@@ -1,0 +1,149 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "linear-dag"
+dynamic = ["version"]
+description = ''
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+keywords = [
+  "statistics",
+  "machine-learning",
+]
+authors = [
+  { name = "Nicholas Mancuso", email = "nmancuso@usc.edu" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Developers",
+  "Natural Language :: English",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Topic :: Scientific/Engineering :: Mathematics",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = [
+  "numpy",
+  "scipy",
+  "networkx",
+  "tskit",
+  "ldgm@git+https://github.com/awohns/ldgm.git"
+]
+
+[project.urls]
+Documentation = "https://github.com/unknown/linear-dag#readme"
+Issues = "https://github.com/unknown/linear-dag/issues"
+Source = "https://github.com/unknown/linear-dag"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/linear_dag/_version.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["src/"]
+exclude = ["docs/"]
+
+[tool.hatch.envs.default]
+dependencies = [
+  "coverage[toml]>=6.5",
+  "pytest",
+]
+[tool.hatch.envs.default.scripts]
+test = "pytest {args:tests}"
+test-cov = "coverage run -m pytest {args:tests}"
+cov-report = [
+  "- coverage combine",
+  "coverage report",
+]
+cov = [
+  "test-cov",
+  "cov-report",
+]
+
+[[tool.hatch.envs.all.matrix]]
+python = ["3.9", "3.10", "3.11"]
+
+[tool.hatch.envs.lint]
+detached = true
+dependencies = [
+  "mypy>=1.0.0",
+  "ruff>=0.0.243",
+]
+[tool.hatch.envs.lint.scripts]
+typing = "mypy --install-types --non-interactive {args:src/linear_dag tests}"
+style = [
+  "ruff format {args:.}",
+]
+fmt = [
+  "ruff --fix {args:.}",
+  "style",
+]
+all = [
+  "style",
+  "typing",
+]
+
+[tool.ruff]
+target-version = "py37"
+line-length = 120
+fixable = ["I001", "F401"]
+select = ["E", "F", "I001"]
+ignore = [
+    # Allow non-abstract empty methods in abstract base classes
+    "B027",
+    # Allow boolean positional values in function calls, like `dict.get(... True)`
+    "FBT003",
+    # Ignore checks for possible passwords
+    "S105", "S106", "S107",
+    # Ignore complexity
+    "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+]
+ignore-init-module-imports = true
+
+[tool.ruff.isort]
+known-first-party = ["linear-dag"]
+combine-as-imports = true
+lines-after-imports = 2
+lines-between-types = 1
+known-local-folder = ["src"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+extra-standard-library = ["typing_extensions"]
+order-by-type = false
+
+[tool.ruff.per-file-ignores]
+# Tests can use magic values, assertions, and relative imports
+"tests/**/*" = ["PLR2004", "S101", "TID252"]
+
+[tool.coverage.run]
+source_pkgs = ["linear_dag", "tests"]
+branch = true
+parallel = true
+omit = [
+  "src/linear_dag/__about__.py",
+]
+
+[tool.coverage.paths]
+linear_dag = ["src/linear_dag", "*/linear-dag/src/linear_dag"]
+tests = ["tests", "*/linear-dag/tests"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "no cov",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
