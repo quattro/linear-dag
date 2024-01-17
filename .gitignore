@@ -1,5 +1,5 @@
 # version is auto-built by hatch, not need to store it...
-src/linear-dag/_version.py
+src/linear_dag/_version.py
 
 # just a symlink to treeseq data
 data
