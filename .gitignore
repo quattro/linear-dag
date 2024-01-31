@@ -24,6 +24,7 @@ __pycache__/*
 .*.swp
 */.ipynb_checkpoints/*
 .DS_Store
+MATLAB/*.asv
 
 # Project files
 .ropeproject
