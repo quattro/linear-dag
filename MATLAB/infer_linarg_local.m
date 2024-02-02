@@ -54,7 +54,7 @@ nnzX = nnz(X);
 % homozygous carrier of j.
 if ~exist('Xhaplo')
     Xhaplo = true;
-    for min_alleles = 1:2
+    for min_alleles = 1:ploidy
         X_carrier = sparse(X >= min_alleles);
         R_carrier = X_carrier' * X_carrier;
         Xhaplo = Xhaplo & (R_carrier >= diag(R_carrier));
