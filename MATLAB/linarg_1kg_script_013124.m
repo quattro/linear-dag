@@ -31,16 +31,16 @@ disp(nnz(Xs)/nnz(A))
 
 % Re-compute linarg from the genotype matrix 
 flip_minor_alleles = true;
-[A1, flip, samples1, mutations1] = infer_linarg_local(Xs,1,flip_minor_alleles);
+[A1, flip, samples1, mutations1] = infer_linarg_local(X,1,flip_minor_alleles);
 disp('Ratio of number of nonzeros:')
-disp(nnz(Xs)/nnz(A1))
+disp(nnz(X)/nnz(A1))
 
 X1 = inv(speye(size(A1)) - A1);
 % x -> flip * (1 + x) maps 0->1, 1->0 if flip==1
 X1 = flip + X1(samples1,mutations1) .* ((-1).^flip);
 
 % Check that inferred A agrees with Xs
-assert(all(X1 == Xs, 'all'))
+assert(all(X1 == X, 'all'))
 
 
 
