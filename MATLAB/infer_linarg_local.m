@@ -1,4 +1,4 @@
-function [A, flip, samples, mutations, Xhaplo_init] = ...
+function [A, flip, samples, mutations, Xhaplo_init, Ainit] = ...
     infer_linarg_local(X, rsq_threshold,...
     flip_minor_alleles, Xhaplo)
 %Infer a linear ARG from a genotype matrix X
@@ -67,18 +67,18 @@ end
 % Break ties (i.e., variants in perfect LD) arbitrarily
 ties = Xhaplo & Xhaplo';
 Xhaplo = Xhaplo - triu(ties,1);
-Ahaplo = speye(m) - inv(Xhaplo);
 clear ties
 
 % Initial linarg
+Ahaplo = speye(m) - inv(Xhaplo);
 Asample = X * (speye(m) - Ahaplo);
 if nargout < 4
     clear X
 end
-A = [sparse(m+n,n) [Asample; Ahaplo]];
+Ainit = [sparse(m+n,n) [Asample; Ahaplo]];
 
 % Simplified linarg
-A = find_recombinations(A);
+A = find_recombinations(Ainit);
 
 samples = 1:n;
 mutations = n+1:n+m;
