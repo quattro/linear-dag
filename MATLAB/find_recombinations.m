@@ -54,10 +54,10 @@ parentRows{1} = index_array(trioList(:,1), n);
 parentRows{2} = index_array(trioList(:,2), n);
 childRows = index_array(trioList(:,3), n);
 cliqueRows = index_array(trioList(:,5), nClique);
-cliqueRows(end+1:size(cliques,1)) = {containers.Map};
-parentRows{1}(end+1:size(cliques,1)) = {containers.Map};
-parentRows{2}(end+1:size(cliques,1)) = {containers.Map};
-childRows(end+1:size(cliques,1)) = {containers.Map};
+cliqueRows(end+1:end+size(cliques,1)) = {containers.Map};
+parentRows{1}(end+1:end+size(cliques,1)) = {containers.Map};
+parentRows{2}(end+1:end+size(cliques,1)) = {containers.Map};
+childRows(end+1:end+size(cliques,1)) = {containers.Map};
 
 cliqueSize = cellfun(@length,cliqueRows);
 
