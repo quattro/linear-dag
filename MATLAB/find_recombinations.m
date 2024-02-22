@@ -19,7 +19,7 @@ for child = 1:n
     [rowParents, ~, rowWeights] = find(B(:,child));
     if ~isempty(rowWeights)
         [~, ~, weightInd] = unique(rowWeights);
-        weight_sets = index_array(weightInd);
+        weight_sets = index_array(weightInd, max(weightInd));
         % weight_sets = {find(rowWeights < 0) find(rowWeights > 0)}
         for kk = 1:length(weight_sets)
             if ~isempty(weight_sets{kk})
@@ -134,9 +134,6 @@ A = sparse(edgeList(:,2),edgeList(:,1),edgeList(:,3),newNode,newNode);
         if isempty(idx)
             cells = containers.Map;
             return;
-        end
-        if ~exist('n')
-            n = max(idx);
         end
         cells = accumarray(idx,(1:length(idx))',[n 1],@(x){containers.Map(x,true(size(x)))});
         cells(cellfun(@isempty,cells)) = repmat({containers.Map},sum(cellfun(@isempty,cells)),1);
