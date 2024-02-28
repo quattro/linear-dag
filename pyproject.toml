@@ -14,6 +14,7 @@ keywords = [
   "machine-learning",
 ]
 authors = [
+  { name = "Luke O'Connor", email = "loconnor@broadinstitute.org"},
   { name = "Nicholas Mancuso", email = "nmancuso@usc.edu" },
 ]
 classifiers = [
@@ -121,6 +122,8 @@ all = [
 [tool.ruff]
 target-version = "py37"
 line-length = 120
+
+[tool.ruff.lint]
 fixable = ["I001", "F401"]
 select = ["E", "F", "I001"]
 ignore = [
@@ -135,7 +138,7 @@ ignore = [
 ]
 ignore-init-module-imports = true
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 known-first-party = ["linear-dag"]
 combine-as-imports = true
 lines-after-imports = 2
@@ -145,7 +148,7 @@ section-order = ["future", "standard-library", "third-party", "first-party", "lo
 extra-standard-library = ["typing_extensions"]
 order-by-type = false
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 # Tests can use magic values, assertions, and relative imports
 "tests/**/*" = ["PLR2004", "S101", "TID252"]
 

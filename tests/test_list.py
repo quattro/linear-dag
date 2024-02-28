@@ -1,5 +1,7 @@
-from linear_dag import LinkedListArray
 import numpy as np
+
+from linear_dag import LinkedListArray
+
 
 def test_linked_list_array():
     # Initialize the LinkedListArray with 3 linked lists for example
@@ -12,7 +14,7 @@ def test_linked_list_array():
     which = np.array([0, 1, 2, 3, 4, 1, 1, 2, 2], dtype=np.intc)  # Indices in 'what' array
     order = np.random.permutation(len(what))
     # Assign values to linked lists
-    linked_list_array.assign(what[order], where,which[order])
+    linked_list_array.assign(what[order], where, which[order])
 
     linked_list_array.remove_difference(2, 1)
 
