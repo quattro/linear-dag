@@ -26,7 +26,6 @@ def main():
     T = create_trios_instance_from_file(filename, 1)
     cs = T.clique_size()
     print(np.sum(cs))
-    print(T.num_nodes())
     start_time = time.time()
     c = T.max_clique()
     while c > 0:

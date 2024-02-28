@@ -290,11 +290,11 @@ cdef class Trios:
         for i in range(nn):
             if self.neighbors[rows[i], p] >= 0:
                 has_neighbor[i] = True
-        if np.sum(has_neighbor.astype(np.intc)) == 0:
+        if np.sum(has_neighbor) == 0:
             return has_neighbor
 
         # Identify neighbors and reassign their parent nodes
-        cdef int[:] neighbors = np.zeros(np.sum(has_neighbor.astype(np.intc)), dtype=np.intc)
+        cdef int[:] neighbors = np.zeros(np.sum(has_neighbor), dtype=np.intc)
         cdef int idx = 0
         for i in range(nn):
             if has_neighbor[i]:
