@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = ''
 readme = "README.md"
 requires-python = ">=3.9"
-license = "MIT"
+license = { text = "MIT" }
 keywords = [
   "statistics",
   "machine-learning",
@@ -58,33 +58,30 @@ version-file = "src/linear_dag/_version.py"
 include = ["src/"]
 exclude = ["docs/"]
 
-[tool.hatch.build.targets.wheel.hooks.cython]
-dependencies = ["hatch-cython"]
-
 [tool.hatch.envs.default]
 dependencies = [
   "coverage[toml]>=6.5",
   "pytest",
+  "numpy",
 ]
 
-[tool.hatch.build.targets.wheel.hooks.cython.options]
-includes = ["src/"]
+[tool.hatch.build.hooks.cython]
+dependencies = ["Cython", "numpy", "hatch-cython"]
+
+[tool.hatch.build.hooks.cython.options]
+src = "linear_dag"
+compile_py = false
 include_numpy = true
-include_pyarrow = false
-
-compile_args = [
-  # single string
-  "-v",
-  # by platform
-  { platforms = ["linux", "darwin"], arg = "-Wcpp" },
-  # by platform & arch
-  { platforms = "darwin", arch = "x86_64", arg = "-arch x86_64" },
-  { platforms = ["darwin"], arch = "arm64", arg = "-arch arm64" },
-  # with pep508 markers
-  { platforms = ["darwin"], arch = "x86_64", arg = "-I/usr/local/opt/llvm/include", depends_path = true, marker = "python_version <= '3.10'"  },
-]
 directives = { boundscheck = false, nonecheck = false, language_level = 3, binding = true }
 compile_kwargs = { }
+
+[build.targets.wheel.hooks.cython.options.files]
+exclude = [
+  "*.py"
+]
+include = [
+  "trios.pyx",
+]
 
 [tool.hatch.envs.default.scripts]
 test = "pytest {args:tests}"
