@@ -1,8 +1,8 @@
-from libc.stdlib cimport malloc, free
 cimport numpy as np
+from libc.stdlib cimport free, malloc
+
 import numpy as np
-import cython
-cimport cython
+
 
 cdef struct ListNode:
     ListNode* next
@@ -63,6 +63,7 @@ cdef class LinkedListArray:
             self.last[n] = new_node
 
         self.length[n] += 1
+
     cdef void remove(self, int n, ListNode * node, ListNode * predecessor):
         # Check if the node to remove is the first node in the list
         if predecessor == NULL:
@@ -90,7 +91,7 @@ cdef class LinkedListArray:
         for i in range(len(where)):
             idx = where[i]
             if idx >= self.n:
-                raise ValueError(f"Length of linked list array exceeded.")
+                raise ValueError("Length of linked list array exceeded.")
             if self.first[idx] is not NULL:
                 raise ValueError(f"List at index {idx} is not empty.")
 
@@ -155,24 +156,44 @@ cdef class LinkedListArray:
             i += 1
 
         return result
-cdef class Trios:
-    cdef int n
-    cdef int[:,:] parents # parents[r,p] is parent p of trio r for p in [0,1]
-    cdef int[:] child # child[r] is the child of trio r
-    cdef int[:] weight # weight[r] is the edge weight of parent[r,p] -> child[r] for p in [0,1]
-    cdef int[:] clique # clique[r] is the clique to which trio r belongs
-    cdef int[:,:] neighbors # neighbors[r,p] is the adjacent trio s s.t. child[r]==child[s] and parent[r,p]==parent[s,1-p], or -1 if none such exists
-    cdef LinkedListArray cliqueRows # lists of rows r s.t. clique[r]==c
-    cdef int nCliques # number of cliques so far (for creating new ones)
-    cdef int nNodes # number of nodes so far (for creating new ones)
 
+
+cdef class Trios:
+    """
+    Class to encapsulate trio-clique information.
+
+    **Arguments:**
+
+    - `n`: Number of nodes
+
+    **Attributes:**
+
+    - `parents`: parents[r,p] is parent p of trio r for p in [0, 1]
+    - `child`: child[r] is the child of trio r
+    - `weight`: weight[r] is the edge weight of parent[r,p] -> child[r] for p in [0, 1]
+    - `clique`: clique[r] is the clique to which trio r belongs
+    - `neighbors`: neighbors[r,p] is the adjacent trio s, s.t. child[r]==child[s] & parent[r,p]==parent[s, 1-p],
+        or -1 if none such exists
+    - `cliqueRows`: lists of rows r s.t. clique[r]==c
+    - `nCliques`: number of cliques so far (for creating new ones)
+    - `nNodes`: number of nodes so far (for creating new ones)
+    """
+    cdef int n
+    cdef int[:, :] parents
+    cdef int[:] child
+    cdef int[:] weight
+    cdef int[:] clique
+    cdef int[:, :] neighbors
+    cdef LinkedListArray cliqueRows
+    cdef int nCliques
+    cdef int nNodes
 
     def __init__(self, int n):
         self.n = n
-        self.parents = np.zeros((n, 2), dtype=np.intc) 
-        self.child = np.zeros(n, dtype=np.intc) 
-        self.weight = np.zeros(n, dtype=np.intc)  
-        self.clique = np.zeros(n, dtype=np.intc)  
+        self.parents = np.zeros((n, 2), dtype=np.intc)
+        self.child = np.zeros(n, dtype=np.intc)
+        self.weight = np.zeros(n, dtype=np.intc)
+        self.clique = np.zeros(n, dtype=np.intc)
         self.neighbors = np.zeros((n, 2), dtype=np.intc)
         self.cliqueRows = LinkedListArray(n)
         self.nCliques = 0
@@ -201,7 +222,6 @@ cdef class Trios:
         self.neighbors[row, 0] = left_neighbor
         self.neighbors[row, 1] = right_neighbor
         self.cliqueRows.extend(clique, row)
-    
 
     def add_trios(self, trios_data, index_offset):
         """
@@ -234,7 +254,6 @@ cdef class Trios:
         # Use 'assign' to populate 'cliqueRows'
         self.cliqueRows.assign(what, where, which)
 
-        
     cpdef extract_trio(self, int trio_index):
         # Check if the index is within bounds
         if trio_index < 0 or trio_index >= self.n:
@@ -249,8 +268,7 @@ cdef class Trios:
         left_neighbor = self.neighbors[trio_index, 0]
         right_neighbor = self.neighbors[trio_index, 1]
 
-        return (parent1, parent2, child, weight, clique, left_neighbor, right_neighbor)
-
+        return parent1, parent2, child, weight, clique, left_neighbor, right_neighbor
 
     cpdef factor_clique(self, int c):
         cdef int nr = self.cliqueRows.length[c]
@@ -263,17 +281,17 @@ cdef class Trios:
         # Call update_trios for p=0 and p=1, store the boolean vectors
         for p in range(2):
             has_shared_duo = self.update_trios(p, clique_rows, self.nNodes)
-            has_shared_duo_list[:,p] = has_shared_duo
+            has_shared_duo_list[:, p] = has_shared_duo
 
         # Update neighbor lists
         for i in range(nr):
             row = clique_rows[i]
-            if has_shared_duo_list[i,0] and has_shared_duo_list[i,1]:
+            if has_shared_duo_list[i, 0] and has_shared_duo_list[i, 1]:
                 # Both parent-child duos have neighbors: bypass them in neighbor list
                 self.bypass_trios(row)
-            elif has_shared_duo_list[i,0] or has_shared_duo_list[i,1]:
+            elif has_shared_duo_list[i, 0] or has_shared_duo_list[i, 1]:
                 # One has a neighbor: truncate end of neighbor list
-                self.remove_adjacent(row, 0 if has_shared_duo_list[i,0] else 1)
+                self.remove_adjacent(row, 0 if has_shared_duo_list[i, 0] else 1)
 
         # Call collapse_clique on 'c', 'n', and 'rows'
         self.collapse_clique(c, self.nNodes, clique_rows)
@@ -320,33 +338,33 @@ cdef class Trios:
 
     cpdef bypass_trios(self, int t):
         # Assuming t, l, and r are 0-based indices
-        cdef int l = self.neighbors[t,0]
-        cdef int r = self.neighbors[t,1]
+        cdef int left = self.neighbors[t, 0]
+        cdef int right = self.neighbors[t, 1]
 
-        if l >= 0 and r >= 0:  # Check if l and r are valid indices
-            self.neighbors[l,1] = r  # Update right_adjacent of l to r
-            self.neighbors[r,0] = l  # Update left_adjacent of r to l
+        if left >= 0 and right >= 0:  # Check if l and r are valid indices
+            self.neighbors[left, 1] = right  # Update right_adjacent of l to r
+            self.neighbors[right, 0] = left  # Update left_adjacent of r to l
 
         # Set the adjacency of t to -1, indicating no adjacent trios
-        self.neighbors[t,1] = -1
-        self.neighbors[t,0] = -1
+        self.neighbors[t, 1] = -1
+        self.neighbors[t, 0] = -1
 
     cpdef remove_adjacent(self, int t, int p):
         cdef int x
-        x = self.neighbors[t,p]
-        self.neighbors[x,1-p] = -1
-    
+        x = self.neighbors[t, p]
+        self.neighbors[x, 1-p] = -1
+
     cpdef collapse_clique(self, int c, int node, int[:] ts):
 
         # Update all trios in ts, except for the first one
         cdef int t
         for t in ts[1:]:
-            self.parents[t,0] = -1
-            self.parents[t,1] = -1
+            self.parents[t, 0] = -1
+            self.parents[t, 1] = -1
             self.child[t] = -1
             self.weight[t] = -1
-            self.neighbors[t,0] = -1
-            self.neighbors[t,1] = -1
+            self.neighbors[t, 0] = -1
+            self.neighbors[t, 1] = -1
             self.clique[t] = -1
 
         # Update the first trio
@@ -354,11 +372,11 @@ cdef class Trios:
         self.child[t_first] = node
         self.weight[t_first] = 1
         self.clique[t_first] = -1
-        self.neighbors[t_first,0] = -1
-        self.neighbors[t_first,1] = -1
+        self.neighbors[t_first, 0] = -1
+        self.neighbors[t_first, 1] = -1
         # Note: parents for the first trio remain unchanged
 
-        self.cliqueRows.clear_list(c) # eliminate the clique
+        self.cliqueRows.clear_list(c)  # eliminate the clique
 
     cpdef count_edges(self):
         cdef int trioIdx, p
@@ -393,7 +411,7 @@ cdef class Trios:
         # Add either 1 or 2 edges for each non-null trio
         for trioIdx in range(self.n):
             if self.child[trioIdx] < 0:
-                continue # Trio is null
+                continue  # Trio is null
 
             # Add edge entry for parent[p] to child with the corresponding weight
             edge_list[edgeIdx, 0] = self.parents[trioIdx, p]
@@ -409,7 +427,6 @@ cdef class Trios:
                 edgeIdx += 1
 
         return edge_list
-
 
     def clique_size(self):
         return self.cliqueRows.length
@@ -431,7 +448,7 @@ cdef class Trios:
                     property_holds = False
                     print(f"Property does not hold for element {i} in clique {clique_id}.")
                     break  # Exit early if a single violation is found
-            except:
+            except ValueError as ve:
                 print(f"Error when evaluating property for element {i} in clique {clique_id}")
                 return
 
@@ -460,4 +477,3 @@ cdef class Trios:
             print("All properties hold for the Trios instance.")
         else:
             print("At least one property does not hold for the Trios instance.")
-        
