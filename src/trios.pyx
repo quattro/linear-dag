@@ -380,7 +380,7 @@ cdef class Trios:
         return counter
 
     cpdef fill_edgelist(self):
-        cdef int trioIdx, parentIdx
+        cdef int trioIdx
         cdef int edgeIdx = 0
         cdef int nEdges = self.count_edges()
 
@@ -402,7 +402,7 @@ cdef class Trios:
             edgeIdx += 1
 
             # If neighbor[1-p] is -1, it means that this parent-child duo doesn't appear elsewhere and must be added now
-            if self.neighbors[trioIdx, 1-p] == -1:
+            if self.neighbors[trioIdx, 1-p] < 0:
                 edge_list[edgeIdx, 0] = self.parents[trioIdx, 1-p]
                 edge_list[edgeIdx, 1] = self.child[trioIdx]
                 edge_list[edgeIdx, 2] = self.weight[trioIdx]
