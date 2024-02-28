@@ -74,12 +74,8 @@ src = "linear_dag"
 compile_py = false
 include_numpy = true
 directives = { boundscheck = false, nonecheck = false, language_level = 3, binding = true }
-compile_kwargs = { }
 
 [build.targets.wheel.hooks.cython.options.files]
-exclude = [
-  "*.py"
-]
 include = [
   "trios.pyx",
 ]
