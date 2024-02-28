@@ -232,6 +232,7 @@ cdef class Trios:
         if required_space > self.n:
             raise MemoryError("Exceeded allocated space for trios.")
 
+        cdef Py_ssize_t row
         # Update class properties with new trios information
         for row, trio in enumerate(trios_data):
             parent1, parent2, child, weight, clique, left_neighbor, right_neighbor = trio

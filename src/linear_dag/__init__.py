@@ -9,6 +9,10 @@ from .core import (
     construct_1_summed_DAG_fast as construct_1_summed_DAG_fast,
     construct_1_summed_DAG_slow as construct_1_summed_DAG_slow,
 )
+from .trios import (
+    Trios as Trios,
+    LinkedListArray as LinkedListArray,
+)
 
 
 try:

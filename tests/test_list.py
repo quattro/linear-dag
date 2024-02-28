@@ -1,4 +1,4 @@
-from trios import LinkedListArray
+from linear_dag import LinkedListArray
 import numpy as np
 
 def test_linked_list_array():
@@ -18,6 +18,3 @@ def test_linked_list_array():
 
     arr = linked_list_array.extract(1)
     print(arr)
-
-# Call the test function
-test_linked_list_array()

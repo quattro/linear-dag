@@ -1,7 +1,9 @@
 import csv
-from trios import Trios
 import time
 import numpy as np
+
+from linear_dag import Trios
+
 
 def read_trios_file(filename):
     """
@@ -22,7 +24,7 @@ def create_trios_instance_from_file(filename, index_offset):
 
 
 def main():
-    filename = '/Volumes/T7/data/triolist.txt'
+    filename = '/Users/nicholas/Dropbox/collab/nick-luke/linearg_shared/triolist.txt'
     T = create_trios_instance_from_file(filename, 1)
     cs = T.clique_size()
     print(np.sum(cs))
@@ -37,7 +39,7 @@ def main():
     T.check_properties(1000)
     print(T.extract_trio(1003))
     edges = T.fill_edgelist()
-    print(edges[-10:,:])
+    print(np.array(edges[-10:,:]))
     
 
 
