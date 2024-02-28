@@ -24,20 +24,20 @@ def create_trios_instance_from_file(filename, index_offset):
 def main():
     filename = '/Volumes/T7/data/triolist.txt'
     T = create_trios_instance_from_file(filename, 1)
-    cs = T.cliqueSize()
+    cs = T.clique_size()
     print(np.sum(cs))
-    print(T.numNodes())
+    print(T.num_nodes())
     start_time = time.time()
-    c = T.maxClique()
+    c = T.max_clique()
     while c > 0:
         T.factor_clique(c)
-        c = T.maxClique()
+        c = T.max_clique()
 
     end_time = time.time()
     print(f"Execution time: {end_time - start_time} seconds")
     T.check_properties(1000)
     print(T.extract_trio(1003))
-    edges = T.extract_edgelist()
+    edges = T.fill_edgelist()
     print(edges[-10:,:])
     
 
