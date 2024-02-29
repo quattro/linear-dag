@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+requires = ["hatchling", "hatch-vcs", "hatch-cython"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,12 +8,13 @@ dynamic = ["version"]
 description = ''
 readme = "README.md"
 requires-python = ">=3.9"
-license = "MIT"
+license = { text = "MIT" }
 keywords = [
   "statistics",
   "machine-learning",
 ]
 authors = [
+  { name = "Luke O'Connor", email = "loconnor@broadinstitute.org"},
   { name = "Nicholas Mancuso", email = "nmancuso@usc.edu" },
 ]
 classifiers = [
@@ -62,7 +63,23 @@ exclude = ["docs/"]
 dependencies = [
   "coverage[toml]>=6.5",
   "pytest",
+  "numpy",
 ]
+
+[tool.hatch.build.hooks.cython]
+dependencies = ["Cython", "numpy", "hatch-cython"]
+
+[tool.hatch.build.hooks.cython.options]
+src = "linear_dag"
+compile_py = false
+include_numpy = true
+directives = { boundscheck = false, nonecheck = false, language_level = 3, binding = true }
+
+[build.targets.wheel.hooks.cython.options.files]
+include = [
+  "trios.pyx",
+]
+
 [tool.hatch.envs.default.scripts]
 test = "pytest {args:tests}"
 test-cov = "coverage run -m pytest {args:tests}"
@@ -101,6 +118,8 @@ all = [
 [tool.ruff]
 target-version = "py37"
 line-length = 120
+
+[tool.ruff.lint]
 fixable = ["I001", "F401"]
 select = ["E", "F", "I001"]
 ignore = [
@@ -115,7 +134,7 @@ ignore = [
 ]
 ignore-init-module-imports = true
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 known-first-party = ["linear-dag"]
 combine-as-imports = true
 lines-after-imports = 2
@@ -125,7 +144,7 @@ section-order = ["future", "standard-library", "third-party", "first-party", "lo
 extra-standard-library = ["typing_extensions"]
 order-by-type = false
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 # Tests can use magic values, assertions, and relative imports
 "tests/**/*" = ["PLR2004", "S101", "TID252"]
 
