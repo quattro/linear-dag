@@ -4,7 +4,7 @@
 from importlib.metadata import PackageNotFoundError, version  # pragma: no cover
 
 # annoying 'as' notation to avoid warnings/errors about unused imports...
-from .core import (
+from .one_summed import (
     compute_path_sums as compute_path_sums,
     construct_1_summed_DAG_fast as construct_1_summed_DAG_fast,
     construct_1_summed_DAG_slow as construct_1_summed_DAG_slow,
