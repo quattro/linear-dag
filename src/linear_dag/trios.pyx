@@ -1,8 +1,6 @@
 cimport numpy as np
 from libc.stdlib cimport free, malloc
-
 import numpy as np
-
 
 cdef struct ListNode:
     ListNode* next
@@ -185,21 +183,29 @@ cdef class Trios:
     cdef int[:] weight
     cdef int[:] clique
     cdef int[:, :] neighbors
+    cdef int[:, :] edge_list
     cdef LinkedListArray clique_rows
     cdef int num_cliques
     cdef int num_nodes
+    cdef int num_edges
+    cdef int num_trios
 
     def __init__(self, int n):
         self.n = n
-        self.parents = np.zeros((n, 2), dtype=np.intc)
-        self.child = np.zeros(n, dtype=np.intc)
+        self.parents = -np.ones((n, 2), dtype=np.intc)
+        self.child = -np.ones(n, dtype=np.intc)
         self.weight = np.zeros(n, dtype=np.intc)
-        self.clique = np.zeros(n, dtype=np.intc)
-        self.neighbors = np.zeros((n, 2), dtype=np.intc)
+        self.clique = -np.ones(n, dtype=np.intc)
+        self.neighbors = -np.ones((n, 2), dtype=np.intc)
+        self.edge_list = -np.ones((n, 3), dtype=np.intc)
         self.clique_rows = LinkedListArray(n)
         self.num_cliques = 0
         self.num_nodes = 0
+        self.num_edges = 0
+        self.num_trios = 0
 
+    def get_num(self):
+        return (self.n, self.num_cliques, self.num_nodes, self.num_trios, self.num_edges)
     # Methods
     cpdef max_clique(self):
         cdef int max_clique = np.argmax(self.clique_rows.length)
@@ -207,6 +213,69 @@ cdef class Trios:
             return max_clique
         else:
             return -1
+
+    cpdef convert_matrix(self, np.ndarray data, np.ndarray indices, np.ndarray indptr, int num_nodes):
+
+            cdef int parent, weight, previous_parent, previous_row, count
+            cdef int current_trio = -1
+            for child in range(num_nodes - 1):
+                last_row_dict = {}
+                last_parent_dict = {}
+                num_rows_dict = {}
+                for jj in range(indptr[child], indptr[child + 1]):
+                    parent = indices[jj]
+                    weight = int(data[jj])
+                    if weight not in last_parent_dict:
+                        # print(weight, child)
+                        last_parent_dict[weight] = parent
+                        num_rows_dict[weight] = 1
+                        continue
+
+                    num_rows_dict[weight] += 1
+
+                    # Add a new row to the trio list
+                    current_trio += 1
+                    if current_trio >= self.n:
+                        raise ValueError('Exceeded allowed space for trios')
+
+                    previous_parent = last_parent_dict[weight]
+                    last_parent_dict[weight] = parent
+                    self.parents[current_trio, 0] =  previous_parent
+                    self.parents[current_trio, 1] =  parent
+                    self.child[current_trio] =  child
+                    self.weight[current_trio] = weight
+
+                    # Link together neighboring rows
+                    if weight not in last_row_dict:
+                        last_row_dict[weight] = current_trio
+                        continue
+
+                    previous_row = last_row_dict[weight]
+                    last_row_dict[weight] = current_trio
+                    self.neighbors[current_trio, 0] = previous_row
+                    self.neighbors[previous_row, 1] = current_trio
+
+                # Add singleton edges to edge_list
+                for weight, count in num_rows_dict.items():
+                    if count > 1:
+                        continue
+                    self.edge_list[self.num_edges,0] = last_parent_dict[weight]
+                    self.edge_list[self.num_edges,1] = child
+                    self.edge_list[self.num_edges,2] = weight
+                    self.num_edges += 1
+
+            # Assign cliques
+            current_trio += 1
+            _, indices = np.unique(self.parents, axis=0, return_inverse=True)
+            self.clique = indices.astype(np.intc)
+
+            self.num_trios = current_trio
+            self.num_nodes = np.max(self.parents[:,1]) + 1
+
+            # Collect rows belonging to each clique in self.clique_rows
+            self.collect_cliques()
+
+            return self.edge_list[:self.num_edges,:]
 
     def add_trio(self, int row, int parent1, int parent2, int child, int weight, int clique, int left_neighbor,
                  int right_neighbor):
@@ -247,11 +316,14 @@ cdef class Trios:
 
         self.num_nodes = max(np.max(self.parents), np.max(self.child)) + 1
 
+    def get_cliques(self):
+        return np.asarray(self.clique)
+
     cpdef collect_cliques(self):
         self.num_cliques = np.max(self.clique) + 1
-        cdef int[:] what = np.arange(self.n, dtype=np.intc)
+        cdef int[:] what = np.arange(self.num_trios, dtype=np.intc)
         cdef int[:] where = np.arange(self.num_cliques, dtype=np.intc)
-        cdef int[:] which = self.clique
+        cdef int[:] which = self.clique[:self.num_trios]
 
         # Use 'assign' to populate 'cliqueRows'
         self.clique_rows.assign(what, where, which)
@@ -274,8 +346,10 @@ cdef class Trios:
 
     cpdef factor_clique(self, int c):
         cdef int nr = self.clique_rows.length[c]
+
         # Look up the trios belonging to the clique 'c'
         cdef int[:] clique_rows = self.clique_rows.extract(c).astype(np.intc)
+
         # Prepare storage for the boolean vectors returned by update_trios
         bool_array = np.zeros((nr, 2), dtype=np.intc)
         cdef bint[:, :] has_shared_duo_list = bool_array
@@ -285,7 +359,7 @@ cdef class Trios:
             has_shared_duo = self.update_trios(p, clique_rows, self.num_nodes)
             has_shared_duo_list[:, p] = has_shared_duo
 
-        # Update neighbor lists
+        # Update neighbor lists; add edges for child nodes with no neighboring trios
         for i in range(nr):
             row = clique_rows[i]
             if has_shared_duo_list[i, 0] and has_shared_duo_list[i, 1]:
@@ -294,6 +368,18 @@ cdef class Trios:
             elif has_shared_duo_list[i, 0] or has_shared_duo_list[i, 1]:
                 # One has a neighbor: truncate end of neighbor list
                 self.remove_adjacent(row, 0 if has_shared_duo_list[i, 0] else 1)
+            else:
+                self.edge_list[self.num_edges,0] = self.num_nodes
+                self.edge_list[self.num_edges,1] = self.child[row]
+                self.edge_list[self.num_edges,2] = self.weight[row]
+                self.num_edges += 1
+
+        # Add edges for child nodes with no neighboring trios
+        for i in range(nr):
+            row = clique_rows[i]
+            if has_shared_duo_list[i, 0] or has_shared_duo_list[i, 1]:
+                continue
+
 
         # Call collapse_clique on 'c', 'n', and 'rows'
         self.collapse_clique(c, self.num_nodes, clique_rows)
@@ -400,15 +486,10 @@ cdef class Trios:
         return counter
 
     cpdef fill_edgelist(self):
-        cdef int trio_idx
-        cdef int edge_idx = 0
-        cdef int num_edges = self.count_edges()
-
-        # Allocate space for the edge list: each edge has two endpoints and a weight
-        cdef int[:, :] edge_list = np.zeros((num_edges, 3), dtype=np.intc)
 
         # It doesn't matter if p is 0 or 1, choose p = 0
         cdef int p = 0
+        cdef int trio_idx
 
         # Add either 1 or 2 edges for each non-null trio
         for trio_idx in range(self.n):
@@ -416,19 +497,19 @@ cdef class Trios:
                 continue  # Trio is null
 
             # Add edge entry for parent[p] to child with the corresponding weight
-            edge_list[edge_idx, 0] = self.parents[trio_idx, p]
-            edge_list[edge_idx, 1] = self.child[trio_idx]
-            edge_list[edge_idx, 2] = self.weight[trio_idx]
-            edge_idx += 1
+            self.edge_list[self.num_edges, 0] = self.parents[trio_idx, p]
+            self.edge_list[self.num_edges, 1] = self.child[trio_idx]
+            self.edge_list[self.num_edges, 2] = self.weight[trio_idx]
+            self.num_edges += 1
 
             # If neighbor[1-p] is -1, it means that this parent-child duo doesn't appear elsewhere and must be added now
             if self.neighbors[trio_idx, 1-p] < 0:
-                edge_list[edge_idx, 0] = self.parents[trio_idx, 1-p]
-                edge_list[edge_idx, 1] = self.child[trio_idx]
-                edge_list[edge_idx, 2] = self.weight[trio_idx]
-                edge_idx += 1
+                self.edge_list[self.num_edges, 0] = self.parents[trio_idx, 1-p]
+                self.edge_list[self.num_edges, 1] = self.child[trio_idx]
+                self.edge_list[self.num_edges, 2] = self.weight[trio_idx]
+                self.num_edges += 1
 
-        return edge_list
+        return self.edge_list[:self.num_edges, :]
 
     def clique_size(self):
         return self.clique_rows.length
