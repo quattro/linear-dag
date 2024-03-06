@@ -30,8 +30,8 @@ class Linarg:
 
     def print(self):
         print(f"genotypes: shape {self.genotypes.shape}, nonzeros {self.genotypes.nnz}")
-        print(f"A: shape {self.A.shape}, nonzeros {self.genotypes.nnz}")
-        print(f"A_haplo: shape {self.A_haplo.shape}, nonzeros {self.genotypes.nnz}")
+        print(f"A: shape {self.A.shape}, nonzeros {self.A.nnz}")
+        print(f"A_haplo: shape {self.A_haplo.shape}, nonzeros {self.A_haplo.nnz}")
         if self.trio_list is not None:
             tup = self.trio_list.get_num()
             print(f"trio_list properties: n {tup[0]}, num_cliques {tup[1]}")
