@@ -78,6 +78,7 @@ directives = { boundscheck = false, nonecheck = false, language_level = 3, bindi
 [build.targets.wheel.hooks.cython.options.files]
 include = [
   "trios.pyx",
+  "solve.pyx"
 ]
 
 [tool.hatch.envs.default.scripts]
