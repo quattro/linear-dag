@@ -19,4 +19,9 @@ def test_linked_list_array():
     linked_list_array.remove_difference(2, 1)
 
     arr = linked_list_array.extract(1)
-    print(arr)
+    assert arr == [20]
+    print("OK")
+
+
+if __name__ == "__main__":
+    test_linked_list_array()
