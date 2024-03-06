@@ -9,7 +9,7 @@ import numpy as np
 
 @dataclass(order=True)
 class SetNode:
-    weight: int | float
+    weight: int
     node: Any = field(compare=False)
 
 
@@ -17,7 +17,7 @@ class ActiveSet:
     act_heap: list[SetNode]
     act_set: set[int]
 
-    def __init__(self, i: int, weight: int | float):
+    def __init__(self, i: int, weight: int):
         node = SetNode(weight, i)
         self.act_heap = [node]
         self.act_set = {i}
@@ -32,7 +32,7 @@ class ActiveSet:
     def __bool__(self) -> bool:
         return bool(self.act_set)
 
-    def push(self, i: int, weight: int | float):
+    def push(self, i: int, weight: int):
         node = SetNode(weight, i)
         heapq.heappush(self.act_heap, node)
         self.act_set.add(i)
