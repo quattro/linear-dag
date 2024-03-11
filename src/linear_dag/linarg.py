@@ -4,6 +4,7 @@ import numpy as np
 
 from scipy.io import mmread, mmwrite
 from scipy.sparse import csc_matrix, csr_matrix, eye, hstack, triu, vstack
+from tqdm import tqdm
 
 from .solve import spinv_triangular
 from .trios import Trios
@@ -127,21 +128,22 @@ class Linarg:
         self.A_haplo = self.A_haplo[original_order, :][:, original_order]
         self.A_haplo.eliminate_zeros()
 
-    def compute_hierarchy(self):
+    def compute_hierarchy(self) -> np.ndarray:
         A_csr = self.A.tocsr()
         n_sample = self.genotypes.shape[0]
-        # rank = np.ones(A_csr.nnz)
-        counter = 0
-        for child in range(self.A.shape[0]):
+        rank = np.zeros(A_csr.nnz)
+        H = self.haplotypes - eye(self.haplotypes.shape[0])
+        for child in tqdm(range(self.A.shape[0])):
             # Restrict haplotype matrix to parents of that child
             parents = A_csr.indices[A_csr.indptr[child] : A_csr.indptr[child + 1]]
             parents_as_indices = parents - n_sample
-            haplotype_submatrix = self.haplotypes[parents_as_indices, parents_as_indices]
-            X = eye(len(parents))
-            while X.nnz > 0:
-                X = haplotype_submatrix & X
-                # Set rank[i] = counter for any i s.t. X[:,i] is not all zeros
-                counter += 1
+            haplotype_submatrix = H[parents_as_indices, :][:, parents_as_indices]
+            X = csc_matrix(eye(len(parents)))
+            while np.any(X.data):
+                X = haplotype_submatrix @ X
+                rank[parents_as_indices] += np.diff(X.indptr) > 0
+
+        return rank
 
     def form_initial_linarg(self):
         self.compute_haplotypes()
@@ -170,9 +172,15 @@ class Linarg:
         self.samples = range(self.genotypes.shape[0])
         self.variants = range(self.genotypes.shape[0], self.genotypes.shape[1] + self.genotypes.shape[0])
 
-    def create_triolist(self):
+    def create_triolist(self, ranked: bool = False):
         self.trio_list = Trios(2 * self.A.nnz)  # TODO what should n be?
-        self.trio_list.convert_matrix(self.A.data, self.A.indices, self.A.indptr, self.A.indptr.shape[0])
+        if ranked:
+            rank = self.compute_hierarchy()
+            self.trio_list.convert_matrix_ranked(
+                self.A.data, self.A.indices, self.A.indptr, self.A.indptr.shape[0], rank
+            )
+        else:
+            self.trio_list.convert_matrix(self.A.data, self.A.indices, self.A.indptr, self.A.indptr.shape[0])
         self.trio_list.check_properties(-1)
 
     def find_recombinations(self):

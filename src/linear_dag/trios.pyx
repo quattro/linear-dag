@@ -283,10 +283,13 @@ cdef class Trios:
     cpdef convert_matrix_ranked(self, np.ndarray weights, np.ndarray indices, np.ndarray indptr, int num_nodes,
                          np.ndarray rank):
 
-        cdef int parent, weight, previous_weight, previous_parent, previous_trio
+        cdef int parent, weight, previous_weight, previous_parent, previous_trio, jj
         cdef int current_trio = -1
+
+        # Iterate over child nodes, creating trios involving adjacent pairs of parents for that child
         for child in range(num_nodes - 1):
-            ordered_indptrs = indptr[child] + np.argsort(rank[indptr[child]: indptr[child + 1]])
+            # stable ordering, s.t. consecutive parent indices with same rank are adjacent
+            ordered_indptrs = indptr[child] + np.argsort(rank[indptr[child]: indptr[child + 1]], kind='stable')
             previous_parent = -1
             previous_trio = -1
             for jj in ordered_indptrs:
@@ -311,35 +314,57 @@ cdef class Trios:
 
                 # Link together neighboring rows
                 if previous_trio == -1:
+                    previous_trio = current_trio
                     continue
                 self.neighbors[current_trio, 0] = previous_trio
                 self.neighbors[previous_trio, 1] = current_trio
                 previous_trio = current_trio
 
             # Add singleton edges (child node having in-degree 1) to edge_list
-            if previous_trio == -1:
+            if previous_trio == -1 and previous_parent >= 0:
                 self.edge_list[self.num_edges, 0] = parent
                 self.edge_list[self.num_edges, 1] = child
                 self.edge_list[self.num_edges, 2] = weight
                 self.num_edges += 1
 
-        # Assign cliques
-        current_trio += 1
-        _, indices = np.unique(self.parents, axis=0, return_inverse=True)
-        self.clique = indices.astype(np.intc)
 
-        self.num_trios = current_trio
+        self.num_trios = current_trio + 1
         self.num_nodes = np.max(self.parents[:, 1]) + 1
+
+        # Assign cliques based on parents and weights
+        self.compute_cliques()
 
         # Collect rows belonging to each clique in self.clique_rows
         self.collect_cliques()
 
         return self.edge_list[:self.num_edges, :]
 
+    cdef compute_cliques(self):
+        # Array storing parents and coprime edge weights
+        cdef int[:, :] trio_info = np.empty((self.num_trios, 4), dtype=np.intc)
+
+        cdef int i, weight_gcd
+        for i in range(self.num_trios):
+
+            # Greatest common divisor of the edge weights
+            weight_gcd = gcd(self.weight[i, 0], self.weight[i, 1])
+
+            trio_info[i, 0] = self.parents[i, 0]
+            trio_info[i, 1] = self.parents[i, 1]
+            trio_info[i, 2] = self.weight[i, 0] // weight_gcd
+            trio_info[i, 3] = self.weight[i, 1] // weight_gcd
+
+        # Clique index of each trio
+        _, unique_indices = np.unique(trio_info, axis=0, return_inverse=True)
+
+        self.clique = unique_indices.astype(np.intc)
+
+
     cpdef convert_matrix(self, np.ndarray data, np.ndarray indices, np.ndarray indptr, int num_nodes):
 
             cdef int parent, weight, previous_parent, previous_row, count
             cdef int current_trio = -1
+            # Iterate over child nodes, creating trios involving adjacent pairs of parents for that child
             for child in range(num_nodes - 1):
                 last_row_dict = {}
                 last_parent_dict = {}
@@ -388,11 +413,14 @@ cdef class Trios:
 
             # Assign cliques
             current_trio += 1
-            _, indices = np.unique(self.parents, axis=0, return_inverse=True)
-            self.clique = indices.astype(np.intc)
+            # _, indices = np.unique(self.parents, axis=0, return_inverse=True)
+            # self.clique = indices.astype(np.intc)
 
             self.num_trios = current_trio
             self.num_nodes = np.max(self.parents[:,1]) + 1
+
+            # Assign cliques based on parents and weights
+            self.compute_cliques()
 
             # Collect rows belonging to each clique in self.clique_rows
             self.collect_cliques()
@@ -480,6 +508,7 @@ cdef class Trios:
             c = self.max_clique()
 
     cpdef factor_clique(self, int c):
+        cdef int p, i
         cdef int nr = self.clique_rows.length[c]
 
         # Look up the trios belonging to the clique 'c'
@@ -487,14 +516,13 @@ cdef class Trios:
 
         # Edge weights of the clique and of each row
         cdef int g = gcd(self.weight[clique_rows[0],0], self.weight[clique_rows[0],1])
-        cdef int[:] clique_weight = np.zeros(2, dtype=np.intc)
-        cdef int p
+        cdef int[:] clique_weight = np.empty(2, dtype=np.intc)
         for p in range(2):
             clique_weight[p] = self.weight[clique_rows[0],p] // g
-        cdef int[:] row_weight = np.zeros(nr, dtype=np.intc)
-        cdef int i
+        cdef int[:] row_weight = np.empty(nr, dtype=np.intc)
         for i in range(nr):
             row_weight[i] = self.weight[clique_rows[i],0] // clique_weight[0]
+            assert(self.weight[clique_rows[i],1] == row_weight[i] * clique_weight[1])
 
         # Prepare storage for the boolean vectors returned by update_trios
         bool_array = np.zeros((nr, 2), dtype=np.intc)
@@ -502,7 +530,7 @@ cdef class Trios:
 
         # Call update_trios for p=0 and p=1, store the boolean vectors
         for p in range(2):
-            has_shared_duo = self.update_trios(p, clique_rows, self.num_nodes)
+            has_shared_duo = self.update_trios(p, clique_rows, self.num_nodes, clique_weight[p])
             has_shared_duo_list[:, p] = has_shared_duo
 
         # Update neighbor lists; add edges for child nodes with no neighboring trios
@@ -524,11 +552,10 @@ cdef class Trios:
         self.collapse_clique(c, self.num_nodes, clique_rows, clique_weight)
         self.num_nodes += 1
 
-    cdef bint[:] update_trios(self, int p, int[:] rows, int new_node):
+    cdef bint[:] update_trios(self, int p, int[:] rows, int new_node, int edge_weight_divisor):
         cdef int nn = len(rows)
         # Identify rows with p-neighbors
         cdef bint[:] has_neighbor = np.zeros(nn, dtype=np.intc)
-        # cdef cnp.ndarray[cnp.npy_bool, ndim=1] has_neighbor_np = np.zeros(nn, dtype=np.bool_)
         if nn == 0:
             return has_neighbor
         cdef int i
@@ -545,6 +572,7 @@ cdef class Trios:
             if has_neighbor[i]:
                 neighbors[idx] = self.neighbors[rows[i], p]
                 self.parents[neighbors[idx], 1-p] = new_node
+                self.weight[neighbors[idx], 1-p] = self.weight[neighbors[idx], 1-p] // edge_weight_divisor
                 idx += 1
 
         # Re-assign clique[neighbors]
@@ -634,9 +662,9 @@ cdef class Trios:
 
         # It doesn't matter if p is 0 or 1, choose p = 0
         cdef int p = 0
-        cdef int trio_idx
 
         # Add either 1 or 2 edges for each non-null trio
+        cdef int trio_idx
         for trio_idx in range(self.n):
             if self.child[trio_idx] < 0:
                 continue  # Trio is null
