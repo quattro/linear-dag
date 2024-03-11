@@ -1,10 +1,68 @@
 cimport numpy as np
 from libc.stdlib cimport free, malloc
 import numpy as np
+import heapq
+
+# from .mod_heapc import ModHeap
 
 cdef struct ListNode:
     ListNode* next
     int value
+
+cdef int gcd(int a, int b):
+    cdef int temp
+    while b != 0:
+        temp = b
+        b = a % b
+        a = temp
+    return a
+
+
+cdef class Node:
+    cdef public int priority
+    cdef public int index
+
+    def __init__(self, int priority, int index):
+        self.priority = priority
+        self.index = index
+
+    def __lt__(self, Node other):
+        return self.priority < other.priority
+
+    def __int__(self):
+        return self.index
+
+cdef class ModHeap:
+    cdef public list act_heap
+    cdef int[:] priority
+    cdef public int n
+
+    def __init__(self, int[:] priority):
+        self.n = len(priority)
+        self.priority = np.copy(priority).astype(np.intc) # Copies the input array
+        self.act_heap = self._create_heap(np.copy(self.priority))
+        heapq.heapify(self.act_heap)
+    cdef list _create_heap(self, int[:] priority):
+        cdef int i
+        cdef list heap = []
+        for i in range(self.n):
+            # Allocate a new Node and append it to the heap list
+            node = Node(-priority[i], i)
+            heap.append(node)
+        heapq.heapify(heap)
+        return heap
+
+    cpdef push(self, int index, int priority):
+        cdef Node node = Node(-priority, index)
+        heapq.heappush(self.act_heap, node)
+        self.priority[index] = priority
+
+    cpdef int pop(self):
+        cdef Node node = heapq.heappop(self.act_heap)
+        while self.priority[node.index] != -node.priority:
+            node = heapq.heappop(self.act_heap)
+        self.priority[node.index] = 0
+        return node.index
 
 cdef class LinkedListArray:
     cdef ListNode** first  # Array of pointers to the first element of each linked list
@@ -180,25 +238,29 @@ cdef class Trios:
     cdef int n
     cdef int[:, :] parents
     cdef int[:] child
-    cdef int[:] weight
+    cdef int[:,:] weight
     cdef int[:] clique
     cdef int[:, :] neighbors
     cdef int[:, :] edge_list
     cdef LinkedListArray clique_rows
+    cdef ModHeap clique_size_heap
     cdef int num_cliques
     cdef int num_nodes
     cdef int num_edges
     cdef int num_trios
+    # cdef int* clique_size
+    # cdef object* clique_size
 
     def __init__(self, int n):
         self.n = n
         self.parents = -np.ones((n, 2), dtype=np.intc)
         self.child = -np.ones(n, dtype=np.intc)
-        self.weight = np.zeros(n, dtype=np.intc)
+        self.weight = np.zeros((n, 2), dtype=np.intc)
         self.clique = -np.ones(n, dtype=np.intc)
         self.neighbors = -np.ones((n, 2), dtype=np.intc)
         self.edge_list = -np.ones((n, 3), dtype=np.intc)
         self.clique_rows = LinkedListArray(n)
+        self.clique_size_heap = None
         self.num_cliques = 0
         self.num_nodes = 0
         self.num_edges = 0
@@ -207,12 +269,72 @@ cdef class Trios:
     def get_num(self):
         return (self.n, self.num_cliques, self.num_nodes, self.num_trios, self.num_edges)
     # Methods
-    cpdef max_clique(self):
-        cdef int max_clique = np.argmax(self.clique_rows.length)
-        if self.clique_rows.length[max_clique] > 1:
+    cpdef int max_clique(self):
+        cdef int max_clique = self.clique_size_heap.pop()
+        # cdef int max_clique = np.argmax(self.clique_rows.length)
+        if self.clique_size(max_clique) > 1:
             return max_clique
         else:
             return -1
+
+    def extract_heap(self):
+        return (self.clique_size_heap.act_heap, self.clique_size_heap.priority)
+
+    cpdef convert_matrix_ranked(self, np.ndarray weights, np.ndarray indices, np.ndarray indptr, int num_nodes,
+                         np.ndarray rank):
+
+        cdef int parent, weight, previous_weight, previous_parent, previous_trio
+        cdef int current_trio = -1
+        for child in range(num_nodes - 1):
+            ordered_indptrs = indptr[child] + np.argsort(rank[indptr[child]: indptr[child + 1]])
+            previous_parent = -1
+            previous_trio = -1
+            for jj in ordered_indptrs:
+                parent = indices[jj]
+                weight = int(weights[jj])
+                if previous_parent == -1:
+                    previous_parent = parent
+                    previous_weight = weight
+                    continue
+
+                # Add a new row to the trio list
+                current_trio += 1
+                if current_trio >= self.n:
+                    raise ValueError('Exceeded allowed space for trios')
+                self.parents[current_trio, 0] = previous_parent
+                self.parents[current_trio, 1] = parent
+                self.child[current_trio] = child
+                self.weight[current_trio, 0] = previous_weight
+                self.weight[current_trio, 1] = weight
+                previous_weight = weight
+                previous_parent = parent
+
+                # Link together neighboring rows
+                if previous_trio == -1:
+                    continue
+                self.neighbors[current_trio, 0] = previous_trio
+                self.neighbors[previous_trio, 1] = current_trio
+                previous_trio = current_trio
+
+            # Add singleton edges (child node having in-degree 1) to edge_list
+            if previous_trio == -1:
+                self.edge_list[self.num_edges, 0] = parent
+                self.edge_list[self.num_edges, 1] = child
+                self.edge_list[self.num_edges, 2] = weight
+                self.num_edges += 1
+
+        # Assign cliques
+        current_trio += 1
+        _, indices = np.unique(self.parents, axis=0, return_inverse=True)
+        self.clique = indices.astype(np.intc)
+
+        self.num_trios = current_trio
+        self.num_nodes = np.max(self.parents[:, 1]) + 1
+
+        # Collect rows belonging to each clique in self.clique_rows
+        self.collect_cliques()
+
+        return self.edge_list[:self.num_edges, :]
 
     cpdef convert_matrix(self, np.ndarray data, np.ndarray indices, np.ndarray indptr, int num_nodes):
 
@@ -226,7 +348,6 @@ cdef class Trios:
                     parent = indices[jj]
                     weight = int(data[jj])
                     if weight not in last_parent_dict:
-                        # print(weight, child)
                         last_parent_dict[weight] = parent
                         num_rows_dict[weight] = 1
                         continue
@@ -243,7 +364,8 @@ cdef class Trios:
                     self.parents[current_trio, 0] =  previous_parent
                     self.parents[current_trio, 1] =  parent
                     self.child[current_trio] =  child
-                    self.weight[current_trio] = weight
+                    self.weight[current_trio, 0] = weight
+                    self.weight[current_trio, 1] = weight
 
                     # Link together neighboring rows
                     if weight not in last_row_dict:
@@ -287,7 +409,8 @@ cdef class Trios:
         self.parents[row, 0] = parent1
         self.parents[row, 1] = parent2
         self.child[row] = child
-        self.weight[row] = weight
+        self.weight[row, 0] = weight
+        self.weight[row, 1] = weight
         self.clique[row] = clique
         self.neighbors[row, 0] = left_neighbor
         self.neighbors[row, 1] = right_neighbor
@@ -309,7 +432,8 @@ cdef class Trios:
             self.parents[row, 0] = parent1 - index_offset
             self.parents[row, 1] = parent2 - index_offset
             self.child[row] = child - index_offset
-            self.weight[row] = weight
+            self.weight[row, 0] = weight
+            self.weight[row, 1] = weight
             self.clique[row] = clique - index_offset
             self.neighbors[row, 0] = left_neighbor - index_offset
             self.neighbors[row, 1] = right_neighbor - index_offset
@@ -328,6 +452,9 @@ cdef class Trios:
         # Use 'assign' to populate 'cliqueRows'
         self.clique_rows.assign(what, where, which)
 
+        # Populate 'clique_size'
+        self.clique_size_heap = ModHeap(self.clique_rows.length)
+
     cpdef extract_trio(self, int trio_index):
         # Check if the index is within bounds
         if trio_index < 0 or trio_index >= self.n:
@@ -337,18 +464,37 @@ cdef class Trios:
         parent1 = self.parents[trio_index, 0]
         parent2 = self.parents[trio_index, 1]
         child = self.child[trio_index]
-        weight = self.weight[trio_index]
+        weight1 = self.weight[trio_index, 0]
+        weight2 = self.weight[trio_index, 1]
         clique = self.clique[trio_index]
         left_neighbor = self.neighbors[trio_index, 0]
         right_neighbor = self.neighbors[trio_index, 1]
 
-        return parent1, parent2, child, weight, clique, left_neighbor, right_neighbor
+        return parent1, parent2, child, weight1, weight2, clique, left_neighbor, right_neighbor
+
+    cpdef find_recombinations(self):
+
+        cdef int c = self.max_clique()
+        while c >= 0:
+            self.factor_clique(c)
+            c = self.max_clique()
 
     cpdef factor_clique(self, int c):
         cdef int nr = self.clique_rows.length[c]
 
         # Look up the trios belonging to the clique 'c'
         cdef int[:] clique_rows = self.clique_rows.extract(c).astype(np.intc)
+
+        # Edge weights of the clique and of each row
+        cdef int g = gcd(self.weight[clique_rows[0],0], self.weight[clique_rows[0],1])
+        cdef int[:] clique_weight = np.zeros(2, dtype=np.intc)
+        cdef int p
+        for p in range(2):
+            clique_weight[p] = self.weight[clique_rows[0],p] // g
+        cdef int[:] row_weight = np.zeros(nr, dtype=np.intc)
+        cdef int i
+        for i in range(nr):
+            row_weight[i] = self.weight[clique_rows[i],0] // clique_weight[0]
 
         # Prepare storage for the boolean vectors returned by update_trios
         bool_array = np.zeros((nr, 2), dtype=np.intc)
@@ -371,18 +517,11 @@ cdef class Trios:
             else:
                 self.edge_list[self.num_edges,0] = self.num_nodes
                 self.edge_list[self.num_edges,1] = self.child[row]
-                self.edge_list[self.num_edges,2] = self.weight[row]
+                self.edge_list[self.num_edges,2] = row_weight[i]
                 self.num_edges += 1
 
-        # Add edges for child nodes with no neighboring trios
-        for i in range(nr):
-            row = clique_rows[i]
-            if has_shared_duo_list[i, 0] or has_shared_duo_list[i, 1]:
-                continue
-
-
         # Call collapse_clique on 'c', 'n', and 'rows'
-        self.collapse_clique(c, self.num_nodes, clique_rows)
+        self.collapse_clique(c, self.num_nodes, clique_rows, clique_weight)
         self.num_nodes += 1
 
     cdef bint[:] update_trios(self, int p, int[:] rows, int new_node):
@@ -416,9 +555,14 @@ cdef class Trios:
         # Assign neighbors to cliqueRows[new cliques]
         self.clique_rows.assign(neighbors, self.num_cliques + np.arange(len(affected_cliques), dtype=np.intc), which_affected_cliques.astype(np.intc))
 
+        # Update clique size heap
+        for i in range(len(affected_cliques)):
+            self.clique_size_heap.push(self.num_cliques + i, self.clique_rows.length[self.num_cliques + i])
+
         # Remove them from cliqueRows[old cliques]
         for i in range(len(affected_cliques)):
             self.clique_rows.remove_difference(self.num_cliques + i, affected_cliques[i])
+            self.clique_size_heap.push(affected_cliques[i], self.clique_rows.length[affected_cliques[i]])
 
         self.num_cliques += len(affected_cliques)
 
@@ -442,7 +586,7 @@ cdef class Trios:
         x = self.neighbors[t, p]
         self.neighbors[x, 1-p] = -1
 
-    cpdef collapse_clique(self, int c, int node, int[:] ts):
+    cpdef collapse_clique(self, int c, int node, int[:] ts, int[:] clique_weight):
 
         # Update all trios in ts, except for the first one
         cdef int t
@@ -450,7 +594,8 @@ cdef class Trios:
             self.parents[t, 0] = -1
             self.parents[t, 1] = -1
             self.child[t] = -1
-            self.weight[t] = -1
+            self.weight[t, 0] = 0
+            self.weight[t, 1] = 0
             self.neighbors[t, 0] = -1
             self.neighbors[t, 1] = -1
             self.clique[t] = -1
@@ -458,11 +603,11 @@ cdef class Trios:
         # Update the first trio
         cdef int t_first = ts[0]
         self.child[t_first] = node
-        self.weight[t_first] = 1
+        self.weight[t_first, :] = clique_weight
         self.clique[t_first] = -1
         self.neighbors[t_first, 0] = -1
         self.neighbors[t_first, 1] = -1
-        # Note: parents for the first trio remain unchanged
+        # Parents remain unchanged
 
         self.clique_rows.clear_list(c)  # eliminate the clique
 
@@ -499,20 +644,20 @@ cdef class Trios:
             # Add edge entry for parent[p] to child with the corresponding weight
             self.edge_list[self.num_edges, 0] = self.parents[trio_idx, p]
             self.edge_list[self.num_edges, 1] = self.child[trio_idx]
-            self.edge_list[self.num_edges, 2] = self.weight[trio_idx]
+            self.edge_list[self.num_edges, 2] = self.weight[trio_idx, p]
             self.num_edges += 1
 
             # If neighbor[1-p] is -1, it means that this parent-child duo doesn't appear elsewhere and must be added now
             if self.neighbors[trio_idx, 1-p] < 0:
                 self.edge_list[self.num_edges, 0] = self.parents[trio_idx, 1-p]
                 self.edge_list[self.num_edges, 1] = self.child[trio_idx]
-                self.edge_list[self.num_edges, 2] = self.weight[trio_idx]
+                self.edge_list[self.num_edges, 2] = self.weight[trio_idx, 1-p]
                 self.num_edges += 1
 
         return self.edge_list[:self.num_edges, :]
 
-    def clique_size(self):
-        return self.clique_rows.length
+    cpdef clique_size(self, n):
+        return self.clique_rows.length[n]
 
     def check_properties(self, int num_rows_to_check):
         # Flag to indicate if the property holds for all elements

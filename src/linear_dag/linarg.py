@@ -6,13 +6,14 @@ from scipy.io import mmread, mmwrite
 from scipy.sparse import csc_matrix, csr_matrix, eye, hstack, triu, vstack
 
 from .solve import spinv_triangular
-from .trios import Trios  # Assuming Trios is accessible as a Python module
+from .trios import Trios
 
 
 class Linarg:
     def __init__(self, genotype_matrix_mtx: str = None):
         self.trio_list: Trios = None
         self.genotypes: csc_matrix = csc_matrix((0, 0))
+        self.haplotypes: csr_matrix = csr_matrix((0, 0))
         self.A: csc_matrix = csc_matrix((0, 0))
         self.A_haplo: csc_matrix = csc_matrix((0, 0))
         self.variants: np.ndarray = np.array([])
@@ -94,7 +95,6 @@ class Linarg:
         self.genotypes = genotypes_lil.T.tocsc()
 
     def compute_haplotypes(self):
-        Xh = None
         for n in range(1, int(self.ploidy) + 1):
             X_carrier = self.genotypes >= n
             X_carrier = X_carrier.astype(np.int32)
@@ -106,17 +106,14 @@ class Linarg:
                 temp.data[temp.indptr[i] : temp.indptr[i + 1]] = row_data >= R_carrier[i, i]
 
             if n == 1:
-                Xh = temp
+                self.haplotypes = temp
             else:
-                Xh = Xh.multiply(temp)
+                self.haplotypes = self.haplotypes.multiply(temp)
 
-        Xh.eliminate_zeros()
-        Xh = Xh.tocsc()
-        ties = Xh.multiply(Xh.transpose())
-        Xh = Xh - triu(ties, k=1)
-        Xh.eliminate_zeros()
-
-        return Xh
+        self.haplotypes.eliminate_zeros()
+        ties = self.haplotypes.multiply(self.haplotypes.transpose())
+        self.haplotypes = self.haplotypes - triu(ties, k=1)
+        self.haplotypes.eliminate_zeros()
 
     def invert_haplotype_matrix(self, X_haplo: csc_matrix):
         row_counts = np.diff(X_haplo.indptr)
@@ -130,14 +127,30 @@ class Linarg:
         self.A_haplo = self.A_haplo[original_order, :][:, original_order]
         self.A_haplo.eliminate_zeros()
 
+    def compute_hierarchy(self):
+        A_csr = self.A.tocsr()
+        n_sample = self.genotypes.shape[0]
+        # rank = np.ones(A_csr.nnz)
+        counter = 0
+        for child in range(self.A.shape[0]):
+            # Restrict haplotype matrix to parents of that child
+            parents = A_csr.indices[A_csr.indptr[child] : A_csr.indptr[child + 1]]
+            parents_as_indices = parents - n_sample
+            haplotype_submatrix = self.haplotypes[parents_as_indices, parents_as_indices]
+            X = eye(len(parents))
+            while X.nnz > 0:
+                X = haplotype_submatrix & X
+                # Set rank[i] = counter for any i s.t. X[:,i] is not all zeros
+                counter += 1
+
     def form_initial_linarg(self):
-        Xh = self.compute_haplotypes()
+        self.compute_haplotypes()
         # A = spinv_triangular(Xh_reordered)
         # lu = splu(Xh)
         # self.A_haplo = lu.solve_sparse(csc_matrix(b))
         # self.A_haplo = self.A_haplo.astype(np.int32)
         # self.A_haplo.eliminate_zeros()
-        self.invert_haplotype_matrix(Xh)
+        self.invert_haplotype_matrix(self.haplotypes.tocsc())
 
         n, m = self.genotypes.shape
 
@@ -166,10 +179,7 @@ class Linarg:
         if self.trio_list is None:
             self.create_triolist()
 
-        c = self.trio_list.max_clique()
-        while c > 0:
-            self.trio_list.factor_clique(c)
-            c = self.trio_list.max_clique()
+        self.trio_list.find_recombinations()
 
         # Verify the trio list remains valid
         self.trio_list.check_properties(-1)
