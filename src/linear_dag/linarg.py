@@ -4,7 +4,6 @@ import numpy as np
 
 from scipy.io import mmread, mmwrite
 from scipy.sparse import csc_matrix, csr_matrix, eye, hstack, triu, vstack
-from tqdm import tqdm
 
 from .solve import spinv_triangular
 from .trios import Trios
@@ -153,7 +152,7 @@ class Linarg:
         n_sample = self.genotypes.shape[0]
         rank = np.zeros(A_csr.nnz)
         H = self.haplotypes - eye(self.haplotypes.shape[0])
-        for child in tqdm(range(self.A.shape[0])):
+        for child in range(self.A.shape[0]):
             # Restrict haplotype matrix to parents of that child
             parents = A_csr.indices[A_csr.indptr[child] : A_csr.indptr[child + 1]]
             parents_as_indices = parents - n_sample
