@@ -29,7 +29,7 @@ class Linarg:
         self.samples = np.arange(self.genotypes.shape[0])
         self.variants = np.arange(self.genotypes.shape[1])
         self.flip = np.zeros(self.genotypes.shape[1])
-        self.ploidy = np.max(self.genotypes)
+        self.ploidy = np.max(self.genotypes) if self.genotypes.size > 0 else 1
 
     def print(self):
         print(f"genotypes: shape {self.genotypes.shape}, nonzeros {self.genotypes.nnz}")
