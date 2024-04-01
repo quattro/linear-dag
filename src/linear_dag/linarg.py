@@ -11,7 +11,7 @@ from .trios import Trios
 
 
 class Linarg:
-    def __init__(self, genotype_matrix_mtx: str = None):
+    def __init__(self, genotype_matrix_mtx: str = None, genotype_matrix_txt: str = None):
         self.trio_list: Trios = None
         self.genotypes: csc_matrix = csc_matrix((0, 0))
         self.haplotypes: csr_matrix = csr_matrix((0, 0))
@@ -25,10 +25,12 @@ class Linarg:
 
         if genotype_matrix_mtx is not None:
             self.genotypes = csc_matrix(mmread(genotype_matrix_mtx))
-            self.samples = np.arange(self.genotypes.shape[0])
-            self.variants = np.arange(self.genotypes.shape[1])
-            self.flip = np.zeros(self.genotypes.shape[1])
-            self.ploidy = np.max(self.genotypes)
+        elif genotype_matrix_txt is not None:
+            self.genotypes = np.loadtxt(genotype_matrix_txt)
+        self.samples = np.arange(self.genotypes.shape[0])
+        self.variants = np.arange(self.genotypes.shape[1])
+        self.flip = np.zeros(self.genotypes.shape[1])
+        self.ploidy = np.max(self.genotypes)
 
     def print(self):
         print(f"genotypes: shape {self.genotypes.shape}, nonzeros {self.genotypes.nnz}")
@@ -52,6 +54,24 @@ class Linarg:
 
         # Write the matrix A
         mmwrite(filename + ".mtx", self.A)
+
+    def binarize(self, r2_threshold: float = 0.0):
+        discretized_genotypes = np.rint(self.genotypes).astype(int)
+
+        # Correlations between dosages + calls
+        correlations = []
+        for i in range(self.genotypes.shape[1]):
+            corr_coef = np.corrcoef(self.genotypes[:, 5].todense().T, discretized_genotypes[:, 5].todense().T)[0, 1]
+            correlations.append(corr_coef)
+
+        # Thresholding
+        well_imputed = np.asarray(correlations) >= r2_threshold
+
+        # Update the genotypes with the discretized values
+        self.genotypes = discretized_genotypes[:, well_imputed]
+        self.variants = np.arange(self.genotypes.shape[1])
+
+        return correlations
 
     def compute_af(self):
         column_sums = self.genotypes.sum(axis=0)
@@ -197,4 +217,5 @@ class Linarg:
         num_nodes = np.max(edges[:, 0:2]) + 1
         self.A = csc_matrix((edges[:, 2], (edges[:, 1], edges[:, 0])), shape=(num_nodes, num_nodes))
 
-        return edges
+    def calculate_statistics(self) -> tuple:
+        return *self.genotypes.shape, self.genotypes.nnz, self.A.nnz
