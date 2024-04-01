@@ -6,12 +6,18 @@ from importlib.metadata import PackageNotFoundError, version  # pragma: no cover
 from .linarg import (
     Linarg as Linarg,
 )
+from .linarg_workflow import (
+    run_linarg_workflow as run_linarg_workflow,
+)
 
 # annoying 'as' notation to avoid warnings/errors about unused imports...
 from .one_summed import (
     compute_path_sums as compute_path_sums,
     construct_1_summed_DAG_fast as construct_1_summed_DAG_fast,
     construct_1_summed_DAG_slow as construct_1_summed_DAG_slow,
+)
+from .simulate import (
+    Simulate as Simulate,
 )
 from .solve import (
     spinv_triangular as spinv_triangular,
