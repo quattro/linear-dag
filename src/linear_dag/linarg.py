@@ -114,8 +114,8 @@ class Linarg:
 
         self.genotypes = genotypes_lil.T.tocsc()
 
-    def compute_haplotypes(self):
-        for n in range(1, int(self.ploidy) + 1):
+    def compute_haplotypes(self, ploidy: int = 1):
+        for n in range(1, ploidy + 1):
             X_carrier = self.genotypes >= n
             X_carrier = X_carrier.astype(np.int32)
             R_carrier = X_carrier.transpose().dot(X_carrier)
@@ -164,8 +164,8 @@ class Linarg:
 
         return rank
 
-    def form_initial_linarg(self):
-        self.compute_haplotypes()
+    def form_initial_linarg(self, ploidy: int = 1) -> None:
+        self.compute_haplotypes(ploidy)
         # A = spinv_triangular(Xh_reordered)
         # lu = splu(Xh)
         # self.A_haplo = lu.solve_sparse(csc_matrix(b))
