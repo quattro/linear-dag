@@ -1,6 +1,7 @@
 import numpy as np
 cimport numpy as np
 
+# Inverse of a lower-triangular sparse CSC matrix with unit diagonal
 cpdef spinv_triangular(int[:] indptr, int[:] indices, int[:] data):
 
     cdef int n = len(indptr)

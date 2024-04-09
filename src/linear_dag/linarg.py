@@ -36,7 +36,7 @@ def _construct_A(genotypes: csc_matrix, ploidy: int = 1) -> csc_matrix:
     triangular_order = np.argsort(-row_counts)
     original_order = np.argsort(triangular_order)
     haplotypes = haplotypes[triangular_order, :][:, triangular_order].astype(np.int32)
-    haplotypes = haplotypes.tocsr()
+    haplotypes = haplotypes.tocsc()
     haplotypes.sort_indices()
     indptr, indices, data = spinv_triangular(haplotypes.indptr, haplotypes.indices, haplotypes.data)
 
