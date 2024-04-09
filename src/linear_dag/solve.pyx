@@ -1,5 +1,6 @@
 import numpy as np
 cimport numpy as np
+
 cpdef spinv_triangular(int[:] indptr, int[:] indices, int[:] data):
 
     cdef int n = len(indptr)

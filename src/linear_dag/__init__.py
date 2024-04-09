@@ -26,6 +26,12 @@ from .trios import (
     LinkedListArray as LinkedListArray,
     Trios as Trios,
 )
+from .utils import (
+    apply_maf_threshold as apply_maf_threshold,
+    binarize as binarize,
+    compute_af as compute_af,
+    flip_alleles as flip_alleles,
+)
 
 
 try:

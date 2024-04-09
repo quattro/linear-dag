@@ -3,7 +3,13 @@ import os
 from time import time
 from typing import Optional
 
-import linear_dag as ld
+import numpy as np
+
+from scipy.io import mmread
+from scipy.sparse import csc_matrix
+
+from .linarg import Linarg
+from .utils import apply_maf_threshold, binarize, flip_alleles
 
 
 def run_linarg_workflow(
@@ -39,8 +45,10 @@ def run_linarg_workflow(
     #     raise NotADirectoryError(f"Output directory does not exist: {output_directory}")
 
     # Initialize Linarg based on input file type
-    kwargs = {"genotype_matrix_mtx": genotype_file} if input_type == "mtx" else {"genotype_matrix_txt": genotype_file}
-    linarg = ld.Linarg(**kwargs)
+    if input_type == "mtx":
+        genotypes = csc_matrix(mmread(genotype_file))
+    else:
+        genotypes = np.loadtxt(genotype_file)
 
     # Read SNP info file and check the number of lines
     # with open(snpinfo_file, 'r') as file:
@@ -49,19 +57,20 @@ def run_linarg_workflow(
     #         raise ValueError("The number of lines in the SNP info file does not match the number of variants.")
 
     if rsq_threshold is not None:
-        linarg.binarize(rsq_threshold)
+        genotypes = binarize(genotypes, rsq_threshold)
+
+    ploidy = np.max(genotypes).astype(int)
     if maf_threshold is not None:
-        linarg.apply_maf_threshold(maf_threshold)
+        genotypes = apply_maf_threshold(genotypes, ploidy, maf_threshold)
+
     if flip_minor_alleles:
-        linarg.flip_alleles()
+        genotypes, flipped = flip_alleles(genotypes, ploidy)
 
-    linarg.form_initial_linarg()
-
-    linarg.create_triolist()
-    linarg.find_recombinations()
+    linarg = Linarg.from_genotypes(genotypes)
+    linarg = linarg.find_recombinations()
 
     # Calculate and handle statistics
-    stats = linarg.calculate_statistics()
+    stats = (*genotypes.shape, genotypes.nnz, linarg.nnz)
 
     # Write Linarg output with SNP info file
     output_file_path = os.path.join(output_file_prefix)  # Modify as needed

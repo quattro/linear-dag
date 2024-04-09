@@ -1,44 +1,93 @@
 # linarg.py
+from dataclasses import dataclass
 
 import numpy as np
 
-from scipy.io import mmread, mmwrite
+from numpy.typing import NDArray
+from scipy.io import mmwrite
 from scipy.sparse import csc_matrix, csr_matrix, eye, hstack, triu, vstack
 
 from .solve import spinv_triangular
 from .trios import Trios
 
 
+def _construct_A(genotypes: csc_matrix, ploidy: int = 1) -> csc_matrix:
+    for n in range(1, ploidy + 1):
+        X_carrier = genotypes >= n
+        X_carrier = X_carrier.astype(np.int32)
+        R_carrier = X_carrier.transpose().dot(X_carrier)
+
+        temp = R_carrier.copy()
+        for i in range(R_carrier.shape[0]):
+            row_data = R_carrier.data[R_carrier.indptr[i] : R_carrier.indptr[i + 1]]
+            temp.data[temp.indptr[i] : temp.indptr[i + 1]] = row_data >= R_carrier[i, i]
+
+        if n == 1:
+            haplotypes = temp
+        else:
+            haplotypes = haplotypes.multiply(temp)
+
+    haplotypes.eliminate_zeros()
+    ties = haplotypes.multiply(haplotypes.transpose())
+    haplotypes = haplotypes - triu(ties, k=1)
+    haplotypes.eliminate_zeros()
+
+    row_counts = np.diff(haplotypes.indptr)
+    triangular_order = np.argsort(-row_counts)
+    original_order = np.argsort(triangular_order)
+    haplotypes = haplotypes[triangular_order, :][:, triangular_order].astype(np.int32)
+    haplotypes = haplotypes.tocsr()
+    haplotypes.sort_indices()
+    indptr, indices, data = spinv_triangular(haplotypes.indptr, haplotypes.indices, haplotypes.data)
+
+    A = csr_matrix((data, indices, indptr))
+    A = A[original_order, :][:, original_order]
+    A.eliminate_zeros()
+
+    return A
+
+
+@dataclass
 class Linarg:
-    def __init__(self, genotype_matrix_mtx: str = None, genotype_matrix_txt: str = None):
-        self.trio_list: Trios = None
-        self.genotypes: csc_matrix = csc_matrix((0, 0))
-        self.haplotypes: csr_matrix = csr_matrix((0, 0))
-        self.A: csc_matrix = csc_matrix((0, 0))
-        self.A_haplo: csc_matrix = csc_matrix((0, 0))
-        self.variants: np.ndarray = np.array([])
-        self.samples: np.ndarray = np.array([])
-        self.flip: np.ndarray = np.array([])
-        self.ploidy: int = 1
-        self.af: np.ndarray = np.array([])
+    A: csr_matrix
+    sample_indices: NDArray
+    variant_indices: NDArray
 
-        if genotype_matrix_mtx is not None:
-            self.genotypes = csc_matrix(mmread(genotype_matrix_mtx))
-        elif genotype_matrix_txt is not None:
-            self.genotypes = np.loadtxt(genotype_matrix_txt)
-        self.samples = np.arange(self.genotypes.shape[0])
-        self.variants = np.arange(self.genotypes.shape[1])
-        self.flip = np.zeros(self.genotypes.shape[1])
-        self.ploidy = np.max(self.genotypes) if self.genotypes.size > 0 else 1
+    @staticmethod
+    def from_genotypes(genotypes: csc_matrix, ploidy: int = 1) -> "Linarg":
+        n, m = genotypes.shape
+        A_haplo = _construct_A(genotypes, ploidy)
 
-    def print(self):
-        print(f"genotypes: shape {self.genotypes.shape}, nonzeros {self.genotypes.nnz}")
-        print(f"A: shape {self.A.shape}, nonzeros {self.A.nnz}")
-        print(f"A_haplo: shape {self.A_haplo.shape}, nonzeros {self.A_haplo.nnz}")
-        if self.trio_list is not None:
-            tup = self.trio_list.get_num()
-            print(f"trio_list properties: n {tup[0]}, num_cliques {tup[1]}")
-            print(f"num_nodes {tup[2]}, num_trios {tup[3]}, num_edges {tup[4]}")
+        # Fit samples to the matrix
+        A_sample = genotypes @ A_haplo
+        A_haplo = eye(m) - A_haplo
+
+        # Concatenate
+        zeros_matrix = csr_matrix((m + n, n))
+        vertical_stack = vstack([A_sample, A_haplo])
+        A = hstack([zeros_matrix, vertical_stack])
+        A = A.astype(np.int32)
+        A.eliminate_zeros()
+        A = csr_matrix(A)
+
+        # Indices in A of the samples and variants
+        samples_idx = np.arange(n)
+        variants_idx = np.arange(n, n + m)
+
+        return Linarg(A, samples_idx, variants_idx)
+
+    @property
+    def shape(self):
+        n = len(self.sample_indices)
+        m = len(self.variant_indices)
+        return n, m
+
+    @property
+    def nnz(self):
+        return self.A.nnz
+
+    def __str__(self):
+        return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
 
     def write(self, filename: str):
         # Write samples
@@ -54,104 +103,11 @@ class Linarg:
         # Write the matrix A
         mmwrite(filename + ".mtx", self.A)
 
-    def binarize(self, r2_threshold: float = 0.0):
-        discretized_genotypes = np.rint(self.genotypes).astype(int)
-
-        # Correlations between dosages + calls
-        correlations = []
-        for i in range(self.genotypes.shape[1]):
-            corr_coef = np.corrcoef(self.genotypes[:, 5].todense().T, discretized_genotypes[:, 5].todense().T)[0, 1]
-            correlations.append(corr_coef)
-
-        # Thresholding
-        well_imputed = np.asarray(correlations) >= r2_threshold
-
-        # Update the genotypes with the discretized values
-        self.genotypes = discretized_genotypes[:, well_imputed]
-        self.variants = np.arange(self.genotypes.shape[1])
-
-        return correlations
-
-    def compute_af(self):
-        column_sums = self.genotypes.sum(axis=0)
-        # Convert column sums to a flat array (necessary for sparse matrices)
-        column_sums = np.ravel(column_sums)
-        self.af = column_sums / self.genotypes.shape[0] / self.ploidy
-        return self.af
-
-    def apply_maf_threshold(self, threshold: float = 0):
-        # Calculate allele frequencies
-        self.compute_af()
-
-        # Calculate MAF (ensure p is a flat array for element-wise operations)
-        maf = np.minimum(self.af, 1 - self.af)
-
-        # Find indices where MAF is above the threshold
-        maf_above_threshold_indices = np.where(maf > threshold)[0]
-
-        # Keep only the columns of self.genotypes where MAF is above the threshold
-        self.genotypes = self.genotypes[:, maf_above_threshold_indices]
-
-        # Update the MAF array to reflect the columns kept
-        self.af = self.af[maf_above_threshold_indices]
-
-    def flip_alleles(self):
-        # Calculate allele frequencies
-        self.compute_af()
-        self.flip = self.af > 0.5
-
-        # list-of-columns format
-        genotypes_lil = self.genotypes.T.tolil()
-
-        for i in range(genotypes_lil.shape[0]):
-            if self.flip[i]:
-                self.af[i] = 1 - self.af[i]
-
-                # Convert the row to dense, flip the alleles, and assign it back
-                row_dense = genotypes_lil[i, :].toarray()
-                flipped_row_dense = self.ploidy - row_dense
-                genotypes_lil[i, :] = flipped_row_dense
-
-        self.genotypes = genotypes_lil.T.tocsc()
-
-    def compute_haplotypes(self, ploidy: int = 1):
-        for n in range(1, ploidy + 1):
-            X_carrier = self.genotypes >= n
-            X_carrier = X_carrier.astype(np.int32)
-            R_carrier = X_carrier.transpose().dot(X_carrier)
-
-            temp = R_carrier.copy()
-            for i in range(R_carrier.shape[0]):
-                row_data = R_carrier.data[R_carrier.indptr[i] : R_carrier.indptr[i + 1]]
-                temp.data[temp.indptr[i] : temp.indptr[i + 1]] = row_data >= R_carrier[i, i]
-
-            if n == 1:
-                self.haplotypes = temp
-            else:
-                self.haplotypes = self.haplotypes.multiply(temp)
-
-        self.haplotypes.eliminate_zeros()
-        ties = self.haplotypes.multiply(self.haplotypes.transpose())
-        self.haplotypes = self.haplotypes - triu(ties, k=1)
-        self.haplotypes.eliminate_zeros()
-
-    def invert_haplotype_matrix(self, X_haplo: csc_matrix):
-        row_counts = np.diff(X_haplo.indptr)
-        triangular_order = np.argsort(-row_counts)
-        original_order = np.argsort(triangular_order)
-        X_haplo = X_haplo[triangular_order, :][:, triangular_order].astype(np.int32)
-        X_haplo = X_haplo.tocsr()
-        X_haplo.sort_indices()
-        indptr, indices, data = spinv_triangular(X_haplo.indptr, X_haplo.indices, X_haplo.data)
-        self.A_haplo = csr_matrix((data, indices, indptr))
-        self.A_haplo = self.A_haplo[original_order, :][:, original_order]
-        self.A_haplo.eliminate_zeros()
-
-    def compute_hierarchy(self) -> np.ndarray:
-        A_csr = self.A.tocsr()
-        n_sample = self.genotypes.shape[0]
-        rank = np.zeros(A_csr.nnz)
-        H = self.haplotypes - eye(self.haplotypes.shape[0])
+    def compute_hierarchy(self, haplotypes: csc_matrix) -> NDArray:
+        A_csr = self.A
+        n_sample, m_sample = self.shape
+        rank = np.zeros(self.nnz)
+        H = haplotypes - eye(haplotypes.shape[0])
         for child in range(self.A.shape[0]):
             # Restrict haplotype matrix to parents of that child
             parents = A_csr.indices[A_csr.indptr[child] : A_csr.indptr[child + 1]]
@@ -164,57 +120,23 @@ class Linarg:
 
         return rank
 
-    def form_initial_linarg(self, ploidy: int = 1) -> None:
-        self.compute_haplotypes(ploidy)
-        # A = spinv_triangular(Xh_reordered)
-        # lu = splu(Xh)
-        # self.A_haplo = lu.solve_sparse(csc_matrix(b))
-        # self.A_haplo = self.A_haplo.astype(np.int32)
-        # self.A_haplo.eliminate_zeros()
-        self.invert_haplotype_matrix(self.haplotypes.tocsc())
-
-        n, m = self.genotypes.shape
-
-        # Fit samples to the matrix
-        A_sample = self.genotypes @ self.A_haplo
-        self.A_haplo = eye(m) - self.A_haplo
-
-        # Concatenate
-        zeros_matrix = csr_matrix((m + n, n))
-        vertical_stack = vstack([A_sample, self.A_haplo])
-        self.A = hstack([zeros_matrix, vertical_stack])
-        self.A = self.A.astype(np.int32)
-        self.A.eliminate_zeros()
-        self.A = csr_matrix(self.A)
-
-        # Indices in A of the samples and variants
-        self.samples = range(self.genotypes.shape[0])
-        self.variants = range(self.genotypes.shape[0], self.genotypes.shape[1] + self.genotypes.shape[0])
-
-    def create_triolist(self, ranked: bool = False):
-        self.trio_list = Trios(2 * self.A.nnz)  # TODO what should n be?
+    def find_recombinations(self, ranked: bool = False) -> "Linarg":
+        trio_list = Trios(2 * self.A.nnz)  # TODO what should n be?
         if ranked:
             rank = self.compute_hierarchy()
-            self.trio_list.convert_matrix_ranked(
-                self.A.data, self.A.indices, self.A.indptr, self.A.indptr.shape[0], rank
-            )
+            trio_list.convert_matrix_ranked(self.A.data, self.A.indices, self.A.indptr, self.A.indptr.shape[0], rank)
         else:
-            self.trio_list.convert_matrix(self.A.data, self.A.indices, self.A.indptr, self.A.indptr.shape[0])
-        self.trio_list.check_properties(-1)
+            trio_list.convert_matrix(self.A.data, self.A.indices, self.A.indptr, self.A.indptr.shape[0])
 
-    def find_recombinations(self):
-        if self.trio_list is None:
-            self.create_triolist()
-
-        self.trio_list.find_recombinations()
+        trio_list.find_recombinations()
 
         # Verify the trio list remains valid
-        self.trio_list.check_properties(-1)
+        trio_list.check_properties(-1)
 
         # Compute new edge list
-        edges = self.trio_list.fill_edgelist()
+        edges = trio_list.fill_edgelist()
         num_nodes = np.max(edges[:, 0:2]) + 1
-        self.A = csc_matrix((edges[:, 2], (edges[:, 1], edges[:, 0])), shape=(num_nodes, num_nodes))
 
-    def calculate_statistics(self) -> tuple:
-        return *self.genotypes.shape, self.genotypes.nnz, self.A.nnz
+        A = csr_matrix((edges[:, 2], (edges[:, 1], edges[:, 0])), shape=(num_nodes, num_nodes))
+
+        return Linarg(A, self.sample_indices, self.variant_indices)
