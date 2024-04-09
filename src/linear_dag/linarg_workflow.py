@@ -48,15 +48,15 @@ def run_linarg_workflow(
     #     if len(snpinfo_lines) != linarg.variants.shape[0]:
     #         raise ValueError("The number of lines in the SNP info file does not match the number of variants.")
 
-    # Perform operations on Linarg instance
-    linarg.form_initial_linarg()
-
     if rsq_threshold is not None:
         linarg.binarize(rsq_threshold)
     if maf_threshold is not None:
         linarg.apply_maf_threshold(maf_threshold)
     if flip_minor_alleles:
         linarg.flip_alleles()
+
+    linarg.form_initial_linarg()
+
     linarg.create_triolist()
     linarg.find_recombinations()
 
