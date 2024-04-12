@@ -104,7 +104,7 @@ class Linarg:
         # Read the matrix A
         A = csr_matrix(mmread(filename + ".mtx"))
 
-        return Linarg(A, sample_list, variant_list, flip_list)
+        return Linarg(A, sample_list - 1, variant_list - 1, flip_list)
 
     @property
     def shape(self):
@@ -122,13 +122,13 @@ class Linarg:
     def write(self, filename: str):
         # Write samples
         with open(filename + ".samples.txt", "w") as f_samples:
-            for sample in self.samples:
-                f_samples.write(f"{sample}\n")
+            for sample in self.sample_indices:
+                f_samples.write(f"{sample + 1}\n")
 
         # Write variants
         with open(filename + ".mutations.txt", "w") as f_variants:
-            for variant in self.variants:
-                f_variants.write(f"{variant}\n")
+            for variant in self.variant_indices:
+                f_variants.write(f"{variant + 1}\n")
 
         # Write the matrix A
         mmwrite(filename + ".mtx", self.A)
@@ -149,6 +149,19 @@ class Linarg:
                 rank[parents_as_indices] += np.diff(X.indptr) > 0
 
         return rank
+
+    def make_triangular(self) -> NDArray:
+        import networkx as nx
+
+        G = nx.from_scipy_sparse_array(self.A, create_using=nx.DiGraph)
+        order = nx.topological_sort(G.reverse(copy=False))
+        order = np.asarray(list(order))
+
+        self.A = self.A[order, :][:, order]
+        inv_order = np.argsort(order)
+        self.variant_indices = inv_order[self.variant_indices]
+        self.sample_indices = inv_order[self.sample_indices]
+        return order
 
     def find_recombinations(self, ranked: bool = False) -> "Linarg":
         trio_list = Trios(2 * self.A.nnz)  # TODO what should n be?
