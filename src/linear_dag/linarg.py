@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from numpy.typing import NDArray
-from scipy.io import mmwrite
+from scipy.io import mmread, mmwrite
 from scipy.sparse import csc_matrix, csr_matrix, eye, hstack, triu, vstack
 
 from .solve import spinv_triangular
@@ -52,9 +52,10 @@ class Linarg:
     A: csr_matrix
     sample_indices: NDArray
     variant_indices: NDArray
+    flip: NDArray
 
     @staticmethod
-    def from_genotypes(genotypes: csc_matrix, ploidy: int = 1) -> "Linarg":
+    def from_genotypes(genotypes: csc_matrix, ploidy: int = 1, flip: NDArray = None) -> "Linarg":
         n, m = genotypes.shape
         A_haplo = _construct_A(genotypes, ploidy)
 
@@ -74,7 +75,36 @@ class Linarg:
         samples_idx = np.arange(n)
         variants_idx = np.arange(n, n + m)
 
-        return Linarg(A, samples_idx, variants_idx)
+        if flip is None:
+            flip = np.zeros(len(variants_idx))
+
+        return Linarg(A, samples_idx, variants_idx, flip)
+
+    @staticmethod
+    def from_file(filename: str) -> "Linarg":
+        # Read samples
+        sample_list = []
+        with open(filename + ".samples.txt", "r") as f:
+            header = next(f)
+            assert header == "index\n"
+            for line in f:
+                sample_list.append(int(line))
+
+        # Read variants
+        variant_list = []
+        flip_list = []
+        with open(filename + ".mutations.txt", "r") as f:
+            header = next(f)
+            assert header == "index,flip\n"
+            for line in f:
+                index, flip = [int(n) for n in line.split(",")]
+                variant_list.append(index)
+                flip_list.append(flip)
+
+        # Read the matrix A
+        A = csr_matrix(mmread(filename + ".mtx"))
+
+        return Linarg(A, sample_list, variant_list, flip_list)
 
     @property
     def shape(self):
