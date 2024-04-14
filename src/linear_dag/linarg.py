@@ -122,10 +122,14 @@ class Linarg:
     def nnz(self):
         return self.A.nnz
 
+    @property
+    def ndim(self):
+        return 2
+
     def __str__(self):
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
 
-    def __mul__(self, other: NDArray) -> NDArray:
+    def __matmul__(self, other: NDArray) -> NDArray:
         if other.shape[0] != self.shape[1]:
             raise ValueError(
                 f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and {other.shape}."
@@ -137,16 +141,27 @@ class Linarg:
         x = spsolve_triangular(eye(self.A.shape[0]) - self.A, v)
         return x - np.sum(other[self.flip])
 
-    # def __rmul__(self, other: NDArray) -> NDArray:
-    #     if other.shape[1] != self.shape[0]:
-    #         raise ValueError(f"Incorrect dimensions for matrix multiplication.
-    #         Inputs had size {other.shape} and {self.shape}.")
-    #
-    #     v = np.zeros((other.shape[0], self.A.shape[1]))
-    #     v[:, self.sample_indices] = other
-    #     x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T).T
-    #     x[self.flip] = np.sum(other) - x[self.flip]
-    #     return x
+    def __rmatmul__(self, other: NDArray) -> NDArray:
+        if other.shape[1] != self.shape[0]:
+            raise ValueError(
+                f"Incorrect dimensions for matrix multiplication. " f"Inputs had size {other.shape} and {self.shape}."
+            )
+
+        v = np.zeros((other.shape[0], self.A.shape[1]))
+        v[:, self.sample_indices] = other
+        x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T, lower=False)
+        x = x[self.variant_indices]
+        x[self.flip] = np.sum(other) - x[self.flip]
+        return x.T
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        if ufunc == np.matmul:
+            # Identify the position of `self` in inputs
+            if inputs[0] is self:  # self is the left operand
+                return self.__matmul__(inputs[1])
+            elif inputs[1] is self:  # self is the right operand
+                return self.__rmatmul__(inputs[0])
+        return NotImplemented
 
     def __getitem__(self, key: tuple[slice, slice]) -> "Linarg":
         rows, cols = key
@@ -155,6 +170,9 @@ class Linarg:
         return Linarg(
             self.A, self.sample_indices[row_indices], self.variant_indices[col_indices], self.flip[col_indices]
         )
+
+    def copy(self) -> "Linarg":
+        return Linarg(self.A.copy(), self.variant_indices.copy(), self.sample_indices.copy(), self.flip.copy())
 
     # def rows(self, idx: slice):
     #     row_indices = range(*idx.indices(self.shape[0]))
