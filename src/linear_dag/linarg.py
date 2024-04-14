@@ -6,6 +6,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.io import mmread, mmwrite
 from scipy.sparse import csc_matrix, csr_matrix, eye, hstack, triu, vstack
+from scipy.sparse.linalg import spsolve_triangular
 
 from .solve import spinv_triangular
 from .trios import Trios
@@ -76,7 +77,7 @@ class Linarg:
         variants_idx = np.arange(n, n + m)
 
         if flip is None:
-            flip = np.zeros(len(variants_idx))
+            flip = np.zeros(len(variants_idx), dtype=bool)
 
         return Linarg(A, samples_idx, variants_idx, flip)
 
@@ -88,7 +89,7 @@ class Linarg:
             header = next(f)
             assert header == "index\n"
             for line in f:
-                sample_list.append(int(line))
+                sample_list.append(int(line) - 1)
 
         # Read variants
         variant_list = []
@@ -98,13 +99,18 @@ class Linarg:
             assert header == "index,flip\n"
             for line in f:
                 index, flip = [int(n) for n in line.split(",")]
-                variant_list.append(index)
+                variant_list.append(index - 1)
                 flip_list.append(flip)
 
         # Read the matrix A
         A = csr_matrix(mmread(filename + ".mtx"))
 
-        return Linarg(A, sample_list - 1, variant_list - 1, flip_list)
+        return Linarg(
+            A,
+            np.asarray(sample_list, dtype=int),
+            np.asarray(variant_list, dtype=int),
+            np.asarray(flip_list, dtype=bool),
+        )
 
     @property
     def shape(self):
@@ -118,6 +124,45 @@ class Linarg:
 
     def __str__(self):
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
+
+    def __mul__(self, other: NDArray) -> NDArray:
+        if other.shape[0] != self.shape[1]:
+            raise ValueError(
+                f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and {other.shape}."
+            )
+
+        other[self.flip] *= -1
+        v = np.zeros((self.A.shape[0], other.shape[1]))
+        v[self.variant_indices, :] = other
+        x = spsolve_triangular(eye(self.A.shape[0]) - self.A, v)
+        return x - np.sum(other[self.flip])
+
+    # def __rmul__(self, other: NDArray) -> NDArray:
+    #     if other.shape[1] != self.shape[0]:
+    #         raise ValueError(f"Incorrect dimensions for matrix multiplication.
+    #         Inputs had size {other.shape} and {self.shape}.")
+    #
+    #     v = np.zeros((other.shape[0], self.A.shape[1]))
+    #     v[:, self.sample_indices] = other
+    #     x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T).T
+    #     x[self.flip] = np.sum(other) - x[self.flip]
+    #     return x
+
+    def __getitem__(self, key: tuple[slice, slice]) -> "Linarg":
+        rows, cols = key
+        row_indices = range(*rows.indices(self.shape[0]))
+        col_indices = range(*cols.indices(self.shape[1]))
+        return Linarg(
+            self.A, self.sample_indices[row_indices], self.variant_indices[col_indices], self.flip[col_indices]
+        )
+
+    # def rows(self, idx: slice):
+    #     row_indices = range(*idx.indices(self.shape[0]))
+    #     n = len(row_indices)
+    #     x = np.zeros((n, self.shape[0]))
+    #     for i, index in enumerate(row_indices):
+    #         x[i, self.sample_indices[index]] = 1
+    #     return x * self.data
 
     def write(self, filename: str):
         # Write samples
