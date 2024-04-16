@@ -49,14 +49,14 @@ def _construct_A(genotypes: csc_matrix, ploidy: int = 1) -> csc_matrix:
 
 
 @dataclass
-class Linarg:
+class LinearARG:
     A: csr_matrix
     sample_indices: NDArray
     variant_indices: NDArray
     flip: NDArray
 
     @staticmethod
-    def from_genotypes(genotypes: csc_matrix, ploidy: int = 1, flip: NDArray = None) -> "Linarg":
+    def from_genotypes(genotypes: csc_matrix, ploidy: int = 1, flip: NDArray = None) -> "LinearARG":
         n, m = genotypes.shape
         A_haplo = _construct_A(genotypes, ploidy)
 
@@ -79,10 +79,10 @@ class Linarg:
         if flip is None:
             flip = np.zeros(len(variants_idx), dtype=bool)
 
-        return Linarg(A, samples_idx, variants_idx, flip)
+        return LinearARG(A, samples_idx, variants_idx, flip)
 
     @staticmethod
-    def from_file(filename: str) -> "Linarg":
+    def from_file(filename: str) -> "LinearARG":
         # Read samples
         sample_list = []
         with open(filename + ".samples.txt", "r") as f:
@@ -105,7 +105,7 @@ class Linarg:
         # Read the matrix A
         A = csr_matrix(mmread(filename + ".mtx"))
 
-        return Linarg(
+        return LinearARG(
             A,
             np.asarray(sample_list, dtype=int),
             np.asarray(variant_list, dtype=int),
@@ -135,11 +135,10 @@ class Linarg:
                 f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and {other.shape}."
             )
 
-        other[self.flip] *= -1
         v = np.zeros((self.A.shape[0], other.shape[1]))
-        v[self.variant_indices, :] = other
+        v[self.variant_indices, :] = (other.T * (-1) ** self.flip).T
         x = spsolve_triangular(eye(self.A.shape[0]) - self.A, v)
-        return x - np.sum(other[self.flip])
+        return x[self.sample_indices] + np.sum(other[self.flip])
 
     def __rmatmul__(self, other: NDArray) -> NDArray:
         if other.shape[1] != self.shape[0]:
@@ -151,7 +150,7 @@ class Linarg:
         v[:, self.sample_indices] = other
         x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T, lower=False)
         x = x[self.variant_indices]
-        x[self.flip] = np.sum(other) - x[self.flip]
+        x[self.flip] = np.sum(other) - x[self.flip]  # TODO what if other is a matrix?
         return x.T
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
@@ -163,16 +162,16 @@ class Linarg:
                 return self.__rmatmul__(inputs[0])
         return NotImplemented
 
-    def __getitem__(self, key: tuple[slice, slice]) -> "Linarg":
+    def __getitem__(self, key: tuple[slice, slice]) -> "LinearARG":
         rows, cols = key
         row_indices = range(*rows.indices(self.shape[0]))
         col_indices = range(*cols.indices(self.shape[1]))
-        return Linarg(
+        return LinearARG(
             self.A, self.sample_indices[row_indices], self.variant_indices[col_indices], self.flip[col_indices]
         )
 
-    def copy(self) -> "Linarg":
-        return Linarg(self.A.copy(), self.variant_indices.copy(), self.sample_indices.copy(), self.flip.copy())
+    def copy(self) -> "LinearARG":
+        return LinearARG(self.A.copy(), self.variant_indices.copy(), self.sample_indices.copy(), self.flip.copy())
 
     # def rows(self, idx: slice):
     #     row_indices = range(*idx.indices(self.shape[0]))
@@ -185,13 +184,15 @@ class Linarg:
     def write(self, filename: str):
         # Write samples
         with open(filename + ".samples.txt", "w") as f_samples:
+            f_samples.write("index\n")
             for sample in self.sample_indices:
                 f_samples.write(f"{sample + 1}\n")
 
         # Write variants
         with open(filename + ".mutations.txt", "w") as f_variants:
-            for variant in self.variant_indices:
-                f_variants.write(f"{variant + 1}\n")
+            f_variants.write("index,flip\n")
+            for variant, flip in zip(self.variant_indices, self.flip):
+                f_variants.write(f"{variant + 1}, {int(flip)}\n")
 
         # Write the matrix A
         mmwrite(filename + ".mtx", self.A)
@@ -213,20 +214,19 @@ class Linarg:
 
         return rank
 
-    def make_triangular(self) -> NDArray:
-        import networkx as nx
+    def make_triangular(self) -> "LinearARG":
+        import networkx as nx  # TODO maybe re-implement without this
 
         G = nx.from_scipy_sparse_array(self.A, create_using=nx.DiGraph)
         order = nx.topological_sort(G.reverse(copy=False))
         order = np.asarray(list(order))
-
-        self.A = self.A[order, :][:, order]
         inv_order = np.argsort(order)
-        self.variant_indices = inv_order[self.variant_indices]
-        self.sample_indices = inv_order[self.sample_indices]
-        return order
 
-    def find_recombinations(self, ranked: bool = False) -> "Linarg":
+        return LinearARG(
+            self.A[order, :][:, order], inv_order[self.sample_indices], inv_order[self.variant_indices], self.flip
+        )
+
+    def find_recombinations(self, ranked: bool = False, remove_singleton_nodes: bool = False) -> "LinearARG":
         trio_list = Trios(2 * self.A.nnz)  # TODO what should n be?
         if ranked:
             rank = self.compute_hierarchy()
@@ -234,7 +234,7 @@ class Linarg:
         else:
             trio_list.convert_matrix(self.A.data, self.A.indices, self.A.indptr, self.A.indptr.shape[0])
 
-        trio_list.find_recombinations()
+        trio_list.find_recombinations(remove_singleton_nodes)
 
         # Verify the trio list remains valid
         trio_list.check_properties(-1)
@@ -242,7 +242,6 @@ class Linarg:
         # Compute new edge list
         edges = trio_list.fill_edgelist()
         num_nodes = np.max(edges[:, 0:2]) + 1
-
         A = csr_matrix((edges[:, 2], (edges[:, 1], edges[:, 0])), shape=(num_nodes, num_nodes))
 
-        return Linarg(A, self.sample_indices, self.variant_indices)
+        return LinearARG(A, self.sample_indices, self.variant_indices, self.flip)
