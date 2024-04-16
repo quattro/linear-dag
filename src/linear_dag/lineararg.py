@@ -49,14 +49,14 @@ def _construct_A(genotypes: csc_matrix, ploidy: int = 1) -> csc_matrix:
 
 
 @dataclass
-class Linarg:
+class LinearARG:
     A: csr_matrix
     sample_indices: NDArray
     variant_indices: NDArray
     flip: NDArray
 
     @staticmethod
-    def from_genotypes(genotypes: csc_matrix, ploidy: int = 1, flip: NDArray = None) -> "Linarg":
+    def from_genotypes(genotypes: csc_matrix, ploidy: int = 1, flip: NDArray = None) -> "LinearARG":
         n, m = genotypes.shape
         A_haplo = _construct_A(genotypes, ploidy)
 
@@ -79,10 +79,10 @@ class Linarg:
         if flip is None:
             flip = np.zeros(len(variants_idx), dtype=bool)
 
-        return Linarg(A, samples_idx, variants_idx, flip)
+        return LinearARG(A, samples_idx, variants_idx, flip)
 
     @staticmethod
-    def from_file(filename: str) -> "Linarg":
+    def from_file(filename: str) -> "LinearARG":
         # Read samples
         sample_list = []
         with open(filename + ".samples.txt", "r") as f:
@@ -105,7 +105,7 @@ class Linarg:
         # Read the matrix A
         A = csr_matrix(mmread(filename + ".mtx"))
 
-        return Linarg(
+        return LinearARG(
             A,
             np.asarray(sample_list, dtype=int),
             np.asarray(variant_list, dtype=int),
@@ -148,11 +148,11 @@ class Linarg:
     #     x[self.flip] = np.sum(other) - x[self.flip]
     #     return x
 
-    def __getitem__(self, key: tuple[slice, slice]) -> "Linarg":
+    def __getitem__(self, key: tuple[slice, slice]) -> "LinearARG":
         rows, cols = key
         row_indices = range(*rows.indices(self.shape[0]))
         col_indices = range(*cols.indices(self.shape[1]))
-        return Linarg(
+        return LinearARG(
             self.A, self.sample_indices[row_indices], self.variant_indices[col_indices], self.flip[col_indices]
         )
 
@@ -208,7 +208,7 @@ class Linarg:
         self.sample_indices = inv_order[self.sample_indices]
         return order
 
-    def find_recombinations(self, ranked: bool = False) -> "Linarg":
+    def find_recombinations(self, ranked: bool = False) -> "LinearARG":
         trio_list = Trios(2 * self.A.nnz)  # TODO what should n be?
         if ranked:
             rank = self.compute_hierarchy()
@@ -227,4 +227,4 @@ class Linarg:
 
         A = csr_matrix((edges[:, 2], (edges[:, 1], edges[:, 0])), shape=(num_nodes, num_nodes))
 
-        return Linarg(A, self.sample_indices, self.variant_indices)
+        return LinearARG(A, self.sample_indices, self.variant_indices, np.zeros(len(self.variant_indices), dtype=bool))

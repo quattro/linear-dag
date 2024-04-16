@@ -4,11 +4,11 @@ import numpy as np
 from scipy.io import mmwrite
 from scipy.sparse import csc_matrix
 
-from .linarg import Linarg
+from .lineararg import LinearARG
 from .one_summed import construct_1_summed_DAG_slow
 
 
-class Simulate(Linarg):
+class Simulate(LinearARG):
     def simulate_example(self, example: str = "2-1", ns: int = 10):
         # Initial ARG (not one-summed)
         if example == "2-1":
@@ -67,8 +67,8 @@ class Simulate(Linarg):
         self.samples = np.arange(ns)
         self.variants = np.arange(ns, ns + nm)
 
-    def linarg(self) -> Linarg:
-        copy = Linarg()
+    def linarg(self) -> LinearARG:
+        copy = LinearARG()
         copy.genotypes = csc_matrix(self.genotypes)
         copy.variants = np.copy(self.variants)
         copy.samples = np.copy(self.samples)

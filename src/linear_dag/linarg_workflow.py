@@ -8,7 +8,7 @@ import numpy as np
 from scipy.io import mmread
 from scipy.sparse import csc_matrix
 
-from .linarg import Linarg
+from .lineararg import LinearARG
 from .utils import apply_maf_threshold, binarize, flip_alleles
 
 
@@ -66,7 +66,7 @@ def run_linarg_workflow(
     if flip_minor_alleles:
         genotypes, flipped = flip_alleles(genotypes, ploidy)
 
-    linarg = Linarg.from_genotypes(genotypes)
+    linarg = LinearARG.from_genotypes(genotypes)
     linarg = linarg.find_recombinations()
 
     # Calculate and handle statistics

@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: MIT
 from importlib.metadata import PackageNotFoundError, version  # pragma: no cover
 
-from .linarg import (
-    Linarg as Linarg,
-)
 from .linarg_workflow import (
     run_linarg_workflow as run_linarg_workflow,
+)
+from .lineararg import (
+    LinearARG as LinearARG,
 )
 
 # annoying 'as' notation to avoid warnings/errors about unused imports...
