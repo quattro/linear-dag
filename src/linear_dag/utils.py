@@ -39,7 +39,7 @@ def flip_alleles(genotypes: csc_matrix, ploidy: int = 1) -> tuple[csc_matrix, ND
     return genotypes_lil.T.tocsc(), f_idxs
 
 
-def apply_maf_threshold(genotypes: csc_matrix, ploidy: int = 1, threshold: float = 0.0) -> csc_matrix:
+def apply_maf_threshold(genotypes: csc_matrix, ploidy: int = 1, threshold: float = 0.0) -> tuple[csc_matrix, NDArray]:
     # Calculate allele frequencies
     af = compute_af(genotypes, ploidy)
 
@@ -50,7 +50,7 @@ def apply_maf_threshold(genotypes: csc_matrix, ploidy: int = 1, threshold: float
     maf_above_threshold_indices = np.where(maf > threshold)[0]
 
     # Keep only the columns of self.genotypes where MAF is above the threshold
-    return genotypes[:, maf_above_threshold_indices]
+    return genotypes[:, maf_above_threshold_indices], maf_above_threshold_indices
 
 
 def binarize(genotypes: csc_matrix, r2_threshold: float = 0.0) -> tuple[csc_matrix, NDArray]:

@@ -8,7 +8,7 @@ import numpy as np
 from scipy.io import mmread
 from scipy.sparse import csc_matrix
 
-from .linarg import Linarg
+from .lineararg import LinearARG
 from .utils import apply_maf_threshold, binarize, flip_alleles
 
 
@@ -20,7 +20,8 @@ def run_linarg_workflow(
     rsq_threshold: Optional[float] = None,
     max_sample_size: Optional[int] = None,
     statistics_file_path: Optional[str] = None,
-) -> None:
+    remove_singleton_nodes: bool = False,
+) -> "LinearARG":
     start_time = time()
 
     # Check and select input files
@@ -57,28 +58,36 @@ def run_linarg_workflow(
     #         raise ValueError("The number of lines in the SNP info file does not match the number of variants.")
 
     if rsq_threshold is not None:
-        genotypes = binarize(genotypes, rsq_threshold)
+        genotypes, well_imputed_variants = binarize(genotypes, rsq_threshold)
 
     ploidy = np.max(genotypes).astype(int)
     if maf_threshold is not None:
-        genotypes = apply_maf_threshold(genotypes, ploidy, maf_threshold)
+        genotypes, common_variants = apply_maf_threshold(genotypes, ploidy, maf_threshold)
+
+    # TODO output which variants were kept
+    kept_variants = well_imputed_variants[common_variants]
+    print("kept_variants:", kept_variants.shape)
 
     if flip_minor_alleles:
         genotypes, flipped = flip_alleles(genotypes, ploidy)
 
-    linarg = Linarg.from_genotypes(genotypes)
-    linarg = linarg.find_recombinations()
+    linarg = LinearARG.from_genotypes(genotypes)
+    linarg = linarg.find_recombinations(remove_singleton_nodes=remove_singleton_nodes)
+    linarg = linarg.make_triangular()
 
-    # Calculate and handle statistics
-    stats = (*genotypes.shape, genotypes.nnz, linarg.nnz)
-
-    # Write Linarg output with SNP info file
-    output_file_path = os.path.join(output_file_prefix)  # Modify as needed
-    linarg.write(output_file_path)
+    if output_file_prefix is not None:
+        output_file_path = os.path.join(output_file_prefix)
+        linarg.write(output_file_path)
 
     runtime = time() - start_time
 
     # Handle statistics file
+    stats = (*genotypes.shape, genotypes.nnz, linarg.nnz)
+    line = (input_file_prefix, *stats, stats[2] / stats[3], runtime)
+    print(
+        f"file_name: {line[0]},num_samples: {line[1]}, num_variants: {line[2]}, nnz_X: {line[3]}, "
+        f"nnz_A: : {line[4]}, nnz_ratio: {line[5]}, runtime: {line[6]}"
+    )
     if statistics_file_path:
         if not os.path.exists(statistics_file_path):
             with open(statistics_file_path, "w") as stats_file:
@@ -86,5 +95,6 @@ def run_linarg_workflow(
 
         with open(statistics_file_path, "a") as stats_file:
             # Assuming stats is a tuple, write it to the end of the file
-            line = (input_file_prefix, *stats, stats[2] / stats[3], runtime)
             stats_file.write(",".join(map(str, line)) + "\n")
+
+    return linarg, genotypes
