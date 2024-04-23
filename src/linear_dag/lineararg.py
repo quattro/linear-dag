@@ -150,7 +150,7 @@ class LinearARG:
         v[:, self.sample_indices] = other
         x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T, lower=False)
         x = x[self.variant_indices]
-        x[self.flip] = np.sum(other) - x[self.flip]  # TODO what if other is a matrix?
+        x[self.flip] = np.sum(other, axis=0) - x[self.flip]  # TODO what if other is a matrix?
         return x.T
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
