@@ -10,11 +10,17 @@ from .lineararg import (
     LinearARG as LinearARG,
 )
 
+# from .intervals import (
+#     Intervals as Intervals,
+# )
 # annoying 'as' notation to avoid warnings/errors about unused imports...
 from .one_summed import (
     compute_path_sums as compute_path_sums,
     construct_1_summed_DAG_fast as construct_1_summed_DAG_fast,
     construct_1_summed_DAG_slow as construct_1_summed_DAG_slow,
+)
+from .pathsumdag import (
+    PathSumDAG as PathSumDAG,
 )
 from .simulate import (
     Simulate as Simulate,
