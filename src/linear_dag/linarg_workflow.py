@@ -9,6 +9,7 @@ from scipy.io import mmread
 from scipy.sparse import csc_matrix
 
 from .lineararg import LinearARG
+from .pathsumdag import PathSumDAG
 from .utils import apply_maf_threshold, binarize, flip_alleles
 
 
@@ -21,7 +22,9 @@ def run_linarg_workflow(
     max_sample_size: Optional[int] = None,
     statistics_file_path: Optional[str] = None,
     remove_singleton_nodes: bool = False,
-) -> "LinearARG":
+    recombination_method: str = "old",
+    make_triangular: bool = True,
+) -> tuple:
     start_time = time()
 
     # Check and select input files
@@ -71,9 +74,21 @@ def run_linarg_workflow(
     if flip_minor_alleles:
         genotypes, flipped = flip_alleles(genotypes, ploidy)
 
+    genotype_stats = (*genotypes.shape, genotypes.nnz)
+
     linarg = LinearARG.from_genotypes(genotypes)
-    linarg = linarg.find_recombinations(remove_singleton_nodes=remove_singleton_nodes)
-    linarg = linarg.make_triangular()
+
+    if recombination_method == "old":
+        linarg = linarg.find_recombinations(remove_singleton_nodes=remove_singleton_nodes)
+    elif recombination_method == "new":
+        pathdag = PathSumDAG.from_lineararg(linarg)
+        schedule = [1000, 100, 10, 1]  # TODO
+        for s in schedule:
+            pathdag.iterate(threshold=s)
+        linarg.A = pathdag.to_csr_matrix()
+
+    if make_triangular:
+        linarg = linarg.make_triangular()
 
     if output_file_prefix is not None:
         output_file_path = os.path.join(output_file_prefix)
@@ -82,8 +97,7 @@ def run_linarg_workflow(
     runtime = time() - start_time
 
     # Handle statistics file
-    stats = (*genotypes.shape, genotypes.nnz, linarg.nnz)
-    line = (input_file_prefix, *stats, stats[2] / stats[3], runtime)
+    line = (input_file_prefix, *genotype_stats, linarg.nnz, genotype_stats[2] / linarg.nnz, runtime)
     print(
         f"file_name: {line[0]},num_samples: {line[1]}, num_variants: {line[2]}, nnz_X: {line[3]}, "
         f"nnz_A: : {line[4]}, nnz_ratio: {line[5]}, runtime: {line[6]}"
