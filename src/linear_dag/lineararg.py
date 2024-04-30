@@ -150,7 +150,8 @@ class LinearARG:
         v[:, self.sample_indices] = other
         x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T, lower=False)
         x = x[self.variant_indices]
-        x[self.flip] = np.sum(other, axis=0) - x[self.flip]  # TODO what if other is a matrix?
+        if np.any(self.flip):
+            x[self.flip] = np.sum(other, axis=1) - x[self.flip]  # TODO what if other is a matrix?
         return x.T
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
@@ -171,7 +172,7 @@ class LinearARG:
         )
 
     def copy(self) -> "LinearARG":
-        return LinearARG(self.A.copy(), self.variant_indices.copy(), self.sample_indices.copy(), self.flip.copy())
+        return LinearARG(self.A.copy(), self.sample_indices.copy(), self.variant_indices.copy(), self.flip.copy())
 
     # def rows(self, idx: slice):
     #     row_indices = range(*idx.indices(self.shape[0]))
