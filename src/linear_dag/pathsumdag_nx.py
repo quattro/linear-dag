@@ -1,9 +1,7 @@
-import networkit as nk
+import networkx as nx
 import numpy as np
 
-from networkit.algebraic import adjacencyMatrix
 from numpy.typing import NDArray
-from scipy.sparse import coo_matrix, csr_matrix
 
 from .lineararg import LinearARG
 
@@ -14,7 +12,7 @@ class PathSumDAG:
     Implements a weighted directed acyclic graph with path sum-preserving operations.
     """
 
-    g: nk.Graph
+    g: nx.DiGraph
     last_predecessor: NDArray[np.int_]
     original_nodes: set[int]
     node_position: NDArray[np.int_]
@@ -22,30 +20,30 @@ class PathSumDAG:
 
     @property
     def nodes(self) -> set[int]:
-        return set(self.g.iterNodes())
+        return set(self.g.nodes())
 
     @property
     def number_of_nodes(self) -> int:
-        return self.g.numberOfNodes()
+        return self.g.number_of_nodes()
 
     @property
     def number_of_edges(self) -> int:
-        return self.g.numberOfEdges()
+        return self.g.number_of_edges()
 
     def __init__(self, directed_graph=None, last_predecessor=None, original_nodes=None, node_position=None):
-        self.g = directed_graph if directed_graph else nk.Graph()
+        self.g = directed_graph
         self.last_predecessor = last_predecessor
         self.original_nodes = original_nodes
         self.node_position = node_position
+        self.next_node_index = int(np.max(directed_graph.nodes()) + 1)
 
     @classmethod
-    def from_digraph(cls, directed_graph: "nk.Graph") -> "PathSumDAG":
-        m = directed_graph.numberOfEdges()
+    def from_digraph(cls, directed_graph: nx.DiGraph) -> "PathSumDAG":
+        m = directed_graph.number_of_edges()
         last_predecessor = -np.ones(m, dtype=np.intc)
-        original_nodes = set(directed_graph.iterNodes())
+        original_nodes = set(directed_graph.nodes)
         node_position = np.zeros(m)
-        n = directed_graph.numberOfNodes()
-        node_position[:n] = np.arange(n)
+        node_position[: directed_graph.number_of_nodes()] = np.arange(directed_graph.number_of_nodes())
 
         return cls(
             directed_graph=directed_graph,
@@ -56,12 +54,12 @@ class PathSumDAG:
 
     @classmethod
     def from_lineararg(cls, lineararg: "LinearARG") -> "PathSumDAG":
-        D = nk.GraphFromCoo(coo_matrix(lineararg.A.T).astype(float), weighted=True, directed=True)
+        D = nx.from_scipy_sparse_array(lineararg.A.T, create_using=nx.DiGraph, edge_attribute="weight")
         return cls.from_digraph(D)
 
     def to_csr_matrix(self):
-        A = adjacencyMatrix(self.g)
-        return csr_matrix(A.T)
+        A = nx.to_scipy_sparse_array(self.g, format="csc", weight="weight")
+        return A.T
 
     def iterate(self, threshold: int = 1) -> None:
         """
@@ -71,15 +69,13 @@ class PathSumDAG:
         if threshold < 1:
             raise ValueError("Recombination threshold parameter should be at least 1")
 
-        # for node in list(self.g.iterNodes()):
-        #     self.unweight(node)
+        for node in list(self.g.nodes()):
+            self.unweight(node)
 
         self.last_predecessor[:] = -1
         order = np.argsort(self.node_position)
         for i in order:
-            if not self.g.hasNode(i):
-                continue
-            if self.g.degreeOut(i) == 0:
+            if not self.g.has_node(i):
                 continue
             self.process_node(i, threshold=threshold)
 
@@ -92,7 +88,7 @@ class PathSumDAG:
         children if they have an in-degree of 1 (and are not in the original set of nodes)
         """
 
-        successors = [v for v in self.g.iterNeighbors(u) if self.g.weight(u, v) == 1]
+        successors = [v for v in self.g.successors(u) if self.g.edges[u, v]["weight"] == 1]
 
         # successors of v shared with each last predecessor
         shared_successors_with = {}
@@ -115,15 +111,17 @@ class PathSumDAG:
             self.factor((p, u), shared_successors)
 
             # Check and potentially remove the predecessor
-            if self.g.degreeOut(p) == 1 and p not in self.original_nodes:
+            if self.g.out_degree(p) == 1 and p not in self.original_nodes:
                 self.remove_node(p)
 
         for s in successors:
-            if self.g.degreeIn(s) == 1 and s not in self.original_nodes:
+            if self.g.in_degree(s) == 1 and s not in self.original_nodes:
                 self.remove_node(s)
 
     def create_node(self, position: int) -> int:
-        n: int = self.g.addNode()
+        n = self.next_node_index  # Ensuring the new node has a unique index
+        self.next_node_index += 1
+        self.g.add_node(n)
         self.node_position[n] = position
         return n
 
@@ -132,20 +130,23 @@ class PathSumDAG:
         Factor a biclique (U,V), where (u,v) is in G for all u in U, v in V, creating a new node n with edges (u,n)
         and (n,v)
         """
-        n = self.create_node(self.node_position[U[1]])
+        n = self.create_node(self.node_position[U[-1]])
 
         for v in V:
-            self.g.addEdge(n, v, w=self.g.weight(U[0], v))
+            self.g.add_edge(n, v, weight=self.g.edges[U[0], v]["weight"])
 
         for u in U:
             for v in V:
-                assert self.g.hasEdge(u, v), f"Problem with nodes {u} and {v}"
-                self.g.removeEdge(u, v)
+                assert self.g.has_edge(u, v), f"Problem with nodes {u} and {v}"
+                self.g.remove_edge(u, v)
 
-            self.g.addEdge(u, n, w=1)
+            self.g.add_edge(u, n, weight=1)
 
         self.last_predecessor[n] = U[-1]
-        self.last_predecessor[V] = n
+
+        # Update last_predecessor for each v in V to the new node n
+        for v in V:
+            self.last_predecessor[v] = n
 
     def unweight(self, u: int) -> None:
         """
@@ -154,8 +155,8 @@ class PathSumDAG:
         """
         # Outgoing edges from each node with given weights
         successors_with_weight = {}
-        for v in self.g.iterNeighbors(u):
-            w = self.g.weight(u, v)
+        for v in self.g.successors(u):
+            w = self.g.edges[u, v]["weight"]
             if w not in successors_with_weight:
                 successors_with_weight[w] = []
             successors_with_weight[w].append(v)
@@ -164,14 +165,15 @@ class PathSumDAG:
             if w == 1 or len(successors) <= 1:
                 continue
 
-            # TODO think about node position here
             n = self.create_node(self.node_position[u])
 
             for s in successors:
-                self.g.addEdge(n, s, w=1)
-                self.g.removeEdge(u, s)
+                self.g.add_edge(n, s, weight=1)
+                self.g.remove_edge(u, s)
+                if self.last_predecessor[s] == u:
+                    self.last_predecessor[s] = n
 
-            self.g.addEdge(u, n, w=w)
+            self.g.add_edge(u, n, weight=w)
 
     def remove_node(self, node: int) -> None:
         """
@@ -179,37 +181,34 @@ class PathSumDAG:
         Also updates self.last_predecessor.
         """
 
-        # Bypass the node TODO refactor/denest this
-        for p in self.g.iterInNeighbors(node):
-            for s in self.g.iterNeighbors(node):
-                edge_weight = self.g.weight(p, node) * self.g.weight(node, s)
-                if self.g.hasEdge(p, s):
-                    edge_weight += self.g.weight(p, s)
-                    if edge_weight == 0:
-                        self.g.removeEdge(p, s)
-                    else:
-                        self.g.setWeight(p, s, edge_weight)
-                    continue
+        predecessors = list(self.g.predecessors(node))
+        successors = list(self.g.successors(node))
 
-                self.g.addEdge(p, s, edge_weight)
+        # Bypass the node
+        for p in predecessors:
+            for s in successors:
+                if not self.g.has_edge(p, s):
+                    self.g.add_edge(p, s, weight=0)
+
+                self.g.edges[p, s]["weight"] += self.g.edges[p, node]["weight"] * self.g.edges[node, s]["weight"]
+
+                if self.g.edges[p, s]["weight"] == 0:
+                    self.g.remove_edge(p, s)
 
         # Update last_predecessor
-        for s in self.g.iterNeighbors(node):
+        for s in successors:
             if self.last_predecessor[s] == node:
-                self.last_predecessor[s] = self.last_predecessor[node]
-            if s not in self.original_nodes:
-                self.node_position[s] = max(self.node_position[s], self.node_position[node])
+                self.last_predecessor[s] = predecessors[0] if predecessors else -1
 
         # Delete the node
-        self.g.removeNode(node)
-        self.last_predecessor[node] = -1
+        self.g.remove_node(node)
 
     def cleanup(self) -> None:
         """
         Remove all nodes having either in- or out-degree one
         """
-        for node in self.g.iterNodes():
+        for node in list(self.g.nodes):
             if node in self.original_nodes:
                 continue
-            if self.g.degreeIn(node) == 1 or self.g.degreeOut(node) == 1:
+            if self.g.in_degree(node) == 1 or self.g.out_degree(node) == 1:
                 self.remove_node(node)

@@ -37,6 +37,7 @@ dependencies = [
   "numpy",
   "scipy",
   "networkx",
+  "networkit",
   "tskit",
   "ldgm@git+https://github.com/awohns/ldgm.git"
 ]
