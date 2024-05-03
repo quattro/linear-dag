@@ -71,8 +71,8 @@ class PathSumDAG:
         if threshold < 1:
             raise ValueError("Recombination threshold parameter should be at least 1")
 
-        # for node in list(self.g.iterNodes()):
-        #     self.unweight(node)
+        for node in list(self.g.iterNodes()):
+            self.unweight(node)
 
         self.last_predecessor[:] = -1
         order = np.argsort(self.node_position)
