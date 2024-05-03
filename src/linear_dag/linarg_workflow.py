@@ -82,6 +82,7 @@ def run_linarg_workflow(
         linarg = linarg.find_recombinations(remove_singleton_nodes=remove_singleton_nodes)
     elif recombination_method == "new":
         pathdag = PathSumDAG.from_lineararg(linarg)
+        pathdag.unweight_all()
         schedule = [1000, 100, 10, 1]  # TODO
         for s in schedule:
             pathdag.iterate(threshold=s)

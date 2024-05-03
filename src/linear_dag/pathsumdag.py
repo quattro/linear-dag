@@ -1,3 +1,6 @@
+from functools import partial
+from itertools import groupby
+
 import networkit as nk
 import numpy as np
 
@@ -18,7 +21,6 @@ class PathSumDAG:
     last_predecessor: NDArray[np.int_]
     original_nodes: set[int]
     node_position: NDArray[np.int_]
-    next_node_index: int
 
     @property
     def nodes(self) -> set[int]:
@@ -63,6 +65,10 @@ class PathSumDAG:
         A = adjacencyMatrix(self.g)
         return csr_matrix(A.T)
 
+    def unweight_all(self) -> None:
+        for node in list(self.g.iterNodes()):
+            self.unweight(node)
+
     def iterate(self, threshold: int = 1) -> None:
         """
         Iterate over all nodes in the graph twice, first performing an unweighting operation and then processing them.
@@ -70,9 +76,6 @@ class PathSumDAG:
 
         if threshold < 1:
             raise ValueError("Recombination threshold parameter should be at least 1")
-
-        for node in list(self.g.iterNodes()):
-            self.unweight(node)
 
         self.last_predecessor[:] = -1
         order = np.argsort(self.node_position)
@@ -95,15 +98,13 @@ class PathSumDAG:
         successors = [v for v in self.g.iterNeighbors(u) if self.g.weight(u, v) == 1]
 
         # successors of v shared with each last predecessor
-        shared_successors_with = {}
-        for v in successors:
-            p = self.last_predecessor[v]
-            if p not in shared_successors_with:
-                shared_successors_with[p] = []
-            shared_successors_with[p].append(v)
+        def last_predecessor(v):
+            return self.last_predecessor[v]
+
+        sorted_successors = sorted(successors, key=last_predecessor)
 
         # Process each unique predecessor
-        for p, shared_successors in shared_successors_with.items():
+        for p, shared_successors in groupby(sorted_successors, last_predecessor):
             if p == -1:
                 self.last_predecessor[shared_successors] = u
                 continue
@@ -153,25 +154,20 @@ class PathSumDAG:
         a new node n_w, together with a single edge (u,n_w) having weight w.
         """
         # Outgoing edges from each node with given weights
-        successors_with_weight = {}
-        for v in self.g.iterNeighbors(u):
-            w = self.g.weight(u, v)
-            if w not in successors_with_weight:
-                successors_with_weight[w] = []
-            successors_with_weight[w].append(v)
-
-        for w, successors in successors_with_weight.items():
-            if w == 1 or len(successors) <= 1:
+        neighbor_to_weight = partial(self.g.weight, u)
+        sorted_neighbors = sorted(self.g.iterNeighbors(u), key=neighbor_to_weight)
+        for weight, neighbors in groupby(sorted_neighbors, neighbor_to_weight):
+            if weight == 1:
                 continue
 
             # TODO think about node position here
             n = self.create_node(self.node_position[u])
 
-            for s in successors:
-                self.g.addEdge(n, s, w=1)
-                self.g.removeEdge(u, s)
+            for v in neighbors:
+                self.g.addEdge(n, v, w=1)
+                self.g.removeEdge(u, v)
 
-            self.g.addEdge(u, n, w=w)
+            self.g.addEdge(u, n, w=weight)
 
     def remove_node(self, node: int) -> None:
         """
