@@ -227,7 +227,7 @@ class LinearARG:
             self.A[order, :][:, order], inv_order[self.sample_indices], inv_order[self.variant_indices], self.flip
         )
 
-    def find_recombinations(self, ranked: bool = False, remove_singleton_nodes: bool = False) -> "LinearARG":
+    def find_recombinations(self, ranked: bool = False) -> "LinearARG":
         trio_list = Trios(2 * self.A.nnz)  # TODO what should n be?
         if ranked:
             rank = self.compute_hierarchy()
@@ -235,7 +235,7 @@ class LinearARG:
         else:
             trio_list.convert_matrix(self.A.data, self.A.indices, self.A.indptr, self.A.indptr.shape[0])
 
-        trio_list.find_recombinations(remove_singleton_nodes)
+        trio_list.find_recombinations()
 
         # Verify the trio list remains valid
         trio_list.check_properties(-1)
