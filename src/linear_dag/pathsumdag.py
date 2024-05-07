@@ -67,11 +67,11 @@ class PathSumDAG:
 
     def unweight_all(self) -> None:
         for node in list(self.g.iterNodes()):
-            self.unweight(node)
+            self.unweight_node(node)
 
-    def iterate(self, threshold: int = 1) -> None:
+    def recombine_all(self, threshold: int = 1) -> None:
         """
-        Iterate over all nodes in the graph twice, first performing an unweighting operation and then processing them.
+        Iterate over all nodes in the graph twice and recombine them.
         """
 
         if threshold < 1:
@@ -84,9 +84,9 @@ class PathSumDAG:
                 continue
             if self.g.degreeOut(i) == 0:
                 continue
-            self.process_node(i, threshold=threshold)
+            self.recombine_node(i, threshold=threshold)
 
-    def process_node(self, u: int, threshold: int = 1) -> None:
+    def recombine_node(self, u: int, threshold: int = 1) -> None:
         """
         Processes outgoing edges from node u in DiGraph G:
         - Finds unique last-visited predecessors of successors of u.
@@ -105,6 +105,7 @@ class PathSumDAG:
 
         # Process each unique predecessor
         for p, shared_successors in groupby(sorted_successors, last_predecessor):
+            shared_successors = list(shared_successors)
             if p == -1:
                 self.last_predecessor[shared_successors] = u
                 continue
@@ -148,7 +149,7 @@ class PathSumDAG:
         self.last_predecessor[n] = U[-1]
         self.last_predecessor[V] = n
 
-    def unweight(self, u: int) -> None:
+    def unweight_node(self, u: int) -> None:
         """
         Takes outgoing edges (u,v) of u having weight w != 1 and replaces them with an edge (n_w,v) having weight 1 for
         a new node n_w, together with a single edge (u,n_w) having weight w.
@@ -175,19 +176,19 @@ class PathSumDAG:
         Also updates self.last_predecessor.
         """
 
-        # Bypass the node TODO refactor/denest this
+        # Bypass the node
         for p in self.g.iterInNeighbors(node):
             for s in self.g.iterNeighbors(node):
                 edge_weight = self.g.weight(p, node) * self.g.weight(node, s)
-                if self.g.hasEdge(p, s):
-                    edge_weight += self.g.weight(p, s)
-                    if edge_weight == 0:
-                        self.g.removeEdge(p, s)
-                    else:
-                        self.g.setWeight(p, s, edge_weight)
+                if not self.g.hasEdge(p, s):
+                    self.g.addEdge(p, s, edge_weight)
                     continue
 
-                self.g.addEdge(p, s, edge_weight)
+                edge_weight += self.g.weight(p, s)
+                if edge_weight == 0:
+                    self.g.removeEdge(p, s)
+                else:
+                    self.g.setWeight(p, s, edge_weight)
 
         # Update last_predecessor
         for s in self.g.iterNeighbors(node):
