@@ -41,7 +41,7 @@ def _construct_A(genotypes: csc_matrix, ploidy: int = 1) -> csc_matrix:
     haplotypes.sort_indices()
     indptr, indices, data = spinv_triangular(haplotypes.indptr, haplotypes.indices, haplotypes.data)
 
-    A = csr_matrix((data, indices, indptr))
+    A = csc_matrix((data, indices, indptr))
     A = A[original_order, :][:, original_order]
     A.eliminate_zeros()
 
@@ -130,6 +130,8 @@ class LinearARG:
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
 
     def __matmul__(self, other: NDArray) -> NDArray:
+        if other.ndim == 1:
+            other = other.reshape(-1, 1)
         if other.shape[0] != self.shape[1]:
             raise ValueError(
                 f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and {other.shape}."
@@ -141,6 +143,8 @@ class LinearARG:
         return x[self.sample_indices] + np.sum(other[self.flip])
 
     def __rmatmul__(self, other: NDArray) -> NDArray:
+        if other.ndim == 1:
+            other = other.reshape(1, -1)
         if other.shape[1] != self.shape[0]:
             raise ValueError(
                 f"Incorrect dimensions for matrix multiplication. " f"Inputs had size {other.shape} and {self.shape}."
@@ -214,6 +218,81 @@ class LinearARG:
                 rank[parents_as_indices] += np.diff(X.indptr) > 0
 
         return rank
+
+    def unweight(self, handle_singletons_differently=False) -> "LinearARG":
+        """
+        Prepares an initial linear ARG for recombination finding by grouping out-edges by weight. If node u has
+        multiple out-edges with weight k != 1, then a new node v is created with a single k-weighted edge (u,v)
+        and a 1-weighted edge (v, w) for each neighbor w.
+        :return:
+        """
+        from collections import defaultdict
+
+        M = csc_matrix(self.A)
+        num_nodes = len(M.indptr) - 1
+        new_indptr = np.zeros(2 * num_nodes, dtype=np.uintc)
+        new_indices = np.zeros(2 * len(M.indices), dtype=np.uintc)
+        new_data = np.zeros(2 * len(M.indices), dtype=np.intc)
+        original_nodes = np.zeros(num_nodes, dtype=np.uintc)
+        element_index = 0
+        node_index = 0
+        for u in range(num_nodes):
+            original_nodes[u] = node_index
+
+            # Collect neighbors of i by weight
+            weight_to_neighbors = defaultdict(list)
+            for j in range(M.indptr[u], M.indptr[u + 1]):
+                weight_to_neighbors[M.data[j]].append(M.indices[j])
+
+            # Separately handle edges of weight 1, which do not produce a new node
+            for neighbor in weight_to_neighbors[1]:
+                new_data[element_index] = 1
+                new_indices[element_index] = neighbor
+                element_index += 1
+
+            out_degree = len(weight_to_neighbors) + len(weight_to_neighbors[1]) - 1
+            new_indptr[node_index + 1] = new_indptr[node_index] + out_degree
+            node_index += 1
+
+            # Create out-edges of u
+            for edge_weight, neighbors_with_weight in weight_to_neighbors.items():
+                if edge_weight == 1:
+                    continue
+                if handle_singletons_differently and len(neighbors_with_weight) == 1:
+                    new_indices[element_index] = neighbors_with_weight[0]
+                else:
+                    # Create a new node
+                    new_indices[element_index] = node_index
+                    out_degree = len(neighbors_with_weight)
+                    new_indptr[node_index + 1] = new_indptr[node_index] + out_degree
+                    node_index += 1
+
+                new_data[element_index] = edge_weight
+                element_index += 1
+
+            # Create out-edges of newly created nodes
+            for edge_weight, neighbors_with_weight in weight_to_neighbors.items():
+                if edge_weight == 1:
+                    continue
+                if handle_singletons_differently and len(neighbors_with_weight) == 1:
+                    continue
+
+                for neighbor in neighbors_with_weight:
+                    new_data[element_index] = 1
+                    new_indices[element_index] = neighbor
+                    element_index += 1
+
+        # new_indices are a combination of new and old node IDs, mostly old except for those with weight != 1
+        new_indices[new_data == 1] = original_nodes[new_indices[new_data == 1]]
+
+        # Reconstitute the adjacency matrix and convert back from CSC to CSR
+        M = csc_matrix(
+            (new_data[:element_index], new_indices[:element_index], new_indptr[: node_index + 1]),
+            shape=(node_index, node_index),
+        )
+        M = csr_matrix(M)
+
+        return LinearARG(M, original_nodes[self.sample_indices], original_nodes[self.variant_indices], self.flip)
 
     def make_triangular(self) -> "LinearARG":
         import networkx as nx  # TODO maybe re-implement without this
