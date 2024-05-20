@@ -21,7 +21,7 @@ class Simulate(LinearARG):
     def simulate_example(*, example: str = "2-1", ns: int = 10):
         # Initial ARG (not one-summed)
         if example == "2-1":
-            A_haplo = [[0, 0, 0], [1, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 1, 1]]
+            A_haplo = [[0, 0, 0], [1, 0, 0], [1, 0, 0], [0, 1, 1]]
 
         elif example == "3-2-1":
             A_haplo = [
@@ -49,8 +49,33 @@ class Simulate(LinearARG):
                 [0, 0, 0, 0, 1],
                 [0, 1, 1, 0, 0],
             ]
+
+        elif example == "4-2-1":
+            A_haplo = [
+                [0, 0, 0, 0, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 1, 1, 0, 0],
+                [0, 1, 1, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 1, 1],
+            ]
+
+        elif example == "4-2":
+            A_haplo = [
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 1, 1, 0, 0],
+                [1, 1, 0, 0, 0, 0],
+                [0, 0, 1, 0, 0, 0],
+                [0, 1, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 1],
+            ]
         else:
-            raise ValueError("Valid examples are '2-1', '3-2-1' and '2-2-1'")
+            raise ValueError("Valid examples are '4', '2-1', '3-2-1' and '2-2-1'")
 
         A_haplo = np.asarray(A_haplo)
         nh, nm = A_haplo.shape
@@ -60,6 +85,7 @@ class Simulate(LinearARG):
         G = nx.from_numpy_array(A_haplo, create_using=nx.DiGraph)
         G = construct_1_summed_DAG_slow(G)
         A_haplo = nx.to_numpy_array(G)
+        print(A_haplo)
 
         # Set of possible haplotypes
         haplotypes = np.linalg.inv(np.eye(nh) - A_haplo)
