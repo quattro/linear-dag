@@ -17,6 +17,11 @@ extensions = [
         sources=["solve.pyx"],  # Source file for the second extension
         include_dirs=[numpy.get_include()],  # Include directory for NumPy headers
     ),
+    Extension(
+        name="graph",  # Name of the second extension
+        sources=["graph.pyx"],  # Source file for the second extension
+        include_dirs=[numpy.get_include()],  # Include directory for NumPy headers
+    ),
 ]
 
 setup(
