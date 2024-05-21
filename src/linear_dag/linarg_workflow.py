@@ -79,7 +79,7 @@ def run_linarg_workflow(
     linarg = LinearARG.from_genotypes(genotypes)
 
     if recombination_method == "old":
-        linarg = linarg.find_recombinations(remove_singleton_nodes=remove_singleton_nodes)
+        linarg = linarg.find_recombinations()
     elif recombination_method == "new":
         pathdag = PathSumDAG.from_lineararg(linarg)
         pathdag.unweight_all()
