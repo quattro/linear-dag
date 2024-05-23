@@ -24,6 +24,7 @@ def run_linarg_workflow(
     remove_singleton_nodes: bool = False,
     recombination_method: str = "old",
     make_triangular: bool = True,
+    unweight_nodes: bool = False,
 ) -> tuple:
     start_time = time()
 
@@ -77,12 +78,13 @@ def run_linarg_workflow(
     genotype_stats = (*genotypes.shape, genotypes.nnz)
 
     linarg = LinearARG.from_genotypes(genotypes)
+    if unweight_nodes:
+        linarg = linarg.unweight()
 
     if recombination_method == "old":
         linarg = linarg.find_recombinations()
     elif recombination_method == "new":
         pathdag = PathSumDAG.from_lineararg(linarg)
-        pathdag.unweight_all()
         schedule = [1000, 100, 10, 1]  # TODO
         for s in schedule:
             pathdag.iterate(threshold=s)
