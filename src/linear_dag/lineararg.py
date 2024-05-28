@@ -1,11 +1,11 @@
-# linarg.py
+# lineararg.py
 from dataclasses import dataclass
 
 import numpy as np
 
 from numpy.typing import NDArray
 from scipy.io import mmread, mmwrite
-from scipy.sparse import csc_matrix, csr_matrix, eye, hstack, triu, vstack
+from scipy.sparse import block_diag, csc_matrix, csr_matrix, eye, hstack, triu, vstack
 from scipy.sparse.linalg import spsolve_triangular
 
 from .solve import spinv_triangular
@@ -13,8 +13,9 @@ from .trios import Trios
 
 
 def _construct_A(genotypes: csc_matrix, ploidy: int = 1) -> csc_matrix:
+    more_than_one_carrier = np.diff(genotypes.indptr) > 1
     for n in range(1, ploidy + 1):
-        X_carrier = genotypes >= n
+        X_carrier = genotypes[:, more_than_one_carrier] >= n
         X_carrier = X_carrier.astype(np.int32)
         R_carrier = X_carrier.transpose().dot(X_carrier)
 
@@ -43,6 +44,14 @@ def _construct_A(genotypes: csc_matrix, ploidy: int = 1) -> csc_matrix:
 
     A = csc_matrix((data, indices, indptr))
     A = A[original_order, :][:, original_order]
+
+    # Add back variants with <=1 carrier
+    one_or_zero_carriers = np.where(more_than_one_carrier == 0)[0]
+    more_than_one_carrier = np.where(more_than_one_carrier == 1)[0]
+    variant_ordering = np.argsort(np.concatenate((more_than_one_carrier, one_or_zero_carriers)))
+    A = csc_matrix(block_diag((A, eye(len(one_or_zero_carriers)))))
+    A = A[variant_ordering, :][:, variant_ordering]
+
     A.eliminate_zeros()
 
     return A
@@ -95,12 +104,12 @@ class LinearARG:
         variant_list = []
         flip_list = []
         with open(filename + ".mutations.txt", "r") as f:
-            header = next(f)
-            assert header == "index,flip\n"
+            header = next(f).split(",")
+            assert header[-2:] == ["index", "flip\n"]
             for line in f:
-                index, flip = [int(n) for n in line.split(",")]
-                variant_list.append(index - 1)
-                flip_list.append(flip)
+                fields = line.split(",")
+                variant_list.append(int(fields[-2]) - 1)
+                flip_list.append(int(fields[-1]))
 
         # Read the matrix A
         A = csr_matrix(mmread(filename + ".mtx"))
@@ -186,21 +195,35 @@ class LinearARG:
     #         x[i, self.sample_indices[index]] = 1
     #     return x * self.data
 
-    def write(self, filename: str):
+    def write(self, filename_prefix: str, variant_metadata: dict = None) -> None:
+        """
+        Writes LinearARG to a trio of files, filename_prefix + ['.mtx', '.samples.txt', '.mutations.txt'].
+        :param filename_prefix: where to save.
+        :param variant_metadata: dictionary of lists containing metadata to be saved in *.mutations.txt. Fields
+        will be saved with keys as column headers and values as column values. Length of each list should equal number
+        of variants.
+        """
+        if variant_metadata is None:
+            variant_metadata = {"variant": list(range(1, len(self.variant_indices) + 1))}
         # Write samples
-        with open(filename + ".samples.txt", "w") as f_samples:
+        with open(filename_prefix + ".samples.txt", "w") as f_samples:
             f_samples.write("index\n")
             for sample in self.sample_indices:
                 f_samples.write(f"{sample + 1}\n")
 
         # Write variants
-        with open(filename + ".mutations.txt", "w") as f_variants:
+        with open(filename_prefix + ".mutations.txt", "w") as f_variants:
+            for key in variant_metadata.keys():
+                f_variants.write(f"{key},")
             f_variants.write("index,flip\n")
-            for variant, flip in zip(self.variant_indices, self.flip):
-                f_variants.write(f"{variant + 1}, {int(flip)}\n")
+            for line in zip(self.variant_indices, self.flip, *variant_metadata.values()):
+                index, flip, variant = line[0], line[1], line[2:]
+                for value in variant:
+                    f_variants.write(f"{value},")
+                f_variants.write(f"{index + 1},{int(flip)}\n")
 
         # Write the matrix A
-        mmwrite(filename + ".mtx", self.A)
+        mmwrite(filename_prefix + ".mtx", self.A)
 
     def compute_hierarchy(self, haplotypes: csc_matrix) -> NDArray:
         A_csr = self.A
@@ -218,6 +241,36 @@ class LinearARG:
                 rank[parents_as_indices] += np.diff(X.indptr) > 0
 
         return rank
+
+    def unweight_slow(self) -> "LinearARG":
+        M = self.A
+        num_nodes = len(M.indptr) - 1
+        index_counter = len(M.indices)
+        new_indptr = np.concatenate((M.indptr, np.empty_like(M.indices, dtype=np.uintc)))
+        new_indices = np.concatenate((M.indices.copy(), np.empty_like(M.indices, dtype=np.intc)))
+        new_data = np.concatenate((M.data.copy(), np.empty_like(M.indices, dtype=np.intc)))
+        new_nodes = dict()
+
+        for entry in range(len(M.indices)):
+            index, weight = M.indices[entry], M.data[entry]
+            if weight == 1:
+                continue
+            if (index, weight) not in new_nodes:
+                new_nodes[(index, weight)] = num_nodes
+                new_indices[index_counter] = index
+                new_data[index_counter] = weight
+                num_nodes += 1
+                index_counter += 1
+                new_indptr[num_nodes] = index_counter
+
+            new_indices[entry] = new_nodes[(index, weight)]
+            new_data[entry] = 1
+
+        M = csr_matrix(
+            (new_data[:index_counter], new_indices[:index_counter], new_indptr[: num_nodes + 1]),
+            shape=(num_nodes, num_nodes),
+        )
+        return LinearARG(M, self.sample_indices, self.variant_indices, self.flip)
 
     def unweight(self, handle_singletons_differently=False) -> "LinearARG":
         """

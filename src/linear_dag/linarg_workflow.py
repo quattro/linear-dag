@@ -61,11 +61,15 @@ def run_linarg_workflow(
     #     if len(snpinfo_lines) != linarg.variants.shape[0]:
     #         raise ValueError("The number of lines in the SNP info file does not match the number of variants.")
 
-    if rsq_threshold is not None:
+    if rsq_threshold is None:
+        well_imputed_variants = np.arange(genotypes.shape[1])
+    else:
         genotypes, well_imputed_variants = binarize(genotypes, rsq_threshold)
 
     ploidy = np.max(genotypes).astype(int)
-    if maf_threshold is not None:
+    if maf_threshold is None:
+        common_variants = np.arange(genotypes.shape[1])
+    else:
         genotypes, common_variants = apply_maf_threshold(genotypes, ploidy, maf_threshold)
 
     # TODO output which variants were kept
@@ -87,15 +91,16 @@ def run_linarg_workflow(
         pathdag = PathSumDAG.from_lineararg(linarg)
         schedule = [1000, 100, 10, 1]  # TODO
         for s in schedule:
-            pathdag.iterate(threshold=s)
+            pathdag.recombine_all(threshold=s)
         linarg.A = pathdag.to_csr_matrix()
 
     if make_triangular:
         linarg = linarg.make_triangular()
+        kept_variants[np.argsort(linarg.variant_indices)] = kept_variants
 
     if output_file_prefix is not None:
         output_file_path = os.path.join(output_file_prefix)
-        linarg.write(output_file_path)
+        linarg.write(output_file_path, variant_metadata={"original_index": 1 + kept_variants})
 
     runtime = time() - start_time
 
