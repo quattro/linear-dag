@@ -39,7 +39,8 @@ dependencies = [
   "networkx",
   "networkit",
   "tskit",
-  "ldgm@git+https://github.com/awohns/ldgm.git"
+  "cyvcf2",
+  "bed-reader[sparse]",
 ]
 
 [project.urls]

@@ -5,7 +5,7 @@ src/linear_dag/*.c
 # just a symlink to treeseq data
 data
 
-test?.py
+test*.py
 
 *.cache
 

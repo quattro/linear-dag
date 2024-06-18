@@ -1,6 +1,8 @@
 # lineararg.py
 from dataclasses import dataclass
 
+import bed_reader as br
+import cyvcf2 as cv
 import numpy as np
 
 from numpy.typing import NDArray
@@ -120,6 +122,35 @@ class LinearARG:
             np.asarray(variant_list, dtype=int),
             np.asarray(flip_list, dtype=bool),
         )
+
+    @staticmethod
+    def from_plink(prefix: str) -> "LinearARG":
+        # TODO: handle missing data
+        with br.open_bed(f"{prefix}.bed") as bed:
+            genotypes = bed.read_sparse(dtype="int8")
+
+            return LinearARG.from_genotypes(genotypes)
+
+    @staticmethod
+    def from_vcf(path: str) -> "LinearARG":
+        vcf = cv.VCF(path, gts012=True)
+        data = []
+        idxs = []
+        ptrs = [0]
+        # TODO: handle missing data
+        for var in vcf:
+            (idx,) = np.where(var.gt_types != 0)
+            gts = var.gt_types[idx]
+            data.append(gts)
+            idxs.append(idx)
+            ptrs.append(ptrs[-1] + len(idx))
+
+        data = np.array(data)
+        idxs = np.array(idxs)
+        ptrs = np.array(ptrs)
+        genotypes = csc_matrix((data, idxs, ptrs))
+
+        return LinearARG.from_genotypes(genotypes)
 
     @property
     def shape(self):
