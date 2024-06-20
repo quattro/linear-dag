@@ -625,14 +625,14 @@ cpdef tuple intersect_clades(tree: DiGraph, new_clade: int[:]):
     cdef node* new_node
     if stranded_nodes.length > 0:
         new_node = tree.add_node()
-        tree.add_edge(new_node, lowest_common_ancestor)
+        tree.add_edge(new_node, lowest_common_ancestor, -1)
         if lowest_common_ancestor.first_in is not NULL:
-            tree.add_edge(lowest_common_ancestor.first_in.u, new_node)
+            tree.add_edge(lowest_common_ancestor.first_in.u, new_node, -1)
             tree.remove_edge(lowest_common_ancestor.first_in)
 
     u = stranded_nodes.pop()
     while u is not NULL:
-        tree.add_edge(new_node, u)
+        tree.add_edge(new_node, u, -1)
         u = stranded_nodes.pop()
 
     cdef int[:] result = np.empty(nodes_to_return.length, dtype=np.intc)
