@@ -5,7 +5,7 @@ import numpy as np
 
 from numpy.typing import NDArray
 from scipy.io import mmwrite
-from scipy.sparse import csc_matrix
+from scipy.sparse import csc_matrix, csr_matrix
 
 from .lineararg import LinearARG
 from .one_summed import construct_1_summed_DAG_slow
@@ -13,18 +13,25 @@ from .one_summed import construct_1_summed_DAG_slow
 
 @dataclass
 class Simulate(LinearARG):
-    A_haplo: NDArray
-    haplotypes: NDArray
-    genotypes: NDArray
+    A_ancestral: NDArray
+    ancestral_haplotypes: NDArray
+    sample_haplotypes: NDArray
 
     @staticmethod
     def simulate_example(*, example: str = "2-1", ns: int = 10):
-        # Initial ARG (not one-summed)
+
+        # A_ancestral is a number-of-haplotypes by number-of-mutations matrix,
+        # where the mutation in column j occurs on the haplotype in row j. If
+        # there are more rows than columns, then rows >= num_columns are haplotypes
+        # that do not have mutations.
         if example == "2-1":
-            A_haplo = [[0, 0, 0], [1, 0, 0], [1, 0, 0], [0, 1, 1]]
+            A_ancestral = [[0, 0, 0],
+                           [1, 0, 0],
+                           [1, 0, 0],
+                           [0, 1, 1]]
 
         elif example == "3-2-1":
-            A_haplo = [
+            A_ancestral = [
                 [0, 0, 0, 0, 0, 0],
                 [1, 0, 0, 0, 0, 0],
                 [1, 0, 0, 0, 0, 0],
@@ -38,7 +45,7 @@ class Simulate(LinearARG):
             ]
 
         elif example == "2-2-1":
-            A_haplo = [
+            A_ancestral = [
                 [0, 0, 0, 0, 0],
                 [1, 0, 0, 0, 0],
                 [1, 0, 0, 0, 0],
@@ -51,7 +58,7 @@ class Simulate(LinearARG):
             ]
 
         elif example == "4-2-1":
-            A_haplo = [
+            A_ancestral = [
                 [0, 0, 0, 0, 0, 0, 0],
                 [1, 0, 0, 0, 0, 0, 0],
                 [1, 0, 0, 0, 0, 0, 0],
@@ -63,7 +70,7 @@ class Simulate(LinearARG):
             ]
 
         elif example == "4-2":
-            A_haplo = [
+            A_ancestral = [
                 [0, 0, 0, 0, 0, 0],
                 [0, 0, 0, 0, 0, 0],
                 [0, 0, 0, 0, 0, 0],
@@ -77,41 +84,42 @@ class Simulate(LinearARG):
         else:
             raise ValueError("Valid examples are '4', '2-1', '3-2-1' and '2-2-1'")
 
-        A_haplo = np.asarray(A_haplo)
-        nh, nm = A_haplo.shape
-        A_haplo = np.hstack((A_haplo, np.zeros((nh, nh - nm))))
+        A_ancestral = np.asarray(A_ancestral)
+        nh, nm = A_ancestral.shape
+        assert nh >= nm, "ARG should have at least as many haplotypes as mutations."
+        A_ancestral = np.hstack((A_ancestral, np.zeros((nh, nh - nm))))
 
         # Convert to linear ARG
-        G = nx.from_numpy_array(A_haplo, create_using=nx.DiGraph)
+        G = nx.from_numpy_array(A_ancestral, create_using=nx.DiGraph)
         G = construct_1_summed_DAG_slow(G)
-        A_haplo = nx.to_numpy_array(G)
-        print(A_haplo)
+        A_ancestral = nx.to_numpy_array(G)
 
         # Set of possible haplotypes
-        haplotypes = np.linalg.inv(np.eye(nh) - A_haplo)
+        haplotypes = np.linalg.inv(np.eye(nh) - A_ancestral)
         haplotypes = haplotypes[:, :nm]
 
         # Sample with replacement from the possible haplotypes
         random_indices = np.random.choice(nh, size=ns, replace=True)
-        genotypes = csc_matrix(haplotypes[random_indices, :])
+        sample_haplotypes = csc_matrix(haplotypes[random_indices, :])
 
-        # Samples then variants
-        A = np.vstack((A_haplo[random_indices, :nm], A_haplo[:, :nm]))
-        A = np.hstack((np.zeros((nh + ns, nh + ns - nm)), A))
+        # Samples then ancestral haplotypes
+        identity = np.eye(nh)
+        A = np.vstack((identity[random_indices, :], A_ancestral[:, :]))
+        A = np.hstack((np.zeros((nh + ns, ns)), A))
 
         sample_indices = np.arange(ns)
         variant_indices = np.arange(ns, ns + nm)
         flip = np.zeros(nm, dtype=bool)
 
         return Simulate(
-            A_haplo=A_haplo,
-            haplotypes=haplotypes,
-            genotypes=genotypes,
+            A_ancestral=A_ancestral,
+            ancestral_haplotypes=haplotypes,
+            sample_haplotypes=sample_haplotypes,
             sample_indices=sample_indices,
             variant_indices=variant_indices,
-            A=A,
+            A=csr_matrix(A),
             flip=flip,
         )
 
     def write_genotypes(self, filename):
-        mmwrite(filename + ".mtx", csc_matrix(self.genotypes))
+        mmwrite(filename + ".mtx", csc_matrix(self.sample_haplotypes))
