@@ -3,7 +3,14 @@ import os
 from time import time
 from typing import Optional
 
-import linear_dag as ld
+import numpy as np
+
+from scipy.io import mmread
+from scipy.sparse import csc_matrix
+
+from .lineararg import LinearARG
+from .pathsumdag import PathSumDAG
+from .utils import apply_maf_threshold, binarize, flip_alleles
 
 
 def run_linarg_workflow(
@@ -14,7 +21,11 @@ def run_linarg_workflow(
     rsq_threshold: Optional[float] = None,
     max_sample_size: Optional[int] = None,
     statistics_file_path: Optional[str] = None,
-) -> None:
+    remove_singleton_nodes: bool = False,
+    recombination_method: str = "old",
+    make_triangular: bool = True,
+    unweight_nodes: bool = False,
+) -> tuple:
     start_time = time()
 
     # Check and select input files
@@ -39,8 +50,10 @@ def run_linarg_workflow(
     #     raise NotADirectoryError(f"Output directory does not exist: {output_directory}")
 
     # Initialize Linarg based on input file type
-    kwargs = {"genotype_matrix_mtx": genotype_file} if input_type == "mtx" else {"genotype_matrix_txt": genotype_file}
-    linarg = ld.Linarg(**kwargs)
+    if input_type == "mtx":
+        genotypes = csc_matrix(mmread(genotype_file))
+    else:
+        genotypes = np.loadtxt(genotype_file)
 
     # Read SNP info file and check the number of lines
     # with open(snpinfo_file, 'r') as file:
@@ -48,28 +61,55 @@ def run_linarg_workflow(
     #     if len(snpinfo_lines) != linarg.variants.shape[0]:
     #         raise ValueError("The number of lines in the SNP info file does not match the number of variants.")
 
-    if rsq_threshold is not None:
-        linarg.binarize(rsq_threshold)
-    if maf_threshold is not None:
-        linarg.apply_maf_threshold(maf_threshold)
+    if rsq_threshold is None:
+        well_imputed_variants = np.arange(genotypes.shape[1])
+    else:
+        genotypes, well_imputed_variants = binarize(genotypes, rsq_threshold)
+
+    ploidy = np.max(genotypes).astype(int)
+    if maf_threshold is None:
+        common_variants = np.arange(genotypes.shape[1])
+    else:
+        genotypes, common_variants = apply_maf_threshold(genotypes, ploidy, maf_threshold)
+
+    # TODO output which variants were kept
+    kept_variants = well_imputed_variants[common_variants]
+    print("kept_variants:", kept_variants.shape)
+
     if flip_minor_alleles:
-        linarg.flip_alleles()
+        genotypes, flipped = flip_alleles(genotypes, ploidy)
 
-    linarg.form_initial_linarg()
+    genotype_stats = (*genotypes.shape, genotypes.nnz)
 
-    linarg.create_triolist()
-    linarg.find_recombinations()
+    linarg = LinearARG.from_genotypes(genotypes)
+    if unweight_nodes:
+        linarg = linarg.unweight()
 
-    # Calculate and handle statistics
-    stats = linarg.calculate_statistics()
+    if recombination_method == "old":
+        linarg = linarg.find_recombinations()
+    elif recombination_method == "new":
+        pathdag = PathSumDAG.from_lineararg(linarg)
+        schedule = [1000, 100, 10, 1]  # TODO
+        for s in schedule:
+            pathdag.recombine_all(threshold=s)
+        linarg.A = pathdag.to_csr_matrix()
 
-    # Write Linarg output with SNP info file
-    output_file_path = os.path.join(output_file_prefix)  # Modify as needed
-    linarg.write(output_file_path)
+    if make_triangular:
+        linarg = linarg.make_triangular()
+        kept_variants[np.argsort(linarg.variant_indices)] = kept_variants
+
+    if output_file_prefix is not None:
+        output_file_path = os.path.join(output_file_prefix)
+        linarg.write(output_file_path, variant_metadata={"original_index": 1 + kept_variants})
 
     runtime = time() - start_time
 
     # Handle statistics file
+    line = (input_file_prefix, *genotype_stats, linarg.nnz, genotype_stats[2] / linarg.nnz, runtime)
+    print(
+        f"file_name: {line[0]},num_samples: {line[1]}, num_variants: {line[2]}, nnz_X: {line[3]}, "
+        f"nnz_A: : {line[4]}, nnz_ratio: {line[5]}, runtime: {line[6]}"
+    )
     if statistics_file_path:
         if not os.path.exists(statistics_file_path):
             with open(statistics_file_path, "w") as stats_file:
@@ -77,5 +117,6 @@ def run_linarg_workflow(
 
         with open(statistics_file_path, "a") as stats_file:
             # Assuming stats is a tuple, write it to the end of the file
-            line = (input_file_prefix, *stats, stats[2] / stats[3], runtime)
             stats_file.write(",".join(map(str, line)) + "\n")
+
+    return linarg, genotypes
