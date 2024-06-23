@@ -1,62 +1,20 @@
 # lineararg.py
 from dataclasses import dataclass
 
-import bed_reader as br
-import cyvcf2 as cv
 import numpy as np
 
 from numpy.typing import NDArray
 from scipy.io import mmread, mmwrite
-from scipy.sparse import block_diag, csc_matrix, csr_matrix, eye, hstack, triu, vstack
+from scipy.sparse import csc_matrix, csr_matrix, eye
 from scipy.sparse.linalg import spsolve_triangular
 
-from .solve import spinv_triangular
+from .linear_arg_inference import (
+    add_samples_to_linear_arg,
+    add_singleton_variants,
+    infer_brick_graph_using_containment,
+    linearize_brick_graph,
+)
 from .trios import Trios
-
-
-def _construct_A(genotypes: csc_matrix, ploidy: int = 1) -> csc_matrix:
-    more_than_one_carrier = np.diff(genotypes.indptr) > 1
-    for n in range(1, ploidy + 1):
-        X_carrier = genotypes[:, more_than_one_carrier] >= n
-        X_carrier = X_carrier.astype(np.int32)
-        R_carrier = X_carrier.transpose().dot(X_carrier)
-
-        temp = R_carrier.copy()
-        for i in range(R_carrier.shape[0]):
-            row_data = R_carrier.data[R_carrier.indptr[i] : R_carrier.indptr[i + 1]]
-            temp.data[temp.indptr[i] : temp.indptr[i + 1]] = row_data >= R_carrier[i, i]
-
-        if n == 1:
-            haplotypes = temp
-        else:
-            haplotypes = haplotypes.multiply(temp)
-
-    haplotypes.eliminate_zeros()
-    ties = haplotypes.multiply(haplotypes.transpose())
-    haplotypes = haplotypes - triu(ties, k=1)
-    haplotypes.eliminate_zeros()
-
-    row_counts = np.diff(haplotypes.indptr)
-    triangular_order = np.argsort(-row_counts)
-    original_order = np.argsort(triangular_order)
-    haplotypes = haplotypes[triangular_order, :][:, triangular_order].astype(np.int32)
-    haplotypes = haplotypes.tocsc()
-    haplotypes.sort_indices()
-    indptr, indices, data = spinv_triangular(haplotypes.indptr, haplotypes.indices, haplotypes.data)
-
-    A = csc_matrix((data, indices, indptr))
-    A = A[original_order, :][:, original_order]
-
-    # Add back variants with <=1 carrier
-    one_or_zero_carriers = np.where(more_than_one_carrier == 0)[0]
-    more_than_one_carrier = np.where(more_than_one_carrier == 1)[0]
-    variant_ordering = np.argsort(np.concatenate((more_than_one_carrier, one_or_zero_carriers)))
-    A = csc_matrix(block_diag((A, eye(len(one_or_zero_carriers)))))
-    A = A[variant_ordering, :][:, variant_ordering]
-
-    A.eliminate_zeros()
-
-    return A
 
 
 @dataclass
@@ -67,30 +25,35 @@ class LinearARG:
     flip: NDArray
 
     @staticmethod
-    def from_genotypes(genotypes: csc_matrix, ploidy: int = 1, flip: NDArray = None) -> "LinearARG":
+    def from_genotypes(
+        genotypes: csc_matrix, ploidy: int = 1, flip: NDArray = None, brick_graph_method: str = "old"
+    ) -> "LinearARG":
+        # Infer an initial brick graph
+        brick_graph_closure: csc_matrix
+        if brick_graph_method.lower() == "old":
+            brick_graph_closure = infer_brick_graph_using_containment(genotypes, ploidy)
+        elif brick_graph_method.lower() == "new":
+            raise NotImplementedError
+            # assert ploidy == 1, "new brick graph method assumes haploid samples"
+            # brick_graph_closure = BrickGraph.from_csc(genotypes.indptr, genotypes, indices).to_csc()
+        else:
+            raise ValueError(f"Unknown brick graph method {brick_graph_method}")
+
+        linear_arg_adjacency_matrix = linearize_brick_graph(brick_graph_closure)
+
+        linear_arg_adjacency_matrix = add_singleton_variants(genotypes, linear_arg_adjacency_matrix)
+
+        linear_arg_adjacency_matrix = add_samples_to_linear_arg(genotypes, linear_arg_adjacency_matrix)
+
+        # linear_arg_adjacency_matrix = find_recombinations(linear_arg_adjacency_matrix)
+
         n, m = genotypes.shape
-        A_haplo = _construct_A(genotypes, ploidy)
-
-        # Fit samples to the matrix
-        A_sample = genotypes @ A_haplo
-        A_haplo = eye(m) - A_haplo
-
-        # Concatenate
-        zeros_matrix = csr_matrix((m + n, n))
-        vertical_stack = vstack([A_sample, A_haplo])
-        A = hstack([zeros_matrix, vertical_stack])
-        A = A.astype(np.int32)
-        A.eliminate_zeros()
-        A = csr_matrix(A)
-
-        # Indices in A of the samples and variants
         samples_idx = np.arange(n)
-        variants_idx = np.arange(n, n + m)
-
+        variants_idx = np.arange(n, m + n)
         if flip is None:
             flip = np.zeros(len(variants_idx), dtype=bool)
 
-        return LinearARG(A, samples_idx, variants_idx, flip)
+        return LinearARG(linear_arg_adjacency_matrix, samples_idx, variants_idx, flip)
 
     @staticmethod
     def from_file(filename: str) -> "LinearARG":
@@ -125,6 +88,8 @@ class LinearARG:
 
     @staticmethod
     def from_plink(prefix: str) -> "LinearARG":
+        import bed_reader as br
+
         # TODO: handle missing data
         with br.open_bed(f"{prefix}.bed") as bed:
             genotypes = bed.read_sparse(dtype="int8")
@@ -133,6 +98,8 @@ class LinearARG:
 
     @staticmethod
     def from_vcf(path: str) -> "LinearARG":
+        import cyvcf2 as cv
+
         vcf = cv.VCF(path, gts012=True)
         data = []
         idxs = []
@@ -390,22 +357,35 @@ class LinearARG:
             self.A[order, :][:, order], inv_order[self.sample_indices], inv_order[self.variant_indices], self.flip
         )
 
-    def find_recombinations(self, ranked: bool = False) -> "LinearARG":
+    def find_recombinations(self) -> "LinearARG":
         trio_list = Trios(2 * self.A.nnz)  # TODO what should n be?
-        if ranked:
-            rank = self.compute_hierarchy()
-            trio_list.convert_matrix_ranked(self.A.data, self.A.indices, self.A.indptr, self.A.indptr.shape[0], rank)
-        else:
-            trio_list.convert_matrix(self.A.data, self.A.indices, self.A.indptr, self.A.indptr.shape[0])
+
+        edges = self.A == 1
+        trio_list.convert_matrix(edges.indices, edges.indptr)
 
         trio_list.find_recombinations()
 
         # Verify the trio list remains valid
         trio_list.check_properties(-1)
 
-        # Compute new edge list
-        edges = trio_list.fill_edgelist()
-        num_nodes = np.max(edges[:, 0:2]) + 1
-        A = csr_matrix((edges[:, 2], (edges[:, 1], edges[:, 0])), shape=(num_nodes, num_nodes))
+        # New edge list comprises the edges of the trio list, plus the edges with weight different from 1 of A
+        new_edges = np.asarray(trio_list.fill_edgelist())
+        # row, col = edges.nonzero()
+        # new_edges = np.vstack((col, row)).T
+        new_edges = np.hstack((new_edges, np.ones((new_edges.shape[0], 1))))
+        edges_with_nonone_weight = np.zeros((np.sum(self.A.data != 1), 3), dtype=np.intc)
+        counter = 0
+        for i in range(self.A.shape[0]):
+            for entry in range(self.A.indptr[i], self.A.indptr[i + 1]):
+                if self.A.data[entry] == 1:
+                    continue
+                j = self.A.indices[entry]
+                weight = self.A.data[entry]
+                edges_with_nonone_weight[counter, :] = [j, i, weight]
+                counter += 1
+        new_edges = np.vstack((new_edges, edges_with_nonone_weight))
+
+        num_nodes = np.max(new_edges[:, 0:2]).astype(int) + 1
+        A = csr_matrix((new_edges[:, 2], (new_edges[:, 1], new_edges[:, 0])), shape=(num_nodes, num_nodes))
 
         return LinearARG(A, self.sample_indices, self.variant_indices, self.flip)
