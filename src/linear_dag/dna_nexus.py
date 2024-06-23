@@ -11,23 +11,31 @@ from scipy.sparse import csr_matrix
 from linear_dag import LinearARG
 
 
-# Function to process a single VCF file
-def process_vcf(dx_data_object: dict) -> csr_matrix:
-    file_name = dx_data_object["describe"]["name"]
+def download_from_dx(dx_data_object, local_file_name):
     file_id = dx_data_object["id"]
     project_id = dx_data_object["describe"]["project"]
-    local_file_name = file_name
-
     dxpy.download_dxfile(file_id, local_file_name, project=project_id)
+
+
+# Function to process a single VCF file
+def process_vcf(vcf_dx_data_object: dict, tabix_dx_data_object: dict = None, region: str = None) -> csr_matrix:
+    vcf_file_name = vcf_dx_data_object["describe"]["name"]
+    project_id = vcf_dx_data_object["describe"]["project"]
+    download_from_dx(vcf_dx_data_object, vcf_file_name)
+
+    if tabix_dx_data_object is not None:
+        tabix_file_name = tabix_dx_data_object["describe"]["name"]
+        download_from_dx(tabix_dx_data_object, tabix_file_name)
 
     print("Reading vcf...")
     callset = allel.read_vcf(
-        local_file_name,
+        vcf_file_name,
         fields=["calldata/GT", "variants/ALT", "variants/REF", "variants/CHROM", "variants/POS", "variants/AF"],
         chunk_length=1000,
+        region=region,
     )
 
-    os.remove(local_file_name)
+    os.remove(vcf_file_name)
     if callset is None:
         return None
 
@@ -61,7 +69,7 @@ def process_vcf(dx_data_object: dict) -> csr_matrix:
     metadata["alt"][flip] = refs[flip]
 
     # Save files locally
-    save_file_name = local_file_name.split(".vcf")[0]
+    save_file_name = vcf_file_name.split(".vcf")[0]
     mtx_filename = f"{save_file_name}.genos.mtx"
     metadata_filename = f"{save_file_name}.metadata.txt"
     mmwrite(mtx_filename, csr_matrix(dense_matrix))
