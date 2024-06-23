@@ -9,7 +9,6 @@ from scipy.io import mmread
 from scipy.sparse import csc_matrix
 
 from .lineararg import LinearARG
-from .pathsumdag import PathSumDAG
 from .utils import apply_maf_threshold, binarize, flip_alleles
 
 
@@ -87,12 +86,12 @@ def run_linarg_workflow(
 
     if recombination_method == "old":
         linarg = linarg.find_recombinations()
-    elif recombination_method == "new":
-        pathdag = PathSumDAG.from_lineararg(linarg)
-        schedule = [1000, 100, 10, 1]  # TODO
-        for s in schedule:
-            pathdag.recombine_all(threshold=s)
-        linarg.A = pathdag.to_csr_matrix()
+    # elif recombination_method == "new":
+    #     pathdag = PathSumDAG.from_lineararg(linarg)
+    #     schedule = [1000, 100, 10, 1]  # TODO
+    #     for s in schedule:
+    #         pathdag.recombine_all(threshold=s)
+    #     linarg.A = pathdag.to_csr_matrix()
 
     if make_triangular:
         linarg = linarg.make_triangular()
