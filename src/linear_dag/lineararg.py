@@ -176,11 +176,7 @@ class LinearARG:
 
     def __getitem__(self, key: tuple[slice, slice]) -> "LinearARG":
         rows, cols = key
-        row_indices = range(*rows.indices(self.shape[0]))
-        col_indices = range(*cols.indices(self.shape[1]))
-        return LinearARG(
-            self.A, self.sample_indices[row_indices], self.variant_indices[col_indices], self.flip[col_indices]
-        )
+        return LinearARG(self.A, self.sample_indices[rows], self.variant_indices[cols], self.flip[cols])
 
     def copy(self) -> "LinearARG":
         return LinearARG(self.A.copy(), self.sample_indices.copy(), self.variant_indices.copy(), self.flip.copy())
