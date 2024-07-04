@@ -9,7 +9,7 @@ from scipy.io import mmread
 from scipy.sparse import csc_matrix
 
 from .lineararg import LinearARG
-from .utils import apply_maf_threshold, binarize, flip_alleles
+from .genotype_processing import apply_maf_threshold, binarize, flip_alleles
 
 
 def run_linarg_workflow(
