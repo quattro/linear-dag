@@ -8,8 +8,8 @@ import numpy as np
 from scipy.io import mmread
 from scipy.sparse import csc_matrix
 
-from .lineararg import LinearARG
 from .genotype_processing import apply_maf_threshold, binarize, flip_alleles
+from .lineararg import LinearARG
 
 
 def run_linarg_workflow(

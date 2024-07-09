@@ -3,6 +3,9 @@
 # SPDX-License-Identifier: MIT
 from importlib.metadata import PackageNotFoundError, version  # pragma: no cover
 
+from .brick_graph import (
+    BrickGraph as BrickGraph,
+)
 from .data_structures import (
     CountingArray as CountingArray,
     DiGraph as DiGraph,
@@ -10,9 +13,6 @@ from .data_structures import (
     ModHeap as ModHeap,
     Queue as Queue,
     Stack as Stack,
-)
-from .brick_graph import (
-    BrickGraph as BrickGraph,
 )
 from .genotype_processing import (
     apply_maf_threshold as apply_maf_threshold,
