@@ -6,7 +6,7 @@ import heapq
 from libc.stdlib cimport free, malloc, realloc
 import numpy as np
 cimport numpy as cnp
-from data_structures cimport node, edge, stack_node, queue_node, list_node # in data_structures.pxd
+from .data_structures cimport node, edge, stack_node, queue_node, list_node # in data_structures.pxd
 
 cdef class Stack:
     """

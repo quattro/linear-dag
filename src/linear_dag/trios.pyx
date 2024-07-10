@@ -1,6 +1,6 @@
 cimport numpy as cnp
 import numpy as np
-from data_structures cimport LinkedListArray, ModHeap, DiGraph
+from .data_structures cimport LinkedListArray, ModHeap, DiGraph
 
 cdef class Trios:
     """

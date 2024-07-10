@@ -19,16 +19,12 @@ class Simulate(LinearARG):
 
     @staticmethod
     def simulate_example(*, example: str = "2-1", ns: int = 10):
-
         # A_ancestral is a number-of-haplotypes by number-of-mutations matrix,
         # where the mutation in column j occurs on the haplotype in row j. If
         # there are more rows than columns, then rows >= num_columns are haplotypes
         # that do not have mutations.
         if example == "2-1":
-            A_ancestral = [[0, 0, 0],
-                           [1, 0, 0],
-                           [1, 0, 0],
-                           [0, 1, 1]]
+            A_ancestral = [[0, 0, 0], [1, 0, 0], [1, 0, 0], [0, 1, 1]]
 
         elif example == "3-2-1":
             A_ancestral = [

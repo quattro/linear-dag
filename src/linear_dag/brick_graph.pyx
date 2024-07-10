@@ -1,7 +1,7 @@
 # brick_graph.pyx
 from libc.stdlib cimport free, malloc
-from data_structures cimport node, edge, queue_node, list_node
-from data_structures cimport DiGraph, Queue, LinkedListArray, CountingArray
+from .data_structures cimport node, edge, queue_node, list_node
+from .data_structures cimport DiGraph, Queue, LinkedListArray, CountingArray
 cimport numpy as cnp
 
 cdef class BrickGraph:
