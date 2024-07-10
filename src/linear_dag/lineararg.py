@@ -8,11 +8,13 @@ from scipy.io import mmread, mmwrite
 from scipy.sparse import csc_matrix, csr_matrix, eye
 from scipy.sparse.linalg import spsolve_triangular
 
+from .brick_graph_py import BrickGraph
 from .linear_arg_inference import (
     add_samples_to_linear_arg,
     add_singleton_variants,
     infer_brick_graph_using_containment,
     linearize_brick_graph,
+    remove_undirected_edges,
 )
 from .trios import Trios
 
@@ -33,19 +35,15 @@ class LinearARG:
         if brick_graph_method.lower() == "old":
             brick_graph_closure = infer_brick_graph_using_containment(genotypes, ploidy)
         elif brick_graph_method.lower() == "new":
-            raise NotImplementedError
-            # assert ploidy == 1, "new brick graph method assumes haploid samples"
-            # brick_graph_closure = BrickGraph.from_csc(genotypes.indptr, genotypes, indices).to_csc()
+            assert ploidy == 1, "new brick graph method assumes haploid samples"
+            brick_graph_closure = BrickGraph.from_genotypes(genotypes).to_csr()
         else:
             raise ValueError(f"Unknown brick graph method {brick_graph_method}")
+        brick_graph_closure = remove_undirected_edges(brick_graph_closure)
 
         linear_arg_adjacency_matrix = linearize_brick_graph(brick_graph_closure)
-
         linear_arg_adjacency_matrix = add_singleton_variants(genotypes, linear_arg_adjacency_matrix)
-
         linear_arg_adjacency_matrix = add_samples_to_linear_arg(genotypes, linear_arg_adjacency_matrix)
-
-        # linear_arg_adjacency_matrix = find_recombinations(linear_arg_adjacency_matrix)
 
         n, m = genotypes.shape
         samples_idx = np.arange(n)
@@ -175,6 +173,7 @@ class LinearARG:
         return NotImplemented
 
     def __getitem__(self, key: tuple[slice, slice]) -> "LinearARG":
+        # TODO make this work with syntax like linarg[:100,] (works with linarg[:100,:])
         rows, cols = key
         return LinearARG(self.A, self.sample_indices[rows], self.variant_indices[cols], self.flip[cols])
 
@@ -366,8 +365,6 @@ class LinearARG:
 
         # New edge list comprises the edges of the trio list, plus the edges with weight different from 1 of A
         new_edges = np.asarray(trio_list.fill_edgelist())
-        # row, col = edges.nonzero()
-        # new_edges = np.vstack((col, row)).T
         new_edges = np.hstack((new_edges, np.ones((new_edges.shape[0], 1))))
         edges_with_nonone_weight = np.zeros((np.sum(self.A.data != 1), 3), dtype=np.intc)
         counter = 0

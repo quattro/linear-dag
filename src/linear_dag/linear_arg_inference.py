@@ -23,11 +23,14 @@ def infer_brick_graph_using_containment(genotypes, ploidy):
         else:
             brick_graph_closure = brick_graph_closure.multiply(temp)
 
-    brick_graph_closure.eliminate_zeros()
-    ties = brick_graph_closure.multiply(brick_graph_closure.transpose())
-    brick_graph_closure = brick_graph_closure - triu(ties, k=1)
-    brick_graph_closure.eliminate_zeros()
     return brick_graph_closure
+
+
+def remove_undirected_edges(adjacency_matrix):
+    ties = adjacency_matrix.multiply(adjacency_matrix.transpose())
+    result = adjacency_matrix - triu(ties, k=1)
+    result.eliminate_zeros()
+    return result
 
 
 def linearize_brick_graph(brick_graph_closure: csc_matrix) -> csc_matrix:
@@ -37,7 +40,9 @@ def linearize_brick_graph(brick_graph_closure: csc_matrix) -> csc_matrix:
     brick_graph_closure = brick_graph_closure[triangular_order, :][:, triangular_order].tocsc()
     brick_graph_closure.sort_indices()
     indptr, indices, data = spinv_triangular(
-        brick_graph_closure.indptr, brick_graph_closure.indices, brick_graph_closure.data
+        brick_graph_closure.indptr.astype(np.intc),
+        brick_graph_closure.indices.astype(np.intc),
+        brick_graph_closure.data.astype(np.intc),
     )
 
     A = eye(indptr.shape[0] - 1) - csc_matrix((data, indices, indptr))
@@ -45,7 +50,7 @@ def linearize_brick_graph(brick_graph_closure: csc_matrix) -> csc_matrix:
     return A
 
 
-def add_singleton_variants(genotypes: csr_matrix, initial_linear_arg: csr_matrix) -> csr_matrix:
+def add_singleton_variants(genotypes: csc_matrix, initial_linear_arg: csc_matrix) -> csc_matrix:
     one_or_zero_carriers = np.where(np.diff(genotypes.indptr) <= 1)[0]
     more_than_one_carrier = np.where(np.diff(genotypes.indptr) > 1)[0]
     variant_ordering = np.argsort(np.concatenate((more_than_one_carrier, one_or_zero_carriers)))

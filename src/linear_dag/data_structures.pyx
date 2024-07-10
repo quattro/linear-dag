@@ -460,7 +460,7 @@ cdef class DiGraph:
         :param max_num_nodes: Number of nodes in the graph.
         :return: An instance of DiGraph constructed from the given CSR data.
         """
-        cdef int num_edges = len(data)
+        cdef int num_edges = np.sum(np.asarray(data) == 1)
         cdef int num_nodes = len(indptr) - 1
         cdef DiGraph G = cls(max_num_nodes, num_edges)
         cdef int node_idx, neighbor_idx, edge_idx
@@ -472,7 +472,10 @@ cdef class DiGraph:
             assert index == i
 
         for node_idx in range(num_nodes):
-            for neighbor_idx in range(indptr[node_idx], indptr[node_idx + 1]):
+            for i in range(indptr[node_idx], indptr[node_idx + 1]):
+                if data[i] != 1:
+                    continue
+                neighbor_idx = indices[i]
                 G.add_edge(node_idx, neighbor_idx)
 
         return G
@@ -737,6 +740,73 @@ cdef class DiGraph:
             counter += 1
         return counter
 
+cdef class Trie(DiGraph):
+    """
+    A trie is a rooted tree in which each edge represents a letter from some alphabet, and a word is represented
+    by a path beginning at the root node. Here, the trie is assigned a fixed number of terminal nodes (words), and it is
+    used to store similar words but not for word lookup.
+    """
+    # cdef int[:] elements
+    # cdef int[:] termini
+    # cdef int[:] depth
+
+    def __cinit__(self, int number_of_nodes, int number_of_edges):
+        self.elements = np.zeros(number_of_nodes, dtype=np.intc)
+        self.termini = np.empty(0)
+        self.depth = np.empty(0)
+
+
+    cdef void initialize_branches(self, int number_of_branches):
+        self.termini = np.arange(number_of_branches)
+        self.depth = np.zeros(number_of_branches)
+        cdef int i
+        for i in range(1, 1 + len(self.termini)):
+            self.add_edge(0, i) # 0: root
+
+    cdef void clear_branch(self, int branch_index): # TODO check this doesn't remove root
+        cdef edge* e = self.nodes[self.termini[branch_index]].first_in
+        cdef edge* next_edge
+        while e is not NULL:
+            next_edge = e.u.first_in
+            self.remove_node(e.v)
+            e = next_edge
+            if e.v.first_out is not NULL:
+                break  # this is the source of the branch
+
+        self.add_node(branch_index)
+        self.depth[branch_index] = 0
+
+    cdef void insert_branch(self, int branch_index, int new_branch_index):
+        self.clear_branch(new_branch_index)
+        cdef node* leaf = self.nodes[self.termini[branch_index]]
+        cdef node* new_leaf = self.add_node(-1)
+        self.termini[new_branch_index] = new_leaf.index
+        self.add_edge(leaf.first_in.u.index, new_leaf.index)
+        self.depth[new_branch_index] = self.depth[branch_index]
+
+    cdef void extend_branch(self, int branch_index, int value):
+        cdef node* leaf = self.nodes[self.termini[branch_index]]
+        cdef node* new_node = self.add_node(-1)
+        self.elements[new_node.index] = value
+        self.set_edge_child(leaf.first_in, new_node)
+        self.add_edge(new_node.index, leaf.index)
+        self.depth[branch_index] += 1
+
+    cdef int[:] read_branch(self, int branch_index):
+        cdef int[:] result = np.empty(self.depth[branch_index])
+        cdef node* u = self.nodes[self.termini[branch_index]]
+        cdef int i
+        for i in range(self.depth[branch_index]):
+            u = u.first_in.u
+            result[i] = self.elements[u.index]
+        return result
+
+    cdef void extend_node_array(self, int new_maximum_number_of_nodes):
+        self.elements.resize(new_maximum_number_of_nodes)
+        super().extend_node_array(new_maximum_number_of_nodes)
+
+
+
 cdef class HeapNode:
     # cdef public int priority
     # cdef public int index
@@ -752,6 +822,11 @@ cdef class HeapNode:
         return self.index
 
 cdef class ModHeap:
+    """
+    Implements a heap with added support for modifying the priority of a key. pop returns the highest-priority node.
+    The size of the heap is <= n+k, where n is the number of keys and k is the number of times that a key has had its
+    priority modified.
+    """
     # cdef public list act_heap
     # cdef int[:] priority
     # cdef public int n

@@ -96,6 +96,19 @@ cdef class DiGraph:
     cdef int number_of_successors(self, node * u)
     cdef int number_of_predecessors(self, node * u)
 
+cdef class Trie(DiGraph):
+    cdef int[:] elements
+    cdef int[:] termini
+    cdef int[:] depth
+
+    cdef void initialize_branches(self, int number_of_branches)
+    cdef void clear_branch(self, int branch_index)
+    cdef void insert_branch(self, int branch_index, int new_branch_index)
+    cdef void extend_branch(self, int branch_index, int value)
+    cdef int[:] read_branch(self, int branch_index)
+    cdef void extend_node_array(self, int new_maximum_number_of_nodes)
+
+
 cdef class HeapNode:
     cdef public int priority
     cdef public int index

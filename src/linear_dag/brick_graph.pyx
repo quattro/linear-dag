@@ -60,7 +60,7 @@ cdef class BrickGraph:
     def get_graph(self) -> DiGraph:
         return self.graph
 
-    def get_subsequence(self, node: int) -> np.ndarray:
+    def get_subsequence(self, node: int) -> cnp.ndarray:
         return self.subsequence.extract(node)
 
     cdef Queue partial_traversal(self, int[:] leaves):
@@ -111,6 +111,12 @@ cdef class BrickGraph:
             place_in_queue = place_in_queue.prev
         return result
 
+    cdef void add_edges(self, int parent_tree_node_index, int child_clade_index):
+        cdef list_node * place_in_list = self.subsequence.head[parent_tree_node_index]
+        while place_in_list != NULL:
+            self.graph.add_edge(place_in_list.value, child_clade_index)
+            place_in_list = place_in_list.next
+
     cpdef int intersect_clades(self, int[:] new_clade, int clade_index):
         """
         Adds a new clade to a rooted tree and splits existing clades if they intersect with the new clade. Returns the
@@ -129,16 +135,12 @@ cdef class BrickGraph:
         elif initial_num_nodes == 1:
             return new_clade[0]
 
-        # Create edges between new clade identifier and the subsequence associated with the lca
+        # Create edges to the new clade from the variants whose intersection forms the LCA
         cdef node * lowest_common_ancestor = traversal.tail.value
         assert lowest_common_ancestor is not NULL
-        cdef list_node* place_in_list = self.subsequence.head[lowest_common_ancestor.index]
-        while place_in_list != NULL:
-            self.graph.add_edge(place_in_list.value, clade_index)
-            place_in_list = place_in_list.next
+        self.add_edges(lowest_common_ancestor.index, clade_index)
 
         cdef edge* out_edge
-        cdef edge* next_edge
         cdef edge* some_visited_edge
         cdef edge* some_unvisited_edge
         cdef node* new_node
@@ -165,21 +167,10 @@ cdef class BrickGraph:
                     some_visited_edge = out_edge
                 out_edge = out_edge.next_out
 
-            # No unvisited children: nothing to do, unless v is the LCA
+            # No unvisited children: means intersect(v, new_clade) == v
             if num_children_unvisited == 0:
-                # v is the LCA: its subsequence is now (clade_index)
-                if v == lowest_common_ancestor:
-                    # add edges between this clade and those comprising v
-                    # place_in_list = self.subsequence.head[v.index]
-                    # while place_in_list != NULL:
-                    #     self.graph.add_edge(place_in_list.value, clade_index)  # TODO replace v.index with correct thing
-                    #     place_in_list = place_in_list.next
-
-                    self.subsequence.clear_list(v.index)
-                    self.subsequence.extend(v.index, clade_index)
+                self.subsequence.extend(v.index, clade_index)
                 continue
-
-            assert num_children_visited > 0, "Something went wrong with tree traversal"
 
             v_is_root = v.first_in == NULL
             if v_is_root:
@@ -188,52 +179,50 @@ cdef class BrickGraph:
 
             parent_of_v = v.first_in.u
 
-            # Add edges to the brick graph between v and the variants of which parent_of_v is the intersection
-            # # TODO can we create recombination nodes at this stage?
-            # place_in_list = self.subsequence.head[parent_of_v.index]
-            # while place_in_list != NULL:
-            #     self.graph.add_edge(place_in_list.value, v.index)  # TODO replace v.index with correct thing
-            #     place_in_list = place_in_list.next
-
-            # Exactly one visited and one unvisited child: delete v
+            # Exactly one visited and one unvisited child: delete v, as there are existing nodes
+            # for both intersect(v, new_clade) and intersect(v, new_clade_complement)
             if num_children_visited == 1 and num_children_unvisited == 1:
-                self.subsequence.clear_list(v.index)
                 self.tree.collapse_node_with_indegree_one(v)
+                self.subsequence.clear_list(v.index)
                 continue
 
-            # Exactly one child w is visited: replace (v,w) with (parent(v), w)
+            # Exactly one child w is visited: there is an existing node for intersect(v, new_clade);
+            # replace (v,w) with (parent(v), w), replacing v with intersect(v, new_clade_complement)
             if num_children_visited == 1:
                 self.tree.set_edge_parent(some_visited_edge, parent_of_v)
                 self.visits[v.index] = 0
                 continue
 
-            # Exactly one child is w is unvisited: replace (v,w) with (parent(v), w)
+            # Exactly one child is w is unvisited: there is an existing node for intersect(v, new_clade_complement);
+            # replace (v,w) with (parent(v), w), replacing v with intersect(v, new_clade)
             if num_children_unvisited == 1:
                 self.tree.set_edge_parent(some_unvisited_edge, parent_of_v)
-                if v == lowest_common_ancestor:
-                    self.subsequence.clear_list(v.index)
                 self.subsequence.extend(v.index, clade_index)  # v is now a subset of the new clade
                 continue
 
-            # Multiple visited and unvisited children: create new_node for the intersection between v and new_clade
-            new_node = self.tree.add_node(-1)
-            self.tree.add_edge(parent_of_v.index, new_node.index)
-            self.replace_visited_out_edges(v, new_node)
-            if v != lowest_common_ancestor:
-                self.subsequence.copy_list(v.index, new_node.index)  # TODO inefficient?
-            self.subsequence.extend(new_node.index, clade_index)
-            self.visits[new_node.index] = self.visits[v.index]
-            self.visits[v.index] = 0
+            # Multiple visited and unvisited children: create new_node for intersect(v, new_clade_complement)
+            # and replace v with intersect(v, new_clade)
+            new_node = self.create_sibling_node(v)
+            self.replace_parent_of_unvisited_out_edges(v, new_node)
+            self.subsequence.extend(v.index, clade_index)
 
         return lowest_common_ancestor.index
 
-    cdef void replace_visited_out_edges(self, node* u, node* v):
+    cdef node* create_sibling_node(self, node* v):
+        cdef node* parent_of_v = v.first_in.u
+        new_node = self.tree.add_node(-1)
+        self.tree.add_edge(parent_of_v.index, new_node.index)
+        self.subsequence.copy_list(v.index, new_node.index)
+        self.visits[new_node.index] = 0
+        return new_node
+
+    cdef void replace_parent_of_unvisited_out_edges(self, node* u, node* v):
         """
-        Replace edges (u, w) for visited nodes w with (v, w)
+        Replace edges (u, w) with (v, w) for unvisited nodes w
         """
         cdef edge* out_edge = u.first_out
         while out_edge != NULL:
             next_edge = out_edge.next_out
-            if self.visits[out_edge.v.index] > 0:
+            if self.visits[out_edge.v.index] == 0:
                 self.tree.set_edge_parent(out_edge, v)
             out_edge = next_edge

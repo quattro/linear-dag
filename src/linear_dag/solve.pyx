@@ -1,15 +1,15 @@
 import numpy as np
 cimport numpy as np
 
-# Inverse of a lower-triangular sparse CSC matrix with unit diagonal
+# Inverse of a lower-triangular sparse CSR matrix, or upper-triangular CSC matrix, with unit diagonal
 cpdef spinv_triangular(int[:] indptr, int[:] indices, int[:] data):
 
     cdef int n = len(indptr)
     cdef int nz = len(data)
 
     x_indptr = np.zeros(n, dtype=np.intc)
-    x_indices = np.zeros(2 * nz, dtype=np.intc) # TODO how much space needed?
-    x_data = np.zeros(2 * nz, dtype=np.intc)
+    x_indices = np.zeros(5 * nz, dtype=np.intc) # TODO how much space needed?
+    x_data = np.zeros(5 * nz, dtype=np.intc)
     dense_vector = np.zeros(n, dtype=np.intc)
     last_touched = -np.ones(n, dtype=np.intc)
 

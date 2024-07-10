@@ -8,24 +8,23 @@ import numpy as np
 from scipy.io import mmread
 from scipy.sparse import csc_matrix
 
+from .genotype_processing import apply_maf_threshold, binarize, flip_alleles
 from .lineararg import LinearARG
-from .utils import apply_maf_threshold, binarize, flip_alleles
 
 
 def run_linarg_workflow(
     input_file_prefix: str,
-    output_file_prefix: str,
+    output_file_prefix: Optional[str] = None,
     flip_minor_alleles: bool = False,
     maf_threshold: Optional[float] = None,
     rsq_threshold: Optional[float] = None,
-    max_sample_size: Optional[int] = None,
     statistics_file_path: Optional[str] = None,
-    remove_singleton_nodes: bool = False,
     recombination_method: str = "old",
-    make_triangular: bool = True,
-    unweight_nodes: bool = False,
+    brick_graph_method: str = "old",
+    make_triangular: bool = False,
 ) -> tuple:
     start_time = time()
+    # TODO ingest a SNP info file
 
     # Check and select input files
     mtx_file = f"{input_file_prefix}.mtx"
@@ -39,26 +38,11 @@ def run_linarg_workflow(
     else:
         raise FileNotFoundError(f"No genotype matrix file found with prefix: {input_file_prefix}")
 
-    # Check SNP info file
-    # snpinfo_file = f"{input_file_prefix}.snpinfo.csv"
-    # if not os.path.exists(snpinfo_file):
-    #     raise FileNotFoundError(f"SNP info file not found: {snpinfo_file}")
-
-    # Check output directory
-    # if not os.path.isdir(output_directory):
-    #     raise NotADirectoryError(f"Output directory does not exist: {output_directory}")
-
     # Initialize Linarg based on input file type
     if input_type == "mtx":
         genotypes = csc_matrix(mmread(genotype_file))
     else:
         genotypes = np.loadtxt(genotype_file)
-
-    # Read SNP info file and check the number of lines
-    # with open(snpinfo_file, 'r') as file:
-    #     snpinfo_lines = file.readlines()
-    #     if len(snpinfo_lines) != linarg.variants.shape[0]:
-    #         raise ValueError("The number of lines in the SNP info file does not match the number of variants.")
 
     if rsq_threshold is None:
         well_imputed_variants = np.arange(genotypes.shape[1])
@@ -80,18 +64,13 @@ def run_linarg_workflow(
 
     genotype_stats = (*genotypes.shape, genotypes.nnz)
 
-    linarg = LinearARG.from_genotypes(genotypes)
-    if unweight_nodes:
-        linarg = linarg.unweight()
+    linarg = LinearARG.from_genotypes(genotypes, brick_graph_method=brick_graph_method)
 
     if recombination_method == "old":
+        linarg = linarg.unweight()
         linarg = linarg.find_recombinations()
-    # elif recombination_method == "new":
-    #     pathdag = PathSumDAG.from_lineararg(linarg)
-    #     schedule = [1000, 100, 10, 1]  # TODO
-    #     for s in schedule:
-    #         pathdag.recombine_all(threshold=s)
-    #     linarg.A = pathdag.to_csr_matrix()
+    elif recombination_method == "new":
+        raise NotImplementedError
 
     if make_triangular:
         linarg = linarg.make_triangular()
