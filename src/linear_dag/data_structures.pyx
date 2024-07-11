@@ -703,18 +703,21 @@ cdef class DiGraph:
     cdef void collapse_node_with_indegree_one(self, node * v):
         cdef edge * removable_edge = v.first_in
         cdef edge * out_edge
+        cdef edge * next_edge
         cdef node * u
 
         if removable_edge is NULL or removable_edge.next_in is not NULL:
             raise ValueError("Node does not have in-degree of exactly one.")
 
         u = removable_edge.u
+        assert u is not NULL
 
         # Redirect each out-edge of v to point to u
         out_edge = v.first_out
         while out_edge is not NULL:
+            next_edge = out_edge.next_out
             self.set_edge_parent(out_edge, u)
-            out_edge = v.first_out
+            out_edge = next_edge
 
         self.remove_node(v)
 
@@ -739,6 +742,23 @@ cdef class DiGraph:
             in_edge = in_edge.next_in
             counter += 1
         return counter
+
+    def successors(self, u_idx: int):
+        """
+        Iterate over successors of a node
+        """
+        cdef edge* e = self.nodes[u_idx].first_out
+        while e is not NULL:
+            yield e.v.index
+            e = e.next_out
+    def predecessors(self, v_idx: int):
+        """
+        Iterate over predecessors of a node
+        """
+        cdef edge * e = self.nodes[v_idx].first_in
+        while e is not NULL:
+            yield e.u.index
+            e = e.next_in
 
 cdef class Trie(DiGraph):
     """

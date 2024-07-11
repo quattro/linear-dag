@@ -6,7 +6,11 @@ import numpy as np
 from scipy.sparse import csc_matrix
 
 
-class BrickGraph(nx.DiGraph):
+class BrickGraphPy(nx.DiGraph):
+    """
+    Slow implementation of the brick graph algorithm.
+    """
+
     num_samples: int
     tree: nx.DiGraph
     root: int
@@ -35,19 +39,22 @@ class BrickGraph(nx.DiGraph):
     @staticmethod
     def from_genotypes(sparse_matrix: csc_matrix):
         num_samples, num_variants = sparse_matrix.shape
-        result = BrickGraph(num_samples, num_variants)
+        result = BrickGraphPy(num_samples, num_variants)
 
         # forward pass
         for i in range(num_variants):
             carriers = np.where(sparse_matrix[:, i].toarray())[0]
             result.intersect_clades(carriers, i)
             assert nx.is_tree(result.tree), f"{i}, {result.tree.edges}"
+            assert result.tree.number_of_nodes() <= num_samples * 2
 
         # backward pass
         result.initialize_tree()
         for i in reversed(range(num_variants)):
             carriers = np.where(sparse_matrix[:, i].toarray())[0]
             result.intersect_clades(carriers, i)
+            assert nx.is_tree(result.tree), f"{i}, {result.tree.edges}"
+            assert result.tree.number_of_nodes() <= num_samples * 2
 
         return result
 
@@ -167,8 +174,7 @@ class BrickGraph(nx.DiGraph):
         parent = self.parent_in_tree(node)
         if parent is None:
             raise ValueError
-        for child in self.tree.successors(node):
-            self.tree.add_edges_from([(parent, child) for child in self.tree.successors(node)])
+        self.tree.add_edges_from([(parent, child) for child in self.tree.successors(node)])
         self.tree.remove_node(node)
 
         del self.subsequence[node]

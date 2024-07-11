@@ -19,7 +19,7 @@ def run_linarg_workflow(
     maf_threshold: Optional[float] = None,
     rsq_threshold: Optional[float] = None,
     statistics_file_path: Optional[str] = None,
-    recombination_method: str = "old",
+    recombination_method: Optional[str] = None,
     brick_graph_method: str = "old",
     make_triangular: bool = False,
 ) -> tuple:
@@ -64,7 +64,9 @@ def run_linarg_workflow(
 
     genotype_stats = (*genotypes.shape, genotypes.nnz)
 
-    linarg = LinearARG.from_genotypes(genotypes, brick_graph_method=brick_graph_method)
+    linarg = LinearARG.from_genotypes(
+        genotypes, brick_graph_method=brick_graph_method, recombination_method=recombination_method
+    )
 
     if recombination_method == "old":
         linarg = linarg.unweight()

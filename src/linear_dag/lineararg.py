@@ -1,5 +1,6 @@
 # lineararg.py
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -8,14 +9,19 @@ from scipy.io import mmread, mmwrite
 from scipy.sparse import csc_matrix, csr_matrix, eye
 from scipy.sparse.linalg import spsolve_triangular
 
-from .brick_graph_py import BrickGraph
+from .brick_graph import BrickGraph
+from .brick_graph_py import BrickGraphPy
 from .linear_arg_inference import (
+    add_samples_to_brick_graph,
     add_samples_to_linear_arg,
     add_singleton_variants,
+    closure_transitive_reduction,
     infer_brick_graph_using_containment,
     linearize_brick_graph,
     remove_undirected_edges,
+    transitive_closure,
 )
+from .solve import topological_sort
 from .trios import Trios
 
 
@@ -28,12 +34,19 @@ class LinearARG:
 
     @staticmethod
     def from_genotypes(
-        genotypes: csc_matrix, ploidy: int = 1, flip: NDArray = None, brick_graph_method: str = "old"
+        genotypes: csc_matrix,
+        ploidy: int = 1,
+        flip: Optional[NDArray] = None,
+        brick_graph_method: str = "old",
+        recombination_method: Optional[str] = None,
     ) -> "LinearARG":
         # Infer an initial brick graph
-        brick_graph_closure: csc_matrix
+        brick_graph_closure: csr_matrix
         if brick_graph_method.lower() == "old":
             brick_graph_closure = infer_brick_graph_using_containment(genotypes, ploidy)
+        elif brick_graph_method.lower() == "new_slow":
+            assert ploidy == 1, "new brick graph method assumes haploid samples"
+            brick_graph_closure = BrickGraphPy.from_genotypes(genotypes).to_csr()
         elif brick_graph_method.lower() == "new":
             assert ploidy == 1, "new brick graph method assumes haploid samples"
             brick_graph_closure = BrickGraph.from_genotypes(genotypes).to_csr()
@@ -41,17 +54,46 @@ class LinearARG:
             raise ValueError(f"Unknown brick graph method {brick_graph_method}")
         brick_graph_closure = remove_undirected_edges(brick_graph_closure)
 
+        # Find recombinations in the brick graph
+        # TODO clean up - especially handling of diagonal
+        # TODO currently this is very slow
+        recombination_method = recombination_method if recombination_method else ""
+        if recombination_method.lower == "before":
+            brick_graph_closure = add_samples_to_brick_graph(brick_graph_closure, genotypes)
+            brick_graph_closure.setdiag(0)
+            brick_graph_closure.eliminate_zeros()
+            brick_graph = closure_transitive_reduction(brick_graph_closure)
+            trio_list = Trios(brick_graph.nnz)
+            trio_list.convert_matrix(brick_graph.indices, brick_graph.indptr)
+            trio_list.find_recombinations()
+            edges = trio_list.fill_edgelist()
+            num_nodes = np.max(edges) + 1
+            new_brick_graph = csr_matrix(
+                (np.ones(edges.shape[0]), (edges[:, 1], edges[:, 0])), shape=(num_nodes, num_nodes)
+            )
+            new_brick_graph.setdiag(0)
+            new_brick_graph.eliminate_zeros()
+            brick_graph_closure = transitive_closure(new_brick_graph)
+            brick_graph_closure.setdiag(1)
+
         linear_arg_adjacency_matrix = linearize_brick_graph(brick_graph_closure)
         linear_arg_adjacency_matrix = add_singleton_variants(genotypes, linear_arg_adjacency_matrix)
-        linear_arg_adjacency_matrix = add_samples_to_linear_arg(genotypes, linear_arg_adjacency_matrix)
+
+        if recombination_method.lower != "before":
+            linear_arg_adjacency_matrix = add_samples_to_linear_arg(genotypes, linear_arg_adjacency_matrix)
 
         n, m = genotypes.shape
         samples_idx = np.arange(n)
         variants_idx = np.arange(n, m + n)
         if flip is None:
             flip = np.zeros(len(variants_idx), dtype=bool)
+        result = LinearARG(linear_arg_adjacency_matrix, samples_idx, variants_idx, flip)
 
-        return LinearARG(linear_arg_adjacency_matrix, samples_idx, variants_idx, flip)
+        if recombination_method.lower() == "after":
+            result = result.unweight()
+            result = result.find_recombinations()
+
+        return result
 
     @staticmethod
     def from_file(filename: str) -> "LinearARG":
@@ -341,11 +383,7 @@ class LinearARG:
         return LinearARG(M, original_nodes[self.sample_indices], original_nodes[self.variant_indices], self.flip)
 
     def make_triangular(self) -> "LinearARG":
-        import networkx as nx  # TODO maybe re-implement without this
-
-        G = nx.from_scipy_sparse_array(self.A, create_using=nx.DiGraph)
-        order = nx.topological_sort(G.reverse(copy=False))
-        order = np.asarray(list(order))
+        order = np.asarray(topological_sort(self.A))
         inv_order = np.argsort(order)
 
         return LinearARG(

@@ -6,6 +6,9 @@ from importlib.metadata import PackageNotFoundError, version  # pragma: no cover
 from .brick_graph import (
     BrickGraph as BrickGraph,
 )
+from .brick_graph_py import (
+    BrickGraphPy as BrickGraphPy,
+)
 from .data_structures import (
     CountingArray as CountingArray,
     DiGraph as DiGraph,
@@ -44,6 +47,7 @@ from .simulate import (
 )
 from .solve import (
     spinv_triangular as spinv_triangular,
+    topological_sort as topological_sort,
 )
 from .trios import (
     Trios as Trios,
