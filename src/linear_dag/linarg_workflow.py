@@ -22,6 +22,7 @@ def run_linarg_workflow(
     recombination_method: Optional[str] = None,
     brick_graph_method: str = "old",
     make_triangular: bool = False,
+    skiprows: int = 0,
 ) -> tuple:
     start_time = time()
     # TODO ingest a SNP info file
@@ -42,7 +43,7 @@ def run_linarg_workflow(
     if input_type == "mtx":
         genotypes = csc_matrix(mmread(genotype_file))
     else:
-        genotypes = np.loadtxt(genotype_file)
+        genotypes = np.loadtxt(genotype_file, skiprows=skiprows)
 
     if rsq_threshold is None:
         well_imputed_variants = np.arange(genotypes.shape[1])
