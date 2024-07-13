@@ -1,7 +1,7 @@
 # brick_graph.pyx
 import numpy as np
 from .data_structures cimport node, edge, queue_node, list_node
-from .data_structures cimport DiGraph, Queue, LinkedListArray, CountingArray
+from .data_structures cimport DiGraph, Queue, LinkedListArray, CountingArray, Stack
 cimport numpy as cnp
 from scipy.sparse import csr_matrix, csc_matrix
 
@@ -92,13 +92,14 @@ cdef class BrickGraph:
         cdef node* parent_of_v
         cdef node* v = NULL
         cdef bint v_is_root
+        cdef Stack visited_children, unvisited_children
         cdef int num_children_visited, num_children_unvisited
 
         # Partial traversal
         while traversal.length > 0:
             v = traversal.pop()
             visited_children, unvisited_children = self.get_visited_children(v)
-            num_children_unvisited, num_children_visited = len(unvisited_children), len(visited_children)
+            num_children_unvisited, num_children_visited = unvisited_children.length, visited_children.length
 
             # No unvisited children: means intersect(v, new_clade) == v
             if num_children_unvisited == 0:
@@ -143,7 +144,8 @@ cdef class BrickGraph:
             self.subsequence.copy_list(v.index, sibling_node.index)
             self.subsequence.extend(v.index, clade_index)
             self.tree.add_edge(parent_of_v.index, sibling_node.index)
-            for child in unvisited_children:
+            while unvisited_children.length > 0:
+                child = unvisited_children.pop()
                 unvisited_edge = self.tree.nodes[child].first_in
                 self.tree.set_edge_parent(unvisited_edge, sibling_node)
 
@@ -201,15 +203,15 @@ cdef class BrickGraph:
             self.graph.add_edge(place_in_list.value, add_to)
             place_in_list = place_in_list.next
 
-    cdef tuple get_visited_children(self, node* v):
-        cdef list visited_children = []
-        cdef list unvisited_children = []
+    cdef tuple[Stack, Stack] get_visited_children(self, node* v):
+        cdef Stack visited_children = Stack()
+        cdef Stack unvisited_children = Stack()
         cdef int child
         for child in self.tree.successors(v.index):
             if self.times_visited[child] > 0:
-                visited_children.append(child)
+                visited_children.push(child)
             else:
-                unvisited_children.append(child)
+                unvisited_children.push(child)
         return visited_children, unvisited_children
 
     cdef void create_new_root(self):

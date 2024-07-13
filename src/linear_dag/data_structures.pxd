@@ -45,12 +45,21 @@ cdef class LinkedListArray:
     cdef copy_list(self, int n, int m)
     cpdef int[:] extract(self, int n)
 
-cdef class CountingArray:
-    cdef int[:] count
+cdef class IntegerSet:
+    cdef int length
     cdef int[:] last_cleared
     cdef int times_cleared
-    cdef int length
+
+    cdef bint contains(self, int index)
+    cdef void add(self, int index)
+    cdef void remove(self, int index)
     cpdef void clear(self)
+
+cdef class CountingArray(IntegerSet):
+    cdef int[:] count
+
+    cdef int get_element(self, int index)
+    cdef void set_element(self, int index, int value)
 
 
 cdef struct node:
