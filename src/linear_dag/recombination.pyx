@@ -13,8 +13,8 @@ cdef class Recombination(DiGraph):
 
     def __init__(self, int num_nodes, int num_edges):
         cnp.import_array()  # Necessary for initializing the C API
-        self.clique = -np.ones(num_edges, dtype=np.intc)
-        self.clique_rows = LinkedListArray(num_edges)
+        self.clique = -np.ones(2 * num_edges, dtype=np.intc) # TODO size needed?
+        self.clique_rows = LinkedListArray(2 * num_edges)
         self.clique_size_heap = None
         self.num_cliques = 0
         super().__init__(num_nodes, num_edges)
@@ -34,7 +34,7 @@ cdef class Recombination(DiGraph):
     @staticmethod
     def from_graph(brick_graph: DiGraph) -> Recombination:
         result = Recombination(brick_graph.maximum_number_of_nodes, brick_graph.maximum_number_of_edges)
-        result.add_edges_from(brick_graph.edge_list())
+        result.add_edges_from(sorted(brick_graph.edge_list())) # sorted by parent indices
         result.compute_cliques()
         result.collect_cliques()
         return result
@@ -92,7 +92,6 @@ cdef class Recombination(DiGraph):
             return -1
 
     cpdef void factor_clique(self, int clique_index):
-        print(clique_index)
         sys.stdout.flush()
         cdef int[:] clique_rows = self.clique_rows.extract(clique_index)
         if len(clique_rows) <= 1:
@@ -106,7 +105,7 @@ cdef class Recombination(DiGraph):
         assert self.clique_rows.length[clique_index] == len(clique_rows)
 
         # Replace clique with a star
-        self.collapse_clique(clique_index, new_node.index)
+        self.collapse_clique(clique_index, new_node.index, clique_rows)
 
     cdef void update_trios(self, int p, int[:] edges, int new_node):
         cdef int num_trios = len(edges)
@@ -120,8 +119,11 @@ cdef class Recombination(DiGraph):
             if neighbor >= 0:
                 neighboring_trios[num_neighbors] = neighbor
                 num_neighbors += 1
+        neighboring_trios = neighboring_trios[:num_neighbors]
 
         # Re-assign clique[neighboring_trios]
+        cdef int[:] affected_cliques = np.empty(num_neighbors, dtype=np.intc)
+        cdef cnp.ndarray which_affected_cliques = np.empty(num_neighbors, dtype=np.int64)
         affected_cliques, which_affected_cliques = np.unique(
             np.take(self.clique, neighboring_trios),
             return_inverse=True)
@@ -132,7 +134,7 @@ cdef class Recombination(DiGraph):
         self.num_cliques += num_new_cliques
 
         # Assign neighbors to cliqueRows[new cliques]
-        self.clique_rows.assign(neighboring_trios, new_cliques, which_affected_cliques)
+        self.clique_rows.assign(neighboring_trios, new_cliques, which_affected_cliques.astype(np.intc))
 
         # Update clique size heap
         cdef int new_clique
@@ -155,29 +157,31 @@ cdef class Recombination(DiGraph):
         if p == 0:
             e = e.prev_in
         elif p == 1:
-            e = e.next_in.next_in
+            e = e.next_in
         else:
             raise ValueError
+
         if e is NULL:
+            return -1
+        if e.next_in is NULL:
             return -1
         return e.index
 
-    cpdef collapse_clique(self, int c, int new_node):
+    cpdef collapse_clique(self, int c, int new_node, int[:] edge_indices):
         cdef int i
-        cdef int[:] edge_indices = self.clique_rows.extract(c)
         cdef edge* e = self.edges[edge_indices[0]]
 
         # Add edges from parents of the trio to the new node
-        cdef int parent
-        parent = e.u.index
-        self.add_edge(parent, new_node)
-        parent = e.next_in.u.index
-        self.add_edge(parent, new_node)
+        cdef int left_parent = e.u.index
+        cdef int right_parent = e.next_in.u.index
+        self.add_edge(left_parent, new_node)
+        self.add_edge(right_parent, new_node)
 
         # Replace trio edges with a single edge from new node to each child
         for i in edge_indices:
             e = self.edges[i]
-            self.set_edge_parent(e, self.nodes[new_node])
-            self.remove_edge(e.next_in)
+            assert e.u.index == left_parent and e.next_in.u.index == right_parent
+            self.set_edge_parent(e.next_in, self.nodes[new_node])
+            self.remove_edge(e)
 
         self.clique_rows.clear_list(c)

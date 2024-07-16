@@ -71,12 +71,13 @@ def add_samples_to_linear_arg(genotypes: csc_matrix, initial_linear_arg: csr_mat
 
 def add_samples_to_brick_graph(brick_graph_closure: csr_matrix, genotypes: csc_matrix) -> csr_matrix:
     n, m = genotypes.shape
-    padding_matrix = vstack([csr_matrix((m, n), dtype=np.intc), eye(n)])
-    vertical_stack = vstack([brick_graph_closure, csr_matrix(genotypes)])
-    return csr_matrix(hstack([vertical_stack, padding_matrix]))
+    vertical_stack = vstack([csr_matrix(genotypes), brick_graph_closure])
+    return csr_matrix(hstack([csr_matrix((n + m, n), dtype=np.intc), vertical_stack]))
 
 
 def closure_transitive_reduction(transitive_graph: csr_matrix) -> csr_matrix:
+    if np.any(transitive_graph.data != 1):
+        raise ValueError("Edge weights of the transitive graph should be one")
     number_of_paths = path_sum(transitive_graph)
     number_of_paths.data[number_of_paths.data != 1] = 0
     number_of_paths.eliminate_zeros()
@@ -92,7 +93,24 @@ def transitive_closure(graph: csr_matrix) -> csr_matrix:
 def path_sum(graph: csr_matrix) -> csr_matrix:
     IminusA = csr_matrix(eye(graph.shape[0]) - graph)
     IminusA.eliminate_zeros()
+    assert np.all(IminusA.diagonal() == 1)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=RuntimeWarning)  # Ignore overflow error
         number_of_paths = spinv_make_triangular(IminusA)
     return csr_matrix(number_of_paths)
+
+
+def setdiag(matrix: csr_matrix, value: int) -> None:
+    """
+    Workaround for bug in scipy.sparse.csr_matrix.setdiag()
+    """
+    matrix.setdiag(value)
+    if np.all(matrix.diagonal() == value):  # sometimes not, unclear why
+        return
+
+    for i in range(1, len(matrix.indptr)):
+        for j in range(matrix.indptr[i - 1], matrix.indptr[i]):
+            if matrix.indices[j] == i - 1:
+                matrix.data[j] = value
+    matrix.eliminate_zeros()
+    assert np.all(matrix.diagonal() == value)

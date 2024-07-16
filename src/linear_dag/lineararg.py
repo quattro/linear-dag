@@ -19,8 +19,9 @@ from .linear_arg_inference import (
     infer_brick_graph_using_containment,
     linearize_brick_graph,
     remove_undirected_edges,
-    transitive_closure,
+    setdiag,
 )
+from .one_summed import construct_1_summed_DAG_slow
 from .solve import topological_sort
 from .trios import Trios
 
@@ -58,28 +59,47 @@ class LinearARG:
         # TODO clean up - especially handling of diagonal
         # TODO currently this is very slow
         recombination_method = recombination_method if recombination_method else ""
-        if recombination_method.lower == "before":
+        print(recombination_method)
+        if recombination_method.lower() == "before":
+            # Brick graph including sample nodes
             brick_graph_closure = add_samples_to_brick_graph(brick_graph_closure, genotypes)
-            brick_graph_closure.setdiag(0)
-            brick_graph_closure.eliminate_zeros()
-            brick_graph = closure_transitive_reduction(brick_graph_closure)
+            setdiag(brick_graph_closure, 0)
+            brick_graph = csr_matrix(closure_transitive_reduction(brick_graph_closure).transpose())
+            setdiag(brick_graph, 0)
+            brick_graph.eliminate_zeros()
+            brick_graph.sort_indices()
+
+            # Find recombinations
             trio_list = Trios(brick_graph.nnz)
             trio_list.convert_matrix(brick_graph.indices, brick_graph.indptr)
             trio_list.find_recombinations()
             edges = trio_list.fill_edgelist()
-            num_nodes = np.max(edges) + 1
-            new_brick_graph = csr_matrix(
-                (np.ones(edges.shape[0]), (edges[:, 1], edges[:, 0])), shape=(num_nodes, num_nodes)
-            )
-            new_brick_graph.setdiag(0)
-            new_brick_graph.eliminate_zeros()
-            brick_graph_closure = transitive_closure(new_brick_graph)
-            brick_graph_closure.setdiag(1)
 
-        linear_arg_adjacency_matrix = linearize_brick_graph(brick_graph_closure)
-        linear_arg_adjacency_matrix = add_singleton_variants(genotypes, linear_arg_adjacency_matrix)
+            # Linearize
+            import networkx as nx
 
-        if recombination_method.lower != "before":
+            G = nx.DiGraph()
+            num_nodes = 1 + np.max([max(i, j) for i, j in edges])
+            G.add_nodes_from(np.arange(num_nodes))  # Needed so that nodes are in the right order
+            G.add_edges_from(edges)
+            for e in edges:
+                G.edges[e]["weight"] = 1
+            G_linear = construct_1_summed_DAG_slow(G)
+            linear_arg_adjacency_matrix = csr_matrix(nx.to_scipy_sparse_array(G_linear, format="csr").transpose())
+
+            # num_nodes = np.max(edges) + 1
+            # edges = ([j for _, j in edges], [i for i, _ in edges])
+            # new_brick_graph = csr_matrix(
+            #     (np.ones(len(edges[0])), edges), shape=(num_nodes, num_nodes)
+            # )
+            # setdiag(new_brick_graph, 0)
+            # new_brick_graph.eliminate_zeros()
+            # brick_graph_closure = csr_matrix(transitive_closure(new_brick_graph).transpose())
+            # setdiag(brick_graph_closure, 1)
+            # linear_arg_adjacency_matrix = linearize_brick_graph(brick_graph_closure)
+        else:
+            linear_arg_adjacency_matrix = linearize_brick_graph(brick_graph_closure)
+            linear_arg_adjacency_matrix = add_singleton_variants(genotypes, linear_arg_adjacency_matrix)
             linear_arg_adjacency_matrix = add_samples_to_linear_arg(genotypes, linear_arg_adjacency_matrix)
 
         n, m = genotypes.shape

@@ -95,7 +95,6 @@ cdef class BrickGraph:
         cdef Stack visited_children, unvisited_children
         cdef int num_children_visited, num_children_unvisited
 
-        # Partial traversal
         while traversal.length > 0:
             v = traversal.pop()
             visited_children, unvisited_children = self.get_visited_children(v)
