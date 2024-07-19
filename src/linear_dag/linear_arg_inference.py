@@ -5,7 +5,7 @@ import numpy as np
 
 from scipy.sparse import block_diag, csc_matrix, csr_matrix, eye, hstack, triu, vstack
 
-from .solve import spinv_make_triangular, spinv_triangular
+from .solve import spinv_make_triangular, spinv_triangular, topological_sort
 
 
 def infer_brick_graph_using_containment(genotypes: csc_matrix, ploidy) -> csr_matrix:
@@ -17,8 +17,8 @@ def infer_brick_graph_using_containment(genotypes: csc_matrix, ploidy) -> csr_ma
 
         temp = R_carrier.copy()
         for i in range(R_carrier.shape[0]):
-            row_data = R_carrier.data[R_carrier.indptr[i] : R_carrier.indptr[i + 1]]
-            temp.data[temp.indptr[i] : temp.indptr[i + 1]] = row_data >= R_carrier[i, i]
+            row_data = R_carrier.data[R_carrier.indptr[i]: R_carrier.indptr[i + 1]]
+            temp.data[temp.indptr[i]: temp.indptr[i + 1]] = row_data >= R_carrier[i, i]
 
         if n == 1:
             brick_graph_closure = temp
@@ -69,10 +69,48 @@ def add_samples_to_linear_arg(genotypes: csc_matrix, initial_linear_arg: csr_mat
     return csr_matrix(A)
 
 
-def add_samples_to_brick_graph(brick_graph_closure: csr_matrix, genotypes: csc_matrix) -> csr_matrix:
+def add_samples_to_brick_graph_closure(genotypes: csc_matrix, brick_graph_closure: csr_matrix) -> csr_matrix:
     n, m = genotypes.shape
-    vertical_stack = vstack([csr_matrix(genotypes), brick_graph_closure])
-    return csr_matrix(hstack([csr_matrix((n + m, n), dtype=np.intc), vertical_stack]))
+    result = vertcat(csr_matrix(genotypes), brick_graph_closure)
+    pad_leading_zeros(result, n)
+    return result
+
+
+def vertcat(A: csr_matrix, B: csr_matrix) -> csr_matrix:
+    indptrs = np.concatenate((A.indptr, A.indptr[-1] + B.indptr[1:]))
+    indices = np.concatenate((A.indices, B.indices))
+    data = np.concatenate((A.data, B.data))
+    return csr_matrix((data, indices, indptrs))
+
+
+def pad_leading_zeros(A: csr_matrix, num_cols: int) -> None:
+    A = csr_matrix((A.data, A.indices + num_cols, A.indptrs))
+
+
+def add_samples_to_initial_brick_graph(genotypes: csc_matrix, brick_graph: csr_matrix) -> csr_matrix:
+    n, m = genotypes.shape
+    assert brick_graph.shape == (m, m), "brick_graph should have one node per variant in the genotype matrix"
+    assert np.all(genotypes.data == 1), "this doesn't work with unphased data"
+    assert np.all(brick_graph.diagonal() == 0), "requires unit diagonal"
+
+    indices = []
+    indptrs = [0]
+
+    for row in range(n):
+        row_data_indices = range(genotypes.indptr[row], genotypes.indptr[row + 1])
+        ancestors = set(genotypes.indices[row_data_indices])
+        parents = []
+        for ancestor in ancestors:
+            ancestor_indices = range(genotypes.indptr[ancestor], genotypes.indptr[ancestor + 1])
+            ancestor_parents = set(genotypes.indices[ancestor_indices])
+            if ancestor_parents.isdisjoint(ancestors):
+                parents.append(ancestor)
+
+        indices += sorted(parents)
+        indptrs.append(indptrs[-1] + len(parents))
+
+    result = csc_matrix((np.ones_like(indices), indices, indptrs))
+    return add_samples_to_brick_graph_closure(result, brick_graph)
 
 
 def closure_transitive_reduction(transitive_graph: csr_matrix) -> csr_matrix:
