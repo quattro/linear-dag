@@ -1,14 +1,38 @@
-import os
-
-import allel
+import cyvcf2 as cv
 import dxpy
 import numpy as np
 import pyspark
 
-from scipy.io import mmwrite
-from scipy.sparse import csr_matrix
+from scipy.sparse import csc_matrix, csr_matrix
 
 from linear_dag import LinearARG
+
+
+def vcf_to_csc(path: str, region: str) -> tuple[csc_matrix, list[dict]]:
+    """
+    Codes genotypes as 0/1/2/3, where 3 means that at least one of the two alleles is unknown.
+    """
+    vcf = cv.VCF(path, gts012=True, strict_gt=True)
+    data = []
+    idxs = []
+    ptrs = [0]
+    info = []
+
+    # TODO: handle missing data
+    # TODO: handle phased data
+    for var in vcf(region):
+        (idx,) = np.where(var.gt_types != 0)
+        gts = var.gt_types[idx]
+        data.append(gts)
+        idxs.append(idx)
+        ptrs.append(ptrs[-1] + len(idx))
+        info.append(var.INFO)
+
+    data = np.concatenate(data)
+    idxs = np.concatenate(idxs)
+    ptrs = np.array(ptrs)
+    genotypes = csc_matrix((data, idxs, ptrs))
+    return genotypes, info
 
 
 def download_from_dx(dx_data_object, local_file_name):
@@ -17,75 +41,17 @@ def download_from_dx(dx_data_object, local_file_name):
     dxpy.download_dxfile(file_id, local_file_name, project=project_id)
 
 
-# Function to process a single VCF file
+# Function to download and read a single VCF file
 def process_vcf(vcf_dx_data_object: dict, tabix_dx_data_object: dict = None, region: str = None) -> csr_matrix:
     vcf_file_name = vcf_dx_data_object["describe"]["name"]
-    project_id = vcf_dx_data_object["describe"]["project"]
     download_from_dx(vcf_dx_data_object, vcf_file_name)
 
     if tabix_dx_data_object is not None:
         tabix_file_name = tabix_dx_data_object["describe"]["name"]
         download_from_dx(tabix_dx_data_object, tabix_file_name)
 
-    print("Reading vcf...")
-    callset = allel.read_vcf(
-        vcf_file_name,
-        fields=["calldata/GT", "variants/ALT", "variants/REF", "variants/CHROM", "variants/POS", "variants/AF"],
-        chunk_length=1000,
-        region=region,
-    )
-
-    os.remove(vcf_file_name)
-    if callset is None:
-        return None
-
-    print("Loading genotypes...")
-    genotypes = allel.GenotypeArray(callset["calldata/GT"])
-
-    alleles = callset["variants/ALT"]
-
-    # Data manipulation and allele flipping
-    dense_matrix = genotypes.to_n_alt().T
-    af = np.mean(dense_matrix, axis=0) / 2
-    flip = af > 0.5
-    dense_matrix[:, flip] = 2 - dense_matrix[:, flip]
-    sparse_matrix = csr_matrix(dense_matrix)
-
-    # Metadata preparation
-    chromosomes = callset["variants/CHROM"]
-    positions = callset["variants/POS"]
-    refs = callset["variants/REF"]
-    alts = np.array([",".join(x) for x in alleles])
-
-    metadata_dtype = [("chromosome", "U10"), ("position", int), ("ref", "U10"), ("alt", "U10")]
-    metadata = np.empty(len(chromosomes), dtype=metadata_dtype)
-    metadata["chromosome"] = chromosomes
-    metadata["position"] = positions
-    metadata["ref"] = refs
-    metadata["alt"] = alts
-
-    # Flip ref/alt where needed
-    metadata["ref"][flip] = alts[flip]
-    metadata["alt"][flip] = refs[flip]
-
-    # Save files locally
-    save_file_name = vcf_file_name.split(".vcf")[0]
-    mtx_filename = f"{save_file_name}.genos.mtx"
-    metadata_filename = f"{save_file_name}.metadata.txt"
-    mmwrite(mtx_filename, csr_matrix(dense_matrix))
-    np.savetxt(
-        metadata_filename, metadata, fmt="%s,%d,%s,%s", delimiter=",", header="chromosome,position,ref,alt", comments=""
-    )
-
-    # Upload files to DNAnexus
-    dxpy.upload_local_file(mtx_filename, project=project_id, folder="genotypes")
-    dxpy.upload_local_file(metadata_filename, project=project_id, folder="genotype_metadata")
-
-    # Optional: Clean up local files if not needed locally
-    os.remove(mtx_filename)
-    os.remove(metadata_filename)
-
-    return sparse_matrix
+    sparse_matrix, variant_info = vcf_to_csc(vcf_file_name, region)
+    return sparse_matrix, variant_info
 
 
 def process_directory(directory_path):

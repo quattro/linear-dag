@@ -4,6 +4,7 @@ from typing import Optional
 
 import numpy as np
 
+from genotype_processing import read_vcf
 from numpy.typing import NDArray
 from scipy.io import mmread, mmwrite
 from scipy.sparse import csc_matrix, csr_matrix, eye
@@ -12,15 +13,16 @@ from scipy.sparse.linalg import spsolve_triangular
 from .brick_graph import BrickGraph
 from .brick_graph_py import BrickGraphPy
 from .linear_arg_inference import (
-    add_samples_to_brick_graph,
+    add_samples_to_brick_graph_closure,
     add_samples_to_linear_arg,
     add_singleton_variants,
     closure_transitive_reduction,
     infer_brick_graph_using_containment,
     linearize_brick_graph,
     remove_undirected_edges,
-    transitive_closure,
+    setdiag,
 )
+from .one_summed import construct_1_summed_DAG_slow
 from .solve import topological_sort
 from .trios import Trios
 
@@ -58,28 +60,48 @@ class LinearARG:
         # TODO clean up - especially handling of diagonal
         # TODO currently this is very slow
         recombination_method = recombination_method if recombination_method else ""
-        if recombination_method.lower == "before":
-            brick_graph_closure = add_samples_to_brick_graph(brick_graph_closure, genotypes)
-            brick_graph_closure.setdiag(0)
+        print(recombination_method)
+        if recombination_method.lower() == "before":
+            # Brick graph including sample nodes
+            brick_graph_closure = add_samples_to_brick_graph_closure(genotypes, brick_graph_closure)
+            setdiag(brick_graph_closure, 0)
             brick_graph_closure.eliminate_zeros()
-            brick_graph = closure_transitive_reduction(brick_graph_closure)
+            brick_graph = csr_matrix(closure_transitive_reduction(brick_graph_closure).transpose())
+            setdiag(brick_graph, 0)
+            brick_graph.eliminate_zeros()
+            brick_graph.sort_indices()
+
+            # Find recombinations
             trio_list = Trios(brick_graph.nnz)
             trio_list.convert_matrix(brick_graph.indices, brick_graph.indptr)
             trio_list.find_recombinations()
             edges = trio_list.fill_edgelist()
-            num_nodes = np.max(edges) + 1
-            new_brick_graph = csr_matrix(
-                (np.ones(edges.shape[0]), (edges[:, 1], edges[:, 0])), shape=(num_nodes, num_nodes)
-            )
-            new_brick_graph.setdiag(0)
-            new_brick_graph.eliminate_zeros()
-            brick_graph_closure = transitive_closure(new_brick_graph)
-            brick_graph_closure.setdiag(1)
 
-        linear_arg_adjacency_matrix = linearize_brick_graph(brick_graph_closure)
-        linear_arg_adjacency_matrix = add_singleton_variants(genotypes, linear_arg_adjacency_matrix)
+            # Linearize
+            import networkx as nx
 
-        if recombination_method.lower != "before":
+            G = nx.DiGraph()
+            num_nodes = 1 + np.max([max(i, j) for i, j in edges])
+            G.add_nodes_from(np.arange(num_nodes))  # Needed so that nodes are in the right order
+            G.add_edges_from(edges)
+            for e in edges:
+                G.edges[e]["weight"] = 1
+            G_linear = construct_1_summed_DAG_slow(G)
+            linear_arg_adjacency_matrix = csr_matrix(nx.to_scipy_sparse_array(G_linear, format="csr").transpose())
+
+            # num_nodes = np.max(edges) + 1
+            # edges = ([j for _, j in edges], [i for i, _ in edges])
+            # new_brick_graph = csr_matrix(
+            #     (np.ones(len(edges[0])), edges), shape=(num_nodes, num_nodes)
+            # )
+            # setdiag(new_brick_graph, 0)
+            # new_brick_graph.eliminate_zeros()
+            # brick_graph_closure = csr_matrix(transitive_closure(new_brick_graph).transpose())
+            # setdiag(brick_graph_closure, 1)
+            # linear_arg_adjacency_matrix = linearize_brick_graph(brick_graph_closure)
+        else:
+            linear_arg_adjacency_matrix = linearize_brick_graph(brick_graph_closure)
+            linear_arg_adjacency_matrix = add_singleton_variants(genotypes, linear_arg_adjacency_matrix)
             linear_arg_adjacency_matrix = add_samples_to_linear_arg(genotypes, linear_arg_adjacency_matrix)
 
         n, m = genotypes.shape
@@ -133,30 +155,11 @@ class LinearARG:
         # TODO: handle missing data
         with br.open_bed(f"{prefix}.bed") as bed:
             genotypes = bed.read_sparse(dtype="int8")
-
             return LinearARG.from_genotypes(genotypes)
 
     @staticmethod
     def from_vcf(path: str) -> "LinearARG":
-        import cyvcf2 as cv
-
-        vcf = cv.VCF(path, gts012=True)
-        data = []
-        idxs = []
-        ptrs = [0]
-        # TODO: handle missing data
-        for var in vcf:
-            (idx,) = np.where(var.gt_types != 0)
-            gts = var.gt_types[idx]
-            data.append(gts)
-            idxs.append(idx)
-            ptrs.append(ptrs[-1] + len(idx))
-
-        data = np.array(data)
-        idxs = np.array(idxs)
-        ptrs = np.array(ptrs)
-        genotypes = csc_matrix((data, idxs, ptrs))
-
+        genotypes = read_vcf(path)
         return LinearARG.from_genotypes(genotypes)
 
     @property
@@ -318,7 +321,7 @@ class LinearARG:
 
         M = csc_matrix(self.A)
         num_nodes = len(M.indptr) - 1
-        new_indptr = np.zeros(2 * num_nodes, dtype=np.uintc)
+        new_indptr = np.zeros(4 * num_nodes, dtype=np.uintc)
         new_indices = np.zeros(2 * len(M.indices), dtype=np.uintc)
         new_data = np.zeros(2 * len(M.indices), dtype=np.intc)
         original_nodes = np.zeros(num_nodes, dtype=np.uintc)

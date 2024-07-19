@@ -5,8 +5,11 @@ from typing import Type
 import heapq
 from libc.stdlib cimport free, malloc, realloc
 import numpy as np
+from scipy.sparse import csr_matrix, csc_matrix
 cimport numpy as cnp
 from .data_structures cimport node, edge, stack_node, queue_node, list_node # in data_structures.pxd
+
+cdef int MAXINT = 32767
 
 cdef class Stack:
     """
@@ -15,7 +18,7 @@ cdef class Stack:
     # cdef stack_node* head
     # cdef int length
 
-    def __cinit__(self):
+    def __init__(self):
         self.head = NULL
         self.length = 0
 
@@ -77,7 +80,7 @@ cdef class Queue:
     # cdef queue_node* tail
     # cdef int length
 
-    def __cinit__(self):
+    def __init__(self):
         self.head = NULL
         self.tail = NULL
         self.length = 0
@@ -138,43 +141,68 @@ cdef class Queue:
         while self.head is not NULL:
             self.pop()
 
-cdef class CountingArray:
-    """Array that keeps track of the last time each element was modified, allowing it to be cleared in O(1) time"""
+cdef class IntegerSet:
+    """Set of integers between 0 and n-1 supporting O(1) add, remove, check for inclusion, and clear."""
     # cdef int length
-    # cdef int[:] count
     # cdef int[:] last_cleared
     # cdef int times_cleared
 
-    def __cinit__(self, int length):
-        self.length = length
-        self.count = np.zeros(length, dtype=np.intc)
-        self.last_cleared = np.zeros(length, dtype=np.intc)
-        self.times_cleared = 0
-
     def __init__(self, int length):
+        self.length = length
+        self.last_cleared = np.zeros(length, dtype=np.intc)
+        self.times_cleared = 1
         cnp.import_array()  # Necessary for initializing the C API
 
-    def __contains__(self, int index):
+    cdef bint contains(self, int index):
+        if index >= self.length or index < 0:
+            return False
         return self.last_cleared[index] == self.times_cleared
 
-    def __setitem__(self, int index, int value):
+    cdef void add(self, int index):
         if index >= self.length or index < 0:
             raise IndexError(f"Index {index} out of bounds")
-
         self.last_cleared[index] = self.times_cleared
-        self.count[index] = value
 
-    def __getitem__(self, int index) -> int:
+    cdef void remove(self, int index):
+        if index >= self.length or index < 0:
+            raise IndexError(f"Index {index} out of bounds")
+        self.last_cleared[index] = 0
+
+    cpdef void clear(self):
+        self.times_cleared += 1
+        if self.times_cleared == MAXINT:
+            self.last_cleared = np.zeros(self.length, dtype=np.intc)
+            self.times_cleared = 1
+
+cdef class CountingArray(IntegerSet):
+    """Array that keeps track of the last time each element was modified, allowing it to be cleared in O(1) time"""
+    # cdef int[:] count
+
+    def __init__(self, int length):
+        self.count = np.zeros(length, dtype=np.intc)
+        super().__init__(length)
+
+    def __contains__(self, int index) -> bint:  # index in counting_array
+        return self.contains(index)
+
+    def __setitem__(self, int index, int value):  # counting_array[index] = value
+        self.set_element(index, value)
+
+    def __getitem__(self, int index) -> int:  # value = counting_array[index]
+        return self.get_element(index)
+
+    cdef int get_element(self, int index):
         if index >= self.length or index < 0:
             raise IndexError(f"Index {index} out of bounds")
 
-        if index not in self:
+        if not self.contains(index):
             return 0
         else:
             return self.count[index]
 
-    cpdef void clear(self):
-        self.times_cleared += 1
+    cdef void set_element(self, int index, int value):
+        self.add(index)
+        self.count[index] = value
 
 
 cdef class LinkedListArray:
@@ -344,8 +372,7 @@ cdef class LinkedListArray:
 cdef class DiGraph:
     """
     Unweighted directed graph implemented using linked lists of edges. Data structure is optimized for fast modification,
-    i.e., adding or removing nodes and edges. The maximum number of nodes + edges must be prespecified.
-    Nodes and edges are stored in arrays. Each node
+    i.e., adding or removing nodes and edges. Nodes and edges are stored in arrays. Each node
     stores pointers to its first out-edge and its first in-edge. Each edge (u,v) contains pointers to its next out-edge
     (u,w), its previous out-edge, its next in-edge (w,v), and its previous in-edge; also to u and v themselves. Nodes
     and edges are indexed, with nodes[i].index == i and likewise for edges; order of indices is arbitrary.
@@ -449,17 +476,16 @@ cdef class DiGraph:
             e = e.next_out
 
     @classmethod
-    def from_csr(cls, int[:] indptr, int[:] indices, int[:] data, int max_num_nodes):
+    def from_csr(cls, A: csr_matrix):
         """
-        Create a graph from a Compressed Sparse Row (CSR) format.
-
-        :param indptr: Array that indicates the start of each row in indices
-        :param indices: Array containing column indices of non-zero elements in matrix form.
-        :param data: Array containing weights of the edges corresponding to column indices. Edges of weight different
-        from one are ignored.
-        :param max_num_nodes: Number of nodes in the graph.
-        :return: An instance of DiGraph constructed from the given CSR data.
+        Create a DiGraph from a Compressed Sparse Row (CSR) format matrix.
         """
+        cdef int[:] indptr = A.indptr.astype(np.intc)
+        cdef int[:] indices = A.indices.astype(np.intc)
+        cdef int[:] data = A.data.astype(np.intc)
+        cdef int max_num_nodes = A.shape[0]
+        if A.shape[1] != max_num_nodes:
+            raise ValueError("Input matrix should be square")
         cdef int num_edges = np.sum(np.asarray(data) == 1)
         cdef int num_nodes = len(indptr) - 1
         cdef DiGraph G = cls(max_num_nodes, num_edges)
@@ -480,6 +506,13 @@ cdef class DiGraph:
 
         return G
 
+    @classmethod
+    def from_csc(cls, A: csc_matrix):
+        """
+        Create a DiGraph from a Compressed Sparse Row (CSR) format matrix.
+        """
+        return cls.from_csr(csr_matrix(A))
+
     def edge_list(self) -> list[tuple[int, int]]:
         """
         Returns a list of edges.
@@ -498,7 +531,6 @@ cdef class DiGraph:
         return edgelist
 
     def to_csr(self) -> csr_matrix:
-        from scipy.sparse import csr_matrix
         n = self.maximum_number_of_nodes
         edges = self.edge_list()
         rows, cols = zip(*edges)
@@ -506,7 +538,6 @@ cdef class DiGraph:
                        shape=(n, n))
 
     def to_csc(self) -> csc_matrix:
-        from scipy.sparse import csc_matrix
         return csc_matrix(self.to_csr())
 
     def add_edges_from(self, list[tuple[int, int]] edges) -> None:
@@ -770,11 +801,11 @@ cdef class Trie(DiGraph):
     # cdef int[:] termini
     # cdef int[:] depth
 
-    def __cinit__(self, int number_of_nodes, int number_of_edges):
+    def __init__(self, int number_of_nodes, int number_of_edges):
         self.elements = np.zeros(number_of_nodes, dtype=np.intc)
         self.termini = np.empty(0)
         self.depth = np.empty(0)
-
+        super().__init__(number_of_nodes, number_of_edges)
 
     cdef void initialize_branches(self, int number_of_branches):
         self.termini = np.arange(number_of_branches)
