@@ -72,7 +72,7 @@ def add_samples_to_linear_arg(genotypes: csc_matrix, initial_linear_arg: csr_mat
 def add_samples_to_brick_graph_closure(genotypes: csc_matrix, brick_graph_closure: csr_matrix) -> csr_matrix:
     n, m = genotypes.shape
     result = vertcat(csr_matrix(genotypes), brick_graph_closure)
-    pad_leading_zeros(result, n)
+    result = pad_leading_zeros(result, n)
     return result
 
 
@@ -80,11 +80,13 @@ def vertcat(A: csr_matrix, B: csr_matrix) -> csr_matrix:
     indptrs = np.concatenate((A.indptr, A.indptr[-1] + B.indptr[1:]))
     indices = np.concatenate((A.indices, B.indices))
     data = np.concatenate((A.data, B.data))
-    return csr_matrix((data, indices, indptrs))
+    return csr_matrix((data, indices, indptrs),
+                      shape=(A.shape[0] + B.shape[0], A.shape[1]))
 
 
-def pad_leading_zeros(A: csr_matrix, num_cols: int) -> None:
-    A = csr_matrix((A.data, A.indices + num_cols, A.indptrs))
+def pad_leading_zeros(A: csr_matrix, num_cols: int) -> csr_matrix:
+    return csr_matrix((A.data, A.indices + num_cols, A.indptr),
+                      shape=(A.shape[0], num_cols + A.shape[1]))
 
 
 def add_samples_to_initial_brick_graph(genotypes: csc_matrix, brick_graph: csr_matrix) -> csr_matrix:
