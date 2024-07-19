@@ -91,19 +91,18 @@ def construct_1_summed_DAG_slow(G: nx.DiGraph) -> nx.DiGraph:
 
         while L:
             j = L.pop()
-            for k in G.successors(j):
+            for k in G_prime.successors(j):
                 if k in L:
-                    path_sum[k] += G[j][k]["weight"]
+                    path_sum[k] += G_prime[j][k]["weight"]
                 else:
                     L.push(k, -topological_ordering[k])
-                    path_sum[k] = G[j][k]["weight"]
+                    path_sum[k] = G_prime[j][k]["weight"]
             if path_sum[j] != 1:
-                if not G.has_edge(i, j):
-                    G.add_edge(i, j, weight=0)
+                if not G_prime.has_edge(i, j):
+                    G_prime.add_edge(i, j, weight=0)
                 if not G_prime.has_edge(i, j):
                     G_prime.add_edge(i, j, weight=0)
 
-                G[i][j]["weight"] += 1 - path_sum[j]
                 G_prime[i][j]["weight"] += 1 - path_sum[j]
 
     return G_prime
