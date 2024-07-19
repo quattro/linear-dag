@@ -1,7 +1,77 @@
+import os
+
+from typing import Optional
+
 import numpy as np
 
 from numpy.typing import NDArray
+from scipy.io import mmread
 from scipy.sparse import csc_matrix
+
+
+def load_genotypes(
+    input_file_prefix: str,
+    flip_minor_alleles: bool = False,
+    maf_threshold: Optional[float] = None,
+    rsq_threshold: Optional[float] = None,
+    skiprows: int = 0,
+) -> tuple[csc_matrix, NDArray, NDArray]:
+    mtx_file = f"{input_file_prefix}.mtx"
+    txt_file = f"{input_file_prefix}.txt"
+    if os.path.exists(mtx_file):
+        genotype_file = mtx_file
+        input_type = "mtx"
+    elif os.path.exists(txt_file):
+        genotype_file = txt_file
+        input_type = "txt"
+    else:
+        raise FileNotFoundError(f"No genotype matrix file found with prefix: {input_file_prefix}")
+
+    # Initialize Linarg based on input file type
+    if input_type == "mtx":
+        genotypes = csc_matrix(mmread(genotype_file))
+    else:
+        genotypes = np.loadtxt(genotype_file, skiprows=skiprows)
+
+    if rsq_threshold is None:
+        well_imputed_variants = np.arange(genotypes.shape[1])
+    else:
+        genotypes, well_imputed_variants = binarize(genotypes, rsq_threshold)
+
+    ploidy = np.max(genotypes).astype(int)
+    if maf_threshold is None:
+        common_variants = np.arange(genotypes.shape[1])
+    else:
+        genotypes, common_variants = apply_maf_threshold(genotypes, ploidy, maf_threshold)
+
+    kept_variants = well_imputed_variants[common_variants]
+    print("kept_variants:", kept_variants.shape)
+
+    if flip_minor_alleles:
+        genotypes, flipped_variants = flip_alleles(genotypes, ploidy)
+
+    return genotypes, kept_variants, flipped_variants
+
+
+def read_vcf(path: str) -> csc_matrix:
+    import cyvcf2 as cv
+
+    vcf = cv.VCF(path, gts012=True)
+    data = []
+    idxs = []
+    ptrs = [0]
+    # TODO: handle missing data
+    for var in vcf:
+        (idx,) = np.where(var.gt_types != 0)
+        gts = var.gt_types[idx]
+        data.append(gts)
+        idxs.append(idx)
+        ptrs.append(ptrs[-1] + len(idx))
+
+    data = np.concatenate(data)
+    idxs = np.concatenate(idxs)
+    ptrs = np.array(ptrs)
+    return csc_matrix((data, idxs, ptrs))
 
 
 def compute_af(genotypes: csc_matrix, ploidy: int = 1) -> NDArray:

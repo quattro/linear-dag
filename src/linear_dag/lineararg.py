@@ -4,6 +4,7 @@ from typing import Optional
 
 import numpy as np
 
+from genotype_processing import read_vcf
 from numpy.typing import NDArray
 from scipy.io import mmread, mmwrite
 from scipy.sparse import csc_matrix, csr_matrix, eye
@@ -12,7 +13,7 @@ from scipy.sparse.linalg import spsolve_triangular
 from .brick_graph import BrickGraph
 from .brick_graph_py import BrickGraphPy
 from .linear_arg_inference import (
-    add_samples_to_brick_graph,
+    add_samples_to_brick_graph_closure,
     add_samples_to_linear_arg,
     add_singleton_variants,
     closure_transitive_reduction,
@@ -62,8 +63,9 @@ class LinearARG:
         print(recombination_method)
         if recombination_method.lower() == "before":
             # Brick graph including sample nodes
-            brick_graph_closure = add_samples_to_brick_graph(brick_graph_closure, genotypes)
+            brick_graph_closure = add_samples_to_brick_graph_closure(genotypes, brick_graph_closure)
             setdiag(brick_graph_closure, 0)
+            brick_graph_closure.eliminate_zeros()
             brick_graph = csr_matrix(closure_transitive_reduction(brick_graph_closure).transpose())
             setdiag(brick_graph, 0)
             brick_graph.eliminate_zeros()
@@ -153,30 +155,11 @@ class LinearARG:
         # TODO: handle missing data
         with br.open_bed(f"{prefix}.bed") as bed:
             genotypes = bed.read_sparse(dtype="int8")
-
             return LinearARG.from_genotypes(genotypes)
 
     @staticmethod
     def from_vcf(path: str) -> "LinearARG":
-        import cyvcf2 as cv
-
-        vcf = cv.VCF(path, gts012=True)
-        data = []
-        idxs = []
-        ptrs = [0]
-        # TODO: handle missing data
-        for var in vcf:
-            (idx,) = np.where(var.gt_types != 0)
-            gts = var.gt_types[idx]
-            data.append(gts)
-            idxs.append(idx)
-            ptrs.append(ptrs[-1] + len(idx))
-
-        data = np.array(data)
-        idxs = np.array(idxs)
-        ptrs = np.array(ptrs)
-        genotypes = csc_matrix((data, idxs, ptrs))
-
+        genotypes = read_vcf(path)
         return LinearARG.from_genotypes(genotypes)
 
     @property
@@ -338,7 +321,7 @@ class LinearARG:
 
         M = csc_matrix(self.A)
         num_nodes = len(M.indptr) - 1
-        new_indptr = np.zeros(2 * num_nodes, dtype=np.uintc)
+        new_indptr = np.zeros(4 * num_nodes, dtype=np.uintc)
         new_indices = np.zeros(2 * len(M.indices), dtype=np.uintc)
         new_data = np.zeros(2 * len(M.indices), dtype=np.intc)
         original_nodes = np.zeros(num_nodes, dtype=np.uintc)

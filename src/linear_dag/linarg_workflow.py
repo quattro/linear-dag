@@ -5,10 +5,7 @@ from typing import Optional
 
 import numpy as np
 
-from scipy.io import mmread
-from scipy.sparse import csc_matrix
-
-from .genotype_processing import apply_maf_threshold, binarize, flip_alleles
+from .genotype_processing import load_genotypes
 from .lineararg import LinearARG
 
 
@@ -27,41 +24,15 @@ def run_linarg_workflow(
     start_time = time()
     # TODO ingest a SNP info file
 
-    # Check and select input files
-    mtx_file = f"{input_file_prefix}.mtx"
-    txt_file = f"{input_file_prefix}.txt"
-    if os.path.exists(mtx_file):
-        genotype_file = mtx_file
-        input_type = "mtx"
-    elif os.path.exists(txt_file):
-        genotype_file = txt_file
-        input_type = "txt"
-    else:
-        raise FileNotFoundError(f"No genotype matrix file found with prefix: {input_file_prefix}")
+    genotypes, kept_variants, flipped_variants = load_genotypes(
+        input_file_prefix,
+        flip_minor_alleles=flip_minor_alleles,
+        maf_threshold=maf_threshold,
+        rsq_threshold=rsq_threshold,
+        skiprows=skiprows,
+    )
 
-    # Initialize Linarg based on input file type
-    if input_type == "mtx":
-        genotypes = csc_matrix(mmread(genotype_file))
-    else:
-        genotypes = np.loadtxt(genotype_file, skiprows=skiprows)
-
-    if rsq_threshold is None:
-        well_imputed_variants = np.arange(genotypes.shape[1])
-    else:
-        genotypes, well_imputed_variants = binarize(genotypes, rsq_threshold)
-
-    ploidy = np.max(genotypes).astype(int)
-    if maf_threshold is None:
-        common_variants = np.arange(genotypes.shape[1])
-    else:
-        genotypes, common_variants = apply_maf_threshold(genotypes, ploidy, maf_threshold)
-
-    # TODO output which variants were kept
-    kept_variants = well_imputed_variants[common_variants]
-    print("kept_variants:", kept_variants.shape)
-
-    if flip_minor_alleles:
-        genotypes, flipped = flip_alleles(genotypes, ploidy)
+    # TODO handle flipped variants appropriately
 
     genotype_stats = (*genotypes.shape, genotypes.nnz)
 
