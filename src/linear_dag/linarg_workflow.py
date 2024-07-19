@@ -5,7 +5,7 @@ from typing import Optional
 
 import numpy as np
 
-from .genotype_processing import load_genotypes
+from .genotype import load_genotypes
 from .lineararg import LinearARG
 
 

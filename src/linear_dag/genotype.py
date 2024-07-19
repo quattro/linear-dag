@@ -53,25 +53,29 @@ def load_genotypes(
     return genotypes, kept_variants, flipped_variants
 
 
-def read_vcf(path: str) -> csc_matrix:
+def read_vcf(path: str, region: str = None) -> tuple[csc_matrix, list[dict]]:
     import cyvcf2 as cv
 
     vcf = cv.VCF(path, gts012=True)
     data = []
     idxs = []
     ptrs = [0]
+    info = []
+
     # TODO: handle missing data
-    for var in vcf:
+    for var in vcf(region):
         (idx,) = np.where(var.gt_types != 0)
         gts = var.gt_types[idx]
         data.append(gts)
         idxs.append(idx)
         ptrs.append(ptrs[-1] + len(idx))
+        info.append(var.INFO)
 
     data = np.concatenate(data)
     idxs = np.concatenate(idxs)
     ptrs = np.array(ptrs)
-    return csc_matrix((data, idxs, ptrs))
+
+    return csc_matrix((data, idxs, ptrs)), info
 
 
 def compute_af(genotypes: csc_matrix, ploidy: int = 1) -> NDArray:

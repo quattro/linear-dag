@@ -4,7 +4,7 @@ from typing import Optional
 
 import numpy as np
 
-from genotype_processing import read_vcf
+from genotype import read_vcf
 from numpy.typing import NDArray
 from scipy.io import mmread, mmwrite
 from scipy.sparse import csc_matrix, csr_matrix, eye
@@ -159,7 +159,7 @@ class LinearARG:
 
     @staticmethod
     def from_vcf(path: str) -> "LinearARG":
-        genotypes = read_vcf(path)
+        genotypes, _ = read_vcf(path)
         return LinearARG.from_genotypes(genotypes)
 
     @property

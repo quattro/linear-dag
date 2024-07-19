@@ -1,38 +1,11 @@
-import cyvcf2 as cv
 import dxpy
 import numpy as np
 import pyspark
 
-from scipy.sparse import csc_matrix, csr_matrix
+from scipy.sparse import csr_matrix
 
-from linear_dag import LinearARG
-
-
-def vcf_to_csc(path: str, region: str) -> tuple[csc_matrix, list[dict]]:
-    """
-    Codes genotypes as 0/1/2/3, where 3 means that at least one of the two alleles is unknown.
-    """
-    vcf = cv.VCF(path, gts012=True, strict_gt=True)
-    data = []
-    idxs = []
-    ptrs = [0]
-    info = []
-
-    # TODO: handle missing data
-    # TODO: handle phased data
-    for var in vcf(region):
-        (idx,) = np.where(var.gt_types != 0)
-        gts = var.gt_types[idx]
-        data.append(gts)
-        idxs.append(idx)
-        ptrs.append(ptrs[-1] + len(idx))
-        info.append(var.INFO)
-
-    data = np.concatenate(data)
-    idxs = np.concatenate(idxs)
-    ptrs = np.array(ptrs)
-    genotypes = csc_matrix((data, idxs, ptrs))
-    return genotypes, info
+from .genotype import read_vcf
+from .lineararg import LinearARG
 
 
 def download_from_dx(dx_data_object, local_file_name):
@@ -50,7 +23,8 @@ def process_vcf(vcf_dx_data_object: dict, tabix_dx_data_object: dict = None, reg
         tabix_file_name = tabix_dx_data_object["describe"]["name"]
         download_from_dx(tabix_dx_data_object, tabix_file_name)
 
-    sparse_matrix, variant_info = vcf_to_csc(vcf_file_name, region)
+    sparse_matrix, variant_info = read_vcf(vcf_file_name, region)
+
     return sparse_matrix, variant_info
 
 

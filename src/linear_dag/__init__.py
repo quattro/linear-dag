@@ -17,7 +17,7 @@ from .data_structures import (
     Queue as Queue,
     Stack as Stack,
 )
-from .genotype_processing import (
+from .genotype import (
     apply_maf_threshold as apply_maf_threshold,
     binarize as binarize,
     compute_af as compute_af,

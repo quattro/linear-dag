@@ -43,6 +43,12 @@ dependencies = [
   "bed-reader[sparse]",
 ]
 
+[project.optional-dependencies]
+dnanexus = [
+  "dxpy",
+  "pyspark",
+]
+
 [project.urls]
 Documentation = "https://github.com/unknown/linear-dag#readme"
 Issues = "https://github.com/unknown/linear-dag/issues"

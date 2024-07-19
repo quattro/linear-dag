@@ -5,7 +5,7 @@ import numpy as np
 
 from scipy.sparse import block_diag, csc_matrix, csr_matrix, eye, hstack, triu, vstack
 
-from .solve import spinv_make_triangular, spinv_triangular, topological_sort
+from .solve import spinv_make_triangular, spinv_triangular
 
 
 def infer_brick_graph_using_containment(genotypes: csc_matrix, ploidy) -> csr_matrix:
@@ -17,8 +17,8 @@ def infer_brick_graph_using_containment(genotypes: csc_matrix, ploidy) -> csr_ma
 
         temp = R_carrier.copy()
         for i in range(R_carrier.shape[0]):
-            row_data = R_carrier.data[R_carrier.indptr[i]: R_carrier.indptr[i + 1]]
-            temp.data[temp.indptr[i]: temp.indptr[i + 1]] = row_data >= R_carrier[i, i]
+            row_data = R_carrier.data[R_carrier.indptr[i] : R_carrier.indptr[i + 1]]
+            temp.data[temp.indptr[i] : temp.indptr[i + 1]] = row_data >= R_carrier[i, i]
 
         if n == 1:
             brick_graph_closure = temp
@@ -80,13 +80,11 @@ def vertcat(A: csr_matrix, B: csr_matrix) -> csr_matrix:
     indptrs = np.concatenate((A.indptr, A.indptr[-1] + B.indptr[1:]))
     indices = np.concatenate((A.indices, B.indices))
     data = np.concatenate((A.data, B.data))
-    return csr_matrix((data, indices, indptrs),
-                      shape=(A.shape[0] + B.shape[0], A.shape[1]))
+    return csr_matrix((data, indices, indptrs), shape=(A.shape[0] + B.shape[0], A.shape[1]))
 
 
 def pad_leading_zeros(A: csr_matrix, num_cols: int) -> csr_matrix:
-    return csr_matrix((A.data, A.indices + num_cols, A.indptr),
-                      shape=(A.shape[0], num_cols + A.shape[1]))
+    return csr_matrix((A.data, A.indices + num_cols, A.indptr), shape=(A.shape[0], num_cols + A.shape[1]))
 
 
 def add_samples_to_initial_brick_graph(genotypes: csc_matrix, brick_graph: csr_matrix) -> csr_matrix:
