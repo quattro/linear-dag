@@ -4,7 +4,7 @@ from typing import Optional
 
 import numpy as np
 
-from genotype import read_vcf
+from .genotype import read_vcf
 from numpy.typing import NDArray
 from scipy.io import mmread, mmwrite
 from scipy.sparse import csc_matrix, csr_matrix, eye
