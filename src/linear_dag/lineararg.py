@@ -263,53 +263,6 @@ class LinearARG:
         # Write the matrix A
         mmwrite(filename_prefix + ".mtx", self.A)
 
-    def compute_hierarchy(self, haplotypes: csc_matrix) -> NDArray:
-        A_csr = self.A
-        n_sample, m_sample = self.shape
-        rank = np.zeros(self.nnz)
-        H = haplotypes - eye(haplotypes.shape[0])
-        for child in range(self.A.shape[0]):
-            # Restrict haplotype matrix to parents of that child
-            parents = A_csr.indices[A_csr.indptr[child] : A_csr.indptr[child + 1]]
-            parents_as_indices = parents - n_sample
-            haplotype_submatrix = H[parents_as_indices, :][:, parents_as_indices]
-            X = csc_matrix(eye(len(parents)))
-            while np.any(X.data):
-                X = haplotype_submatrix @ X
-                rank[parents_as_indices] += np.diff(X.indptr) > 0
-
-        return rank
-
-    def unweight_slow(self) -> "LinearARG":
-        M = self.A
-        num_nodes = len(M.indptr) - 1
-        index_counter = len(M.indices)
-        new_indptr = np.concatenate((M.indptr, np.empty_like(M.indices, dtype=np.uintc)))
-        new_indices = np.concatenate((M.indices.copy(), np.empty_like(M.indices, dtype=np.intc)))
-        new_data = np.concatenate((M.data.copy(), np.empty_like(M.indices, dtype=np.intc)))
-        new_nodes = dict()
-
-        for entry in range(len(M.indices)):
-            index, weight = M.indices[entry], M.data[entry]
-            if weight == 1:
-                continue
-            if (index, weight) not in new_nodes:
-                new_nodes[(index, weight)] = num_nodes
-                new_indices[index_counter] = index
-                new_data[index_counter] = weight
-                num_nodes += 1
-                index_counter += 1
-                new_indptr[num_nodes] = index_counter
-
-            new_indices[entry] = new_nodes[(index, weight)]
-            new_data[entry] = 1
-
-        M = csr_matrix(
-            (new_data[:index_counter], new_indices[:index_counter], new_indptr[: num_nodes + 1]),
-            shape=(num_nodes, num_nodes),
-        )
-        return LinearARG(M, self.sample_indices, self.variant_indices, self.flip)
-
     def unweight(self, handle_singletons_differently=False) -> "LinearARG":
         """
         Prepares an initial linear ARG for recombination finding by grouping out-edges by weight. If node u has
