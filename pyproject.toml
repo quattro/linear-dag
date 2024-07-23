@@ -34,19 +34,21 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
+  "cython",
   "numpy",
   "scipy",
   "networkx",
-  "networkit",
-  "tskit",
-  "cyvcf2",
-  "bed-reader[sparse]",
 ]
 
 [project.optional-dependencies]
 dnanexus = [
   "dxpy",
   "pyspark",
+  "cyvcf2",
+]
+genotype = [
+  "cyvcf2",
+  "bed-reader[sparse]",
 ]
 
 [project.urls]
