@@ -49,6 +49,8 @@ def load_genotypes(
 
     if flip_minor_alleles:
         genotypes, flipped_variants = flip_alleles(genotypes, ploidy)
+    else:
+        flipped_variants = None
 
     return genotypes, kept_variants, flipped_variants
 
