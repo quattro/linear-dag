@@ -71,18 +71,20 @@ cdef class BrickGraph:
         :param clade_index: integer identifier for the new clade
         :return: lowest common ancestor of nodes in new_clade
         """
-
-        # Compute bottom-up ordering of nodes; update self.visits to tell number of leaves descended from each node
-        cdef Queue traversal = self.partial_traversal(new_clade)
-
-        cdef int initial_num_nodes = len(new_clade)
-        if initial_num_nodes <= 1:
+        if len(new_clade) == 0:
             return
 
-        # Create edges to the new clade from the variants whose intersection forms the LCA
-        cdef node * lowest_common_ancestor = traversal.tail.value
+        # Compute bottom-up ordering of nodes; update self.visits to tell number of leaves descended from each node
+        cdef node * lowest_common_ancestor = self.partial_traversal(new_clade)
         assert lowest_common_ancestor is not NULL
+
+        # Create edges to the new clade from the variants whose intersection forms the LCA
         self.add_edges_from_subsequence(lowest_common_ancestor.index, clade_index)
+
+        cdef Stack traversal = Stack()
+        cdef int i
+        for i in new_clade:
+            traversal.push(i)
 
         cdef edge* out_edge
         cdef edge* visited_edge
@@ -96,8 +98,17 @@ cdef class BrickGraph:
         cdef int num_children_visited, num_children_unvisited
 
         while traversal.length > 0:
-            v = traversal.pop()
-            visited_children, unvisited_children = self.get_visited_children(v)
+            v = self.tree.nodes[traversal.pop()]
+
+            # Push a node when all its visited children have been found
+            if v.first_in != NULL:
+                i = v.first_in.u.index
+                if self.times_visited[i] == 1:
+                    traversal.push(i)
+                else:
+                    self.times_visited[i] -= 1
+
+            visited_children, unvisited_children = self.get_visited_children(v)  # TODO avoid unvisited children?
             num_children_unvisited, num_children_visited = unvisited_children.length, visited_children.length
 
             # No unvisited children: means intersect(v, new_clade) == v
@@ -148,17 +159,16 @@ cdef class BrickGraph:
                 unvisited_edge = self.tree.nodes[child].first_in
                 self.tree.set_edge_parent(unvisited_edge, sibling_node)
 
-    cdef Queue partial_traversal(self, int[:] leaves):
+    cdef node* partial_traversal(self, int[:] leaves):
         """
         Returns the ancestors of a set of leaf nodes, up to their lowest common ancestor, in bottom-up topological ordering.
         :param leaves: indices of leaf nodes
         :return: queue of nodes such pop() returns all children in the queue before returning a parent
         """
         self.times_visited.clear()
-        cdef Queue result = Queue()
         cdef int num_leaves = len(leaves)
         if num_leaves == 0:
-            return result
+            return <node*> NULL
 
         cdef Queue active_nodes = Queue()
         cdef int i
@@ -180,21 +190,9 @@ cdef class BrickGraph:
 
             if v.first_in != NULL:
                 active_nodes.push(v.first_in.u)
-        active_nodes.clear()
-        cdef node * lowest_common_ancestor = v
 
-        # Top-down traversal putting children ahead of parents
-        cdef edge* out_edge
-        cdef queue_node* place_in_queue = result.push_to_front(lowest_common_ancestor)
-        while place_in_queue != NULL:
-            v = place_in_queue.value
-            out_edge = v.first_out
-            while out_edge != NULL:
-                if out_edge.v.index in self.times_visited:
-                    result.push_to_front(out_edge.v)
-                out_edge = out_edge.next_out
-            place_in_queue = place_in_queue.prev
-        return result
+        cdef node * lowest_common_ancestor = v
+        return lowest_common_ancestor
 
     cdef void add_edges_from_subsequence(self, int add_from, int add_to):
         cdef list_node * place_in_list = self.subsequence.head[add_from]
