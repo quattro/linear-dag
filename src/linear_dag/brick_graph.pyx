@@ -55,7 +55,10 @@ cdef class BrickGraph:
 
     def to_csr(self) -> csr_matrix:
         edge_list = self.graph.edge_list()
-        parents, children = zip(*edge_list)
+        if len(edge_list) > 0:
+            parents, children = zip(*edge_list)
+        else:
+            parents, children = [], []
         result = csr_matrix((np.ones(len(edge_list)), (children, parents)),
                           shape=(self.num_variants, self.num_variants))
         result.setdiag(1)
