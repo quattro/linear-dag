@@ -1,5 +1,12 @@
 # data_structures.pxd
 
+cdef class IntegerList:
+    cdef int* value
+    cdef int length
+    cdef int maximum_length
+
+    cdef void push(self, int value)
+    cdef int pop(self)
 
 cdef struct stack_node:
     int value
@@ -59,6 +66,7 @@ cdef class CountingArray(IntegerSet):
     cdef int[:] count
 
     cdef int get_element(self, int index)
+    cdef int increment_element(self, int index, int increment)
     cdef void set_element(self, int index, int value)
 
 

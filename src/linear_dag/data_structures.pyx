@@ -11,6 +11,33 @@ from .data_structures cimport node, edge, stack_node, queue_node, list_node # in
 
 cdef int MAXINT = 32767
 
+cdef class IntegerList:
+    """Fixed-length list of integers supporting push() and pop()"""
+    # cdef int* value
+    # cdef int length
+    # cdef int maximum_length
+
+    def __cinit__(self, int maximum_length):
+        self.maximum_length = maximum_length
+        self.value = <int*> malloc(maximum_length * sizeof(int))
+        self.length = 0
+
+    def __dealloc__(self):
+        free(self.value)
+
+    cdef void push(self, int value):
+        if self.length >= self.maximum_length:
+            raise ValueError("IntegerList is full")
+        self.value[self.length] = value
+        self.length += 1
+
+    cdef int pop(self):
+        self.length -= 1
+        if self.length < 0:
+            raise ValueError("IntegerList is empty")
+        return self.value[self.length]
+
+
 cdef class Stack:
     """
     Stack of integers implemented as a linked list.
@@ -189,16 +216,21 @@ cdef class CountingArray(IntegerSet):
         self.set_element(index, value)
 
     def __getitem__(self, int index) -> int:  # value = counting_array[index]
+        if index >= self.length or index < 0:
+            raise IndexError(f"Index {index} out of bounds")
         return self.get_element(index)
 
     cdef int get_element(self, int index):
-        if index >= self.length or index < 0:
-            raise IndexError(f"Index {index} out of bounds")
-
         if not self.contains(index):
             return 0
-        else:
-            return self.count[index]
+        return self.count[index]
+
+    cdef int increment_element(self, int index, int increment):
+        if not self.contains(index):
+            self.set_element(index, increment)
+            return increment
+        self.count[index] += increment
+        return self.count[index]
 
     cdef void set_element(self, int index, int value):
         self.add(index)
