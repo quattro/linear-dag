@@ -4,6 +4,7 @@ from .data_structures cimport node, edge, queue_node, list_node
 from .data_structures cimport DiGraph, Queue, LinkedListArray, CountingArray, Stack
 cimport numpy as cnp
 from scipy.sparse import csr_matrix, csc_matrix
+import time
 
 cdef class BrickGraph:
     """
@@ -16,6 +17,7 @@ cdef class BrickGraph:
     cdef CountingArray times_visited
     cdef int num_samples
     cdef int num_variants
+    cdef double[:] timer # temporary
 
     def __cinit__(self, int num_samples, int num_variants):
         cnp.import_array()
@@ -26,6 +28,7 @@ cdef class BrickGraph:
         self.initialize_tree()
         tree_num_nodes = self.tree.maximum_number_of_nodes
         self.times_visited = CountingArray(tree_num_nodes)
+        self.timer = np.zeros(10, dtype=np.double)
 
     cpdef void initialize_tree(self):
         self.tree = DiGraph(self.num_samples * 2, self.num_samples * 2 - 1)
@@ -33,6 +36,9 @@ cdef class BrickGraph:
         cdef list edges = [(self.root, i) for i in range(self.num_samples)]
         self.tree.add_edges_from(edges)
         self.subsequence = LinkedListArray(self.tree.maximum_number_of_nodes)
+
+    def get_time(self):
+        return np.array(self.timer)
 
     @staticmethod
     def from_genotypes(genotypes: csc_matrix):
@@ -78,10 +84,13 @@ cdef class BrickGraph:
             return
 
         # Compute bottom-up ordering of nodes; update self.visits to tell number of leaves descended from each node
+        t = time.time()
         cdef node * lowest_common_ancestor = self.partial_traversal(new_clade)
         assert lowest_common_ancestor is not NULL
+        self.timer[0] += time.time() - t
 
         # Create edges to the new clade from the variants whose intersection forms the LCA
+        t = time.time()
         self.add_edges_from_subsequence(lowest_common_ancestor.index, clade_index)
 
         cdef Stack traversal = Stack()
@@ -98,21 +107,28 @@ cdef class BrickGraph:
         cdef node* v = NULL
         cdef bint v_is_root
         cdef Stack visited_children, unvisited_children
-        cdef int num_children_visited, num_children_unvisited
+        cdef int num_children_visited, num_children_unvisited, visits
+        self.timer[1] += time.time() - t
 
         while traversal.length > 0:
+            t = time.time()
             v = self.tree.nodes[traversal.pop()]
 
             # Push a node when all its visited children have been found
             if v.first_in != NULL:
                 i = v.first_in.u.index
-                if self.times_visited[i] == 1:
+                visits = self.times_visited.get_element(i)
+                if visits == 1:
                     traversal.push(i)
                 else:
-                    self.times_visited[i] -= 1
+                    self.times_visited.set_element(i, visits - 1)
+            self.timer[4] += time.time() - t
 
+            t = time.time()
             visited_children, unvisited_children = self.get_visited_children(v)  # TODO avoid unvisited children?
             num_children_unvisited, num_children_visited = unvisited_children.length, visited_children.length
+            self.timer[2] += time.time() - t
+            t = time.time()
 
             # No unvisited children: means intersect(v, new_clade) == v
             if num_children_unvisited == 0:
@@ -161,6 +177,7 @@ cdef class BrickGraph:
                 child = unvisited_children.pop()
                 unvisited_edge = self.tree.nodes[child].first_in
                 self.tree.set_edge_parent(unvisited_edge, sibling_node)
+            self.timer[3] += time.time() - t
 
     cdef node* partial_traversal(self, int[:] leaves):
         """
@@ -185,8 +202,8 @@ cdef class BrickGraph:
         while True:
             v = active_nodes.pop()
             assert v != NULL
-            num_visits = self.times_visited[v.index] + 1
-            self.times_visited[v.index] = num_visits
+            num_visits = self.times_visited.get_element(v.index) + 1
+            self.times_visited.set_element(v.index, num_visits)
             v_is_lca = num_visits == num_leaves
             if v_is_lca:
                 break
@@ -207,11 +224,15 @@ cdef class BrickGraph:
         cdef Stack visited_children = Stack()
         cdef Stack unvisited_children = Stack()
         cdef int child
-        for child in self.tree.successors(v.index):
-            if self.times_visited[child] > 0:
+        cdef edge* e = v.first_out
+        while e is not NULL:
+            child = e.v.index
+            e = e.next_out
+            if self.times_visited.contains(child):
                 visited_children.push(child)
             else:
                 unvisited_children.push(child)
+
         return visited_children, unvisited_children
 
     cdef void create_new_root(self):
