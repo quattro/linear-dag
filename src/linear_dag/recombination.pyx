@@ -2,6 +2,8 @@ cimport numpy as cnp
 import numpy as np
 from .data_structures cimport LinkedListArray, ModHeap, CountingArray, DiGraph, node, edge
 import sys
+
+
 cdef class Recombination(DiGraph):
     """
     Implements
@@ -11,6 +13,7 @@ cdef class Recombination(DiGraph):
     cdef ModHeap clique_size_heap
     cdef int num_cliques
 
+
     def __init__(self, int num_nodes, int num_edges):
         cnp.import_array()  # Necessary for initializing the C API
         self.clique = -np.ones(2 * num_edges, dtype=np.intc) # TODO size needed?
@@ -18,6 +21,7 @@ cdef class Recombination(DiGraph):
         self.clique_size_heap = None
         self.num_cliques = 0
         super().__init__(num_nodes, num_edges)
+
 
     @property
     def get_heap(self):
@@ -84,6 +88,8 @@ cdef class Recombination(DiGraph):
         while c >= 0: # -1 when none remain
             self.factor_clique(c)
             c = self.max_clique()
+            if self.clique_rows.length[c] <= 1:
+                break
 
     cpdef int max_clique(self):
         if self.clique_size_heap:
@@ -92,7 +98,6 @@ cdef class Recombination(DiGraph):
             return -1
 
     cpdef void factor_clique(self, int clique_index):
-        sys.stdout.flush()
         cdef int[:] clique_rows = self.clique_rows.extract(clique_index)
         if len(clique_rows) <= 1:
             return

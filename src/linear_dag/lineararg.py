@@ -25,6 +25,8 @@ from .linear_arg_inference import (
 from .one_summed import construct_1_summed_DAG_slow
 from .solve import topological_sort
 from .trios import Trios
+from .data_structures import DiGraph
+from .recombination import Recombination
 
 
 @dataclass
@@ -346,20 +348,21 @@ class LinearARG:
             self.A[order, :][:, order], inv_order[self.sample_indices], inv_order[self.variant_indices], self.flip
         )
 
-    def find_recombinations(self) -> "LinearARG":
-        trio_list = Trios(2 * self.A.nnz)  # TODO what should n be?
+    def find_recombinations(self, method="old") -> "LinearARG":
+        if method == "old":
+            trio_list = Trios(2 * self.A.nnz)  # TODO what should n be?
+            edges = self.A == 1
+            trio_list.convert_matrix(edges.indices, edges.indptr)
+            trio_list.find_recombinations()
+            new_edges = np.asarray(trio_list.fill_edgelist())
+        else:
+            gr = DiGraph.from_csc(self.A.transpose())
+            recom = Recombination.from_graph(gr)
+            recom.find_recombinations()
+            new_edges = np.array(recom.edge_list(), dtype=np.dtype('int', 'int'))
 
-        edges = self.A == 1
-        trio_list.convert_matrix(edges.indices, edges.indptr)
-
-        trio_list.find_recombinations()
-
-        # Verify the trio list remains valid
-        trio_list.check_properties(-1)
-
-        # New edge list comprises the edges of the trio list, plus the edges with weight different from 1 of A
-        new_edges = np.asarray(trio_list.fill_edgelist())
         new_edges = np.hstack((new_edges, np.ones((new_edges.shape[0], 1))))
+
         edges_with_nonone_weight = np.zeros((np.sum(self.A.data != 1), 3), dtype=np.intc)
         counter = 0
         for i in range(self.A.shape[0]):
