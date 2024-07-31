@@ -120,15 +120,11 @@ def topological_sort(A: "csr_matrix") -> np.ndarray:
     cdef int i
     for i in np.where(num_unvisited_nonself_parents == 0)[0]:
         nodes_to_visit.push(i)
-    if nodes_to_visit.length == 0:
-        raise ValueError("Adjacency matrix is not acyclic; check that its diagonal is zero")
 
     cdef np.ndarray result = np.empty(num_nodes, dtype=np.intc)
     cdef int node, child
     i = 0
     while nodes_to_visit.length > 0:
-        if i == num_nodes:
-            raise ValueError("Adjacency matrix is not acyclic; check that its diagonal is zero")
         node = nodes_to_visit.pop()
         result[i] = node
 
@@ -141,5 +137,7 @@ def topological_sort(A: "csr_matrix") -> np.ndarray:
                 nodes_to_visit.push(child)
         i += 1
 
-    assert i == num_nodes
+    if i != num_nodes:
+        raise ValueError("Adjacency matrix is not acyclic")
+
     return result
