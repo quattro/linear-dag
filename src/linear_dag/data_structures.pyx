@@ -354,7 +354,6 @@ cdef class LinkedListArray:
 
     cdef copy_list(self, int n, int m):
         """Replaces the current list m with a copy of list n"""
-        self.clear_list(m)
         cdef list_node * node = self.head[n]
         while node is not NULL:
             self.extend(m, node.value)
