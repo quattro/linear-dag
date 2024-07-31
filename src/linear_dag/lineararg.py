@@ -27,7 +27,7 @@ from .solve import topological_sort
 from .trios import Trios
 from .data_structures import DiGraph
 from .recombination import Recombination
-
+from time import time
 
 @dataclass
 class LinearARG:
@@ -35,6 +35,42 @@ class LinearARG:
     sample_indices: NDArray
     variant_indices: NDArray
     flip: NDArray
+
+    @staticmethod
+    def from_genotypes_new(
+            genotypes: csc_matrix,
+    ):
+        import networkx as nx
+
+        t = time()
+        brick_graph = BrickGraph.from_genotypes(genotypes)
+        print(f"brick graph: {time() - t}s")
+        t = time()
+
+        recom = Recombination.from_graph(brick_graph)
+        recom.find_recombinations()
+        edges = recom.edge_list()
+        print(f"recombination: {time() - t}s")
+        t = time()
+
+        # linearize
+        G = nx.DiGraph()
+        num_nodes = 1 + np.max([max(i, j) for i, j in edges])
+        G.add_nodes_from(np.arange(num_nodes))  # Needed so that nodes are in the right order
+        G.add_edges_from(edges)
+        for e in edges:
+            G.edges[e]["weight"] = 1
+        G_linear = construct_1_summed_DAG_slow(G)
+        linear_arg_adjacency_matrix = csr_matrix(nx.to_scipy_sparse_array(G_linear, format="csr").transpose())
+        print(f"linearize: {time() - t}s")
+
+        n, m = genotypes.shape
+        samples_idx = np.arange(m, m+n)
+        variants_idx = np.arange(m)
+        flip = np.zeros(len(variants_idx), dtype=bool)
+        result = LinearARG(linear_arg_adjacency_matrix, samples_idx, variants_idx, flip)
+
+        return result
 
     @staticmethod
     def from_genotypes(
@@ -52,8 +88,9 @@ class LinearARG:
             assert ploidy == 1, "new brick graph method assumes haploid samples"
             brick_graph_closure = BrickGraphPy.from_genotypes(genotypes).to_csr()
         elif brick_graph_method.lower() == "new":
-            assert ploidy == 1, "new brick graph method assumes haploid samples"
-            brick_graph_closure = BrickGraph.from_genotypes(genotypes).to_csr()
+            raise NotImplementedError("use from_genotypes_new instead")
+        elif brick_graph_method.lower() == "trivial":
+            brick_graph_closure = csr_matrix(eye(genotypes.shape[1]))
         else:
             raise ValueError(f"Unknown brick graph method {brick_graph_method}")
         brick_graph_closure = remove_undirected_edges(brick_graph_closure)
@@ -74,7 +111,7 @@ class LinearARG:
             brick_graph.sort_indices()
 
             # Find recombinations
-            trio_list = Trios(brick_graph.nnz)
+            trio_list = Trios(5 * brick_graph.nnz)
             trio_list.convert_matrix(brick_graph.indices, brick_graph.indptr)
             trio_list.find_recombinations()
             edges = trio_list.fill_edgelist()
@@ -90,20 +127,10 @@ class LinearARG:
                 G.edges[e]["weight"] = 1
             G_linear = construct_1_summed_DAG_slow(G)
             linear_arg_adjacency_matrix = csr_matrix(nx.to_scipy_sparse_array(G_linear, format="csr").transpose())
-
-            # num_nodes = np.max(edges) + 1
-            # edges = ([j for _, j in edges], [i for i, _ in edges])
-            # new_brick_graph = csr_matrix(
-            #     (np.ones(len(edges[0])), edges), shape=(num_nodes, num_nodes)
-            # )
-            # setdiag(new_brick_graph, 0)
-            # new_brick_graph.eliminate_zeros()
-            # brick_graph_closure = csr_matrix(transitive_closure(new_brick_graph).transpose())
-            # setdiag(brick_graph_closure, 1)
-            # linear_arg_adjacency_matrix = linearize_brick_graph(brick_graph_closure)
         else:
             linear_arg_adjacency_matrix = linearize_brick_graph(brick_graph_closure)
-            linear_arg_adjacency_matrix = add_singleton_variants(genotypes, linear_arg_adjacency_matrix)
+            if brick_graph_method.lower() == "old":
+                linear_arg_adjacency_matrix = add_singleton_variants(genotypes, linear_arg_adjacency_matrix)
             linear_arg_adjacency_matrix = add_samples_to_linear_arg(genotypes, linear_arg_adjacency_matrix)
 
         n, m = genotypes.shape
@@ -350,7 +377,7 @@ class LinearARG:
 
     def find_recombinations(self, method="old") -> "LinearARG":
         if method == "old":
-            trio_list = Trios(2 * self.A.nnz)  # TODO what should n be?
+            trio_list = Trios(5 * self.A.nnz)  # TODO what should n be?
             edges = self.A == 1
             trio_list.convert_matrix(edges.indices, edges.indptr)
             trio_list.find_recombinations()
