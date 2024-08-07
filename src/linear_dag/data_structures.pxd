@@ -94,6 +94,7 @@ cdef class DiGraph:
     cdef int maximum_number_of_nodes
     cdef int maximum_number_of_edges
 
+    cpdef bint has_node(self, int node_index)
     cpdef int some_parent(self, int node_index)
     cpdef int some_child(self, int node_index)
     cpdef void initialize_all_nodes(self)
@@ -110,21 +111,12 @@ cdef class DiGraph:
     cdef void patch_in_pointers(self, edge* e)
     cdef void collapse_node(self, node * u)
     cdef void collapse_node_with_indegree_one(self, node * u)
+    cdef void collapse_node_with_outdegree_one(self, node * u)
     cdef int number_of_successors(self, node * u)
     cdef int number_of_predecessors(self, node * u)
-
-cdef class Trie(DiGraph):
-    cdef int[:] elements
-    cdef int[:] termini
-    cdef int[:] depth
-
-    cdef void initialize_branches(self, int number_of_branches)
-    cdef void clear_branch(self, int branch_index)
-    cdef void insert_branch(self, int branch_index, int new_branch_index)
-    cdef void extend_branch(self, int branch_index, int value)
-    cdef int[:] read_branch(self, int branch_index)
-    cdef void extend_node_array(self, int new_maximum_number_of_nodes)
-
+    cpdef int[:] out_degree(self)
+    cpdef int[:] in_degree(self)
+    cpdef int[:] reverse_topological_sort(self)
 
 cdef class HeapNode:
     cdef public int priority

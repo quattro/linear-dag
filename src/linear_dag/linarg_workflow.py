@@ -12,13 +12,12 @@ from .lineararg import LinearARG
 def run_linarg_workflow(
     input_file_prefix: str,
     output_file_prefix: Optional[str] = None,
-    flip_minor_alleles: bool = False,
+    flip_minor_alleles: bool = True,
     maf_threshold: Optional[float] = None,
     rsq_threshold: Optional[float] = None,
     statistics_file_path: Optional[str] = None,
-    recombination_method: Optional[str] = None,
-    brick_graph_method: str = "old",
-    make_triangular: bool = False,
+    recombination_method: Optional[str] = "run",
+    make_triangular: bool = True,
     skiprows: int = 0,
 ) -> tuple:
     start_time = time()
@@ -37,18 +36,10 @@ def run_linarg_workflow(
     genotype_stats = (*genotypes.shape, genotypes.nnz)
 
     linarg = LinearARG.from_genotypes(
-        genotypes, brick_graph_method=brick_graph_method, recombination_method=recombination_method
+        genotypes,
+        find_recombinations=bool(recombination_method),
+        make_triangular=make_triangular
     )
-
-    if recombination_method == "old":
-        linarg = linarg.unweight()
-        linarg = linarg.find_recombinations()
-    elif recombination_method == "new":
-        raise NotImplementedError
-
-    if make_triangular:
-        linarg = linarg.make_triangular()
-        kept_variants[np.argsort(linarg.variant_indices)] = kept_variants
 
     if output_file_prefix is not None:
         output_file_path = os.path.join(output_file_prefix)

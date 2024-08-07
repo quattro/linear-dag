@@ -482,6 +482,11 @@ cdef class DiGraph:
             yield e.v.index
             e = e.next_out
 
+    cpdef bint has_node(self, int node_index):
+        if node_index >= self.maximum_number_of_nodes or node_index < 0:
+            return 0
+        return self.is_node[node_index]
+
     cpdef int some_parent(self, int node_index):
         return self.nodes[node_index].first_in.u.index
 
@@ -763,13 +768,15 @@ cdef class DiGraph:
         self.remove_node(v)
 
     cdef void collapse_node_with_indegree_one(self, node * v):
+        """Removes a node v and preserves paths from its first parent to all its children; 
+        other parents are ignored"""
         cdef edge * removable_edge = v.first_in
         cdef edge * out_edge
         cdef edge * next_edge
         cdef node * u
 
-        if removable_edge is NULL or removable_edge.next_in is not NULL:
-            raise ValueError("Node does not have in-degree of exactly one.")
+        if removable_edge is NULL:
+            raise ValueError("Node does not have an in-edge.")
 
         u = removable_edge.u
         assert u is not NULL
@@ -782,6 +789,30 @@ cdef class DiGraph:
             out_edge = next_edge
 
         self.remove_node(v)
+
+    cdef void collapse_node_with_outdegree_one(self, node * u):
+        """Removes a node u and preserves paths from its all its parents to its first child; 
+        all other children are ignored """
+        cdef edge * removable_edge = u.first_out
+        cdef edge * in_edge
+        cdef edge * next_edge
+        cdef node * v
+
+        if removable_edge is NULL:
+            raise ValueError("Node does not have an out-edge.")
+
+        v = removable_edge.v
+        assert v is not NULL
+
+        # Redirect each in-edge of u to point to v
+        in_edge = u.first_in
+        while in_edge is not NULL:
+            next_edge = in_edge.next_in
+            self.set_edge_child(in_edge, v)
+            in_edge = next_edge
+
+        self.remove_node(u)
+
 
     cdef int number_of_successors(self, node* u):
         """
@@ -822,71 +853,68 @@ cdef class DiGraph:
             yield e.u.index
             e = e.next_in
 
-cdef class Trie(DiGraph):
-    """
-    A trie is a rooted tree in which each edge represents a letter from some alphabet, and a word is represented
-    by a path beginning at the root node. Here, the trie is assigned a fixed number of terminal nodes (words), and it is
-    used to store similar words but not for word lookup.
-    """
-    # cdef int[:] elements
-    # cdef int[:] termini
-    # cdef int[:] depth
-
-    def __init__(self, int number_of_nodes, int number_of_edges):
-        self.elements = np.zeros(number_of_nodes, dtype=np.intc)
-        self.termini = np.empty(0)
-        self.depth = np.empty(0)
-        super().__init__(number_of_nodes, number_of_edges)
-
-    cdef void initialize_branches(self, int number_of_branches):
-        self.termini = np.arange(number_of_branches)
-        self.depth = np.zeros(number_of_branches)
+    cpdef int[:] out_degree(self):
+        cdef int[:] result = np.zeros(self.maximum_number_of_nodes, dtype=np.intc)
+        cdef node* u
+        cdef edge* e
         cdef int i
-        for i in range(1, 1 + len(self.termini)):
-            self.add_edge(0, i) # 0: root
-
-    cdef void clear_branch(self, int branch_index): # TODO check this doesn't remove root
-        cdef edge* e = self.nodes[self.termini[branch_index]].first_in
-        cdef edge* next_edge
-        while e is not NULL:
-            next_edge = e.u.first_in
-            self.remove_node(e.v)
-            e = next_edge
-            if e.v.first_out is not NULL:
-                break  # this is the source of the branch
-
-        self.add_node(branch_index)
-        self.depth[branch_index] = 0
-
-    cdef void insert_branch(self, int branch_index, int new_branch_index):
-        self.clear_branch(new_branch_index)
-        cdef node* leaf = self.nodes[self.termini[branch_index]]
-        cdef node* new_leaf = self.add_node(-1)
-        self.termini[new_branch_index] = new_leaf.index
-        self.add_edge(leaf.first_in.u.index, new_leaf.index)
-        self.depth[new_branch_index] = self.depth[branch_index]
-
-    cdef void extend_branch(self, int branch_index, int value):
-        cdef node* leaf = self.nodes[self.termini[branch_index]]
-        cdef node* new_node = self.add_node(-1)
-        self.elements[new_node.index] = value
-        self.set_edge_child(leaf.first_in, new_node)
-        self.add_edge(new_node.index, leaf.index)
-        self.depth[branch_index] += 1
-
-    cdef int[:] read_branch(self, int branch_index):
-        cdef int[:] result = np.empty(self.depth[branch_index])
-        cdef node* u = self.nodes[self.termini[branch_index]]
-        cdef int i
-        for i in range(self.depth[branch_index]):
-            u = u.first_in.u
-            result[i] = self.elements[u.index]
+        for i in range(self.maximum_number_of_edges):
+            e = self.edges[i]
+            if e is NULL:
+                continue
+            u = e.u
+            result[u.index] += 1
         return result
 
-    cdef void extend_node_array(self, int new_maximum_number_of_nodes):
-        self.elements.resize(new_maximum_number_of_nodes)
-        super().extend_node_array(new_maximum_number_of_nodes)
+    cpdef int[:] in_degree(self):
+        cdef int[:] result = np.zeros(self.maximum_number_of_nodes, dtype=np.intc)
+        cdef node* v
+        cdef edge* e
+        cdef int i
+        for i in range(self.maximum_number_of_edges):
+            e = self.edges[i]
+            if e is NULL:
+                continue
+            v = e.v
+            result[v.index] += 1
+        return result
 
+    cpdef int[:] reverse_topological_sort(self):
+        """
+        Returns an array of nodes, L, in order such that if L[i] is a descendant of L[j] then i < j
+        """
+        cdef int num_nodes = self.number_of_nodes
+        cdef cnp.ndarray num_unvisited_children = np.asarray(self.out_degree())
+
+        # nodes_to_visit initialized with nodes having out-degree 0
+        cdef Stack nodes_to_visit = Stack()
+        cdef int i
+        for i in np.where(num_unvisited_children == 0)[0]:
+            if self.is_node[i]:
+                nodes_to_visit.push(i)
+
+        cdef int[:] result = np.empty(num_nodes, dtype=np.intc)
+        cdef int node_idx, parent_index
+        cdef edge* in_edge
+        i = 0
+        while nodes_to_visit.length > 0:
+            node_idx = nodes_to_visit.pop()
+            result[i] = node_idx
+            i += 1
+
+            # Add parents to nodes_to_visit once all of their other children have been visited
+            in_edge = self.nodes[node_idx].first_in
+            while in_edge is not NULL:
+                parent_index = in_edge.u.index
+                num_unvisited_children[parent_index] -= 1
+                if num_unvisited_children[parent_index] == 0:
+                    nodes_to_visit.push(parent_index)
+                in_edge = in_edge.next_in
+
+        if i != num_nodes:
+            raise ValueError("DiGraph is not acyclic")
+
+        return result
 
 
 cdef class HeapNode:
