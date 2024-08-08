@@ -35,7 +35,7 @@ def remove_undirected_edges(adjacency_matrix):
     return result
 
 
-def linearize_brick_graph(brick_graph_closure: csr_matrix) -> csr_matrix:
+def linearize_brick_graph_adjacency(brick_graph_closure: csr_matrix) -> csr_matrix:
     brick_graph_closure = remove_undirected_edges(brick_graph_closure)
     row_counts = np.diff(brick_graph_closure.indptr)
     triangular_order = np.argsort(-row_counts)
@@ -71,8 +71,8 @@ def add_samples_to_linear_arg(genotypes: csc_matrix, initial_linear_arg: csr_mat
 
 def add_samples_to_brick_graph_closure(genotypes: csc_matrix, brick_graph_closure: csr_matrix) -> csr_matrix:
     n, m = genotypes.shape
-    result = vertcat(csr_matrix(genotypes), brick_graph_closure)
-    result = pad_leading_zeros(result, n)
+    result = vertcat(brick_graph_closure, csr_matrix(genotypes))
+    result = pad_trailing_zeros(result, n)
     return result
 
 
@@ -82,6 +82,8 @@ def vertcat(A: csr_matrix, B: csr_matrix) -> csr_matrix:
     data = np.concatenate((A.data, B.data))
     return csr_matrix((data, indices, indptrs), shape=(A.shape[0] + B.shape[0], A.shape[1]))
 
+def pad_trailing_zeros(A:csr_matrix, num_cols: int) -> csr_matrix:
+    return csr_matrix((A.data, A.indices, A.indptr), shape=(A.shape[0], num_cols + A.shape[1]))
 
 def pad_leading_zeros(A: csr_matrix, num_cols: int) -> csr_matrix:
     return csr_matrix((A.data, A.indices + num_cols, A.indptr), shape=(A.shape[0], num_cols + A.shape[1]))
@@ -116,11 +118,16 @@ def add_samples_to_initial_brick_graph(genotypes: csc_matrix, brick_graph: csr_m
 def closure_transitive_reduction(transitive_graph: csr_matrix) -> csr_matrix:
     if np.any(transitive_graph.data != 1):
         raise ValueError("Edge weights of the transitive graph should be one")
-    number_of_paths = path_sum(transitive_graph)
-    number_of_paths.data[number_of_paths.data != 1] = 0
-    number_of_paths.eliminate_zeros()
-    return number_of_paths
+    if np.any(transitive_graph.diagonal() != 0):
+        raise ValueError("Diagonal of the transitive graph should be 0")
 
+    result = transitive_graph - (transitive_graph @ transitive_graph > 0)
+    result.eliminate_zeros()
+
+    if np.any(result.data != 1):
+        raise ValueError("Input graph was not transitive")
+
+    return result
 
 def transitive_closure(graph: csr_matrix) -> csr_matrix:
     number_of_paths = path_sum(graph)
