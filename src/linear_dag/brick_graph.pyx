@@ -8,7 +8,8 @@ cdef int MAXINT = 2147483647
 
 cdef class BrickGraph:
     """
-    Implements the brick graph algorithm.
+    Implements the brick graph algorithm. Usage:
+    brick_graph, sample_indices, variant_indices = BrickGraph.from_genotypes(genotype_matrix)
     """
     cdef DiGraph graph
     cdef DiGraph tree
@@ -20,6 +21,49 @@ cdef class BrickGraph:
     cdef int num_samples
     cdef int num_variants
     cdef int direction
+
+    @staticmethod
+    def from_genotypes(genotypes: csc_matrix, add_samples: bool = True) -> tuple[DiGraph, int[:], int[:]]:
+        """
+        Runs the brick graph algorithm on a genotype matrix
+        :param genotypes: sparse genotype matrix in csc_matrix format; rows=samples, columns=variants. Order of variants
+        matters, order of samples does not.
+        :param add_samples: whether to add nodes to the brick graph for the sample haplotypes.
+        """
+        num_samples, num_variants = genotypes.shape
+
+        # Forward pass
+        cdef BrickGraph forward_graph = BrickGraph(num_samples, num_variants)
+        forward_graph.direction = 1
+        cdef int i
+        for i in range(num_variants):
+            carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i + 1]]
+            forward_graph.intersect_clades(carriers, i)
+
+        # Add samples
+        cdef int[:] sample_indices
+        if add_samples:
+            sample_indices =  np.arange(num_variants, num_variants+num_samples, dtype=np.intc)
+            for i in range(num_samples):
+                forward_graph.add_edges_from_subsequence(i, sample_indices[i])
+        else:
+            sample_indices = np.array([])
+
+        # Backward pass
+        cdef BrickGraph backward_graph = BrickGraph(num_samples, num_variants)
+        backward_graph.direction = -1
+        for i in reversed(range(num_variants)):
+            carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i+1]]
+            backward_graph.intersect_clades(carriers, i)
+
+        # For variants i,j with paths i->j and also j->i, combine them into a single node
+        cdef int[:] variant_indices = combine_cliques(forward_graph.graph, backward_graph.graph)
+
+        # Transitive reduction of the union of the forward and reverse graphs
+        # TODO this still leaves a very small number of transitive edges
+        cdef DiGraph brick_graph = reduction_union(forward_graph.graph, backward_graph.graph)
+
+        return brick_graph, sample_indices, variant_indices[:num_variants]
 
     def __cinit__(self, int num_samples, int num_variants):
         cnp.import_array()
@@ -44,69 +88,24 @@ cdef class BrickGraph:
         self.clade_size[self.root] = self.num_samples
         self.subsequence = LinkedListArray(self.tree.maximum_number_of_nodes)
 
-    @staticmethod
-    def from_genotypes(genotypes: csc_matrix) -> DiGraph:
-        num_samples, num_variants = genotypes.shape
-
-        # Forward pass
-        forward_graph = BrickGraph(num_samples, num_variants)
-        forward_graph.direction = 1
-        cdef int i
-        for i in range(num_variants):
-            carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i + 1]]
-            forward_graph.intersect_clades(carriers, i)
-
-        # Add samples
-        for i in range(num_samples):
-            forward_graph.add_edges_from_subsequence(i, i + num_variants)
-
-        # Backward pass
-        backward_graph = BrickGraph(num_samples, num_variants)
-        backward_graph.direction = -1
-        for i in reversed(range(num_variants)):
-            carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i+1]]
-            backward_graph.intersect_clades(carriers, i)
-
-        # Transitive reduction of their union
-        prune_back_edges(forward_graph.graph, backward_graph.graph)
-        return reduction_union(forward_graph.graph, backward_graph.graph)
-
-
-    def to_csr(self) -> csr_matrix:
-        edge_list = self.graph.edge_list()
-        if len(edge_list) > 0:
-            parents, children = zip(*edge_list)
-        else:
-            parents, children = [], []
-        result = csr_matrix((np.ones(len(edge_list)), (children, parents)),
-                          shape=(self.num_variants, self.num_variants))
-        result.setdiag(1)
-        return result
-
-    def edge_list(self) -> list:
-        return self.graph.edge_list()
 
     cpdef void intersect_clades(self, int[:] new_clade, int clade_index):
         """
         Adds a new clade to a rooted tree and splits existing clades if they intersect with the new clade. Returns the
         lowest common ancestor from the previous tree of nodes in the new clade.
-        :param new_clade: integer-valued numpy array
-        :param clade_index: integer identifier for the new clade
-        :return: lowest common ancestor of nodes in new_clade
         """
         cdef int new_clade_size = len(new_clade)
         if new_clade_size == 0:
             return
 
-        # Compute bottom-up ordering of nodes; update self.visits to tell number of leaves descended from each node
+        # Find LCA of the clade while tracking in self.num_visits the number of carriers descended from each node
         cdef node * lowest_common_ancestor = self.partial_traversal(new_clade)
-        self.times_revisited.clear()
         assert lowest_common_ancestor is not NULL
 
-        # Create edges to the new clade from the variants whose intersection forms the LCA
         self.add_edges_from_subsequence(lowest_common_ancestor.index, clade_index)
 
         cdef IntegerList traversal = IntegerList(2 * len(new_clade))
+        self.times_revisited.clear()
         cdef int i
         for i in new_clade:
             traversal.push(i)
@@ -137,10 +136,9 @@ cdef class BrickGraph:
 
             # No unvisited children: means intersect(v, new_clade) == v
             if self.times_visited[node_idx] == self.clade_size[node_idx]:
-                # self.subsequence.extend(node_idx, clade_index)
                 continue
 
-            visited_children, unvisited_children = self.get_visited_children(v)  # TODO avoid unvisited children?
+            visited_children, unvisited_children = self.get_visited_children(v)
             num_children_unvisited, num_children_visited = unvisited_children.length, visited_children.length
             assert num_children_unvisited > 0
 
@@ -150,8 +148,6 @@ cdef class BrickGraph:
                 child_node = self.tree.add_node(-1)
                 assert child_node.index < 2 * self.num_samples
                 self.clade_size[child_node.index] = new_clade_size
-                # self.subsequence.copy_list(node_idx, child_node.index)
-                # self.subsequence.extend(child_node.index, clade_index)
 
                 self.tree.add_edge(node_idx, child_node.index)
                 while visited_children.length > 0:
@@ -191,7 +187,6 @@ cdef class BrickGraph:
                 i = unvisited_children.pop()
                 unvisited_edge = self.tree.nodes[i].first_in
                 self.tree.set_edge_parent(unvisited_edge, parent_of_v)
-                # self.subsequence.extend(node_idx, clade_index)  # v is now a subset of the new clade
                 self.subsequence.copy_list(node_idx, i)
                 self.clade_size[node_idx] -= self.clade_size[i]
                 continue
@@ -202,8 +197,6 @@ cdef class BrickGraph:
             assert sibling_node.index < self.num_samples * 2
             self.times_visited.set_element(sibling_node.index, 0)
             self.subsequence.copy_list(node_idx, sibling_node.index)
-            # self.subsequence.extend(node_idx, clade_index)
-            # self.clade_variants.copy_list(node_idx, sibling_node.index)
             self.tree.add_edge(parent_of_v.index, sibling_node.index)
             while unvisited_children.length > 0:
                 child = unvisited_children.pop()
@@ -218,9 +211,8 @@ cdef class BrickGraph:
 
     cdef node* partial_traversal(self, int[:] leaves):
         """
-        Returns lowest common ancestor of 
-        :param leaves: indices of leaf nodes
-        :return: queue of nodes such pop() returns all children in the queue before returning a parent
+        Finds the lowest common ancestor of an array of leaves in the tree. For all descendants of the LCA, counts
+        the number of leaves that are descended from them. 
         """
         self.times_visited.clear()
         cdef int num_leaves = len(leaves)
@@ -246,8 +238,12 @@ cdef class BrickGraph:
         cdef node * lowest_common_ancestor = v
         return lowest_common_ancestor
 
-    cdef void add_edges_from_subsequence(self, int add_from, int add_to):
-        cdef int tree_node = add_from
+    cdef void add_edges_from_subsequence(self, int subsequence_index, int node_index):
+        """
+        Adds edges in self.graph from every node u_k in a subsequence to a node, but only if for all succeeding
+        nodes u_j, j>k, there is no path u_k->u_j.
+        """
+        cdef int tree_node = subsequence_index
         cdef list_node * place_in_list
         cdef int last_variant_found = -MAXINT * self.direction
         cdef int variant_idx
@@ -256,16 +252,17 @@ cdef class BrickGraph:
             while place_in_list != NULL:
                 variant_idx = place_in_list.value
                 if variant_idx * self.direction > last_variant_found * self.direction:
-                    self.graph.add_edge(variant_idx, add_to)
+                    self.graph.add_edge(variant_idx, node_index)
                     last_variant_found = variant_idx
                 place_in_list = place_in_list.next
             if self.tree.nodes[tree_node].first_in is NULL:
                 break
             tree_node = self.tree.nodes[tree_node].first_in.u.index
 
-    # cdef walk_to_root(self, node* v)
-
     cdef tuple[Stack, Stack] get_visited_children(self, node* v):
+        """
+        Separates the children of node v into those with and without variant carriers as descendants.
+        """
         cdef Stack visited_children = Stack()
         cdef Stack unvisited_children = Stack()
         cdef int child
@@ -279,48 +276,102 @@ cdef class BrickGraph:
                 unvisited_children.push(child)
         return visited_children, unvisited_children
 
-    cdef void create_new_root(self):
-        cdef node* new_root = self.tree.add_node(-1)
-        assert new_root.index < self.num_samples * 2
-        self.tree.add_edge(new_root.index, self.root)
-        self.subsequence.copy_list(self.root, new_root.index)
-        self.root = new_root.index
-        self.clade_size[self.root] = self.num_samples
-
-    def get_tree(self) -> DiGraph:
-        return self.tree
-
-    def get_graph(self) -> DiGraph:
-        return self.graph
-
-    def get_subsequence(self, node: int) -> cnp.ndarray:
-        return self.subsequence.extract(node)
-
-
-cpdef void prune_back_edges(DiGraph forward_graph, DiGraph backward_graph):
+cpdef int[:] combine_cliques(DiGraph forward_graph, DiGraph backward_graph):
     """
-    Prunes edges (v,u) from backward_graph if (u,v) is an edge of forward_graph; modifies backward_graph in-place.
+    Finds sequences u<v<...<w connected via edges (u,v),(v,...,w) in the forward graph and (w,...,v),(v,u) in the
+    backward graph. Collapses these into a single node and returns an array of node assignments.
     """
-    cdef int num_nodes = max(forward_graph.maximum_number_of_nodes, backward_graph.maximum_number_of_nodes)
-    cdef IntegerSet neighbors = IntegerSet(num_nodes)
+    cdef int num_nodes = backward_graph.maximum_number_of_nodes
+    cdef int[:] result = np.arange(num_nodes, dtype=np.intc)
     cdef int node_index
+    cdef int neighbor_index
+    cdef int neighbor_of_neighbor
+    cdef IntegerSet neighbors = IntegerSet(forward_graph.maximum_number_of_nodes)
     cdef node * current_node
     cdef node * backward_node
     cdef edge * current_edge
-    cdef edge * next_edge
+    cdef edge * back_edge
     for node_index in range(num_nodes):
-        neighbors.clear()
-        current_edge = forward_graph.nodes[node_index].first_in
-        while current_edge is not NULL:
-            neighbors.add(current_edge.u.index)
-            current_edge = current_edge.next_in
+        if not forward_graph.is_node[node_index]:
+            continue
+        assert backward_graph.is_node[node_index]
 
-        current_edge = backward_graph.nodes[node_index].first_out
-        while current_edge is not NULL:
-            next_edge = current_edge.next_out
-            if neighbors.contains(current_edge.v.index):
-                backward_graph.remove_edge(current_edge)
-            current_edge = next_edge
+        # If some neighbor of the current node has a back-edge to the current node as well, then it must be the first
+        # neighbor due to the order in which edges are added (last in, first out)
+        current_edge = forward_graph.nodes[node_index].first_out
+        if current_edge is NULL:
+            continue
+        neighbor_index = current_edge.v.index
+        assert backward_graph.is_node[neighbor_index]
+
+        # Similarly, back edge is the first if it exists
+        back_edge = backward_graph.nodes[neighbor_index].first_out
+        if back_edge is NULL:
+            continue
+        neighbor_of_neighbor = back_edge.v.index
+        if not neighbor_of_neighbor == node_index:
+            continue
+
+        # Remove node_index from each graph, assigning its incoming edges in the forward graph and its outgoing
+        # edges in the backward graph to its neighbor
+        contract_edge(current_edge, back_edge, forward_graph, backward_graph, neighbors)
+        result[node_index] = neighbor_index
+
+    # If a clique u<v<w has size >2, assign u to w instead of v
+    for node_index in reversed(range(num_nodes)):
+        result[node_index] = result[result[node_index]]
+
+    return result
+
+cdef void contract_edge(edge* forward_edge,
+                        edge* backward_edge,
+                        DiGraph forward_graph,
+                        DiGraph backward_graph,
+                        IntegerSet neighbors):
+    """
+    Contract the edges between u and v in the forward graph and v and u in the backward graph. In the forward graph, 
+    in-neighbors w of u are added as in-neighbors of v if for all w' with an edge (w', u) in the backward graph, 
+    (w, w') is not an edge of the forward graph. This ensures that there is no other path w, w', ..., v in the
+    forward graph. In the backward graph, out-neighbors of u are handled similarly.
+    """
+    u_idx = forward_edge.u.index
+    v_idx = forward_edge.v.index
+    assert u_idx == backward_edge.v.index
+    assert v_idx == backward_edge.u.index
+    cdef edge* e
+    cdef node* w
+
+    # For edges (w, u) in the forward graph, add an edge (w, v) if for all w' with an edge (w', u) in the backward
+    # graph, (w, w') is not an edge of the forward graph
+    neighbors.clear()
+    search_two_hops_backward(neighbors, backward_graph, forward_graph, u_idx)
+    assert neighbors.contains(u_idx)
+    cdef edge* e_wu = forward_edge.u.first_in
+    cdef edge* next_edge
+    while e_wu is not NULL:
+        w = e_wu.u
+        next_edge = e_wu.next_in
+        if not neighbors.contains(w.index):
+            forward_graph.set_edge_child(e_wu, forward_edge.v)
+        e_wu = next_edge
+
+    # For edges (u, w) in the backward graph, add an edge (v, w) if for all w' with an edge (u, w') in the forward
+    # graph, (w', w) is not an edge of the backward graph
+    neighbors.clear()
+    search_two_hops(neighbors, forward_graph, backward_graph, u_idx)
+    assert neighbors.contains(u_idx)
+    cdef edge* e_uw = backward_edge.v.first_out
+    while e_uw is not NULL:
+        w = e_uw.v
+        next_edge = e_uw.next_out
+        if not neighbors.contains(w.index):
+            backward_graph.set_edge_parent(e_uw, backward_edge.u)
+        e_uw = next_edge
+
+    forward_graph.remove_node(forward_edge.u)
+    backward_graph.remove_node(backward_edge.v)
+
+
 
 cpdef DiGraph reduction_union(DiGraph forward_reduction, DiGraph backward_reduction):
     """
@@ -358,18 +409,47 @@ cpdef DiGraph reduction_union(DiGraph forward_reduction, DiGraph backward_reduct
 
 # Subroutines of reduction_union
 cdef void search_two_hops(IntegerSet result, DiGraph first_graph, DiGraph second_graph, int starting_node_index):
+    """
+    Searches from a starting node u to find nodes w such that for some v, (u,v) is an edge of first_graph and (v,w)
+    is an edge of second_graph.
+    """
     cdef node * starting_node = first_graph.nodes[starting_node_index]
     cdef edge * first_hop
     cdef edge * second_hop
     first_hop = starting_node.first_out
     while first_hop is not NULL:
+        if not second_graph.has_node(first_hop.v.index):
+            first_hop = first_hop.next_out
+            continue
         second_hop = second_graph.nodes[first_hop.v.index].first_out
         while second_hop is not NULL:
             result.add(second_hop.v.index)
             second_hop = second_hop.next_out
         first_hop = first_hop.next_out
 
+cdef void search_two_hops_backward(IntegerSet result, DiGraph first_graph, DiGraph second_graph, int starting_node_index):
+    """
+    Searches from a starting node u to find nodes w such that for some v, (v,u) is an edge of first_graph and (w,v)
+    is an edge of second_graph.
+    """
+    cdef node * starting_node = first_graph.nodes[starting_node_index]
+    cdef edge * first_hop
+    cdef edge * second_hop
+    first_hop = starting_node.first_in
+    while first_hop is not NULL:
+        if not second_graph.has_node(first_hop.u.index):
+            first_hop = first_hop.next_in
+            continue
+        second_hop = second_graph.nodes[first_hop.u.index].first_in
+        while second_hop is not NULL:
+            result.add(second_hop.u.index)
+            second_hop = second_hop.next_in
+        first_hop = first_hop.next_in
+
 cdef void add_nonredundant_neighbors(DiGraph result, node * starting_node, IntegerSet neighbors_to_exclude):
+    """
+    Copies neighbors of starting_node to the graph result, except for those in neighbors_to_exclude.
+    """
     cdef edge * out_edge = starting_node.first_out
     while out_edge is not NULL:
         if not neighbors_to_exclude.contains(out_edge.v.index):
