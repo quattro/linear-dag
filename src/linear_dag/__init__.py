@@ -32,7 +32,7 @@ from .linear_arg_inference import (
     add_samples_to_linear_arg as add_samples_to_linear_arg,
     add_singleton_variants as add_singleton_variants,
     infer_brick_graph_using_containment as infer_brick_graph_using_containment,
-    linearize_brick_graph as linearize_brick_graph,
+    linearize_brick_graph_adjacency as linearize_brick_graph_adjacency,
 )
 from .lineararg import (
     LinearARG as LinearARG,
@@ -51,6 +51,9 @@ from .solve import (
 )
 from .trios import (
     Trios as Trios,
+)
+from .recombination import (
+    Recombination as Recombination,
 )
 
 
