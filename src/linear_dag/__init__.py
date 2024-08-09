@@ -55,7 +55,11 @@ from .trios import (
 from .recombination import (
     Recombination as Recombination,
 )
-
+from .dna_nexus import (
+    find_shapeit200k_vcf as find_shapeit200k_vcf,
+    download_vcf as download_vcf,
+    vcf_to_csc as vcf_to_csc
+)
 
 try:
     # Change here if project is renamed and does not equal the package name
