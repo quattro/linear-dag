@@ -1,12 +1,34 @@
 import dxpy
 import numpy as np
 import pyspark
+from cyvcf2 import VCF
 
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, csc_matrix
 
 from .genotype import read_vcf
 from .lineararg import LinearARG
 
+PROJECT_ID = 'project-GfvX1pjJg9g7QV7qfYG0fjFv'
+
+
+def find_shapeit200k_vcf(chromosome_number: int) -> tuple:
+    directory_path = '/Bulk/Previous WGS releases/GATK and GraphTyper WGS/SHAPEIT Phased VCFs'
+    file_pattern = f'ukb20279_c{chromosome_number}_b0_v1.vcf.gz'
+    vcf_files = dxpy.find_data_objects(classname='file',
+                                       project=PROJECT_ID,
+                                       folder=directory_path,
+                                       name=file_pattern, name_mode='glob',
+                                       describe=True)
+
+    file_pattern = f'ukb20279_c{chromosome_number}_b0_v1.vcf.gz.tbi'
+    tabix_files = dxpy.find_data_objects(classname='file',
+                                         project=PROJECT_ID,
+                                         folder=directory_path,
+                                         name=file_pattern, name_mode='glob',
+                                         describe=True)
+    vcf_object = next(vcf_files)
+    tabix_object = next(tabix_files)
+    return vcf_object, tabix_object
 
 def download_from_dx(dx_data_object, local_file_name):
     file_id = dx_data_object["id"]
@@ -14,18 +36,60 @@ def download_from_dx(dx_data_object, local_file_name):
     dxpy.download_dxfile(file_id, local_file_name, project=project_id)
 
 
-# Function to download and read a single VCF file
-def process_vcf(vcf_dx_data_object: dict, tabix_dx_data_object: dict = None, region: str = None) -> csr_matrix:
+def download_vcf(vcf_dx_data_object: dict,
+                tabix_dx_data_object: dict = None) -> str:
+
     vcf_file_name = vcf_dx_data_object["describe"]["name"]
+    project_id = vcf_dx_data_object["describe"]["project"]
     download_from_dx(vcf_dx_data_object, vcf_file_name)
 
     if tabix_dx_data_object is not None:
         tabix_file_name = tabix_dx_data_object["describe"]["name"]
         download_from_dx(tabix_dx_data_object, tabix_file_name)
 
-    sparse_matrix, variant_info = read_vcf(vcf_file_name, region)
+    # sparse_matrix, variant_info = vcf_to_csc(vcf_file_name, region, phased=phased)
+    return vcf_file_name
 
-    return sparse_matrix, variant_info
+def vcf_to_csc(path: str, region: str, phased: bool = False, flip_minor_alleles: bool = True) -> tuple[csc_matrix, np.ndarray, list[dict]]:
+    """
+    Codes unphased genotypes as 0/1/2/3, where 3 means that at least one of the two alleles is unknown.
+    Codes phased genotypes as 0/1, and there are 2n rows, where rows 2*k and 2*k+1 correspond to individual k.
+    """
+    vcf = VCF(path, gts012=True, strict_gt=True)
+    data = []
+    idxs = []
+    ptrs = [0]
+    info = []
+    flip = []
+
+    ploidy = 1 if phased else 2
+
+    # TODO: handle missing data
+    for var in vcf(region):
+        if phased:
+            gts = np.ravel(np.asarray(var.genotype.array())[:, :2])
+        else:
+            gts = var.gt_types
+        if flip_minor_alleles:
+            af = np.mean(gts) / ploidy
+            if af > 0.5:
+                gts = ploidy - gts
+                flip.append(True)
+            else:
+                flip.append(False)
+
+        (idx,) = np.where(gts != 0)
+        data.append(gts[idx])
+        idxs.append(idx)
+        ptrs.append(ptrs[-1] + len(idx))
+        info.append(var.INFO)
+
+    data = np.concatenate(data)
+    idxs = np.concatenate(idxs)
+    ptrs = np.array(ptrs)
+    genotypes = csc_matrix((data, idxs, ptrs))
+    flip = np.array(flip)
+    return genotypes, flip, info
 
 
 def process_directory(directory_path):
@@ -49,68 +113,6 @@ def process_directory(directory_path):
     vcf_rdd.map(process_vcf)
 
 
-def download_mtx(
-    genotypes_directory: str, metadata_directory: str, which_files: tuple[int, int] = None
-) -> tuple[list, list]:
-    from itertools import islice
-
-    project_id = "project-GfvX1pjJg9g7QV7qfYG0fjFv"
-
-    # Find .mtx files to download
-    dx_data_objects_mtx = dxpy.find_data_objects(
-        classname="file",
-        project=project_id,
-        folder=genotypes_directory,
-        recurse=False,
-        name="*.mtx",
-        name_mode="glob",
-        describe=True,
-    )
-
-    dx_data_objects_mtx = islice(dx_data_objects_mtx, *which_files)
-
-    mtx_files = []
-    metadata_files = []
-    for dx_data_object in dx_data_objects_mtx:
-        # Download the .mtx file
-        file_id = dx_data_object["id"]
-        local_file_name = dx_data_object["describe"]["name"]
-        dxpy.download_dxfile(file_id, local_file_name, project=project_id)
-        mtx_files.append(local_file_name)
-
-        # Find and download corresponding metadata file
-        metadata_file_name = local_file_name.split(".vcf.gz")[0] + ".vcf.gz.metadata.txt"
-        metadata_file_data = dxpy.find_data_objects(
-            classname="file",
-            project=project_id,
-            folder=metadata_directory,
-            recurse=False,
-            name=metadata_file_name,
-            describe=False,
-        )
-        try:
-            metadata_file_data = next(metadata_file_data)
-        except StopIteration:
-            raise FileNotFoundError(f"Did not find metadata for file {local_file_name}")
-
-        dxpy.download_dxfile(metadata_file_data["id"], filename=metadata_file_name)
-        metadata_files.append(metadata_file_name)
-
-    return mtx_files, metadata_files
-
-
-def load_mtx(mtx_files: list[str], metadata_files: list[str]) -> tuple:
-    from scipy.io import mmread
-    from scipy.sparse import csc_matrix, hstack
-
-    matrices = [mmread(mtx_file).astype(np.intc) for mtx_file in mtx_files]
-    genotype_matrix = csc_matrix(hstack(matrices))
-
-    metadata = load_metadata_to_dict(metadata_files)
-
-    return genotype_matrix, metadata
-
-
 def load_metadata_to_dict(files) -> dict:
     # Initialize a dictionary to hold our metadata
     metadata = {"chromosome": [], "position": [], "ref": [], "alt": []}
@@ -131,18 +133,3 @@ def load_metadata_to_dict(files) -> dict:
                 metadata["alt"].append(alt)
 
     return metadata
-
-
-def run_dnanexus_infer_linarg_workflow(which_files, output_filename) -> None:
-    mtx_files = download_mtx("genotypes/", "genotype_metadata/", which_files)
-    genotypes, metadata = load_mtx(mtx_files)
-
-    # discard singleton and monomorphic alleles
-    include_variant = np.diff(genotypes.indptr) > 1
-    genotypes = genotypes[:, include_variant]
-    metadata = {key: val[include_variant] for key, val in metadata.items()}
-
-    linarg = LinearARG.from_genotypes(genotypes)
-    linarg = linarg.find_recombinations()
-    linarg = linarg.make_triangular()
-    linarg.write(output_filename)
