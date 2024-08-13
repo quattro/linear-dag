@@ -60,7 +60,6 @@ cdef class BrickGraph:
         cdef int[:] variant_indices = combine_cliques(forward_graph.graph, backward_graph.graph)
 
         # Transitive reduction of the union of the forward and reverse graphs
-        # TODO this still leaves a very small number of transitive edges
         cdef DiGraph brick_graph = reduction_union(forward_graph.graph, backward_graph.graph)
 
         return brick_graph, sample_indices, variant_indices[:num_variants]
@@ -332,17 +331,42 @@ cdef void contract_edge(edge* forward_edge,
     Contract the edges between u and v in the forward graph and v and u in the backward graph. In the forward graph, 
     in-neighbors w of u are added as in-neighbors of v if for all w' with an edge (w', u) in the backward graph, 
     (w, w') is not an edge of the forward graph. This ensures that there is no other path w, w', ..., v in the
-    forward graph. In the backward graph, out-neighbors of u are handled similarly.
+    forward graph. In the backward graph, out-neighbors of u are handled similarly. Additionally, edges are added
+    between forward graph in-neighbors w of u and out-neighbors w' of u if w' < v; similarly, between backward graph
+    in-neighbors w of u and out-neighbors w' of u if w < v. 
     """
     u_idx = forward_edge.u.index
     v_idx = forward_edge.v.index
     assert u_idx == backward_edge.v.index
     assert v_idx == backward_edge.u.index
-    cdef edge* e
+    cdef edge* e_in
+    cdef edge* e_out
     cdef node* w
+
+    # Add edges between forward graph in-neighbors w of u and out-neighbors w' of u if w' < v
+    e_in = forward_edge.u.first_in
+    while e_in is not NULL:
+        e_out = forward_edge.u.first_out
+        while e_out is not NULL:
+            if e_out.v.index < v_idx:
+                add_nontransitive_edge(forward_graph, e_in.u.index, e_out.v.index, u_idx)
+            e_out = e_out.next_out
+        e_in = e_in.next_in
+
+    # Add edges between backward graph in-neighbors w of u and out-neighbors w' of u if w < v
+    e_in = backward_edge.v.first_in
+    while e_in is not NULL:
+        if e_in.u.index < v_idx:
+            e_out = backward_edge.v.first_out
+            while e_out is not NULL:
+                add_nontransitive_edge(backward_graph, e_in.u.index, e_out.v.index, u_idx)
+                e_out = e_out.next_out
+        e_in = e_in.next_in
 
     # For edges (w, u) in the forward graph, add an edge (w, v) if for all w' with an edge (w', u) in the backward
     # graph, (w, w') is not an edge of the forward graph
+    # The previous step does not interfere with this because if w' has an edge (w', u) (backward), there is not also
+    # an edge (u, w') (forward).
     neighbors.clear()
     search_two_hops_backward(neighbors, backward_graph, forward_graph, u_idx)
     assert neighbors.contains(u_idx)
@@ -371,6 +395,35 @@ cdef void contract_edge(edge* forward_edge,
     forward_graph.remove_node(forward_edge.u)
     backward_graph.remove_node(backward_edge.v)
 
+cdef edge* add_nontransitive_edge(DiGraph graph, int u_idx, int v_idx, int skip_node):
+    """
+    Adds an edge between u and v if there is not already a path u, w_1,...,w_n, v with u < w_k < v or u > w_k > v. 
+    Skips over skip_node when searching.
+    :return: the edge, or NULL if a path was found
+    """
+    # Search for descendants of u
+    cdef int direction = 1 if u_idx < v_idx else -1
+    cdef edge * e
+    cdef int node
+    cdef Stack nodes_to_visit = Stack()
+    nodes_to_visit.push(u_idx)
+    while nodes_to_visit.length > 0:
+        node = nodes_to_visit.pop()
+
+        e = graph.nodes[node].first_out
+        while e is not NULL:
+            assert direction * e.v.index > direction * u_idx
+            if e.v.index == skip_node:
+                pass
+            elif direction * e.v.index < direction * v_idx:
+                nodes_to_visit.push(e.v.index)
+            elif e.v.index == v_idx:
+                return <edge *> NULL
+            e = e.next_out
+
+    # v was not found
+    # print(u_idx, v_idx)
+    return graph.add_edge(u_idx, v_idx)
 
 
 cpdef DiGraph reduction_union(DiGraph forward_reduction, DiGraph backward_reduction):
