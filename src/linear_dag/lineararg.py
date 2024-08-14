@@ -1,6 +1,6 @@
 # lineararg.py
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple, List
 
 import numpy as np
 
@@ -233,35 +233,109 @@ class LinearARG:
     #         x[i, self.sample_indices[index]] = 1
     #     return x * self.data
 
-    def write(self, filename_prefix: str, variant_metadata: dict = None) -> None:
+    def write(self, filename_prefix: str, chrom: str, positions: list, refs: list, alts: list,
+              sample_filename: Optional[str] = None, iids: Optional[list] = None) -> None:
         """
-        Writes LinearARG to a trio of files, filename_prefix + ['.mtx', '.samples.txt', '.mutations.txt'].
-        :param filename_prefix: where to save.
-        :param variant_metadata: dictionary of lists containing metadata to be saved in *.mutations.txt. Fields
-        will be saved with keys as column headers and values as column values. Length of each list should equal number
-        of variants.
+        Writes LinearARG data in PLINK2 format, optionally writes sample information.
+        :param filename_prefix: The base path and prefix used for output files.
+        :param chrom: The chromosome number or identifier where the variants are located, e.g. "chr1".
+        :param positions: A list of integers representing the genomic positions of each variant.
+        :param refs: A list of strings representing the reference alleles for each variant.
+        :param alts: A list of strings representing the alternate alleles for each variant.
+        :param sample_filename: Optional filename for writing sample data. If provided, a .psam file will be generated
+        containing sample identifiers.
+        :param iids: Optional list of individual identifiers corresponding to samples. If provided, these identifiers
+        are used in the .psam file.
+        :return: None
         """
-        if variant_metadata is None:
-            variant_metadata = {"variant": list(range(1, len(self.variant_indices) + 1))}
-        # Write samples
-        with open(filename_prefix + ".samples.txt", "w") as f_samples:
-            f_samples.write("index\n")
-            for sample in self.sample_indices:
-                f_samples.write(f"{sample + 1}\n")
+        if sample_filename:
+            with open(f"{sample_filename}.psam", "w") as f_samples:
+                f_samples.write("#IID IDX\n")
+                if iids is None:
+                    iids = [f"sample_{idx}" for idx in range(self.shape[0])]
+                for i, iid in enumerate(iids):
+                    f_samples.write(f"{iid} {self.sample_indices[i]}\n")
 
-        # Write variants
-        with open(filename_prefix + ".mutations.txt", "w") as f_variants:
-            for key in variant_metadata.keys():
-                f_variants.write(f"{key},")
-            f_variants.write("index,flip\n")
-            for line in zip(self.variant_indices, self.flip, *variant_metadata.values()):
-                index, flip, variant = line[0], line[1], line[2:]
-                for value in variant:
-                    f_variants.write(f"{value},")
-                f_variants.write(f"{index + 1},{int(flip)}\n")
+        with open(f"{filename_prefix}.pvar", "w") as f_variants:
+            f_variants.write("##fileformat=PVARv1.0\n")
+            f_variants.write("##INFO=<ID=IDX,Number=1,Type=Integer,Description=\"Variant Index\">\n")
+            f_variants.write("##INFO=<ID=FLIP,Number=1,Type=Integer,Description=\"Flip Information\">\n")
+            f_variants.write("#CHROM POS ID REF ALT INFO\n")
+            for idx, pos, ref, alt, flip in zip(self.variant_indices, positions, refs, alts, self.flip):
+                f_variants.write(f"{chrom} {pos} . {ref} {alt} IDX={idx};FLIP={int(flip)}\n")
 
-        # Write the matrix A
-        mmwrite(filename_prefix + ".mtx", self.A)
+        from scipy.sparse import save_npz
+        save_npz(f"{filename_prefix}.npz", self.A)
+
+    @staticmethod
+    def read(adjacency_matrix_file: str, variants_file: str, samples_file: str) -> Tuple[
+        "LinearARG", List[str], List[str]]:
+        """
+        Reads LinearARG data from provided PLINK2 formatted files.
+
+        :param adjacency_matrix_file: Filename for the .npz file containing the adjacency matrix.
+        :param variants_file: Filename for the .pvar file containing variant data.
+        :param samples_file: Filename for the .psam file containing sample IDs.
+        :return: A tuple containing the LinearARG object, list of variant IDs, and list of IIDs.
+        """
+
+        def parse_info(info_str: str) -> Tuple[int, int]:
+            """ Parses the INFO string to extract IDX and FLIP values. """
+            info_parts = info_str.split(';')
+            info_dict = {part.split('=')[0]: int(part.split('=')[1]) for part in info_parts if '=' in part}
+            return info_dict.get('IDX', -1), info_dict.get('FLIP', 0)
+
+        # Load the adjacency matrix
+        from scipy.sparse import load_npz
+        A = load_npz(adjacency_matrix_file)
+
+        # Read variant data
+        variants = []
+        variant_ids = []
+        flips = []
+        with open(variants_file, 'r') as f_var:
+            headers = {}
+            for line in f_var:
+                if line.startswith('##'):
+                    continue
+                if not headers:
+                    headers = {key: idx for idx, key in enumerate(line.strip().split())}
+                    continue
+                parts = line.strip().split()
+                chrom = parts[headers['#CHROM']]
+                pos = parts[headers['POS']]
+                ref = parts[headers['REF']]
+                alt = parts[headers['ALT']]
+                idx, flip = parse_info(parts[headers['INFO']])
+                variant_ids.append(f"{chrom}_{pos}_{ref}_{alt}")
+                variants.append(idx)
+                flips.append(flip)
+
+        variant_indices = np.array(variants)
+        flip = np.array(flips)
+
+        # Read sample data
+        iids = []
+        indices = []
+        with open(samples_file, 'r') as f_samp:
+            headers = {}
+            for line in f_samp:
+                parts = line.strip().split()
+                if line.startswith('#'):
+                    # Identify headers and their positions
+                    if not headers:
+                        headers = {key: idx for idx, key in enumerate(parts) if key in ('IID', 'IDX')}
+                    continue
+                # Read data according to identified headers
+                iid = parts[headers['IID']] if 'IID' in headers else None
+                idx = int(parts[headers['IDX']]) if 'IDX' in headers else -1
+                iids.append(iid)
+                indices.append(idx)
+        sample_indices = np.array(indices)
+
+        linear_arg = LinearARG(A, sample_indices, variant_indices, flip)
+
+        return linear_arg, variant_ids, iids
 
     def unweight(self, handle_singletons_differently=False) -> "LinearARG":
         """
