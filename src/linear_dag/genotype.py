@@ -4,6 +4,7 @@ from typing import Optional
 
 import numpy as np
 
+from cyvcf2 import VCF
 from numpy.typing import NDArray
 from scipy.io import mmread
 from scipy.sparse import csc_matrix
@@ -55,20 +56,38 @@ def load_genotypes(
     return genotypes, kept_variants, flipped_variants
 
 
-def read_vcf(path: str, region: str = None) -> tuple[csc_matrix, list[dict]]:
-    import cyvcf2 as cv
-
-    vcf = cv.VCF(path, gts012=True)
+def read_vcf(
+    path: str, region: Optional[str] = None, phased: bool = False, flip_minor_alleles: bool = True
+) -> tuple[csc_matrix, np.ndarray, list[dict]]:
+    """
+    Codes unphased genotypes as 0/1/2/3, where 3 means that at least one of the two alleles is unknown.
+    Codes phased genotypes as 0/1, and there are 2n rows, where rows 2*k and 2*k+1 correspond to individual k.
+    """
+    vcf = VCF(path, gts012=True, strict_gt=True)
     data = []
     idxs = []
     ptrs = [0]
     info = []
+    flip = []
+
+    ploidy = 1 if phased else 2
 
     # TODO: handle missing data
     for var in vcf(region):
-        (idx,) = np.where(var.gt_types != 0)
-        gts = var.gt_types[idx]
-        data.append(gts)
+        if phased:
+            gts = np.ravel(np.asarray(var.genotype.array())[:, :2])
+        else:
+            gts = var.gt_types
+        if flip_minor_alleles:
+            af = np.mean(gts) / ploidy
+            if af > 0.5:
+                gts = ploidy - gts
+                flip.append(True)
+            else:
+                flip.append(False)
+
+        (idx,) = np.where(gts != 0)
+        data.append(gts[idx])
         idxs.append(idx)
         ptrs.append(ptrs[-1] + len(idx))
         info.append(var.INFO)
@@ -76,8 +95,10 @@ def read_vcf(path: str, region: str = None) -> tuple[csc_matrix, list[dict]]:
     data = np.concatenate(data)
     idxs = np.concatenate(idxs)
     ptrs = np.array(ptrs)
+    genotypes = csc_matrix((data, idxs, ptrs))
+    flip = np.array(flip)
 
-    return csc_matrix((data, idxs, ptrs)), info
+    return genotypes, flip, info
 
 
 def compute_af(genotypes: csc_matrix, ploidy: int = 1) -> NDArray:

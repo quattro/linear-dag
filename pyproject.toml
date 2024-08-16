@@ -50,6 +50,8 @@ genotype = [
   "cyvcf2",
   "bed-reader[sparse]",
 ]
+[project.scripts]
+linear-dag = "linear_dag.cli:run_cli"
 
 [project.urls]
 Documentation = "https://github.com/unknown/linear-dag#readme"

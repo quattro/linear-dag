@@ -1,7 +1,5 @@
-# SPDX-FileCopyrightText: 2024-present Nicholas Mancuso <nmancuso@usc.edu>
-#
-# SPDX-License-Identifier: MIT
 from importlib.metadata import PackageNotFoundError, version  # pragma: no cover
+from importlib.util import find_spec
 
 from .brick_graph import (
     BrickGraph as BrickGraph,
@@ -22,6 +20,7 @@ from .genotype import (
     binarize as binarize,
     compute_af as compute_af,
     flip_alleles as flip_alleles,
+    read_vcf as read_vcf,
 )
 
 # annoying 'as' notation to avoid warnings/errors about unused imports...
@@ -42,6 +41,9 @@ from .one_summed import (
     construct_1_summed_DAG_fast as construct_1_summed_DAG_fast,
     construct_1_summed_DAG_slow as construct_1_summed_DAG_slow,
 )
+from .recombination import (
+    Recombination as Recombination,
+)
 from .simulate import (
     Simulate as Simulate,
 )
@@ -52,14 +54,11 @@ from .solve import (
 from .trios import (
     Trios as Trios,
 )
-from .recombination import (
-    Recombination as Recombination,
-)
-from .dna_nexus import (
-    find_shapeit200k_vcf as find_shapeit200k_vcf,
-    download_vcf as download_vcf,
-    vcf_to_csc as vcf_to_csc
-)
+
+
+# dna_nexus and pyspark are optional dependencies
+if find_spec("dna_nexus") and find_spec("pyspark"):
+    from .dna_nexus import download_vcf as download_vcf, find_shapeit200k_vcf as find_shapeit200k_vcf
 
 try:
     # Change here if project is renamed and does not equal the package name
