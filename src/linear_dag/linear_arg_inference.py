@@ -82,8 +82,10 @@ def vertcat(A: csr_matrix, B: csr_matrix) -> csr_matrix:
     data = np.concatenate((A.data, B.data))
     return csr_matrix((data, indices, indptrs), shape=(A.shape[0] + B.shape[0], A.shape[1]))
 
-def pad_trailing_zeros(A:csr_matrix, num_cols: int) -> csr_matrix:
+
+def pad_trailing_zeros(A: csr_matrix, num_cols: int) -> csr_matrix:
     return csr_matrix((A.data, A.indices, A.indptr), shape=(A.shape[0], num_cols + A.shape[1]))
+
 
 def pad_leading_zeros(A: csr_matrix, num_cols: int) -> csr_matrix:
     return csr_matrix((A.data, A.indices + num_cols, A.indptr), shape=(A.shape[0], num_cols + A.shape[1]))
@@ -128,6 +130,7 @@ def closure_transitive_reduction(transitive_graph: csr_matrix) -> csr_matrix:
         raise ValueError("Input graph was not transitive")
 
     return result
+
 
 def transitive_closure(graph: csr_matrix) -> csr_matrix:
     number_of_paths = path_sum(graph)

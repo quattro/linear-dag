@@ -1,34 +1,30 @@
 # lineararg.py
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import List, Optional, Tuple
 
 import numpy as np
 
-from .genotype import read_vcf
 from numpy.typing import NDArray
-from scipy.io import mmread, mmwrite
+from scipy.io import mmread
 from scipy.sparse import csc_matrix, csr_matrix, eye
 from scipy.sparse.linalg import spsolve_triangular
 
 from .brick_graph import BrickGraph
 from .brick_graph_py import BrickGraphPy
+from .data_structures import DiGraph
+from .genotype import read_vcf
 from .linear_arg_inference import (
-    add_samples_to_brick_graph_closure,
     add_samples_to_linear_arg,
     add_singleton_variants,
-    closure_transitive_reduction,
     infer_brick_graph_using_containment,
+    linearize_brick_graph_adjacency,
     remove_undirected_edges,
-    setdiag,
-    linearize_brick_graph_adjacency
 )
 from .one_summed_cy import linearize_brick_graph
-from .one_summed import construct_1_summed_DAG_slow
+from .recombination import Recombination
 from .solve import topological_sort
 from .trios import Trios
-from .data_structures import DiGraph
-from .recombination import Recombination
-from time import time
+
 
 @dataclass
 class LinearARG:
@@ -39,10 +35,10 @@ class LinearARG:
 
     @staticmethod
     def from_genotypes(
-            genotypes: csc_matrix,
-            variants_flipped_ref_alt: Optional[np.ndarray] = None,
-            find_recombinations: bool = True,
-            make_triangular: bool = True,
+        genotypes: csc_matrix,
+        variants_flipped_ref_alt: Optional[np.ndarray] = None,
+        find_recombinations: bool = True,
+        make_triangular: bool = True,
     ):
         """
         Infers a linear ARG from a genotype matrix.
@@ -83,7 +79,6 @@ class LinearARG:
         brick_graph_method: str = "old",
         recombination_method: str = "none",
     ) -> "LinearARG":
-
         # Infer an initial brick graph
         brick_graph_closure: csr_matrix
         if brick_graph_method.lower() == "old":
@@ -159,8 +154,8 @@ class LinearARG:
 
     @staticmethod
     def from_vcf(path: str) -> "LinearARG":
-        genotypes, _ = read_vcf(path)
-        return LinearARG.from_genotypes(genotypes)
+        genotypes, is_flipped, _ = read_vcf(path)
+        return LinearARG.from_genotypes(genotypes, is_flipped)
 
     @property
     def shape(self):
@@ -233,8 +228,16 @@ class LinearARG:
     #         x[i, self.sample_indices[index]] = 1
     #     return x * self.data
 
-    def write(self, filename_prefix: str, chrom: str, positions: list, refs: list, alts: list,
-              sample_filename: Optional[str] = None, iids: Optional[list] = None) -> None:
+    def write(
+        self,
+        filename_prefix: str,
+        chrom: str,
+        positions: list,
+        refs: list,
+        alts: list,
+        sample_filename: Optional[str] = None,
+        iids: Optional[list] = None,
+    ) -> None:
         """
         Writes LinearARG data in PLINK2 format, optionally writes sample information.
         :param filename_prefix: The base path and prefix used for output files.
@@ -258,18 +261,20 @@ class LinearARG:
 
         with open(f"{filename_prefix}.pvar", "w") as f_variants:
             f_variants.write("##fileformat=PVARv1.0\n")
-            f_variants.write("##INFO=<ID=IDX,Number=1,Type=Integer,Description=\"Variant Index\">\n")
-            f_variants.write("##INFO=<ID=FLIP,Number=1,Type=Integer,Description=\"Flip Information\">\n")
+            f_variants.write('##INFO=<ID=IDX,Number=1,Type=Integer,Description="Variant Index">\n')
+            f_variants.write('##INFO=<ID=FLIP,Number=1,Type=Integer,Description="Flip Information">\n')
             f_variants.write("#CHROM POS ID REF ALT INFO\n")
             for idx, pos, ref, alt, flip in zip(self.variant_indices, positions, refs, alts, self.flip):
                 f_variants.write(f"{chrom} {pos} . {ref} {alt} IDX={idx};FLIP={int(flip)}\n")
 
         from scipy.sparse import save_npz
+
         save_npz(f"{filename_prefix}.npz", self.A)
 
     @staticmethod
-    def read(adjacency_matrix_file: str, variants_file: str, samples_file: str) -> Tuple[
-        "LinearARG", List[str], List[str]]:
+    def read(
+        adjacency_matrix_file: str, variants_file: str, samples_file: str
+    ) -> Tuple["LinearARG", List[str], List[str]]:
         """
         Reads LinearARG data from provided PLINK2 formatted files.
 
@@ -280,33 +285,34 @@ class LinearARG:
         """
 
         def parse_info(info_str: str) -> Tuple[int, int]:
-            """ Parses the INFO string to extract IDX and FLIP values. """
-            info_parts = info_str.split(';')
-            info_dict = {part.split('=')[0]: int(part.split('=')[1]) for part in info_parts if '=' in part}
-            return info_dict.get('IDX', -1), info_dict.get('FLIP', 0)
+            """Parses the INFO string to extract IDX and FLIP values."""
+            info_parts = info_str.split(";")
+            info_dict = {part.split("=")[0]: int(part.split("=")[1]) for part in info_parts if "=" in part}
+            return info_dict.get("IDX", -1), info_dict.get("FLIP", 0)
 
         # Load the adjacency matrix
         from scipy.sparse import load_npz
+
         A = load_npz(adjacency_matrix_file)
 
         # Read variant data
         variants = []
         variant_ids = []
         flips = []
-        with open(variants_file, 'r') as f_var:
+        with open(variants_file, "r") as f_var:
             headers = {}
             for line in f_var:
-                if line.startswith('##'):
+                if line.startswith("##"):
                     continue
                 if not headers:
                     headers = {key: idx for idx, key in enumerate(line.strip().split())}
                     continue
                 parts = line.strip().split()
-                chrom = parts[headers['#CHROM']]
-                pos = parts[headers['POS']]
-                ref = parts[headers['REF']]
-                alt = parts[headers['ALT']]
-                idx, flip = parse_info(parts[headers['INFO']])
+                chrom = parts[headers["#CHROM"]]
+                pos = parts[headers["POS"]]
+                ref = parts[headers["REF"]]
+                alt = parts[headers["ALT"]]
+                idx, flip = parse_info(parts[headers["INFO"]])
                 variant_ids.append(f"{chrom}_{pos}_{ref}_{alt}")
                 variants.append(idx)
                 flips.append(flip)
@@ -317,18 +323,18 @@ class LinearARG:
         # Read sample data
         iids = []
         indices = []
-        with open(samples_file, 'r') as f_samp:
+        with open(samples_file, "r") as f_samp:
             headers = {}
             for line in f_samp:
                 parts = line.strip().split()
-                if line.startswith('#'):
+                if line.startswith("#"):
                     # Identify headers and their positions
                     if not headers:
-                        headers = {key: idx for idx, key in enumerate(parts) if key in ('IID', 'IDX')}
+                        headers = {key: idx for idx, key in enumerate(parts) if key in ("IID", "IDX")}
                     continue
                 # Read data according to identified headers
-                iid = parts[headers['IID']] if 'IID' in headers else None
-                idx = int(parts[headers['IDX']]) if 'IDX' in headers else -1
+                iid = parts[headers["IID"]] if "IID" in headers else None
+                idx = int(parts[headers["IDX"]]) if "IDX" in headers else -1
                 iids.append(iid)
                 indices.append(idx)
         sample_indices = np.array(indices)
@@ -431,7 +437,7 @@ class LinearARG:
             gr = DiGraph.from_csc(self.A.transpose())
             recom = Recombination.from_graph(gr)
             recom.find_recombinations()
-            new_edges = np.array(recom.edge_list(), dtype=np.dtype('int', 'int'))
+            new_edges = np.array(recom.edge_list(), dtype=np.dtype("int", "int"))
 
         new_edges = np.hstack((new_edges, np.ones((new_edges.shape[0], 1))))
 

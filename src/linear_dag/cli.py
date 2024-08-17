@@ -94,7 +94,7 @@ def _main(args):
     argp.add_argument("-q", "--quiet", action="store_true", default=False)
     argp.add_argument("-o", "--output", default="lineardag")
 
-    subp = argp.add_subparsers(required=True, help="Subcommands for linear-dag")
+    subp = argp.add_subparsers(dest="cmd", required=True, help="Subcommands for linear-dag")
 
     make_dag_p = subp.add_parser("make-dag", help="Make a linear dag")
     file_group = make_dag_p.add_mutually_exclusive_group(required=True)

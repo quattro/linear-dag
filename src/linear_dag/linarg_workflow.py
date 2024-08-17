@@ -3,8 +3,6 @@ import os
 from time import time
 from typing import Optional
 
-import numpy as np
-
 from .genotype import load_genotypes
 from .lineararg import LinearARG
 
@@ -36,9 +34,7 @@ def run_linarg_workflow(
     genotype_stats = (*genotypes.shape, genotypes.nnz)
 
     linarg = LinearARG.from_genotypes(
-        genotypes,
-        find_recombinations=bool(recombination_method),
-        make_triangular=make_triangular
+        genotypes, find_recombinations=bool(recombination_method), make_triangular=make_triangular
     )
 
     if output_file_prefix is not None:

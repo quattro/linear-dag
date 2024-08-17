@@ -1,10 +1,10 @@
+import gzip
+
 from collections import defaultdict
 from dataclasses import dataclass
-from os import PathLike
+from os import linesep, PathLike
 from typing import ClassVar, Union
 
-import cyvcf2 as cv
-import numpy as np
 import polars as pl
 
 
@@ -15,88 +15,99 @@ class VariantInfo:
     **Attributes**
     """
 
-    header: pl.DataFrame
     table: pl.DataFrame
-    info: pl.DataFrame
 
-    header_types: ClassVar[list[str]] = ["FILTER", "INFO", "FORMAT", "CONTIG", "STR", "GENERIC"]
-    req_header_fields: ClassVar[list[str]] = ["Type", "Number", "ID", "Description"]
-    req_fields: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT", "INFO"]
     flip_field: ClassVar[str] = "FLIP"
+    idx_field: ClassVar[str] = "IDX"
+    req_fields: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT", "INFO"]
+    req_cols: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT", idx_field, flip_field]
 
     def __post_init__(self):
-        for req_col in self.req_fields:
+        for req_col in self.req_cols:
             if req_col not in self.table.columns:
                 raise ValueError(f"Required column {req_col} not found in variant table")
-        for req_field in self.req_header_fields:
-            if req_field not in self.header.columns:
-                raise ValueError(f"Required column {req_field} not found in header table")
-        if self.flip_field not in self.info.columns:
-            raise ValueError(f"{self.flip_field} required in INFO table")
 
     @property
-    def flip(self):
-        return self.info[self.flip_field].to_numpy()
+    def is_flipped(self):
+        return self.table[self.flip_field].to_numpy()
+
+    @property
+    def indices(self):
+        return self.table[self.idx_field].to_numpy()
 
     def __getitem__(self, key):
-        return VariantInfo(self.header, self.table[key], self.info[key])
+        return VariantInfo(self.table[key])
 
     @classmethod
     def read(cls, path: Union[str, PathLike]) -> "VariantInfo":
-        vcf = cv.VCF(path)
+        if path is None:
+            raise ValueError("path argument cannot be None")
 
-        # construct header table
-        h_types = []
-        h_nums = []
-        h_ids = []
-        h_desc = []
-        found_flip = False
-        for entry in vcf.header_iter():
-            h_types.append(entry.type)
-            h_nums.append(entry["Number"])
-            h_desc.append(entry["Description"])
+        def _parse_info(info_str):
+            idx = -1
+            flip = False
+            for info in info_str.split(";"):
+                s_info = info.split("=")
+                if len(s_info) == 2 and s_info[0] == "IDX":
+                    idx = int(s_info[1])
+                elif len(s_info) == 1 and s_info[0] == "FLIP":
+                    flip = True
 
-            h_id = entry["ID"]
-            found_flip = h_id == cls.flip_field or found_flip
-            h_ids.append(h_id)
+            return idx, flip
 
-        header = pl.dataframe.DataFrame({"ID": h_ids, "Number": h_nums, "Type": h_types, "Description": h_desc})
+        open_f = gzip.open if str(path).endswith(".gz") else open
+        header_map = None
         var_table = defaultdict(list)
-        info = defaultdict(list)
-
-        for var in vcf:
-            # pull the field values
-            for field in cls.header_types:
-                if field == "INFO":
+        with open_f(path, "r") as var_file:
+            for line in var_file:
+                if line.startswith("##"):
                     continue
-                value = getattr(var, field)
-                var_table[field].append(value)
+                elif line[0] == "#":
+                    names = line[1:].strip().split()
+                    header_map = {key: idx for idx, key in enumerate(names)}
+                    for req_name in cls.req_fields:
+                        if req_name not in header_map:
+                            # we check again later based on dataframe, but better to error out early when parsing
+                            raise ValueError(f"Required column {req_name} not found in header table")
+                    continue
 
-            # pull INFO values
-            # we need to scan across all possible INFO fields, so we can use a fixed-format dataframe
-            for h_id in h_ids:
-                # could be None, if this variant doesnt have value corresponding to INFO field/key
-                val = var.INFO.get(h_id)
-                info[h_id].append(val)
+                # parse row; this can easily break...
+                row = line.strip().split()
+                for field in cls.req_fields:
+                    # skip INFO for now...
+                    if field == "INFO":
+                        continue
+                    value = row[header_map[field]]
+                    var_table[field].append(value)
 
-        var_table = pl.dataframe.DataFrame(var_table)
-        info = pl.dataframe.DataFrame(info)
+                # parse info to pull index and flip info if they exist
+                idx, flip = _parse_info(row[header_map["INFO"]])
+                var_table[cls.idx_field].append(idx)
+                var_table[cls.flip_field].append(flip)
 
-        # if flip info field wasn't present, lets add it here
-        num_var = len(info)
-        if not found_flip:
-            # add to info table
-            info = info.with_columns(pl.Series(name=cls.flip_field, values=np.zeros(num_var, dtype=bool)))
-            # add to header
-            flip_header = pl.dataframe.DataFrame(
-                {
-                    "ID": [cls.flip_field],
-                    "Number": h_nums,
-                    "Type": ["INFO"],
-                    "Description": ["Whether the linear-dag counts REF"],
-                }
-            )
-            header = header.vstack(flip_header)
+        var_table = pl.DataFrame(var_table)
 
         # return class instance
-        return cls(header, var_table, info)
+        return cls(var_table)
+
+    def write(self, path: Union[str, PathLike]):
+        open_f = gzip.open if str(path).endswith(".gz") else open
+        with open_f(path, "wt") as pvar_file:
+            pvar_file.write(f"##fileformat=PVARv1.0{linesep}")
+            pvar_file.write(f'##INFO=<ID=IDX,Number=1,Type=Integer,Description="Variant Index">{linesep}')
+            pvar_file.write(f'##INFO=<ID=FLIP,Number=0,Type=Flag,Description="Flip Information">{linesep}')
+            pvar_file.write("\t".join([f"#{self.req_fields[0]}"] + self.req_fields[1:]) + linesep)
+
+            # flush to make sure this exists before writing the table out
+            pvar_file.flush()
+
+            # we need to map IDX and FLIP columns back to INFO
+            sub_table = self.table.with_columns(
+                (
+                    pl.col(self.idx_field).apply(lambda idx: f"IDX={idx}")
+                    + pl.col(self.flip_field).apply(lambda flip: f";{self.flip_field}" if flip else "")
+                ).alias("INFO")
+            ).drop([self.idx_field, self.flip_field])
+            sub_table.write_csv(pvar_file, has_header=False, separator="\t")
+
+        return

@@ -37,6 +37,7 @@ dependencies = [
   "cython",
   "numpy",
   "scipy",
+  "polars",
   "networkx",
 ]
 
@@ -153,7 +154,6 @@ ignore-init-module-imports = true
 [tool.ruff.lint.isort]
 known-first-party = ["linear-dag"]
 combine-as-imports = true
-lines-after-imports = 2
 lines-between-types = 1
 known-local-folder = ["src"]
 section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
