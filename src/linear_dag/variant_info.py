@@ -2,6 +2,7 @@ import gzip
 
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import cached_property
 from os import linesep, PathLike
 from typing import ClassVar, Union
 
@@ -27,11 +28,11 @@ class VariantInfo:
             if req_col not in self.table.columns:
                 raise ValueError(f"Required column {req_col} not found in variant table")
 
-    @property
+    @cached_property
     def is_flipped(self):
         return self.table[self.flip_field].to_numpy()
 
-    @property
+    @cached_property
     def indices(self):
         return self.table[self.idx_field].to_numpy()
 
