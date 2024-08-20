@@ -290,6 +290,35 @@ cdef class LinkedListArray:
 
         self.length[n] += 1
 
+    cdef void insert(self, int n, int value):
+        """Insert a new element into a sorted list"""
+        if n < 0 or n >= self.n:
+            raise ValueError("LinkedList index out of bounds.")
+
+        new_node = <list_node *> malloc(sizeof(list_node))
+        if new_node is NULL:
+            raise MemoryError("Could not allocate list_node.")
+        new_node.value = value
+
+        cdef list_node* place_in_list = self.head[n]
+        cdef list_node* previous = NULL
+        while place_in_list is not NULL:
+            if value > place_in_list.value:
+                break
+            previous = place_in_list
+            place_in_list = place_in_list.next
+
+        if previous is NULL:
+            self.head[n] = new_node
+        else:
+            previous.next = new_node
+
+        if place_in_list is NULL:
+            self.tail[n] = new_node
+        new_node.next = place_in_list
+
+        self.length[n] += 1
+
     cdef void remove(self, int n, list_node * node, list_node * predecessor):
         """Removes a given node from list n; requires knowing its predecessor, if any"""
         # Check if the node to remove is the first node in the list
@@ -618,6 +647,10 @@ cdef class DiGraph:
             self.extend_edge_array(self.maximum_number_of_edges * 2)
         if u_index == v_index:
             raise ValueError("Self edges are not supported")
+
+        if max(u_index, v_index) >= self.maximum_number_of_nodes:
+            self.extend_node_array(2 * max(u_index, v_index))
+
         if not self.is_node[u_index]:
             self.add_node(u_index)
         if not self.is_node[v_index]:
@@ -792,7 +825,7 @@ cdef class DiGraph:
 
     cdef void collapse_node_with_outdegree_one(self, node * u):
         """Removes a node u and preserves paths from its all its parents to its first child; 
-        all other children are ignored """
+        all other children are ignored. """
         cdef edge * removable_edge = u.first_out
         cdef edge * in_edge
         cdef edge * next_edge
@@ -804,10 +837,16 @@ cdef class DiGraph:
         v = removable_edge.v
         assert v is not NULL
 
-        # Redirect each in-edge of u to point to v
-        in_edge = u.first_in
-        while in_edge is not NULL:
+        # Find last in-edge of u
+        in_edge = NULL
+        next_edge = u.first_in
+        while next_edge is not NULL:
+            in_edge = next_edge
             next_edge = in_edge.next_in
+
+        # Redirect each in-edge of u to point to v
+        while in_edge is not NULL:
+            next_edge = in_edge.prev_in
             self.set_edge_child(in_edge, v)
             in_edge = next_edge
 
