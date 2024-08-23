@@ -512,12 +512,13 @@ cdef void add_nonredundant_neighbors(DiGraph result, node * starting_node, Integ
             result.add_edge(starting_node.index, out_edge.v.index)
         out_edge = out_edge.next_out
 
-cpdef DiGraph merge_brick_graphs(list graphs, list sample_nodes):
+cpdef tuple merge_brick_graphs(list graphs, list sample_nodes, list variant_nodes):
     """
     Merge multiple brick graphs with shared sample nodes and other nodes disjoint.
     :param graphs: list of brick graphs
     :param sample_nodes: list of sample indices of each brick graph
-    :return: merged graph
+    :param variant_nodes: list of variant indices of each brick graph
+    :return: merged graph, variant indices, index mapping
     """
     num_samples = len(sample_nodes[0])
     number_of_nodes = sum([graph.maximum_number_of_nodes for graph in graphs])# - (len(graphs)-1) * num_samples
@@ -527,23 +528,30 @@ cpdef DiGraph merge_brick_graphs(list graphs, list sample_nodes):
     cdef int i
     cdef int u, v
     cdef int non_sample_counter = num_samples
+    cdef int sample_counter
     cdef int[:] new_node_ids
-    for graph, samples in zip(graphs, sample_nodes):
-
-        # TODO keep track of variant node IDs
-        # TODO use fewer extra nodes
-        new_node_ids = np.arange(non_sample_counter, non_sample_counter + graph.maximum_number_of_nodes, dtype=np.intc)
-        for i in range(num_samples):
-            new_node_ids[samples[i]] = i
-        non_sample_counter += graph.maximum_number_of_nodes
-
+    cdef list variant_indices = []
+    cdef list index_mapping = []
+    for graph, samples, variants in zip(graphs, sample_nodes, variant_nodes):
+        # Get new node ids corresponding to the merged graph
+        sample_counter = 0
+        new_node_ids = np.zeros(graph.maximum_number_of_nodes, dtype=np.intc)
+        for i in range(graph.maximum_number_of_nodes):
+            if i in samples:
+                new_node_ids[i] = sample_counter
+                sample_counter += 1
+            else:
+                new_node_ids[i] = non_sample_counter
+                non_sample_counter += 1
+        for var in variants:
+            variant_indices.append(new_node_ids[var])
+        index_mapping.append(new_node_ids)
         # Add edges from graph to result while preserving the order of the parent nodes for each child node
         for node_idx in range(graph.maximum_number_of_nodes):
             if not graph.is_node[node_idx]:
                 continue
             add_neighbors(result, graph.nodes[node_idx], new_node_ids)
-
-    return result
+    return result, variant_indices, index_mapping
 
 cdef add_neighbors(DiGraph graph_to_modify, node* v, node_ids):
     cdef edge* e = v.first_in
