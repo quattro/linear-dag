@@ -1,18 +1,24 @@
 # lineararg.py
+import gzip
+
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from functools import cached_property
+from os import linesep, PathLike
+from typing import ClassVar, DefaultDict, Optional, Union
 
+import bed_reader as br
+import cyvcf2 as cv
 import numpy as np
+import numpy.typing as npt
+import polars as pl
 
-from numpy.typing import NDArray
-from scipy.io import mmread
-from scipy.sparse import csc_matrix, csr_matrix, eye
+from scipy.sparse import csc_matrix, csr_matrix, eye, load_npz, save_npz
 from scipy.sparse.linalg import spsolve_triangular
 
 from .brick_graph import BrickGraph
 from .brick_graph_py import BrickGraphPy
 from .data_structures import DiGraph
-from .genotype import read_vcf
 from .linear_arg_inference import (
     add_samples_to_linear_arg,
     add_singleton_variants,
@@ -22,16 +28,172 @@ from .linear_arg_inference import (
 )
 from .one_summed_cy import linearize_brick_graph
 from .recombination import Recombination
+from .sample_info import SampleInfo
 from .solve import topological_sort
 from .trios import Trios
 
 
 @dataclass
+class VariantInfo:
+    """Metadata about variants represented in the linear dag.
+
+    **Attributes**
+    """
+
+    table: pl.DataFrame
+
+    flip_field: ClassVar[str] = "FLIP"
+    idx_field: ClassVar[str] = "IDX"
+    req_fields: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT", "INFO"]
+    req_cols: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT", idx_field, flip_field]
+
+    def __post_init__(self):
+        for req_col in self.req_cols:
+            if req_col not in self.table.columns:
+                raise ValueError(f"Required column {req_col} not found in variant table")
+
+    @cached_property
+    def is_flipped(self):
+        return self.table[self.flip_field].to_numpy()
+
+    @cached_property
+    def indices(self):
+        return self.table[self.idx_field].to_numpy()
+
+    def copy(self):
+        return VariantInfo(self.table.clone())
+
+    def __getitem__(self, key):
+        return VariantInfo(self.table[key])
+
+    @classmethod
+    def read(cls, path: Union[str, PathLike]) -> "VariantInfo":
+        if path is None:
+            raise ValueError("path argument cannot be None")
+
+        def _parse_info(info_str):
+            idx = -1
+            flip = False
+            for info in info_str.split(";"):
+                s_info = info.split("=")
+                if len(s_info) == 2 and s_info[0] == "IDX":
+                    idx = int(s_info[1])
+                elif len(s_info) == 1 and s_info[0] == "FLIP":
+                    flip = True
+
+            return idx, flip
+
+        open_f = gzip.open if str(path).endswith(".gz") else open
+        header_map = None
+        var_table = defaultdict(list)
+        with open_f(path, "r") as var_file:
+            for line in var_file:
+                if line.startswith("##"):
+                    continue
+                elif line[0] == "#":
+                    names = line[1:].strip().split()
+                    header_map = {key: idx for idx, key in enumerate(names)}
+                    for req_name in cls.req_fields:
+                        if req_name not in header_map:
+                            # we check again later based on dataframe, but better to error out early when parsing
+                            raise ValueError(f"Required column {req_name} not found in header table")
+                    continue
+
+                # parse row; this can easily break...
+                row = line.strip().split()
+                for field in cls.req_fields:
+                    # skip INFO for now...
+                    if field == "INFO":
+                        continue
+                    value = row[header_map[field]]
+                    var_table[field].append(value)
+
+                # parse info to pull index and flip info if they exist
+                idx, flip = _parse_info(row[header_map["INFO"]])
+                var_table[cls.idx_field].append(idx)
+                var_table[cls.flip_field].append(flip)
+
+        var_table = pl.DataFrame(var_table)
+
+        # return class instance
+        return cls(var_table)
+
+    def write(self, path: Union[str, PathLike]):
+        open_f = gzip.open if str(path).endswith(".gz") else open
+        with open_f(path, "wt") as pvar_file:
+            pvar_file.write(f"##fileformat=PVARv1.0{linesep}")
+            pvar_file.write(f'##INFO=<ID=IDX,Number=1,Type=Integer,Description="Variant Index">{linesep}')
+            pvar_file.write(f'##INFO=<ID=FLIP,Number=0,Type=Flag,Description="Flip Information">{linesep}')
+            pvar_file.write("\t".join([f"#{self.req_fields[0]}"] + self.req_fields[1:]) + linesep)
+
+            # flush to make sure this exists before writing the table out
+            pvar_file.flush()
+
+            # we need to map IDX and FLIP columns back to INFO
+            sub_table = self.table.with_columns(
+                (
+                    pl.col(self.idx_field).apply(lambda idx: f"IDX={idx}")
+                    + pl.col(self.flip_field).apply(lambda flip: f";{self.flip_field}" if flip else "")
+                ).alias("INFO")
+            ).drop([self.idx_field, self.flip_field])
+            sub_table.write_csv(pvar_file, has_header=False, separator="\t")
+
+        return
+
+    @classmethod
+    def from_open_bed(
+        cls, bed: br.open_bed, indices: Optional[npt.ArrayLike] = None, is_flipped: Optional[npt.ArrayLike] = None
+    ):
+        # doesn't really follow conventions for a class name...
+        # req_cols: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT", idx_field, flip_field]
+        df = dict()
+        df["CHROM"] = bed.chromosome
+        df["POS"] = bed.bp_position
+        df["ID"] = bed.sid
+        df["REF"] = bed.allele_1
+        df["ALT"] = bed.allele_2
+        if indices is None:
+            df[cls.idx_col] = -1 * np.ones(len(bed.bp_position), dtype=int)
+        else:
+            if len(indices) != len(bed.bp_position):
+                raise ValueError("Length of indices does not match number of variants")
+            df[cls.idx_col] = indices
+        if is_flipped is None:
+            df[cls.flip_field] = np.zeros(len(bed.iid)).astype(bool)
+        else:
+            if len(is_flipped) != len(bed.bp_position):
+                raise ValueError("Length of is_flipped flags does not match number of variants")
+            df[cls.flip_field] = is_flipped
+
+        return cls(pl.DataFrame(df))
+
+    @staticmethod
+    def _update_dict_from_vcf(
+        var: cv.Variant, is_flipped: bool, data: DefaultDict[str, list]
+    ) -> DefaultDict[str, list]:
+        data["CHROM"].append(var.CHROM)
+        data["ID"].append(var.ID)
+        data["POS"].append(var.POS)
+        data["REF"].append(var.REF)
+        data["ALT"].append(",".join(var.ALT))
+        data["FLIP"].append(is_flipped)
+
+        return data
+
+
+@dataclass
 class LinearARG:
     A: csr_matrix
-    sample_indices: NDArray
-    variant_indices: NDArray
-    flip: NDArray
+    sample_indices: npt.NDArray[np.uint]
+    variants: VariantInfo
+
+    @property
+    def variant_indices(self):
+        return self.variants.indices
+
+    @property
+    def flip(self):
+        return self.variants.is_flipped
 
     @staticmethod
     def from_genotypes(
@@ -75,7 +237,7 @@ class LinearARG:
     def from_genotypes_old(
         genotypes: csc_matrix,
         ploidy: int = 1,
-        flip: Optional[NDArray] = None,
+        flip: Optional[npt.NDArray[bool]] = None,
         brick_graph_method: str = "old",
         recombination_method: str = "none",
     ) -> "LinearARG":
@@ -113,49 +275,81 @@ class LinearARG:
         return result
 
     @staticmethod
-    def from_file(filename: str) -> "LinearARG":
-        # Read samples
-        sample_list = []
-        with open(filename + ".samples.txt", "r") as f:
-            header = next(f)
-            assert header == "index\n"
-            for line in f:
-                sample_list.append(int(line) - 1)
-
-        # Read variants
-        variant_list = []
-        flip_list = []
-        with open(filename + ".mutations.txt", "r") as f:
-            header = next(f).split(",")
-            assert header[-2:] == ["index", "flip\n"]
-            for line in f:
-                fields = line.split(",")
-                variant_list.append(int(fields[-2]) - 1)
-                flip_list.append(int(fields[-1]))
-
-        # Read the matrix A
-        A = csr_matrix(mmread(filename + ".mtx"))
-
-        return LinearARG(
-            A,
-            np.asarray(sample_list, dtype=int),
-            np.asarray(variant_list, dtype=int),
-            np.asarray(flip_list, dtype=bool),
-        )
-
-    @staticmethod
     def from_plink(prefix: str) -> "LinearARG":
         import bed_reader as br
 
         # TODO: handle missing data
         with br.open_bed(f"{prefix}.bed") as bed:
             genotypes = bed.read_sparse(dtype="int8")
-            return LinearARG.from_genotypes(genotypes)
+
+            brick_graph, samples_idx, variants_idx = BrickGraph.from_genotypes(genotypes)
+
+            recom = Recombination.from_graph(brick_graph)
+            recom.find_recombinations()
+            linear_arg_adjacency_matrix = linearize_brick_graph(recom)
+
+            v_info = VariantInfo.from_bed(bed, variants_idx)
+
+            larg = LinearARG(linear_arg_adjacency_matrix, samples_idx, v_info)
+            larg = larg.make_triangular()
+            return larg
 
     @staticmethod
-    def from_vcf(path: str) -> "LinearARG":
-        genotypes, is_flipped, _ = read_vcf(path)
-        return LinearARG.from_genotypes(genotypes, is_flipped)
+    def from_vcf(path: Union[str, PathLike], phased: bool = False) -> "LinearARG":
+        vcf = cv.VCF(path, gts012=True, strict_gt=True)
+        data = []
+        idxs = []
+        ptrs = [0]
+
+        ploidy = 1 if phased else 2
+
+        # push most of the branching up here to define functions for fewer branch conditions during loop
+        if phased:
+            read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2])  # noqa: E731
+        else:
+            read_gt = lambda var: var.gt_types  # noqa: E731
+
+        def final_read(var):
+            gts = read_gt(var)
+            af = np.mean(gts) / ploidy
+            if af > 0.5:
+                return ploidy - gts, True
+            else:
+                return gts, False
+
+        var_table = defaultdict(list)
+        # TODO: handle missing data
+        for var in vcf():
+            gts, is_flipped = final_read(var)
+
+            (idx,) = np.where(gts != 0)
+            data.append(gts[idx])
+            idxs.append(idx)
+            ptrs.append(ptrs[-1] + len(idx))
+            var_table = VariantInfo._update_dict_from_vcf(var, is_flipped, var_table)
+
+        data = np.concatenate(data)
+        idxs = np.concatenate(idxs)
+        ptrs = np.array(ptrs)
+
+        # construct brickk graph from sparse matrix
+        genotypes = csc_matrix((data, idxs, ptrs))
+        brick_graph, samples_idx, variants_idx = BrickGraph.from_genotypes(genotypes)
+
+        # construct linear representation
+        recom = Recombination.from_graph(brick_graph)
+        recom.find_recombinations()
+        linear_arg_adjacency_matrix = linearize_brick_graph(recom)
+
+        import polars as pl
+
+        # construct var info
+        var_table["IDX"] = variants_idx
+        v_info = VariantInfo(pl.DataFrame(var_table))
+
+        larg = LinearARG(linear_arg_adjacency_matrix, samples_idx, v_info)
+        larg = larg.make_triangular()
+        return larg
 
     @property
     def shape(self):
@@ -174,7 +368,7 @@ class LinearARG:
     def __str__(self):
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
 
-    def __matmul__(self, other: NDArray) -> NDArray:
+    def __matmul__(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
         if other.ndim == 1:
             other = other.reshape(-1, 1)
         if other.shape[0] != self.shape[1]:
@@ -187,7 +381,7 @@ class LinearARG:
         x = spsolve_triangular(eye(self.A.shape[0]) - self.A, v)
         return x[self.sample_indices] + np.sum(other[self.flip])
 
-    def __rmatmul__(self, other: NDArray) -> NDArray:
+    def __rmatmul__(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
         if other.ndim == 1:
             other = other.reshape(1, -1)
         if other.shape[1] != self.shape[0]:
@@ -215,133 +409,55 @@ class LinearARG:
     def __getitem__(self, key: tuple[slice, slice]) -> "LinearARG":
         # TODO make this work with syntax like linarg[:100,] (works with linarg[:100,:])
         rows, cols = key
-        return LinearARG(self.A, self.sample_indices[rows], self.variant_indices[cols], self.flip[cols])
+        return LinearARG(self.A, self.samples[rows], self.variants[cols])
 
     def copy(self) -> "LinearARG":
-        return LinearARG(self.A.copy(), self.sample_indices.copy(), self.variant_indices.copy(), self.flip.copy())
+        return LinearARG(self.A.copy(), self.samples.copy(), self.variants.copy())
 
-    # def rows(self, idx: slice):
-    #     row_indices = range(*idx.indices(self.shape[0]))
-    #     n = len(row_indices)
-    #     x = np.zeros((n, self.shape[0]))
-    #     for i, index in enumerate(row_indices):
-    #         x[i, self.sample_indices[index]] = 1
-    #     return x * self.data
+    def write(self, prefix: Union[str, PathLike]):
+        """Writes LinearARG triplet to disk.
 
-    def write(
-        self,
-        filename_prefix: str,
-        chrom: str,
-        positions: list,
-        refs: list,
-        alts: list,
-        sample_filename: Optional[str] = None,
-        iids: Optional[list] = None,
-    ) -> None:
-        """
-        Writes LinearARG data in PLINK2 format, optionally writes sample information.
-        :param filename_prefix: The base path and prefix used for output files.
-        :param chrom: The chromosome number or identifier where the variants are located, e.g. "chr1".
-        :param positions: A list of integers representing the genomic positions of each variant.
-        :param refs: A list of strings representing the reference alleles for each variant.
-        :param alts: A list of strings representing the alternate alleles for each variant.
-        :param sample_filename: Optional filename for writing sample data. If provided, a .psam file will be generated
-        containing sample identifiers.
-        :param iids: Optional list of individual identifiers corresponding to samples. If provided, these identifiers
-        are used in the .psam file.
+        :param prefix: The base path and prefix used for output files.
+
         :return: None
         """
-        if sample_filename:
-            with open(f"{sample_filename}.psam", "w") as f_samples:
-                f_samples.write("#IID IDX\n")
-                if iids is None:
-                    iids = [f"sample_{idx}" for idx in range(self.shape[0])]
-                for i, iid in enumerate(iids):
-                    f_samples.write(f"{iid} {self.sample_indices[i]}\n")
+        # write out sample info
+        # self.samples.write(prefix + ".psam")
 
-        with open(f"{filename_prefix}.pvar", "w") as f_variants:
-            f_variants.write("##fileformat=PVARv1.0\n")
-            f_variants.write('##INFO=<ID=IDX,Number=1,Type=Integer,Description="Variant Index">\n')
-            f_variants.write('##INFO=<ID=FLIP,Number=1,Type=Integer,Description="Flip Information">\n')
-            f_variants.write("#CHROM POS ID REF ALT INFO\n")
-            for idx, pos, ref, alt, flip in zip(self.variant_indices, positions, refs, alts, self.flip):
-                f_variants.write(f"{chrom} {pos} . {ref} {alt} IDX={idx};FLIP={int(flip)}\n")
+        # write out variant info
+        self.variants.write(prefix + ".pvar")
 
-        from scipy.sparse import save_npz
+        # write out DAG info
+        save_npz(f"{prefix}.npz", self.A)
 
-        save_npz(f"{filename_prefix}.npz", self.A)
+        return
 
     @staticmethod
     def read(
-        adjacency_matrix_file: str, variants_file: str, samples_file: str
-    ) -> Tuple["LinearARG", List[str], List[str]]:
-        """
-        Reads LinearARG data from provided PLINK2 formatted files.
+        matrix_fname: Union[str, PathLike],
+        variant_fname: Union[str, PathLike],
+        samples_fname: Union[str, PathLike],
+    ) -> "LinearARG":
+        """Reads LinearARG data from provided PLINK2 formatted files.
 
-        :param adjacency_matrix_file: Filename for the .npz file containing the adjacency matrix.
-        :param variants_file: Filename for the .pvar file containing variant data.
-        :param samples_file: Filename for the .psam file containing sample IDs.
+        :param matrix_fname: Filename for the .npz file containing the adjacency matrix.
+        :param variant_fname: Filename for the .pvar file containing variant data.
+        :param samples_fname: Filename for the .psam file containing sample IDs.
+
         :return: A tuple containing the LinearARG object, list of variant IDs, and list of IIDs.
         """
 
-        def parse_info(info_str: str) -> Tuple[int, int]:
-            """Parses the INFO string to extract IDX and FLIP values."""
-            info_parts = info_str.split(";")
-            info_dict = {part.split("=")[0]: int(part.split("=")[1]) for part in info_parts if "=" in part}
-            return info_dict.get("IDX", -1), info_dict.get("FLIP", 0)
+        # Load sample info
+        s_info = SampleInfo.read(samples_fname)
+
+        # Load variant info
+        v_info = VariantInfo.read(variant_fname)
 
         # Load the adjacency matrix
-        from scipy.sparse import load_npz
+        A = load_npz(matrix_fname)
 
-        A = load_npz(adjacency_matrix_file)
-
-        # Read variant data
-        variants = []
-        variant_ids = []
-        flips = []
-        with open(variants_file, "r") as f_var:
-            headers = {}
-            for line in f_var:
-                if line.startswith("##"):
-                    continue
-                if not headers:
-                    headers = {key: idx for idx, key in enumerate(line.strip().split())}
-                    continue
-                parts = line.strip().split()
-                chrom = parts[headers["#CHROM"]]
-                pos = parts[headers["POS"]]
-                ref = parts[headers["REF"]]
-                alt = parts[headers["ALT"]]
-                idx, flip = parse_info(parts[headers["INFO"]])
-                variant_ids.append(f"{chrom}_{pos}_{ref}_{alt}")
-                variants.append(idx)
-                flips.append(flip)
-
-        variant_indices = np.array(variants)
-        flip = np.array(flips)
-
-        # Read sample data
-        iids = []
-        indices = []
-        with open(samples_file, "r") as f_samp:
-            headers = {}
-            for line in f_samp:
-                parts = line.strip().split()
-                if line.startswith("#"):
-                    # Identify headers and their positions
-                    if not headers:
-                        headers = {key: idx for idx, key in enumerate(parts) if key in ("IID", "IDX")}
-                    continue
-                # Read data according to identified headers
-                iid = parts[headers["IID"]] if "IID" in headers else None
-                idx = int(parts[headers["IDX"]]) if "IDX" in headers else -1
-                iids.append(iid)
-                indices.append(idx)
-        sample_indices = np.array(indices)
-
-        linear_arg = LinearARG(A, sample_indices, variant_indices, flip)
-
-        return linear_arg, variant_ids, iids
+        # Construct the final object and return!
+        return LinearARG(A, s_info.indices, v_info)
 
     def unweight(self, handle_singletons_differently=False) -> "LinearARG":
         """
@@ -422,9 +538,13 @@ class LinearARG:
         order = np.asarray(topological_sort(self.A))
         inv_order = np.argsort(order)
 
-        return LinearARG(
-            self.A[order, :][:, order], inv_order[self.sample_indices], inv_order[self.variant_indices], self.flip
-        )
+        A = self.A[order, :][:, order]
+        s_idx = inv_order[self.sample_indices]
+
+        v_idx = inv_order[self.variant_indices]
+        v_info = self.variants[v_idx]
+
+        return LinearARG(A, s_idx, v_info)
 
     def find_recombinations(self, method="old") -> "LinearARG":
         if method == "old":
@@ -456,4 +576,4 @@ class LinearARG:
         num_nodes = np.max(new_edges[:, 0:2]).astype(int) + 1
         A = csr_matrix((new_edges[:, 2], (new_edges[:, 1], new_edges[:, 0])), shape=(num_nodes, num_nodes))
 
-        return LinearARG(A, self.sample_indices, self.variant_indices, self.flip)
+        return LinearARG(A, self.samples, self.variants)

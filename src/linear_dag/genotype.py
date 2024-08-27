@@ -56,6 +56,8 @@ def load_genotypes(
     return genotypes, kept_variants, flipped_variants
 
 
+# TODO: split out internal functions based on using phased or unphased to reduce number of branches in loop
+# need to squeeze as much as we can...
 def read_vcf(
     path: str, region: Optional[str] = None, phased: bool = False, flip_minor_alleles: bool = True
 ) -> tuple[csc_matrix, np.ndarray, list[dict]]:
@@ -67,30 +69,39 @@ def read_vcf(
     data = []
     idxs = []
     ptrs = [0]
-    info = []
     flip = []
 
     ploidy = 1 if phased else 2
 
-    # TODO: handle missing data
-    for var in vcf(region):
-        if phased:
-            gts = np.ravel(np.asarray(var.genotype.array())[:, :2])
-        else:
-            gts = var.gt_types
-        if flip_minor_alleles:
+    if phased:
+        read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2])  # noqa: E731
+    else:
+        read_gt = lambda var: var.gt_types  # noqa: E731
+
+    if flip_minor_alleles:
+
+        def final_read(var):
+            gts = read_gt(var)
             af = np.mean(gts) / ploidy
             if af > 0.5:
-                gts = ploidy - gts
-                flip.append(True)
+                return ploidy - gts, True
             else:
-                flip.append(False)
+                return gts, False
+    else:
+
+        def final_read(var):
+            gts = read_gt(var)
+            return gts, False
+
+    # TODO: handle missing data
+    for var in vcf(region):
+        gts, is_flipped = final_read(var)
 
         (idx,) = np.where(gts != 0)
         data.append(gts[idx])
         idxs.append(idx)
         ptrs.append(ptrs[-1] + len(idx))
-        info.append(var.INFO)
+        flip.append(is_flipped)
 
     data = np.concatenate(data)
     idxs = np.concatenate(idxs)
@@ -98,7 +109,7 @@ def read_vcf(
     genotypes = csc_matrix((data, idxs, ptrs))
     flip = np.array(flip)
 
-    return genotypes, flip, info
+    return genotypes, flip
 
 
 def compute_af(genotypes: csc_matrix, ploidy: int = 1) -> NDArray:

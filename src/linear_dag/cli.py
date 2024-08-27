@@ -148,7 +148,7 @@ def _main(args):
 
     if not args.quiet:
         sys.stdout.write(masthead)
-        sys.stdout.write(cmd_str)
+        sys.stdout.write(cmd_str + os.linesep)
         sys.stdout.write("Starting log..." + os.linesep)
         stdout_handler = logging.StreamHandler(sys.stdout)
         stdout_handler.setFormatter(fmt)
@@ -157,7 +157,7 @@ def _main(args):
     # setup log file, but write PLINK-style command first
     disk_log_stream = open(f"{args.output}.log", "w")
     disk_log_stream.write(masthead)
-    disk_log_stream.write(cmd_str)
+    disk_log_stream.write(cmd_str + os.linesep)
     disk_log_stream.write("Starting log..." + os.linesep)
 
     disk_handler = logging.StreamHandler(disk_log_stream)

@@ -26,7 +26,7 @@ from .linear_arg_inference import (
     infer_brick_graph_using_containment as infer_brick_graph_using_containment,
     linearize_brick_graph_adjacency as linearize_brick_graph_adjacency,
 )
-from .lineararg import LinearARG as LinearARG
+from .lineararg import LinearARG as LinearARG, VariantInfo as VariantInfo
 from .one_summed import (
     compute_path_sums as compute_path_sums,
     construct_1_summed_DAG_fast as construct_1_summed_DAG_fast,
@@ -40,7 +40,6 @@ from .solve import (
     topological_sort as topological_sort,
 )
 from .trios import Trios as Trios
-from .variant_info import VariantInfo as VariantInfo
 
 # dna_nexus and pyspark are optional dependencies
 if find_spec("dna_nexus") and find_spec("pyspark"):
