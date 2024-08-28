@@ -7,6 +7,56 @@ from importlib import metadata
 
 from .lineararg import LinearARG
 
+title = """                            @@@@
+          @@@@@@            @@@@@
+       @@@      @@@         @@@@@
+     @              @       @@@@@
+    @  @@@           @@     @@@@@
+   @  @@@@@           @@    @@@@@
+  @@  @@@@@            @@   @@@@@
+ @@                     @   @@@@@
+ @               @@@@@  @   @@@@@
+ @               @@@@@  @   @@@@@
+ @     @@@        @@@   @   @@@@@
+  @    @@@             @    @@@@@
+   @                 @@     @@@@@
+     @@@          @@        @@@@@
+    @    @@@@@@@@           @@@@@
+  @                @        @@@@@
+  @    @        @   @        @@@@                                       @@@@@@@
+  @    @        @   @        @@@@                                    @          @@
+  @             @   @        @@@@                                  @ @@@@@         @
+  @   @@  @   @@@  @         @@@@                                 @  @@@@@          @
+   @ @     @@   @@           @@@@                                @    @@@            @@
+     @@    @@    @           @@@@                               @@                    @
+     @@    @@    @           @@@@                               @               @@@   @
+     @@    @@    @           @@@@                              @               @@@@@  @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     @               @@@@@  @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@      @    @@@        @@@   @
+@@@@@@@                                              @@@@@      @@   @@@             @
+@@@@                                                 @@@@@        @@               @
+@@@@                                                 @@@@@          @@@        @@@
+@@@@                                                 @@@@@         @    @@@@@@
+@@@@                                                 @@@@@       @               @
+@@@@                                                 @@@@@      @    @        @   @
+@@@@                                                 @@@@@      @    @        @   @
+@@@@                                                 @@@@@      @@            @   @
+@@@@                                                 @@@@@       @  @@  @  @@@@  @
+@@@@@                                                 @@@@         @     @@   @@
+@@@@@                                                 @@@@         @@    @@    @
+@@@@@                                                 @@@@         @@    @@    @
+@@@@@                                                 @@@@         @@    @@    @
+@@@@@                @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@@@@@                @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@@@@@                @@@@                                                          @@@@
+@@@@@                @@@@   ██╗  ██╗ ██████╗ ██████╗  █████╗ ███╗   ███╗ █████╗    @@@@
+@@@@@                @@@@   ██║ ██╔╝██╔═══██╗██╔══██╗██╔══██╗████╗ ████║██╔══██╗   @@@@
+@@@@@                @@@@   █████╔╝ ██║   ██║██║  ██║███████║██╔████╔██║███████║   @@@@
+@@@@@                @@@@   ██╔═██╗ ██║   ██║██║  ██║██╔══██║██║╚██╔╝██║██╔══██║   @@@@
+@@@@@                @@@@   ██║  ██╗╚██████╔╝██████╔╝██║  ██║██║ ╚═╝ ██║██║  ██║   @@@@
+@@@@@                @@@@   ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   @@@@
+@@@@@                @@@@                                                          @@@@"""
+
 
 def _construct_cmd_string(args, parser):
     """internal helper function to construct a visually pleasing string of the command line arguments"""
@@ -55,7 +105,7 @@ def _construct_cmd_string(args, parser):
     fmt_options = os.linesep.join(options)
     fmt_sub_args = os.linesep.join(sub_args + sub_options)
 
-    return f"linear-dag {sub_cmd}" + os.linesep + os.linesep.join([fmt_sub_args, fmt_options])
+    return f"kodama {sub_cmd}" + os.linesep + os.linesep.join([fmt_sub_args, fmt_options])
 
 
 def _make_dag(args):
@@ -119,20 +169,12 @@ def _main(args):
     cmd_str = _construct_cmd_string(args, argp)
 
     # fun!
-    title = "    " + "   __   _                   ___  ___  _____" + os.linesep
-    title += "    " + "  / /  (_)__  ___ ___ _____/ _ \/ _ |/ ___/" + os.linesep
-    title += "    " + " / /__/ / _ \/ -_) _ `/ __/ // / __ / (_ /" + os.linesep
-    title += "    " + "/____/_/_//_/\__/\_,_/_/ /____/_/ |_\___/"
     version = f"v{metadata.version('linear_dag')}"
-    # title is len 43 + 4 spaces on 'indent'
-    buff_size = (47 - len(version)) // 2
+    # title is len 87 + 4 spaces on 'indent'
+    buff_size = (87 + 22 + 4 - len(version)) // 2
     version = (" " * buff_size) + version + (" " * buff_size)
     title_and_ver = f"{title}{os.linesep}{version}"
-    buffer_len = len(version) + 8
-    bar_str = ("=" * buffer_len) + os.linesep
-    masthead = bar_str
-    masthead += title_and_ver + os.linesep
-    masthead += bar_str
+    masthead = title_and_ver + os.linesep
 
     # setup logging
     log = logging.getLogger(__name__)
