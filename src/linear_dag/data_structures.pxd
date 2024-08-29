@@ -45,6 +45,7 @@ cdef class LinkedListArray:
     cdef int[:] length  # Length of each linked list
     cdef int n  # Number of linked lists
     cdef void extend(self, int n, int value)
+    cdef void insert(self, int n, int value)
     cdef void remove(self, int n, list_node* element, list_node* predecessor)
     cdef void assign(self, int[:] what, int[:] where, int[:] which)
     cdef void remove_difference(self, int n, int m)

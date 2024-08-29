@@ -38,7 +38,8 @@ cdef class Recombination(DiGraph):
     @staticmethod
     def from_graph(brick_graph: DiGraph) -> Recombination:
         result = Recombination(brick_graph.maximum_number_of_nodes, brick_graph.maximum_number_of_edges)
-        result.add_edges_from(sorted(brick_graph.edge_list())) # sorted by parent indices
+        edges = sorted(brick_graph.edge_list(), reverse=True) # sorted by parent indices
+        result.add_edges_from(edges)
         result.compute_cliques()
         result.collect_cliques()
         return result

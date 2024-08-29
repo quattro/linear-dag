@@ -33,34 +33,37 @@ cdef class BrickGraph:
         num_samples, num_variants = genotypes.shape
 
         # Forward pass
-        cdef BrickGraph forward_graph = BrickGraph(num_samples, num_variants)
-        forward_graph.direction = 1
+        cdef BrickGraph forward_pass = BrickGraph(num_samples, num_variants)
+        forward_pass.direction = 1
         cdef int i
         for i in range(num_variants):
             carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i + 1]]
-            forward_graph.intersect_clades(carriers, i)
+            forward_pass.intersect_clades(carriers, i)
 
         # Add samples
         cdef int[:] sample_indices
         if add_samples:
             sample_indices =  np.arange(num_variants, num_variants+num_samples, dtype=np.intc)
             for i in range(num_samples):
-                forward_graph.add_edges_from_subsequence(i, sample_indices[i])
+                forward_pass.add_edges_from_subsequence(i, sample_indices[i])
+                forward_pass.subsequence.clear_list(i)
         else:
             sample_indices = np.array([])
+        cdef DiGraph forward_graph = forward_pass.graph
 
         # Backward pass
-        cdef BrickGraph backward_graph = BrickGraph(num_samples, num_variants)
-        backward_graph.direction = -1
+        cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants)
+        backward_pass.direction = -1
         for i in reversed(range(num_variants)):
             carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i+1]]
-            backward_graph.intersect_clades(carriers, i)
+            backward_pass.intersect_clades(carriers, i)
+        cdef DiGraph backward_graph = backward_pass.graph
 
         # For variants i,j with paths i->j and also j->i, combine them into a single node
-        cdef int[:] variant_indices = combine_cliques(forward_graph.graph, backward_graph.graph)
+        cdef int[:] variant_indices = combine_cliques(forward_graph, backward_graph)
 
         # Transitive reduction of the union of the forward and reverse graphs
-        cdef DiGraph brick_graph = reduction_union(forward_graph.graph, backward_graph.graph)
+        cdef DiGraph brick_graph = reduction_union(forward_graph, backward_graph)
 
         return brick_graph, sample_indices, variant_indices[:num_variants]
 
@@ -508,4 +511,58 @@ cdef void add_nonredundant_neighbors(DiGraph result, node * starting_node, Integ
         if not neighbors_to_exclude.contains(out_edge.v.index):
             result.add_edge(starting_node.index, out_edge.v.index)
         out_edge = out_edge.next_out
+
+cpdef tuple merge_brick_graphs(list graphs, list sample_nodes, list variant_nodes):
+    """
+    Merge multiple brick graphs with shared sample nodes and other nodes disjoint.
+    :param graphs: list of brick graphs
+    :param sample_nodes: list of sample indices of each brick graph
+    :param variant_nodes: list of variant indices of each brick graph
+    :return: merged graph, variant indices, index mapping
+    """
+    num_samples = len(sample_nodes[0])
+    number_of_nodes = sum([graph.maximum_number_of_nodes for graph in graphs])# - (len(graphs)-1) * num_samples
+    number_of_edges = sum([graph.number_of_edges for graph in graphs])
+    cdef DiGraph result = DiGraph(number_of_nodes, number_of_edges)
+    cdef DiGraph graph
+    cdef int i
+    cdef int u, v
+    cdef int non_sample_counter = num_samples
+    cdef int sample_counter
+    cdef int[:] new_node_ids
+    cdef list variant_indices = []
+    cdef list index_mapping = []
+    for graph, samples, variants in zip(graphs, sample_nodes, variant_nodes):
+        # Get new node ids corresponding to the merged graph
+        sample_counter = 0
+        new_node_ids = np.zeros(graph.maximum_number_of_nodes, dtype=np.intc)
+        for i in range(graph.maximum_number_of_nodes):
+            if i in samples:
+                new_node_ids[i] = sample_counter
+                sample_counter += 1
+            else:
+                new_node_ids[i] = non_sample_counter
+                non_sample_counter += 1
+        for var in variants:
+            variant_indices.append(new_node_ids[var])
+        index_mapping.append(new_node_ids)
+        # Add edges from graph to result while preserving the order of the parent nodes for each child node
+        for node_idx in range(graph.maximum_number_of_nodes):
+            if not graph.is_node[node_idx]:
+                continue
+            add_neighbors(result, graph.nodes[node_idx], new_node_ids)
+    return result, variant_indices, index_mapping
+
+cdef add_neighbors(DiGraph graph_to_modify, node* v, node_ids):
+    cdef edge* e = v.first_in
+    if e is NULL:
+        return
+    node_idx = node_ids[v.index]
+    while e.next_in is not NULL:
+        e = e.next_in
+
+    while e is not NULL:
+        graph_to_modify.add_edge(node_ids[e.u.index], node_idx)
+        e = e.prev_in
+
 
