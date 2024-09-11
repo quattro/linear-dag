@@ -7,6 +7,9 @@ from importlib import metadata
 
 from .lineararg import LinearARG
 
+from .partition_merge import make_genotype_matrix, infer_brick_graph, merge
+
+
 title = """                            @@@@
           @@@@@@            @@@@@
        @@@      @@@         @@@@@
@@ -136,6 +139,24 @@ def _assoc_scan(args):
     pass
 
 
+def _make_geno(args):
+    make_genotype_matrix(args.vcf_path, args.linarg_dir, args.region, args.partition_number, args.phased, args.flip_minor_alleles)
+
+
+def _infer_brick_graph(args):
+    if args.load_dir is None:
+        infer_brick_graph(args.linarg_dir, '', args.partition_identifier)
+    else:
+        infer_brick_graph(args.linarg_dir, args.load_dir, args.partition_identifier)
+
+
+def _merge(args):
+    if args.load_dir is None:
+        merge(args.linarg_dir, '')
+    else:
+        merge(args.linarg_dir, args.load_dir)
+
+
 def _main(args):
     argp = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -161,6 +182,26 @@ def _main(args):
     assoc_p.add_argument("--covar", type=str, help="Covariate file for individuals")
     assoc_p.add_argument("--covar-cols", type=str, help="Covariate file for individuals")
     assoc_p.set_defaults(func=_assoc_scan)
+    
+    make_geno_p = subp.add_parser("make-geno", help="Step 1 of partition and merge pipeline. Makes sparse genotype matrices from VCF file.")
+    make_geno_p.add_argument("--vcf_path", type=str, help="Path to VCF file")  
+    make_geno_p.add_argument("--linarg_dir", type=str, help="Directory to store linear ARG outputs (must be the same for Steps 1-3)")
+    make_geno_p.add_argument("--region", type=str, help="Genomic region of the form chrN-start-end")
+    make_geno_p.add_argument("--partition_number", type=str, help="Partition number in genomic ordering")
+    make_geno_p.add_argument("--phased", type=bool, help="Is data phased?")
+    make_geno_p.add_argument("--flip_minor_alleles", type=bool, help="Should minor alleles be flipped?")
+    make_geno_p.set_defaults(func=_make_geno)
+    
+    infer_brick_graph_p = subp.add_parser("infer-brick-graph", help="Step 2 of partition and merge pipeline. Infers the brick graph from sparse matrix.")
+    infer_brick_graph_p.add_argument("--linarg_dir", type=str, help="Directory to store linear ARG outputs (must be the same for Steps 1-3)")
+    infer_brick_graph_p.add_argument("--load_dir", type=str, help="Directory to load data. Primary for cloud computing e.g. for dnanexus this would be '/mnt/project/'. If there is no load directory, this field can be omitted.")    
+    infer_brick_graph_p.add_argument("--partition_identifier", type=str, help="Partition identifier in the form {paritition_number}_{region}")
+    infer_brick_graph_p.set_defaults(func=_infer_brick_graph)
+    
+    merge_p = subp.add_parser("merge", help="Step 3 of partition and merge pipeline. Merge, find recombinations, and linearize brick graph.")
+    merge_p.add_argument("--linarg_dir", type=str, help="Directory to store linear ARG outputs (must be the same for Steps 1-3)")
+    merge_p.add_argument("--load_dir", type=str, help="Directory to load data. Primary for cloud computing e.g. for dnanexus this would be '/mnt/project/'. If there is no load directory, this field can be omitted.")    
+    merge_p.set_defaults(func=_merge)
 
     # parse arguments
     args = argp.parse_args(args)

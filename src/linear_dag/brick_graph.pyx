@@ -4,6 +4,7 @@ from .data_structures cimport node, edge, list_node
 from .data_structures cimport DiGraph, LinkedListArray, CountingArray, Stack, IntegerList, IntegerSet
 cimport numpy as cnp
 from scipy.sparse import csr_matrix, csc_matrix
+import os
 cdef int MAXINT = 2147483647
 
 cdef class BrickGraph:
@@ -512,17 +513,60 @@ cdef void add_nonredundant_neighbors(DiGraph result, node * starting_node, Integ
             result.add_edge(starting_node.index, out_edge.v.index)
         out_edge = out_edge.next_out
 
-cpdef tuple merge_brick_graphs(list graphs, list sample_nodes, list variant_nodes):
+cpdef tuple read_brick_graph_npz(npz_data):
+    """
+    From NpzFile, read in brick graph.
+    :param npz_data: NpzFile from infer brick graph
+    :return: graph (adjacency matrix), sample_indices, variant_indices
+    """
+    adj_mat = csr_matrix((npz_data['brick_graph_data'], npz_data['brick_graph_indices'], npz_data['brick_graph_indptr']), shape=npz_data['brick_graph_shape'])
+    graph = DiGraph.from_csr(adj_mat)
+    sample_indices = npz_data['sample_indices']
+    variant_indices = npz_data['variant_indices']
+    return graph, sample_indices, variant_indices
+
+cpdef tuple get_graph_statistics(str brick_graph_dir):
+    """
+    Get merged graph statisticics from directory of brick graph partitions.
+    :param brick_graph_dir: location of brick graph partitions
+    :return: num_samples, number_of_nodes, number_of_edges
+    """
+    cdef int number_of_nodes = 0
+    cdef int number_of_edges = 0
+    cdef list files = os.listdir(brick_graph_dir)
+    for f in files:
+        graph, sample_indices, variant_indices = read_brick_graph_npz(np.load(f'{brick_graph_dir}/{f}'))
+        number_of_nodes += graph.number_of_nodes
+        number_of_edges += graph.number_of_edges
+    num_samples = len(sample_indices)
+    number_of_nodes -= num_samples * (len(files)-1)
+    return num_samples, number_of_nodes, number_of_edges
+
+cdef add_neighbors(DiGraph graph_to_modify, node* v, node_ids):
+    """
+    Add edges from the parents of node v to node v to graph_to_modify using the index mapping node_ids.
+    :param graph_to_modify: DiGraph object
+    :param v: pointer to node v
+    :param node_ids: index mapping such that node_ids[i] maps to the index of node i in graph_to_modify
+    :return: None
+    """
+    cdef edge* e = v.first_in
+    if e is NULL:
+        return
+    node_idx = node_ids[v.index]
+    while e.next_in is not NULL:
+        e = e.next_in
+    while e is not NULL:
+        graph_to_modify.add_edge(node_ids[e.u.index], node_idx)
+        e = e.prev_in
+
+cpdef tuple merge_brick_graphs(str brick_graph_dir):
     """
     Merge multiple brick graphs with shared sample nodes and other nodes disjoint.
-    :param graphs: list of brick graphs
-    :param sample_nodes: list of sample indices of each brick graph
-    :param variant_nodes: list of variant indices of each brick graph
+    :param brick_graph_dir: location of brick graph partitions
     :return: merged graph, variant indices, index mapping
     """
-    num_samples = len(sample_nodes[0])
-    number_of_nodes = sum([graph.maximum_number_of_nodes for graph in graphs])# - (len(graphs)-1) * num_samples
-    number_of_edges = sum([graph.number_of_edges for graph in graphs])
+    num_samples, number_of_nodes, number_of_edges = get_graph_statistics(brick_graph_dir) # get statistics to initialize DiGraph object
     cdef DiGraph result = DiGraph(number_of_nodes, number_of_edges)
     cdef DiGraph graph
     cdef int i
@@ -532,11 +576,20 @@ cpdef tuple merge_brick_graphs(list graphs, list sample_nodes, list variant_node
     cdef int[:] new_node_ids
     cdef list variant_indices = []
     cdef list index_mapping = []
-    for graph, samples, variants in zip(graphs, sample_nodes, variant_nodes):
+    cdef list files = os.listdir(brick_graph_dir)
+
+    ind_arr = np.array([int(f.split('_')[0]) for f in files])
+    order = ind_arr.argsort()
+    files = np.array(files)[order].tolist() # sort files by index
+
+    for f in files:
+
+        graph, samples, variants = read_brick_graph_npz(np.load(f'{brick_graph_dir}/{f}'))
+
         # Get new node ids corresponding to the merged graph
         sample_counter = 0
-        new_node_ids = np.zeros(graph.maximum_number_of_nodes, dtype=np.intc)
-        for i in range(graph.maximum_number_of_nodes):
+        new_node_ids = np.zeros(graph.number_of_nodes, dtype=np.intc)
+        for i in range(graph.number_of_nodes):
             if i in samples:
                 new_node_ids[i] = sample_counter
                 sample_counter += 1
@@ -546,23 +599,11 @@ cpdef tuple merge_brick_graphs(list graphs, list sample_nodes, list variant_node
         for var in variants:
             variant_indices.append(new_node_ids[var])
         index_mapping.append(new_node_ids)
+
         # Add edges from graph to result while preserving the order of the parent nodes for each child node
-        for node_idx in range(graph.maximum_number_of_nodes):
+        for node_idx in range(graph.number_of_nodes):
             if not graph.is_node[node_idx]:
                 continue
             add_neighbors(result, graph.nodes[node_idx], new_node_ids)
-    return result, variant_indices, index_mapping
 
-cdef add_neighbors(DiGraph graph_to_modify, node* v, node_ids):
-    cdef edge* e = v.first_in
-    if e is NULL:
-        return
-    node_idx = node_ids[v.index]
-    while e.next_in is not NULL:
-        e = e.next_in
-
-    while e is not NULL:
-        graph_to_modify.add_edge(node_ids[e.u.index], node_idx)
-        e = e.prev_in
-
-
+    return result, variant_indices, num_samples, index_mapping

@@ -45,7 +45,8 @@ cdef class Recombination(DiGraph):
         return result
 
     cpdef void compute_cliques(self):
-        cdef CountingArray right_parent_to_clique = CountingArray(self.number_of_nodes)
+        # cdef CountingArray right_parent_to_clique = CountingArray(self.number_of_nodes)
+        cdef CountingArray right_parent_to_clique = CountingArray(self.maximum_number_of_nodes)
         cdef int left_parent, right_parent, clique_idx
         cdef edge* out_edge
 

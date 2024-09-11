@@ -130,13 +130,18 @@ class VariantInfo:
             pvar_file.flush()
 
             # we need to map IDX and FLIP columns back to INFO
-            sub_table = self.table.with_columns(
-                (
-                    pl.col(self.idx_field).apply(lambda idx: f"IDX={idx}")
-                    + pl.col(self.flip_field).apply(lambda flip: f";{self.flip_field}" if flip else "")
-                ).alias("INFO")
-            ).drop([self.idx_field, self.flip_field])
-            sub_table.write_csv(pvar_file, has_header=False, separator="\t")
+            # this was giving me "AttributeError: 'Expr' object has no attribute 'apply'"
+            # sub_table = self.table.with_columns(
+            #     (
+            #         pl.col(self.idx_field).apply(lambda idx: f"IDX={idx}")
+            #         + pl.col(self.flip_field).apply(lambda flip: f";{self.flip_field}" if flip else "")
+            #     ).alias("INFO")
+            # ).drop([self.idx_field, self.flip_field])
+            # sub_table.write_csv(pvar_file, has_header=False, separator="\t")
+            
+            info_col = pl.Series([f'IDX={idx};FLIP={flip}' for idx, flip in zip(self.table['IDX'], self.table['FLIP'])])
+            sub_table = self.table.with_columns(info_col.alias('INFO')).drop([self.idx_field, self.flip_field]) 
+            sub_table.write_csv(pvar_file, include_header=False, separator="\t")
 
         return
 
@@ -422,6 +427,14 @@ class LinearARG:
         :return: None
         """
         # write out sample info
+        # temporary fix
+        iids = None
+        with open(f"{prefix}.psam", "w") as f_samples:
+                f_samples.write("#IID IDX\n")
+                if iids is None:
+                    iids = [f"sample_{idx}" for idx in range(self.shape[0])]
+                for i, iid in enumerate(iids):
+                    f_samples.write(f"{iid} {self.sample_indices[i]}\n")
         # self.samples.write(prefix + ".psam")
 
         # write out variant info
@@ -448,7 +461,10 @@ class LinearARG:
         """
 
         # Load sample info
-        s_info = SampleInfo.read(samples_fname)
+        # temporary fix
+        sample_info = pl.read_csv(samples_fname, separator=' ')
+        sample_indices = np.array(sample_info['IDX'])
+        # s_info = SampleInfo.read(samples_fname)
 
         # Load variant info
         v_info = VariantInfo.read(variant_fname)
@@ -457,7 +473,8 @@ class LinearARG:
         A = load_npz(matrix_fname)
 
         # Construct the final object and return!
-        return LinearARG(A, s_info.indices, v_info)
+        return LinearARG(A, sample_indices, v_info)
+        # return LinearARG(A, s_info.indices, v_info)
 
     def unweight(self, handle_singletons_differently=False) -> "LinearARG":
         """
@@ -542,9 +559,15 @@ class LinearARG:
         s_idx = inv_order[self.sample_indices]
 
         v_idx = inv_order[self.variant_indices]
-        v_info = self.variants[v_idx]
+        v_info = self.variants.table.clone()
+        v_idx = pl.Series(v_idx)
+        v_info = v_info.with_columns(v_idx.alias('IDX'))
+        
+        # this results in an out of bounds error since the variant indices are greater than the number of rows in v_info
+        # v_info = self.variants[v_idx]
+        # return LinearARG(A, s_idx, v_info)
 
-        return LinearARG(A, s_idx, v_info)
+        return LinearARG(A, s_idx, VariantInfo(v_info))
 
     def find_recombinations(self, method="old") -> "LinearARG":
         if method == "old":

@@ -47,7 +47,7 @@ class SampleInfo:
 
     @classmethod
     def read(cls, path: Union[str, PathLike]) -> "SampleInfo":
-        table = pl.read_csv(path, separator="\t")
+        table = pl.read_csv(path, separator=" ")
         if "#IID" in table.columns:
             table = table.rename({"#IID": "IID"})
         if cls.idx_col not in table.columns:
@@ -56,7 +56,7 @@ class SampleInfo:
         return cls(table=table)
 
     def write(self, path: Union[str, PathLike]):
-        self.table.write_csv(path, separator="\t")
+        self.table.write_csv(path, separator=" ")
         return
 
     @classmethod
