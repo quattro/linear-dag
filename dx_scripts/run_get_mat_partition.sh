@@ -18,7 +18,7 @@ python3.9 -m pip install --upgrade scipy
 python3.9 -m pip install cyvcf2
 python3.9 -m pip install dxpy # for dna_nexus.py
 python3.9 -m pip install pyspark # for dna_nexus.py
-python3.9 -m pip install git+https://github.com/quattro/linear-dag.git@partition_and_merge
+python3.9 -m pip install git+https://github.com/quattro/linear-dag.git
 
 export PATH=$PATH:/home/dnanexus/.local/bin/
 kodama make-geno --vcf_path "$vcf_path" \

@@ -140,7 +140,6 @@ def merge(linarg_dir, load_dir):
 
     linarg = LinearARG(linear_arg_adjacency_matrix, sample_indices, var_info)
     linarg.write(f'{linarg_dir}/linear_arg')
-    # get_linarg_stats(linarg, linarg_dir, load_dir)
     get_linarg_stats(linarg_dir, load_dir)
     
 
