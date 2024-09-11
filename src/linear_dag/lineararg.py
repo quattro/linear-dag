@@ -54,11 +54,11 @@ class VariantInfo:
 
     @cached_property
     def is_flipped(self):
-        return self.table[self.flip_field].to_numpy()
+        return self.table[self.flip_field].to_numpy().astype(bool)
 
     @cached_property
     def indices(self):
-        return self.table[self.idx_field].to_numpy()
+        return self.table[self.idx_field].to_numpy().astype(int)
 
     def copy(self):
         return VariantInfo(self.table.clone())
@@ -203,23 +203,18 @@ class LinearARG:
     @staticmethod
     def from_genotypes(
         genotypes: csc_matrix,
-        variants_flipped_ref_alt: Optional[np.ndarray] = None,
+        variant_info: pl.DataFrame = None,
         find_recombinations: bool = True,
         make_triangular: bool = True,
     ):
         """
         Infers a linear ARG from a genotype matrix.
         :param genotypes: CSC matrix of 0-1 valued, phased genotypes; rows = samples, cols = variants
-        :param variants_flipped_ref_alt: 0-1 valued array indicating which columns of the genotype matrix have had their
         ref and alt alleles flipped
         :param find_recombinations: whether to condense the graph by inferring recombination nodes
         :param make_triangular: whether to re-order rows and columns such that the adjacency matrix is triangular
         :return: linear ARG instance
         """
-        if variants_flipped_ref_alt is None:
-            variants_flipped_ref_alt = np.zeros(genotypes.shape[1], dtype=bool)
-        if len(variants_flipped_ref_alt) != genotypes.shape[1]:
-            raise ValueError
         if type(genotypes) is not csc_matrix:
             raise TypeError
 
@@ -231,7 +226,19 @@ class LinearARG:
 
         linear_arg_adjacency_matrix = linearize_brick_graph(recom)
 
-        result = LinearARG(linear_arg_adjacency_matrix, samples_idx, variants_idx, variants_flipped_ref_alt)
+        num_variants = len(variants_idx)
+        if variant_info is None:
+            data = {"CHROM": np.zeros(num_variants),
+                    "POS": np.arange(num_variants),
+                    "REF": np.zeros(num_variants),
+                    "ALT": np.ones(num_variants),
+                    "FLIP": np.zeros(num_variants),
+                    "ID": np.arange(num_variants),
+                    "INFO": np.zeros(num_variants)}
+            variant_info = pl.DataFrame(data)
+        variant_info = variant_info.with_columns(pl.lit(np.asarray(variants_idx)).alias("IDX"))
+
+        result = LinearARG(linear_arg_adjacency_matrix, samples_idx, VariantInfo(variant_info))
 
         if make_triangular:
             result = result.make_triangular()
