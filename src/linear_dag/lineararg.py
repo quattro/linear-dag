@@ -17,20 +17,11 @@ from scipy.sparse import csc_matrix, csr_matrix, eye, load_npz, save_npz
 from scipy.sparse.linalg import spsolve_triangular
 
 from .brick_graph import BrickGraph
-from .brick_graph_py import BrickGraphPy
-from .data_structures import DiGraph
-from .linear_arg_inference import (
-    add_samples_to_linear_arg,
-    add_singleton_variants,
-    infer_brick_graph_using_containment,
-    linearize_brick_graph_adjacency,
-    remove_undirected_edges,
-)
+from .linear_arg_inference import linear_arg_from_genotypes
 from .one_summed_cy import linearize_brick_graph
 from .recombination import Recombination
-from .sample_info import SampleInfo
 from .solve import topological_sort
-from .trios import Trios
+
 
 
 @dataclass
@@ -211,78 +202,15 @@ class LinearARG:
         Infers a linear ARG from a genotype matrix.
         :param genotypes: CSC matrix of 0-1 valued, phased genotypes; rows = samples, cols = variants
         ref and alt alleles flipped
+        :param variant_info: polars dataframe containing required variant information, or none
         :param find_recombinations: whether to condense the graph by inferring recombination nodes
         :param make_triangular: whether to re-order rows and columns such that the adjacency matrix is triangular
         :return: linear ARG instance
         """
-        if type(genotypes) is not csc_matrix:
-            raise TypeError
-
-        brick_graph, samples_idx, variants_idx = BrickGraph.from_genotypes(genotypes)
-
-        recom = Recombination.from_graph(brick_graph)
-        if find_recombinations:
-            recom.find_recombinations()
-
-        linear_arg_adjacency_matrix = linearize_brick_graph(recom)
-
-        num_variants = len(variants_idx)
-        if variant_info is None:
-            data = {"CHROM": np.zeros(num_variants),
-                    "POS": np.arange(num_variants),
-                    "REF": np.zeros(num_variants),
-                    "ALT": np.ones(num_variants),
-                    "FLIP": np.zeros(num_variants),
-                    "ID": np.arange(num_variants),
-                    "INFO": np.zeros(num_variants)}
-            variant_info = pl.DataFrame(data)
-        variant_info = variant_info.with_columns(pl.lit(np.asarray(variants_idx)).alias("IDX"))
-
+        linear_arg_adjacency_matrix, samples_idx, variant_info = linear_arg_from_genotypes(genotypes, variant_info, find_recombinations)
         result = LinearARG(linear_arg_adjacency_matrix, samples_idx, VariantInfo(variant_info))
-
         if make_triangular:
             result = result.make_triangular()
-
-        return result
-
-    @staticmethod
-    def from_genotypes_old(
-        genotypes: csc_matrix,
-        ploidy: int = 1,
-        flip: Optional[npt.NDArray[bool]] = None,
-        brick_graph_method: str = "old",
-        recombination_method: str = "none",
-    ) -> "LinearARG":
-        # Infer an initial brick graph
-        brick_graph_closure: csr_matrix
-        if brick_graph_method.lower() == "old":
-            brick_graph_closure = infer_brick_graph_using_containment(genotypes, ploidy)
-        elif brick_graph_method.lower() == "new_slow":
-            assert ploidy == 1, "new brick graph method assumes haploid samples"
-            brick_graph_closure = BrickGraphPy.from_genotypes(genotypes).to_csr()
-        elif brick_graph_method.lower() == "new":
-            raise NotImplementedError("use from_genotypes_new instead")
-        elif brick_graph_method.lower() == "trivial":
-            brick_graph_closure = csr_matrix(eye(genotypes.shape[1]))
-        else:
-            raise ValueError(f"Unknown brick graph method {brick_graph_method}")
-        brick_graph_closure = remove_undirected_edges(brick_graph_closure)
-
-        linear_arg_adjacency_matrix = linearize_brick_graph_adjacency(brick_graph_closure)
-        if brick_graph_method.lower() == "old":
-            linear_arg_adjacency_matrix = add_singleton_variants(genotypes, linear_arg_adjacency_matrix)
-        linear_arg_adjacency_matrix = add_samples_to_linear_arg(genotypes, linear_arg_adjacency_matrix)
-
-        n, m = genotypes.shape
-        samples_idx = np.arange(n)
-        variants_idx = np.arange(n, m + n)
-        if flip is None:
-            flip = np.zeros(len(variants_idx), dtype=bool)
-        result = LinearARG(linear_arg_adjacency_matrix, samples_idx, variants_idx, flip)
-
-        if recombination_method.lower() == "after":
-            result = result.unweight()
-            result = result.find_recombinations()
 
         return result
 
@@ -290,24 +218,21 @@ class LinearARG:
     def from_plink(prefix: str) -> "LinearARG":
         import bed_reader as br
 
-        # TODO: handle missing data
         with br.open_bed(f"{prefix}.bed") as bed:
             genotypes = bed.read_sparse(dtype="int8")
 
-            brick_graph, samples_idx, variants_idx = BrickGraph.from_genotypes(genotypes)
+        larg = LinearARG.from_genotypes(genotypes)
+        v_info = VariantInfo.from_open_bed(bed, larg.variant_indices)
+        larg.variants = v_info
+        return larg
 
-            recom = Recombination.from_graph(brick_graph)
-            recom.find_recombinations()
-            linear_arg_adjacency_matrix = linearize_brick_graph(recom)
-
-            v_info = VariantInfo.from_bed(bed, variants_idx)
-
-            larg = LinearARG(linear_arg_adjacency_matrix, samples_idx, v_info)
-            larg = larg.make_triangular()
-            return larg
-
+    #  TODO move file IO out of LinearARG
     @staticmethod
-    def from_vcf(path: Union[str, PathLike], phased: bool = False) -> "LinearARG":
+    def from_vcf(path: Union[str, PathLike],
+                 phased: bool = True,
+                 region: Optional[str] = None,
+                 flip_minor_alleles: bool = False,
+                 return_genotypes: bool = False) -> "LinearARG":
         vcf = cv.VCF(path, gts012=True, strict_gt=True)
         data = []
         idxs = []
@@ -321,8 +246,10 @@ class LinearARG:
         else:
             read_gt = lambda var: var.gt_types  # noqa: E731
 
-        def final_read(var):
+        def final_read(var, flip_minor_alleles):
             gts = read_gt(var)
+            if not flip_minor_alleles:
+                return gts, False
             af = np.mean(gts) / ploidy
             if af > 0.5:
                 return ploidy - gts, True
@@ -331,8 +258,8 @@ class LinearARG:
 
         var_table = defaultdict(list)
         # TODO: handle missing data
-        for var in vcf():
-            gts, is_flipped = final_read(var)
+        for var in vcf(region):
+            gts, is_flipped = final_read(var, flip_minor_alleles)
 
             (idx,) = np.where(gts != 0)
             data.append(gts[idx])
@@ -340,28 +267,14 @@ class LinearARG:
             ptrs.append(ptrs[-1] + len(idx))
             var_table = VariantInfo._update_dict_from_vcf(var, is_flipped, var_table)
 
+        v_info = pl.DataFrame(var_table)
+
         data = np.concatenate(data)
         idxs = np.concatenate(idxs)
         ptrs = np.array(ptrs)
-
-        # construct brickk graph from sparse matrix
         genotypes = csc_matrix((data, idxs, ptrs))
-        brick_graph, samples_idx, variants_idx = BrickGraph.from_genotypes(genotypes)
-
-        # construct linear representation
-        recom = Recombination.from_graph(brick_graph)
-        recom.find_recombinations()
-        linear_arg_adjacency_matrix = linearize_brick_graph(recom)
-
-        import polars as pl
-
-        # construct var info
-        var_table["IDX"] = variants_idx
-        v_info = VariantInfo(pl.DataFrame(var_table))
-
-        larg = LinearARG(linear_arg_adjacency_matrix, samples_idx, v_info)
-        larg = larg.make_triangular()
-        return larg
+        result = LinearARG.from_genotypes(genotypes, v_info)
+        return result, genotypes if return_genotypes else result
 
     @property
     def shape(self):
@@ -483,80 +396,6 @@ class LinearARG:
         return LinearARG(A, sample_indices, v_info)
         # return LinearARG(A, s_info.indices, v_info)
 
-    def unweight(self, handle_singletons_differently=False) -> "LinearARG":
-        """
-        Prepares an initial linear ARG for recombination finding by grouping out-edges by weight. If node u has
-        multiple out-edges with weight k != 1, then a new node v is created with a single k-weighted edge (u,v)
-        and a 1-weighted edge (v, w) for each neighbor w.
-        :return:
-        """
-        from collections import defaultdict
-
-        M = csc_matrix(self.A)
-        num_nodes = len(M.indptr) - 1
-        new_indptr = np.zeros(4 * num_nodes, dtype=np.uintc)
-        new_indices = np.zeros(2 * len(M.indices), dtype=np.uintc)
-        new_data = np.zeros(2 * len(M.indices), dtype=np.intc)
-        original_nodes = np.zeros(num_nodes, dtype=np.uintc)
-        element_index = 0
-        node_index = 0
-        for u in range(num_nodes):
-            original_nodes[u] = node_index
-
-            # Collect neighbors of i by weight
-            weight_to_neighbors = defaultdict(list)
-            for j in range(M.indptr[u], M.indptr[u + 1]):
-                weight_to_neighbors[M.data[j]].append(M.indices[j])
-
-            # Separately handle edges of weight 1, which do not produce a new node
-            for neighbor in weight_to_neighbors[1]:
-                new_data[element_index] = 1
-                new_indices[element_index] = neighbor
-                element_index += 1
-
-            out_degree = len(weight_to_neighbors) + len(weight_to_neighbors[1]) - 1
-            new_indptr[node_index + 1] = new_indptr[node_index] + out_degree
-            node_index += 1
-
-            # Create out-edges of u
-            for edge_weight, neighbors_with_weight in weight_to_neighbors.items():
-                if edge_weight == 1:
-                    continue
-                if handle_singletons_differently and len(neighbors_with_weight) == 1:
-                    new_indices[element_index] = neighbors_with_weight[0]
-                else:
-                    # Create a new node
-                    new_indices[element_index] = node_index
-                    out_degree = len(neighbors_with_weight)
-                    new_indptr[node_index + 1] = new_indptr[node_index] + out_degree
-                    node_index += 1
-
-                new_data[element_index] = edge_weight
-                element_index += 1
-
-            # Create out-edges of newly created nodes
-            for edge_weight, neighbors_with_weight in weight_to_neighbors.items():
-                if edge_weight == 1:
-                    continue
-                if handle_singletons_differently and len(neighbors_with_weight) == 1:
-                    continue
-
-                for neighbor in neighbors_with_weight:
-                    new_data[element_index] = 1
-                    new_indices[element_index] = neighbor
-                    element_index += 1
-
-        # new_indices are a combination of new and old node IDs, mostly old except for those with weight != 1
-        new_indices[new_data == 1] = original_nodes[new_indices[new_data == 1]]
-
-        # Reconstitute the adjacency matrix and convert back from CSC to CSR
-        M = csc_matrix(
-            (new_data[:element_index], new_indices[:element_index], new_indptr[: node_index + 1]),
-            shape=(node_index, node_index),
-        )
-        M = csr_matrix(M)
-
-        return LinearARG(M, original_nodes[self.sample_indices], original_nodes[self.variant_indices], self.flip)
 
     def make_triangular(self) -> "LinearARG":
         order = np.asarray(topological_sort(self.A))
@@ -575,35 +414,3 @@ class LinearARG:
         # return LinearARG(A, s_idx, v_info)
 
         return LinearARG(A, s_idx, VariantInfo(v_info))
-
-    def find_recombinations(self, method="old") -> "LinearARG":
-        if method == "old":
-            trio_list = Trios(5 * self.A.nnz)  # TODO what should n be?
-            edges = self.A == 1
-            trio_list.convert_matrix(edges.indices, edges.indptr)
-            trio_list.find_recombinations()
-            new_edges = np.asarray(trio_list.fill_edgelist())
-        else:
-            gr = DiGraph.from_csc(self.A.transpose())
-            recom = Recombination.from_graph(gr)
-            recom.find_recombinations()
-            new_edges = np.array(recom.edge_list(), dtype=np.dtype("int", "int"))
-
-        new_edges = np.hstack((new_edges, np.ones((new_edges.shape[0], 1))))
-
-        edges_with_nonone_weight = np.zeros((np.sum(self.A.data != 1), 3), dtype=np.intc)
-        counter = 0
-        for i in range(self.A.shape[0]):
-            for entry in range(self.A.indptr[i], self.A.indptr[i + 1]):
-                if self.A.data[entry] == 1:
-                    continue
-                j = self.A.indices[entry]
-                weight = self.A.data[entry]
-                edges_with_nonone_weight[counter, :] = [j, i, weight]
-                counter += 1
-        new_edges = np.vstack((new_edges, edges_with_nonone_weight))
-
-        num_nodes = np.max(new_edges[:, 0:2]).astype(int) + 1
-        A = csr_matrix((new_edges[:, 2], (new_edges[:, 1], new_edges[:, 0])), shape=(num_nodes, num_nodes))
-
-        return LinearARG(A, self.samples, self.variants)
