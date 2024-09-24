@@ -15,11 +15,7 @@ import polars as pl
 
 from scipy.sparse import csc_matrix, csr_matrix, eye, load_npz, save_npz
 from scipy.sparse.linalg import spsolve_triangular
-
-from .brick_graph import BrickGraph
 from .linear_arg_inference import linear_arg_from_genotypes
-from .one_summed_cy import linearize_brick_graph
-from .recombination import Recombination
 from .solve import topological_sort
 
 
@@ -197,6 +193,7 @@ class LinearARG:
         variant_info: pl.DataFrame = None,
         find_recombinations: bool = True,
         make_triangular: bool = True,
+        verbosity: int = 0
     ):
         """
         Infers a linear ARG from a genotype matrix.
@@ -207,7 +204,7 @@ class LinearARG:
         :param make_triangular: whether to re-order rows and columns such that the adjacency matrix is triangular
         :return: linear ARG instance
         """
-        linear_arg_adjacency_matrix, samples_idx, variant_info = linear_arg_from_genotypes(genotypes, variant_info, find_recombinations)
+        linear_arg_adjacency_matrix, samples_idx, variant_info = linear_arg_from_genotypes(genotypes, variant_info, find_recombinations, verbosity)
         result = LinearARG(linear_arg_adjacency_matrix, samples_idx, VariantInfo(variant_info))
         if make_triangular:
             result = result.make_triangular()
@@ -232,7 +229,8 @@ class LinearARG:
                  phased: bool = True,
                  region: Optional[str] = None,
                  flip_minor_alleles: bool = False,
-                 return_genotypes: bool = False) -> "LinearARG":
+                 return_genotypes: bool = False,
+                 verbosity: int = 0) -> "LinearARG":
         vcf = cv.VCF(path, gts012=True, strict_gt=True)
         data = []
         idxs = []
@@ -273,7 +271,7 @@ class LinearARG:
         idxs = np.concatenate(idxs)
         ptrs = np.array(ptrs)
         genotypes = csc_matrix((data, idxs, ptrs))
-        result = LinearARG.from_genotypes(genotypes, v_info)
+        result = LinearARG.from_genotypes(genotypes, v_info, verbosity=verbosity)
         return result, genotypes if return_genotypes else result
 
     @property

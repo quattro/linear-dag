@@ -6,21 +6,27 @@ import polars as pl
 from scipy.sparse import block_diag, csc_matrix, csr_matrix, eye, hstack, triu, vstack
 
 from .solve import spinv_make_triangular, spinv_triangular
-from recombination import Recombination
-from brick_graph import BrickGraph
+from .recombination import Recombination
+from .brick_graph import BrickGraph
 from .one_summed_cy import linearize_brick_graph
 
 
-def linear_arg_from_genotypes(genotypes, variant_info, find_recombinations):
+def linear_arg_from_genotypes(genotypes, variant_info, find_recombinations, verbosity):
     if type(genotypes) is not csc_matrix:
         raise TypeError
 
+    if verbosity > 0:
+        print("Inferring brick graph")
     brick_graph, samples_idx, variants_idx = BrickGraph.from_genotypes(genotypes)
 
+    if verbosity > 0:
+        print("Finding recombinations")
     recom = Recombination.from_graph(brick_graph)
     if find_recombinations:
         recom.find_recombinations()
 
+    if verbosity > 0:
+        print("Linearizing brick graph")
     linear_arg_adjacency_matrix = linearize_brick_graph(recom)
 
     num_variants = len(variants_idx)
