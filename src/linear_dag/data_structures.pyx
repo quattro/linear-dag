@@ -829,6 +829,7 @@ cdef class DiGraph:
         cdef edge * removable_edge = u.first_out
         cdef edge * in_edge
         cdef edge * next_edge
+        cdef edge * prev_edge
         cdef node * v
 
         if removable_edge is NULL:
@@ -837,19 +838,29 @@ cdef class DiGraph:
         v = removable_edge.v
         assert v is not NULL
 
-        # Find last in-edge of u
-        in_edge = NULL
-        next_edge = u.first_in
-        while next_edge is not NULL:
-            in_edge = next_edge
-            next_edge = in_edge.next_in
+        # Insert the first in-edge of u into the in-edge list of v, replacing removable_edge
+        in_edge = u.first_in
+        prev_edge = removable_edge.prev_in
+        in_edge.prev_in = prev_edge
+        if prev_edge is not NULL:
+            prev_edge.next_in = in_edge
+        else:
+            v.first_in = in_edge
 
-        # Redirect each in-edge of u to point to v
+        # Redirect each in-edge of u to point to v; find last such edge
         while in_edge is not NULL:
-            next_edge = in_edge.prev_in
-            self.set_edge_child(in_edge, v)
-            in_edge = next_edge
+            in_edge.v = v
+            prev_edge = in_edge
+            in_edge = in_edge.next_in
 
+        # Patch the end of the inserted list
+        next_edge = removable_edge.next_in
+        prev_edge.next_in = next_edge
+        if next_edge is not NULL:
+            next_edge.prev_in = prev_edge
+
+        # Ensure that the redirected edges are not removed when removing u
+        u.first_in = NULL
         self.remove_node(u)
 
 
