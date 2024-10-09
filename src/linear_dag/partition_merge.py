@@ -21,7 +21,7 @@ def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=
     Codes phased genotypes as 0/1, and there are 2n rows, where rows 2*k and 2*k+1 correspond to individual k. 
     """
     if not os.path.exists(f'{linarg_dir}/variant_metadata/'): os.makedirs(f'{linarg_dir}/variant_metadata/')
-    if not os.path.exists(f'{linarg_dir}/filtered_variants/'): os.makedirs(f'{linarg_dir}/filtered_variants/')
+    # if not os.path.exists(f'{linarg_dir}/filtered_variants/'): os.makedirs(f'{linarg_dir}/filtered_variants/')
     if not os.path.exists(f'{linarg_dir}/genotype_matrices/'): os.makedirs(f'{linarg_dir}/genotype_matrices/')
     
     chrom = region.split('chr')[1].split('-')[0]
@@ -39,8 +39,8 @@ def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=
     f_var = open(f'{linarg_dir}/variant_metadata/{partition_number}_{region}.txt', 'w')
     f_var.write(' '.join(['CHROM', 'POS', 'ID', 'REF', 'ALT', 'FLIP', 'IDX'])+'\n')
     
-    f_filt = open(f'{linarg_dir}/filtered_variants/{partition_number}_{region}.txt', 'w')
-    f_filt.write(' '.join(['CHROM', 'POS', 'ID', 'REF', 'ALT', 'AF'])+'\n')
+    # f_filt = open(f'{linarg_dir}/filtered_variants/{partition_number}_{region}.txt', 'w')
+    # f_filt.write(' '.join(['CHROM', 'POS', 'ID', 'REF', 'ALT', 'AF'])+'\n')
     
     var_index = 0
     for var in vcf(region_formatted):
@@ -58,9 +58,9 @@ def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=
                 flip = False
         
         af = np.mean(gts) / ploidy
-        if (af == 0) or (af == 1): # filter out variants with af=0 or af=1
-            f_filt.write(' '.join([chrom, str(var.POS), '.', var.REF, ','.join(var.ALT), str(af)])+'\n')
-            continue
+        # if (af == 0) or (af == 1): # filter out variants with af=0 or af=1
+        #     f_filt.write(' '.join([chrom, str(var.POS), '.', var.REF, ','.join(var.ALT), str(af)])+'\n')
+        #     continue
 
         (idx,) = np.where(gts != 0)
         data.append(gts[idx])
@@ -70,12 +70,12 @@ def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=
         var_index += 1
     
     f_var.close()
-    f_filt.close()
+    # f_filt.close()
         
     data = np.concatenate(data)
     idxs = np.concatenate(idxs)
     ptrs = np.array(ptrs)
-    genotypes = scipy.sparse.csc_matrix((data, idxs, ptrs))
+    genotypes = scipy.sparse.csc_matrix((data, idxs, ptrs), shape=(gts.shape[0], len(ptrs)-1))
     
     scipy.sparse.save_npz(f'{linarg_dir}/genotype_matrices/{partition_number}_{region}.npz', genotypes)
     
@@ -149,6 +149,10 @@ def get_linarg_stats(linarg_dir, load_dir):
     """
     linarg = LinearARG.read(f'{linarg_dir}/linear_arg.npz', f'{linarg_dir}/linear_arg.pvar', f'{linarg_dir}/linear_arg.psam')
     
+    df_flip = linarg.variants.table.clone()
+    df_flip = df_flip.with_columns(pl.Series([0]*df_flip.shape[0]).alias('FLIP'))
+    linarg.variants.table = df_flip
+    
     linarg_triangular = linarg.make_triangular()
     v = np.ones(linarg.shape[0])
     allele_count_from_linarg = v @ linarg_triangular
@@ -161,7 +165,7 @@ def get_linarg_stats(linarg_dir, load_dir):
     allele_counts = []
     for f in files:
         genotypes = scipy.sparse.load_npz(f'{load_dir}{linarg_dir}/genotype_matrices/{f}')
-        genotypes_nnz += genotypes.nnz
+        genotypes_nnz += np.sum([np.minimum(genotypes[:,i].nnz, genotypes.shape[0]-genotypes[:,i].nnz) for i in range(genotypes.shape[1])])
         v_0 = np.ones(genotypes.shape[0])
         allele_count_from_genotypes = v_0 @ genotypes
         allele_counts.append(allele_count_from_genotypes)

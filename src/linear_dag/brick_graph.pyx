@@ -596,8 +596,7 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
             else:
                 new_node_ids[i] = non_sample_counter
                 non_sample_counter += 1
-        for var in variants:
-            variant_indices.append(new_node_ids[var])
+        variant_indices += [new_node_ids[var] for var in variants]
         index_mapping.append(new_node_ids)
 
         # Add edges from graph to result while preserving the order of the parent nodes for each child node

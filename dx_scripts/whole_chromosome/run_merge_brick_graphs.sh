@@ -1,8 +1,6 @@
 #!/bin/bash
-linarg_identifier=$1
+linarg_dir=$1
 load_dir=$2
-
-linarg_dir="linear_arg_results/${linarg_identifier}"
 
 # download python 3.9 and cython complier dependencies
 sudo apt-get update
@@ -12,8 +10,6 @@ python3.9 -m pip install --upgrade pip
 
 python3.9 -m pip install --upgrade scipy
 python3.9 -m pip install cyvcf2
-python3.9 -m pip install dxpy # for dna_nexus.py
-python3.9 -m pip install pyspark # for dna_nexus.py
 python3.9 -m pip install git+https://github.com/quattro/linear-dag.git
 
 export PATH=$PATH:/home/dnanexus/.local/bin/

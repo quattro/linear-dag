@@ -2,9 +2,7 @@
 region=$1
 out_prefix=$2
 partition_size=$3
-phased=$4
-flip_minor_alleles=$5
-instance_type=$6
+instance_type=$4
 
 chr=$(echo "$region" | awk -F- '{print $1}')
 start=$(echo "$region" | awk -F- '{print $2}')
@@ -25,7 +23,7 @@ for i in $(seq 0 $n_partitions); do
 
   dx run app-swiss-army-knife \
       -iin="/amber/scripts/run_get_mat_partition.sh" \
-      -icmd="bash run_get_mat_partition.sh \"$vcf_path\" $linarg_dir $partition_region $i $phased $flip_minor_alleles" \
+      -icmd="bash run_get_mat_partition.sh \"$vcf_path\" $linarg_dir $partition_region $i" \
       --destination "/" \
       --instance-type $instance_type \
       --priority low \

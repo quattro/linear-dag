@@ -188,8 +188,8 @@ def _main(args):
     make_geno_p.add_argument("--linarg_dir", type=str, help="Directory to store linear ARG outputs (must be the same for Steps 1-3)")
     make_geno_p.add_argument("--region", type=str, help="Genomic region of the form chrN-start-end")
     make_geno_p.add_argument("--partition_number", type=str, help="Partition number in genomic ordering")
-    make_geno_p.add_argument("--phased", type=bool, help="Is data phased?")
-    make_geno_p.add_argument("--flip_minor_alleles", type=bool, help="Should minor alleles be flipped?")
+    make_geno_p.add_argument("--phased", action='store_true', help="Is data phased?")
+    make_geno_p.add_argument("--flip_minor_alleles", action='store_true', help="Should minor alleles be flipped?")
     make_geno_p.set_defaults(func=_make_geno)
     
     infer_brick_graph_p = subp.add_parser("infer-brick-graph", help="Step 2 of partition and merge pipeline. Infers the brick graph from sparse matrix.")
