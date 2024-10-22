@@ -5,19 +5,19 @@ from collections import defaultdict
 from dataclasses import dataclass
 from functools import cached_property
 from os import linesep, PathLike
-from typing import ClassVar, DefaultDict, Optional, Union
+from typing import ClassVar, Optional, Union
 
 import bed_reader as br
-import cyvcf2 as cv
 import numpy as np
 import numpy.typing as npt
 import polars as pl
+from scipy.io import mmread
 
 from scipy.sparse import csc_matrix, csr_matrix, eye, load_npz, save_npz
 from scipy.sparse.linalg import spsolve_triangular
 from .linear_arg_inference import linear_arg_from_genotypes
 from .solve import topological_sort
-
+from .genotype import read_vcf
 
 
 @dataclass
@@ -159,19 +159,6 @@ class VariantInfo:
 
         return cls(pl.DataFrame(df))
 
-    @staticmethod
-    def _update_dict_from_vcf(
-        var: cv.Variant, is_flipped: bool, data: DefaultDict[str, list]
-    ) -> DefaultDict[str, list]:
-        data["CHROM"].append(var.CHROM)
-        data["ID"].append(var.ID)
-        data["POS"].append(var.POS)
-        data["REF"].append(var.REF)
-        data["ALT"].append(",".join(var.ALT))
-        data["FLIP"].append(is_flipped)
-
-        return data
-
 
 @dataclass
 class LinearARG:
@@ -223,54 +210,18 @@ class LinearARG:
         larg.variants = v_info
         return larg
 
-    #  TODO move file IO out of LinearARG
     @staticmethod
     def from_vcf(path: Union[str, PathLike],
                  phased: bool = True,
                  region: Optional[str] = None,
+                 include_samples: Optional[list] = None,
                  flip_minor_alleles: bool = False,
                  return_genotypes: bool = False,
-                 verbosity: int = 0) -> "LinearARG":
-        vcf = cv.VCF(path, gts012=True, strict_gt=True)
-        data = []
-        idxs = []
-        ptrs = [0]
+                 verbosity: int = 0) -> Union[tuple, "LinearARG"]:
 
-        ploidy = 1 if phased else 2
-
-        # push most of the branching up here to define functions for fewer branch conditions during loop
-        if phased:
-            read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2])  # noqa: E731
-        else:
-            read_gt = lambda var: var.gt_types  # noqa: E731
-
-        def final_read(var, flip_minor_alleles):
-            gts = read_gt(var)
-            if not flip_minor_alleles:
-                return gts, False
-            af = np.mean(gts) / ploidy
-            if af > 0.5:
-                return ploidy - gts, True
-            else:
-                return gts, False
-
-        var_table = defaultdict(list)
-        # TODO: handle missing data
-        for var in vcf(region):
-            gts, is_flipped = final_read(var, flip_minor_alleles)
-
-            (idx,) = np.where(gts != 0)
-            data.append(gts[idx])
-            idxs.append(idx)
-            ptrs.append(ptrs[-1] + len(idx))
-            var_table = VariantInfo._update_dict_from_vcf(var, is_flipped, var_table)
-
-        v_info = pl.DataFrame(var_table)
-
-        data = np.concatenate(data)
-        idxs = np.concatenate(idxs)
-        ptrs = np.array(ptrs)
-        genotypes = csc_matrix((data, idxs, ptrs))
+        genotypes, v_info = read_vcf(path, phased, region, flip_minor_alleles)
+        if include_samples:
+            genotypes = genotypes[include_samples, :]
         result = LinearARG.from_genotypes(genotypes, v_info, verbosity=verbosity)
         return result, genotypes if return_genotypes else result
 
@@ -337,11 +288,9 @@ class LinearARG:
     def copy(self) -> "LinearARG":
         return LinearARG(self.A.copy(), self.samples.copy(), self.variants.copy())
 
-    def write(self, prefix: Union[str, PathLike]):
+    def write(self, prefix: Union[str, PathLike], format: str='npz'):
         """Writes LinearARG triplet to disk.
-
         :param prefix: The base path and prefix used for output files.
-
         :return: None
         """
         # write out sample info
@@ -359,8 +308,11 @@ class LinearARG:
         self.variants.write(prefix + ".pvar")
 
         # write out DAG info
-        save_npz(f"{prefix}.npz", self.A)
-
+        if format == 'npz':
+            save_npz(f"{prefix}.npz", self.A)
+        elif format == 'mtx':
+            from scipy.io import mmwrite
+            mmwrite(f"{prefix}.mtx", self.A)
         return
 
     @staticmethod
@@ -371,7 +323,7 @@ class LinearARG:
     ) -> "LinearARG":
         """Reads LinearARG data from provided PLINK2 formatted files.
 
-        :param matrix_fname: Filename for the .npz file containing the adjacency matrix.
+        :param matrix_fname: Filename for the .npz or .mtx file containing the adjacency matrix.
         :param variant_fname: Filename for the .pvar file containing variant data.
         :param samples_fname: Filename for the .psam file containing sample IDs.
 
@@ -388,7 +340,12 @@ class LinearARG:
         v_info = VariantInfo.read(variant_fname)
 
         # Load the adjacency matrix
-        A = load_npz(matrix_fname)
+        if matrix_fname[-4:] == '.npz':
+            A = load_npz(matrix_fname)
+        elif matrix_fname[-4:] == '.mtx':
+            A = mmread(matrix_fname)
+        else:
+            raise ValueError("Adjacency matrix file format should be .npz or .mtx")
 
         # Construct the final object and return!
         return LinearARG(A, sample_indices, v_info)
