@@ -251,7 +251,8 @@ class LinearARG:
             )
 
         v = np.zeros((self.A.shape[0], other.shape[1]))
-        v[self.variant_indices, :] = (other.T * (-1) ** self.flip).T
+        temp = (other.T * (-1) ** self.flip).T
+        np.add.at(v, self.variant_indices, temp)  # handles duplicate variant indices; TODO handle matrix-valued v
         x = spsolve_triangular(eye(self.A.shape[0]) - self.A, v)
         return x[self.sample_indices] + np.sum(other[self.flip])
 
