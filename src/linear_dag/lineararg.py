@@ -132,32 +132,32 @@ class VariantInfo:
 
         return
 
-    @classmethod
-    def from_open_bed(
-        cls, bed: br.open_bed, indices: Optional[npt.ArrayLike] = None, is_flipped: Optional[npt.ArrayLike] = None
-    ):
-        # doesn't really follow conventions for a class name...
-        # req_cols: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT", idx_field, flip_field]
-        df = dict()
-        df["CHROM"] = bed.chromosome
-        df["POS"] = bed.bp_position
-        df["ID"] = bed.sid
-        df["REF"] = bed.allele_1
-        df["ALT"] = bed.allele_2
-        if indices is None:
-            df[cls.idx_col] = -1 * np.ones(len(bed.bp_position), dtype=int)
-        else:
-            if len(indices) != len(bed.bp_position):
-                raise ValueError("Length of indices does not match number of variants")
-            df[cls.idx_col] = indices
-        if is_flipped is None:
-            df[cls.flip_field] = np.zeros(len(bed.iid)).astype(bool)
-        else:
-            if len(is_flipped) != len(bed.bp_position):
-                raise ValueError("Length of is_flipped flags does not match number of variants")
-            df[cls.flip_field] = is_flipped
+    # @classmethod
+    # def from_open_bed(
+    #     cls, bed: br.open_bed, indices: Optional[npt.ArrayLike] = None, is_flipped: Optional[npt.ArrayLike] = None
+    # ):
+    #     # doesn't really follow conventions for a class name...
+    #     # req_cols: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT", idx_field, flip_field]
+    #     df = dict()
+    #     df["CHROM"] = bed.chromosome
+    #     df["POS"] = bed.bp_position
+    #     df["ID"] = bed.sid
+    #     df["REF"] = bed.allele_1
+    #     df["ALT"] = bed.allele_2
+    #     if indices is None:
+    #         df[cls.idx_col] = -1 * np.ones(len(bed.bp_position), dtype=int)
+    #     else:
+    #         if len(indices) != len(bed.bp_position):
+    #             raise ValueError("Length of indices does not match number of variants")
+    #         df[cls.idx_col] = indices
+    #     if is_flipped is None:
+    #         df[cls.flip_field] = np.zeros(len(bed.iid)).astype(bool)
+    #     else:
+    #         if len(is_flipped) != len(bed.bp_position):
+    #             raise ValueError("Length of is_flipped flags does not match number of variants")
+    #         df[cls.flip_field] = is_flipped
 
-        return cls(pl.DataFrame(df))
+    #     return cls(pl.DataFrame(df))
 
     @staticmethod
     def _update_dict_from_vcf(
@@ -211,17 +211,17 @@ class LinearARG:
 
         return result
 
-    @staticmethod
-    def from_plink(prefix: str) -> "LinearARG":
-        # import bed_reader as br
+    # @staticmethod
+    # def from_plink(prefix: str) -> "LinearARG":
+    #     import bed_reader as br
 
-        with br.open_bed(f"{prefix}.bed") as bed:
-            genotypes = bed.read_sparse(dtype="int8")
+    #     with br.open_bed(f"{prefix}.bed") as bed:
+    #         genotypes = bed.read_sparse(dtype="int8")
 
-        larg = LinearARG.from_genotypes(genotypes)
-        v_info = VariantInfo.from_open_bed(bed, larg.variant_indices)
-        larg.variants = v_info
-        return larg
+    #     larg = LinearARG.from_genotypes(genotypes)
+    #     v_info = VariantInfo.from_open_bed(bed, larg.variant_indices)
+    #     larg.variants = v_info
+    #     return larg
 
     #  TODO move file IO out of LinearARG
     @staticmethod
