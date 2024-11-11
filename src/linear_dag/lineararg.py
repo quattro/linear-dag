@@ -15,7 +15,7 @@ from scipy.io import mmread
 
 from scipy.sparse import csc_matrix, csr_matrix, eye, load_npz, save_npz
 from scipy.sparse.linalg import spsolve_triangular
-from scipy.sparse.linalg import LinearOperator
+from scipy.sparse.linalg import LinearOperator, aslinearoperator
 from .linear_arg_inference import linear_arg_from_genotypes
 from .solve import topological_sort
 from .genotype import read_vcf
@@ -244,6 +244,15 @@ class LinearARG(LinearOperator):
     def dtype(self):
         return self.A.dtype
 
+    @property
+    def mean_centered(self):
+        mean = aslinearoperator(np.ones((self.shape[0],1))) @ aslinearoperator(self.allele_frequencies)
+        return self - mean
+
+    @cached_property
+    def allele_frequencies(self):
+        return (np.ones(self.shape[0]) @ self) / self.shape[0]
+
     def __str__(self):
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
 
@@ -315,8 +324,8 @@ class LinearARG(LinearOperator):
     @staticmethod
     def read(
         matrix_fname: Union[str, PathLike],
-        variant_fname: Union[str, PathLike],
-        samples_fname: Union[str, PathLike],
+        variant_fname: Union[str, PathLike] = None,
+        samples_fname: Union[str, PathLike] = None,
     ) -> "LinearARG":
         """Reads LinearARG data from provided PLINK2 formatted files.
 
@@ -326,6 +335,10 @@ class LinearARG(LinearOperator):
 
         :return: A tuple containing the LinearARG object, list of variant IDs, and list of IIDs.
         """
+        if not variant_fname:
+            variant_fname = matrix_fname[:-4] + '.pvar'
+        if not samples_fname:
+            samples_fname = matrix_fname[:-4] + '.psam'
 
         # Load sample info
         # temporary fix
