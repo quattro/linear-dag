@@ -26,6 +26,8 @@ from .solve import (
     spinv_triangular as spinv_triangular,
     topological_sort as topological_sort,
 )
+from .linear_arg_inference import linear_arg_from_genotypes as linear_arg_from_genotypes
+
 
 # dna_nexus and pyspark are optional dependencies
 if find_spec("dna_nexus") and find_spec("pyspark"):

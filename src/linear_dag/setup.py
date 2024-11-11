@@ -6,8 +6,8 @@ from setuptools import Extension, setup
 # Define extension module(s)
 extensions = [
     Extension(
-        name="trios",  # Name of the extension
-        sources=["trios.pyx"],  # Source file(s)
+        name="recombination",  # Name of the extension
+        sources=["recombination.pyx"],  # Source file(s)
         include_dirs=[numpy.get_include()],  # Include directory for NumPy headers
         # Add other required libraries or include directories if needed
     ),

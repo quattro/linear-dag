@@ -15,6 +15,7 @@ from scipy.io import mmread
 
 from scipy.sparse import csc_matrix, csr_matrix, eye, load_npz, save_npz
 from scipy.sparse.linalg import spsolve_triangular
+from scipy.sparse.linalg import LinearOperator
 from .linear_arg_inference import linear_arg_from_genotypes
 from .solve import topological_sort
 from .genotype import read_vcf
@@ -161,7 +162,7 @@ class VariantInfo:
 
 
 @dataclass
-class LinearARG:
+class LinearARG(LinearOperator):
     A: csr_matrix
     sample_indices: npt.NDArray[np.uint]
     variants: VariantInfo
@@ -239,10 +240,14 @@ class LinearARG:
     def ndim(self):
         return 2
 
+    @property
+    def dtype(self):
+        return self.A.dtype
+
     def __str__(self):
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
 
-    def __matmul__(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+    def _matvec(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
         if other.ndim == 1:
             other = other.reshape(-1, 1)
         if other.shape[0] != self.shape[1]:
@@ -256,7 +261,7 @@ class LinearARG:
         x = spsolve_triangular(eye(self.A.shape[0]) - self.A, v)
         return x[self.sample_indices] + np.sum(other[self.flip])
 
-    def __rmatmul__(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+    def _rmatvec(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
         if other.ndim == 1:
             other = other.reshape(1, -1)
         if other.shape[1] != self.shape[0]:
@@ -272,19 +277,10 @@ class LinearARG:
             x[self.flip] = np.sum(other, axis=1) - x[self.flip]  # TODO what if other is a matrix?
         return x.T
 
-    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
-        if ufunc == np.matmul:
-            # Identify the position of `self` in inputs
-            if inputs[0] is self:  # self is the left operand
-                return self.__matmul__(inputs[1])
-            elif inputs[1] is self:  # self is the right operand
-                return self.__rmatmul__(inputs[0])
-        return NotImplemented
-
     def __getitem__(self, key: tuple[slice, slice]) -> "LinearARG":
         # TODO make this work with syntax like linarg[:100,] (works with linarg[:100,:])
         rows, cols = key
-        return LinearARG(self.A, self.samples[rows], self.variants[cols])
+        return LinearARG(self.A, self.sample_indices[rows], self.variants[cols])
 
     def copy(self) -> "LinearARG":
         return LinearARG(self.A.copy(), self.samples.copy(), self.variants.copy())
