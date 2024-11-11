@@ -36,7 +36,7 @@ classifiers = [
 dependencies = [
   "cython",
   "cyvcf2",
-  "bed_reader[sparse]",
+#   "bed_reader[sparse]",
   "numpy",
   "scipy",
   "polars",

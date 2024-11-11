@@ -7,7 +7,7 @@ from functools import cached_property
 from os import linesep, PathLike
 from typing import ClassVar, DefaultDict, Optional, Union
 
-import bed_reader as br
+# import bed_reader as br
 import cyvcf2 as cv
 import numpy as np
 import numpy.typing as npt
@@ -213,7 +213,7 @@ class LinearARG:
 
     @staticmethod
     def from_plink(prefix: str) -> "LinearARG":
-        import bed_reader as br
+        # import bed_reader as br
 
         with br.open_bed(f"{prefix}.bed") as bed:
             genotypes = bed.read_sparse(dtype="int8")
