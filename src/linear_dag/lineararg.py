@@ -13,7 +13,7 @@ import numpy.typing as npt
 import polars as pl
 from scipy.io import mmread
 
-from scipy.sparse import csc_matrix, csr_matrix, eye, load_npz, save_npz
+from scipy.sparse import csc_matrix, csr_matrix, eye, load_npz, save_npz, diags
 from scipy.sparse.linalg import spsolve_triangular
 from scipy.sparse.linalg import LinearOperator, aslinearoperator
 from .linear_arg_inference import linear_arg_from_genotypes
@@ -246,8 +246,20 @@ class LinearARG(LinearOperator):
 
     @property
     def mean_centered(self):
+        """
+        Returns a linear operator representing the mean-centered genotype matrix
+        """
         mean = aslinearoperator(np.ones((self.shape[0],1))) @ aslinearoperator(self.allele_frequencies)
         return self - mean
+
+    @property
+    def normalized(self):
+        """
+        Returns a linear operator representing the normalized genotype matrix whose columns have mean zero and variance one
+        """
+        pq = (self.allele_frequencies * (1-self.allele_frequencies))
+        pq[pq == 0] = 1
+        return self.mean_centered * aslinearoperator(diags(pq ** -0.5))
 
     @cached_property
     def allele_frequencies(self):
