@@ -24,7 +24,8 @@ def randomized_haseman_elston(linarg: LinearARG, ys: np.ndarray, B: int = 20, al
     heterozygosity[heterozygosity == 0] = 1
 
     # Genetic relatedness matrix
-    K = linarg.mean_centered @ aslinearoperator(diags(heterozygosity ** alpha / np.sum(heterozygosity ** (1+alpha)))) @ linarg.mean_centered.T
+    sigmasq = heterozygosity ** (1+alpha)
+    K = linarg.normalized @ aslinearoperator(diags(sigmasq/np.sum(sigmasq))) @ linarg.normalized.T
 
     # Tr(K@K)
     T = 0
