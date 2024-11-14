@@ -1,7 +1,7 @@
 from linear_dag import LinearARG
 import numpy as np
 
-def simulate_phenotype(linarg: LinearARG, heritability: float, alpha: float = 0, fraction_causal: float = 1):
+def simulate_phenotype(linarg: LinearARG, heritability: float, alpha: float = 0, fraction_causal: float = 1, return_genetic_component: bool = False):
     """
     Simulates quantitative phenotypes
         y = X * beta + epsilon
@@ -23,11 +23,11 @@ def simulate_phenotype(linarg: LinearARG, heritability: float, alpha: float = 0,
     is_causal = np.random.rand(M) < fraction_causal
     beta = beta * is_causal
 
-    y = linarg @ beta
-    y -= np.mean(y)
-    y /= np.std(y)
-    y *= np.sqrt(heritability)
-    y += np.random.randn(N) * np.sqrt(1 - heritability)
+    y_bar = linarg @ beta
+    y_bar -= np.mean(y_bar)
+    y_bar /= np.std(y_bar)
+    y_bar *= np.sqrt(heritability)
+    y = y_bar + np.random.randn(N) * np.sqrt(1 - heritability)
 
-    return y
+    return y, y_bar if return_genetic_component else y
 
