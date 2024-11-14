@@ -220,7 +220,7 @@ class LinearARG(LinearOperator):
                  return_genotypes: bool = False,
                  verbosity: int = 0) -> Union[tuple, "LinearARG"]:
 
-        genotypes, v_info = read_vcf(path, phased, region, flip_minor_alleles)
+        genotypes, v_info = read_vcf(path, region, phased, flip_minor_alleles)
         if include_samples:
             genotypes = genotypes[include_samples, :]
         result = LinearARG.from_genotypes(genotypes, v_info, verbosity=verbosity)
