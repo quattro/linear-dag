@@ -39,9 +39,10 @@ if isfolder(filename)
     mutations.index = new_mutation_indices;
 
 elseif isfile([filename, '.mtx'])
-    A = mmread([filename, '.mtx']);
-    samples = readtable([filename, '.samples.txt']);
-    mutations = readtable([filename, '.mutations.txt']);
+    A = readMatrixMarket([filename, '.mtx']);
+    samples = readtable([filename, '.psam'], 'filetype', 'text');
+    mutations = readtable([filename, '.pvar'], 'filetype', 'text');
+    mutations.IDX = cellfun(@(x)sscanf(x, 'IDX=%d'), mutations.INFO);
 else
     error('File not found')
 end

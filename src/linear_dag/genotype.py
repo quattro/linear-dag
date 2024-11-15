@@ -1,14 +1,74 @@
 import os
 
-from typing import Optional
+from typing import DefaultDict, Optional, Union
+from collections import defaultdict
+from os import PathLike
 
 import numpy as np
-
-from cyvcf2 import VCF
+import polars as pl
+import cyvcf2 as cv
 from numpy.typing import NDArray
 from scipy.io import mmread
 from scipy.sparse import csc_matrix
 
+def read_vcf(path: Union[str, PathLike],
+                 phased: bool = True,
+                 region: Optional[str] = None,
+                 flip_minor_alleles: bool = False):
+    def _update_dict_from_vcf(
+        var: cv.Variant, is_flipped: bool, data: DefaultDict[str, list]
+    ) -> DefaultDict[str, list]:
+        data["CHROM"].append(var.CHROM)
+        data["ID"].append(var.ID)
+        data["POS"].append(var.POS)
+        data["REF"].append(var.REF)
+        data["ALT"].append(",".join(var.ALT))
+        data["FLIP"].append(is_flipped)
+
+        return data
+
+    vcf = cv.VCF(path, gts012=True, strict_gt=True)
+    data = []
+    idxs = []
+    ptrs = [0]
+
+    ploidy = 1 if phased else 2
+
+    # push most of the branching up here to define functions for fewer branch conditions during loop
+    if phased:
+        read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2])  # noqa: E731
+    else:
+        read_gt = lambda var: var.gt_types  # noqa: E731
+
+    def final_read(var, flip_minor_alleles):
+        gts = read_gt(var)
+        if not flip_minor_alleles:
+            return gts, False
+        af = np.mean(gts) / ploidy
+        if af > 0.5:
+            return ploidy - gts, True
+        else:
+            return gts, False
+
+    var_table = defaultdict(list)
+    # TODO: handle missing data
+    for var in vcf(region):
+        gts, is_flipped = final_read(var, flip_minor_alleles)
+
+        (idx,) = np.where(gts != 0)
+        data.append(gts[idx])
+        idxs.append(idx)
+        ptrs.append(ptrs[-1] + len(idx))
+        var_table = _update_dict_from_vcf(var, is_flipped, var_table)
+
+    v_info = pl.DataFrame(var_table)
+
+    data = np.concatenate(data)
+    idxs = np.concatenate(idxs)
+    ptrs = np.array(ptrs)
+    genotypes = csc_matrix((data, idxs, ptrs))
+
+    return genotypes, v_info
 
 def load_genotypes(
     input_file_prefix: str,
@@ -65,7 +125,7 @@ def read_vcf(
     Codes unphased genotypes as 0/1/2/3, where 3 means that at least one of the two alleles is unknown.
     Codes phased genotypes as 0/1, and there are 2n rows, where rows 2*k and 2*k+1 correspond to individual k.
     """
-    vcf = VCF(path, gts012=True, strict_gt=True)
+    vcf = cv.VCF(path, gts012=True, strict_gt=True)
     data = []
     idxs = []
     ptrs = [0]
