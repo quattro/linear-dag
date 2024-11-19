@@ -25,10 +25,10 @@ def simulate_phenotype(linarg: LinearARG, heritability: float, alpha: float = 0,
     is_causal = np.random.rand(M) < fraction_causal
     beta = beta * is_causal
 
-    y = linarg @ beta
-    y -= np.mean(y)
-    y /= np.std(y)
-    y *= np.sqrt(heritability)
-    y += np.random.randn(N) * np.sqrt(1 - heritability)
+    y_bar = linarg @ beta
+    y_bar -= np.mean(y_bar)
+    y_bar /= np.std(y_bar)
+    y_bar *= np.sqrt(heritability)
+    y = y_bar + np.random.randn(N) * np.sqrt(1 - heritability)
 
     return y
