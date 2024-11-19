@@ -6,8 +6,6 @@ src/linear_dag/*.c
 data
 clean
 
-test*.py
-
 *.cache
 
 # Temporary and binary files
