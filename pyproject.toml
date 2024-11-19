@@ -43,11 +43,6 @@ dependencies = [
   "networkx",
 ]
 
-[project.optional-dependencies]
-dnanexus = [
-  "dxpy",
-  "pyspark",
-]
 [project.scripts]
 kodama = "linear_dag.cli:run_cli"
 
@@ -87,7 +82,6 @@ directives = { boundscheck = false, nonecheck = false, language_level = 3, bindi
 
 [build.targets.wheel.hooks.cython.options.files]
 include = [
-  "trios.pyx",
   "recombination.pyx",
   "solve.pyx",
   "data_structures.pyx",

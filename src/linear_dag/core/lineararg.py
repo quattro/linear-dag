@@ -11,14 +11,15 @@ import bed_reader as br
 import numpy as np
 import numpy.typing as npt
 import polars as pl
-from scipy.io import mmread
 
-from scipy.sparse import csc_matrix, csr_matrix, eye, load_npz, save_npz, diags
-from scipy.sparse.linalg import spsolve_triangular
-from scipy.sparse.linalg import LinearOperator, aslinearoperator
+from scipy.io import mmread
+from scipy.sparse import csc_matrix, csr_matrix, diags, eye, load_npz, save_npz
+from scipy.sparse.linalg import aslinearoperator, LinearOperator, spsolve_triangular
+
+from linear_dag.genotype import read_vcf
+
 from .linear_arg_inference import linear_arg_from_genotypes
 from .solve import topological_sort
-from .genotype import read_vcf
 
 
 @dataclass
@@ -126,9 +127,9 @@ class VariantInfo:
             #     ).alias("INFO")
             # ).drop([self.idx_field, self.flip_field])
             # sub_table.write_csv(pvar_file, has_header=False, separator="\t")
-            
-            info_col = pl.Series([f'IDX={idx};FLIP={flip}' for idx, flip in zip(self.table['IDX'], self.table['FLIP'])])
-            sub_table = self.table.with_columns(info_col.alias('INFO')).drop([self.idx_field, self.flip_field]) 
+
+            info_col = pl.Series([f"IDX={idx};FLIP={flip}" for idx, flip in zip(self.table["IDX"], self.table["FLIP"])])
+            sub_table = self.table.with_columns(info_col.alias("INFO")).drop([self.idx_field, self.flip_field])
             sub_table.write_csv(pvar_file, include_header=False, separator="\t")
 
         return
@@ -181,7 +182,7 @@ class LinearARG(LinearOperator):
         variant_info: pl.DataFrame = None,
         find_recombinations: bool = True,
         make_triangular: bool = True,
-        verbosity: int = 0
+        verbosity: int = 0,
     ):
         """
         Infers a linear ARG from a genotype matrix.
@@ -192,7 +193,9 @@ class LinearARG(LinearOperator):
         :param make_triangular: whether to re-order rows and columns such that the adjacency matrix is triangular
         :return: linear ARG instance
         """
-        linear_arg_adjacency_matrix, samples_idx, variant_info = linear_arg_from_genotypes(genotypes, variant_info, find_recombinations, verbosity)
+        linear_arg_adjacency_matrix, samples_idx, variant_info = linear_arg_from_genotypes(
+            genotypes, variant_info, find_recombinations, verbosity
+        )
         result = LinearARG(linear_arg_adjacency_matrix, samples_idx, VariantInfo(variant_info))
         if make_triangular:
             result = result.make_triangular()
@@ -212,14 +215,15 @@ class LinearARG(LinearOperator):
         return larg
 
     @staticmethod
-    def from_vcf(path: Union[str, PathLike],
-                 phased: bool = True,
-                 region: Optional[str] = None,
-                 include_samples: Optional[list] = None,
-                 flip_minor_alleles: bool = False,
-                 return_genotypes: bool = False,
-                 verbosity: int = 0) -> Union[tuple, "LinearARG"]:
-
+    def from_vcf(
+        path: Union[str, PathLike],
+        phased: bool = True,
+        region: Optional[str] = None,
+        include_samples: Optional[list] = None,
+        flip_minor_alleles: bool = False,
+        return_genotypes: bool = False,
+        verbosity: int = 0,
+    ) -> Union[tuple, "LinearARG"]:
         genotypes, v_info = read_vcf(path, phased, region, flip_minor_alleles)
         if include_samples:
             genotypes = genotypes[include_samples, :]
@@ -249,17 +253,18 @@ class LinearARG(LinearOperator):
         """
         Returns a linear operator representing the mean-centered genotype matrix
         """
-        mean = aslinearoperator(np.ones((self.shape[0],1))) @ aslinearoperator(self.allele_frequencies)
+        mean = aslinearoperator(np.ones((self.shape[0], 1))) @ aslinearoperator(self.allele_frequencies)
         return self - mean
 
     @property
     def normalized(self):
         """
-        Returns a linear operator representing the normalized genotype matrix whose columns have mean zero and variance one
+        Returns a linear operator representing the normalized genotype matrix
+        whose columns have mean zero and variance one
         """
-        pq = (self.allele_frequencies * (1-self.allele_frequencies))
+        pq = self.allele_frequencies * (1 - self.allele_frequencies)
         pq[pq == 0] = 1
-        return self.mean_centered * aslinearoperator(diags(pq ** -0.5))
+        return self.mean_centered * aslinearoperator(diags(pq**-0.5))
 
     @cached_property
     def allele_frequencies(self):
@@ -267,6 +272,35 @@ class LinearARG(LinearOperator):
 
     def __str__(self):
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
+
+    def _matmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+        if other.ndim == 1:
+            other = other.reshape(-1, 1)
+        if other.shape[0] != self.shape[1]:
+            raise ValueError(
+                f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and {other.shape}."
+            )
+
+        v = np.zeros((self.A.shape[0], other.shape[1]))
+        temp = (other.T * (-1) ** self.flip).T
+        np.add.at(v, self.variant_indices, temp)  # handles duplicate variant indices; TODO handle matrix-valued v
+        x = spsolve_triangular(eye(self.A.shape[0]) - self.A, v)
+        return x[self.sample_indices] + np.sum(other[self.flip], axis=0)
+
+    def _rmatmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+        if other.ndim == 1:
+            other = other.reshape(1, -1)
+        if other.shape[0] != self.shape[0]:
+            raise ValueError(
+                f"Incorrect dimensions for matrix multiplication. " f"Inputs had size {other.shape} and {self.shape}."
+            )
+        v = np.zeros((other.shape[1], self.A.shape[1]))
+        v[:, self.sample_indices] = other.T
+        x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T, lower=False)
+        x = x[self.variant_indices]
+        if np.any(self.flip):
+            x[self.flip] = np.sum(other, axis=0) - x[self.flip]  # TODO what if other is a matrix?
+        return x
 
     def _matvec(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
         if other.ndim == 1:
@@ -289,7 +323,6 @@ class LinearARG(LinearOperator):
             raise ValueError(
                 f"Incorrect dimensions for matrix multiplication. " f"Inputs had size {other.shape} and {self.shape}."
             )
-
         v = np.zeros((other.shape[0], self.A.shape[1]))
         v[:, self.sample_indices] = other
         x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T, lower=False)
@@ -306,7 +339,7 @@ class LinearARG(LinearOperator):
     def copy(self) -> "LinearARG":
         return LinearARG(self.A.copy(), self.samples.copy(), self.variants.copy())
 
-    def write(self, prefix: Union[str, PathLike], format: str='npz'):
+    def write(self, prefix: Union[str, PathLike], format: str = "npz"):
         """Writes LinearARG triplet to disk.
         :param prefix: The base path and prefix used for output files.
         :return: None
@@ -315,21 +348,22 @@ class LinearARG(LinearOperator):
         # temporary fix
         iids = None
         with open(f"{prefix}.psam", "w") as f_samples:
-                f_samples.write("#IID IDX\n")
-                if iids is None:
-                    iids = [f"sample_{idx}" for idx in range(self.shape[0])]
-                for i, iid in enumerate(iids):
-                    f_samples.write(f"{iid} {self.sample_indices[i]}\n")
+            f_samples.write("#IID IDX\n")
+            if iids is None:
+                iids = [f"sample_{idx}" for idx in range(self.shape[0])]
+            for i, iid in enumerate(iids):
+                f_samples.write(f"{iid} {self.sample_indices[i]}\n")
         # self.samples.write(prefix + ".psam")
 
         # write out variant info
         self.variants.write(prefix + ".pvar")
 
         # write out DAG info
-        if format == 'npz':
+        if format == "npz":
             save_npz(f"{prefix}.npz", self.A)
-        elif format == 'mtx':
+        elif format == "mtx":
             from scipy.io import mmwrite
+
             mmwrite(f"{prefix}.mtx", self.A)
         return
 
@@ -348,23 +382,23 @@ class LinearARG(LinearOperator):
         :return: A tuple containing the LinearARG object, list of variant IDs, and list of IIDs.
         """
         if not variant_fname:
-            variant_fname = matrix_fname[:-4] + '.pvar'
+            variant_fname = matrix_fname[:-4] + ".pvar"
         if not samples_fname:
-            samples_fname = matrix_fname[:-4] + '.psam'
+            samples_fname = matrix_fname[:-4] + ".psam"
 
         # Load sample info
         # temporary fix
-        sample_info = pl.read_csv(samples_fname, separator=' ')
-        sample_indices = np.array(sample_info['IDX'])
+        sample_info = pl.read_csv(samples_fname, separator=" ")
+        sample_indices = np.array(sample_info["IDX"])
         # s_info = SampleInfo.read(samples_fname)
 
         # Load variant info
         v_info = VariantInfo.read(variant_fname)
 
         # Load the adjacency matrix
-        if matrix_fname[-4:] == '.npz':
+        if matrix_fname[-4:] == ".npz":
             A = load_npz(matrix_fname)
-        elif matrix_fname[-4:] == '.mtx':
+        elif matrix_fname[-4:] == ".mtx":
             A = mmread(matrix_fname)
         else:
             raise ValueError("Adjacency matrix file format should be .npz or .mtx")
@@ -372,7 +406,6 @@ class LinearARG(LinearOperator):
         # Construct the final object and return!
         return LinearARG(A, sample_indices, v_info)
         # return LinearARG(A, s_info.indices, v_info)
-
 
     def make_triangular(self) -> "LinearARG":
         order = np.asarray(topological_sort(self.A))
@@ -384,8 +417,8 @@ class LinearARG(LinearOperator):
         v_idx = inv_order[self.variant_indices]
         v_info = self.variants.table.clone()
         v_idx = pl.Series(v_idx)
-        v_info = v_info.with_columns(v_idx.alias('IDX'))
-        
+        v_info = v_info.with_columns(v_idx.alias("IDX"))
+
         # this results in an out of bounds error since the variant indices are greater than the number of rows in v_info
         # v_info = self.variants[v_idx]
         # return LinearARG(A, s_idx, v_info)

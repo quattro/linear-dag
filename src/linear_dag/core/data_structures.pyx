@@ -801,7 +801,7 @@ cdef class DiGraph:
         self.remove_node(v)
 
     cdef void collapse_node_with_indegree_one(self, node * v):
-        """Removes a node v and preserves paths from its first parent to all its children; 
+        """Removes a node v and preserves paths from its first parent to all its children;
         other parents are ignored"""
         cdef edge * removable_edge = v.first_in
         cdef edge * out_edge
@@ -824,7 +824,7 @@ cdef class DiGraph:
         self.remove_node(v)
 
     cdef void collapse_node_with_outdegree_one(self, node * u):
-        """Removes a node u and preserves paths from its all its parents to its first child; 
+        """Removes a node u and preserves paths from its all its parents to its first child;
         all other children are ignored. """
         cdef edge * removable_edge = u.first_out
         cdef edge * in_edge

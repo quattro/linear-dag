@@ -1,5 +1,7 @@
-from linear_dag import LinearARG
 import numpy as np
+
+from linear_dag import LinearARG
+
 
 def simulate_phenotype(linarg: LinearARG, heritability: float, alpha: float = 0, fraction_causal: float = 1):
     """
@@ -13,13 +15,13 @@ def simulate_phenotype(linarg: LinearARG, heritability: float, alpha: float = 0,
     :return: vector of phenotype values
     """
 
-    N,M = linarg.shape
+    N, M = linarg.shape
 
     beta = np.random.randn(M)
     heterozygosity = 2 * linarg.allele_frequencies * (1 - linarg.allele_frequencies)
     beta[heterozygosity == 0] = 0
     heterozygosity[heterozygosity == 0] = 1
-    beta = beta * np.sqrt(heterozygosity ** alpha)
+    beta = beta * np.sqrt(heterozygosity**alpha)
     is_causal = np.random.rand(M) < fraction_causal
     beta = beta * is_causal
 
@@ -30,4 +32,3 @@ def simulate_phenotype(linarg: LinearARG, heritability: float, alpha: float = 0,
     y += np.random.randn(N) * np.sqrt(1 - heritability)
 
     return y
-

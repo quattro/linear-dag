@@ -3,12 +3,13 @@ import warnings
 
 import numpy as np
 import polars as pl
-from scipy.sparse import block_diag, csc_matrix, csr_matrix, eye, hstack, triu, vstack
 
-from .solve import spinv_make_triangular, spinv_triangular
-from .recombination import Recombination
+from scipy.sparse import csc_matrix, csr_matrix, eye
+
 from .brick_graph import BrickGraph
 from .one_summed_cy import linearize_brick_graph
+from .recombination import Recombination
+from .solve import spinv_make_triangular
 
 
 def linear_arg_from_genotypes(genotypes, variant_info, find_recombinations, verbosity):
@@ -31,13 +32,15 @@ def linear_arg_from_genotypes(genotypes, variant_info, find_recombinations, verb
 
     num_variants = len(variants_idx)
     if variant_info is None:
-        data = {"CHROM": np.zeros(num_variants),
-                "POS": np.arange(num_variants),
-                "REF": np.zeros(num_variants),
-                "ALT": np.ones(num_variants),
-                "FLIP": np.zeros(num_variants),
-                "ID": np.arange(num_variants),
-                "INFO": np.zeros(num_variants)}
+        data = {
+            "CHROM": np.zeros(num_variants),
+            "POS": np.arange(num_variants),
+            "REF": np.zeros(num_variants),
+            "ALT": np.ones(num_variants),
+            "FLIP": np.zeros(num_variants),
+            "ID": np.arange(num_variants),
+            "INFO": np.zeros(num_variants),
+        }
         variant_info = pl.DataFrame(data)
     variant_info = variant_info.with_columns(pl.lit(np.asarray(variants_idx)).alias("IDX"))
 
@@ -63,11 +66,14 @@ def infer_brick_graph_using_containment(genotypes: csc_matrix, ploidy) -> csr_ma
 
     return brick_graph_closure
 
+
 def pad_trailing_zeros(A: csr_matrix, num_cols: int) -> csr_matrix:
     return csr_matrix((A.data, A.indices, A.indptr), shape=(A.shape[0], num_cols + A.shape[1]))
 
+
 def pad_leading_zeros(A: csr_matrix, num_cols: int) -> csr_matrix:
     return csr_matrix((A.data, A.indices + num_cols, A.indptr), shape=(A.shape[0], num_cols + A.shape[1]))
+
 
 def path_sum(graph: csr_matrix) -> csr_matrix:
     IminusA = csr_matrix(eye(graph.shape[0]) - graph)
@@ -77,6 +83,7 @@ def path_sum(graph: csr_matrix) -> csr_matrix:
         warnings.filterwarnings("ignore", category=RuntimeWarning)  # Ignore overflow error
         number_of_paths = spinv_make_triangular(IminusA)
     return csr_matrix(number_of_paths)
+
 
 def setdiag(matrix: csr_matrix, value: int) -> None:
     """

@@ -4,6 +4,7 @@ src/linear_dag/*.c
 
 # just a symlink to treeseq data
 data
+clean
 
 test*.py
 
