@@ -1,12 +1,14 @@
 # version is auto-built by hatch, not need to store it...
 src/linear_dag/_version.py
-src/linear_dag/*.c
 
 # just a symlink to treeseq data
 data
 clean
 
 *.cache
+# don't track cython-generated c files
+src/linear_dag/*.c
+src/linear_dag/core/*.c
 
 # Temporary and binary files
 foo.py
