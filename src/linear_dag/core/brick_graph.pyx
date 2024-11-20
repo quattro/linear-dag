@@ -215,7 +215,7 @@ cdef class BrickGraph:
     cdef node* partial_traversal(self, int[:] leaves):
         """
         Finds the lowest common ancestor of an array of leaves in the tree. For all descendants of the LCA, counts
-        the number of leaves that are descended from them. 
+        the number of leaves that are descended from them.
         """
         self.times_visited.clear()
         cdef int num_leaves = len(leaves)
@@ -332,12 +332,12 @@ cdef void contract_edge(edge* forward_edge,
                         DiGraph backward_graph,
                         IntegerSet neighbors):
     """
-    Contract the edges between u and v in the forward graph and v and u in the backward graph. In the forward graph, 
-    in-neighbors w of u are added as in-neighbors of v if for all w' with an edge (w', u) in the backward graph, 
+    Contract the edges between u and v in the forward graph and v and u in the backward graph. In the forward graph,
+    in-neighbors w of u are added as in-neighbors of v if for all w' with an edge (w', u) in the backward graph,
     (w, w') is not an edge of the forward graph. This ensures that there is no other path w, w', ..., v in the
     forward graph. In the backward graph, out-neighbors of u are handled similarly. Additionally, edges are added
     between forward graph in-neighbors w of u and out-neighbors w' of u if w' < v; similarly, between backward graph
-    in-neighbors w of u and out-neighbors w' of u if w < v. 
+    in-neighbors w of u and out-neighbors w' of u if w < v.
     """
     u_idx = forward_edge.u.index
     v_idx = forward_edge.v.index
@@ -401,7 +401,7 @@ cdef void contract_edge(edge* forward_edge,
 
 cdef edge* add_nontransitive_edge(DiGraph graph, int u_idx, int v_idx, int skip_node):
     """
-    Adds an edge between u and v if there is not already a path u, w_1,...,w_n, v with u < w_k < v or u > w_k > v. 
+    Adds an edge between u and v if there is not already a path u, w_1,...,w_n, v with u < w_k < v or u > w_k > v.
     Skips over skip_node when searching.
     :return: the edge, or NULL if a path was found
     """
@@ -436,7 +436,7 @@ cpdef DiGraph reduction_union(DiGraph forward_reduction, DiGraph backward_reduct
     transitive reductions of the intersections of some partial ordering with a total ordering and its negation.
     :param forward_reduction: the transitive reduction of intersect(partial ordering, total ordering)
     :param backward_reduction: the transitive reduction of intersect(partial ordering, total ordering reversed)
-    :param prune_loops: whether to prune edges (v,u) in backward_reduction if (u,v) is in forward_reduction 
+    :param prune_loops: whether to prune edges (v,u) in backward_reduction if (u,v) is in forward_reduction
     :return: the transitive reduction of the partial ordering
     """
     cdef int num_nodes = max(forward_reduction.maximum_number_of_nodes, backward_reduction.maximum_number_of_nodes)

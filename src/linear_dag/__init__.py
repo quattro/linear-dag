@@ -1,15 +1,13 @@
 from importlib.metadata import PackageNotFoundError, version  # pragma: no cover
-from importlib.util import find_spec
 
 # annoying 'as' notation to avoid warnings/errors about unused imports...
-from .brick_graph import BrickGraph as BrickGraph
-from .data_structures import (
-    CountingArray as CountingArray,
-    DiGraph as DiGraph,
-    LinkedListArray as LinkedListArray,
-    ModHeap as ModHeap,
-    Queue as Queue,
-    Stack as Stack,
+from .association import (
+    randomized_haseman_elston as randomized_haseman_elston,
+)
+from .core import (
+    BrickGraph as BrickGraph,
+    linear_arg_from_genotypes as linear_arg_from_genotypes,
+    LinearARG as LinearARG,
 )
 from .genotype import (
     apply_maf_threshold as apply_maf_threshold,
@@ -18,23 +16,10 @@ from .genotype import (
     flip_alleles as flip_alleles,
     read_vcf as read_vcf,
 )
-from .lineararg import LinearARG as LinearARG, VariantInfo as VariantInfo
-from .recombination import Recombination as Recombination
-from .sample_info import SampleInfo as SampleInfo
-from .simulate import Simulate as Simulate
-from .solve import (
-    spinv_triangular as spinv_triangular,
-    topological_sort as topological_sort,
+from .structure import (
+    pca as pca,
+    svd as svd,
 )
-from .linear_arg_inference import linear_arg_from_genotypes as linear_arg_from_genotypes
-
-
-# dna_nexus and pyspark are optional dependencies
-if find_spec("dna_nexus") and find_spec("pyspark"):
-    from .dna_nexus import (
-        download_vcf as download_vcf,
-        find_shapeit200k_vcf as find_shapeit200k_vcf,
-    )
 
 try:
     # Change here if project is renamed and does not equal the package name
