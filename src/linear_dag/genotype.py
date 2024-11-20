@@ -9,11 +9,9 @@ import polars as pl
 import cyvcf2 as cv
 from numpy.typing import NDArray
 from scipy.io import mmread
-from scipy.sparse import csc_matrix
-
 def read_vcf(path: Union[str, PathLike],
-                 phased: bool = True,
                  region: Optional[str] = None,
+                 phased: bool = True,
                  flip_minor_alleles: bool = False):
     def _update_dict_from_vcf(
         var: cv.Variant, is_flipped: bool, data: DefaultDict[str, list]
@@ -70,6 +68,8 @@ def read_vcf(path: Union[str, PathLike],
 
     return genotypes, v_info
 
+from scipy.sparse import csc_matrix
+
 def load_genotypes(
     input_file_prefix: str,
     flip_minor_alleles: bool = False,
@@ -118,58 +118,58 @@ def load_genotypes(
 
 # TODO: split out internal functions based on using phased or unphased to reduce number of branches in loop
 # need to squeeze as much as we can...
-def read_vcf(
-    path: str, region: Optional[str] = None, phased: bool = False, flip_minor_alleles: bool = True
-) -> tuple[csc_matrix, np.ndarray, list[dict]]:
-    """
-    Codes unphased genotypes as 0/1/2/3, where 3 means that at least one of the two alleles is unknown.
-    Codes phased genotypes as 0/1, and there are 2n rows, where rows 2*k and 2*k+1 correspond to individual k.
-    """
-    vcf = cv.VCF(path, gts012=True, strict_gt=True)
-    data = []
-    idxs = []
-    ptrs = [0]
-    flip = []
-
-    ploidy = 1 if phased else 2
-
-    if phased:
-        read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2])  # noqa: E731
-    else:
-        read_gt = lambda var: var.gt_types  # noqa: E731
-
-    if flip_minor_alleles:
-
-        def final_read(var):
-            gts = read_gt(var)
-            af = np.mean(gts) / ploidy
-            if af > 0.5:
-                return ploidy - gts, True
-            else:
-                return gts, False
-    else:
-
-        def final_read(var):
-            gts = read_gt(var)
-            return gts, False
-
-    # TODO: handle missing data
-    for var in vcf(region):
-        gts, is_flipped = final_read(var)
-
-        (idx,) = np.where(gts != 0)
-        data.append(gts[idx])
-        idxs.append(idx)
-        ptrs.append(ptrs[-1] + len(idx))
-        flip.append(is_flipped)
-
-    data = np.concatenate(data)
-    idxs = np.concatenate(idxs)
-    ptrs = np.array(ptrs)
-    genotypes = csc_matrix((data, idxs, ptrs))
-    flip = np.array(flip)
-
-    return genotypes, flip
+# def read_vcf(
+#     path: str, region: Optional[str] = None, phased: bool = False, flip_minor_alleles: bool = True
+# ) -> tuple[csc_matrix, np.ndarray, list[dict]]:
+#     """
+#     Codes unphased genotypes as 0/1/2/3, where 3 means that at least one of the two alleles is unknown.
+#     Codes phased genotypes as 0/1, and there are 2n rows, where rows 2*k and 2*k+1 correspond to individual k.
+#     """
+#     vcf = cv.VCF(path, gts012=True, strict_gt=True)
+#     data = []
+#     idxs = []
+#     ptrs = [0]
+#     flip = []
+#
+#     ploidy = 1 if phased else 2
+#
+#     if phased:
+#         read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2])  # noqa: E731
+#     else:
+#         read_gt = lambda var: var.gt_types  # noqa: E731
+#
+#     if flip_minor_alleles:
+#
+#         def final_read(var):
+#             gts = read_gt(var)
+#             af = np.mean(gts) / ploidy
+#             if af > 0.5:
+#                 return ploidy - gts, True
+#             else:
+#                 return gts, False
+#     else:
+#
+#         def final_read(var):
+#             gts = read_gt(var)
+#             return gts, False
+#
+#     # TODO: handle missing data
+#     for var in vcf(region):
+#         gts, is_flipped = final_read(var)
+#
+#         (idx,) = np.where(gts != 0)
+#         data.append(gts[idx])
+#         idxs.append(idx)
+#         ptrs.append(ptrs[-1] + len(idx))
+#         flip.append(is_flipped)
+#
+#     data = np.concatenate(data)
+#     idxs = np.concatenate(idxs)
+#     ptrs = np.array(ptrs)
+#     genotypes = csc_matrix((data, idxs, ptrs))
+#     flip = np.array(flip)
+#
+#     return genotypes, flip
 
 
 def compute_af(genotypes: csc_matrix, ploidy: int = 1) -> NDArray:
