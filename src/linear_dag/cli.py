@@ -5,8 +5,8 @@ import sys
 
 from importlib import metadata
 
-from .lineararg import LinearARG
-from .partition_merge import infer_brick_graph, make_genotype_matrix, merge
+from .core.lineararg import LinearARG
+from .core.partition_merge import infer_brick_graph, make_genotype_matrix, merge
 
 title = """                            @@@@
           @@@@@@            @@@@@
