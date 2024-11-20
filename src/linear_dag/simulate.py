@@ -77,8 +77,28 @@ class Simulate(LinearARG):
                 [0, 1, 0, 0, 0, 0],
                 [0, 0, 0, 0, 1, 1],
             ]
+        elif example == '1-1-1-1-1-1':
+            A_ancestral = [
+                [0, 0, 0, 0, 0, 0],
+                [0, 0, 1, 0, 0, 0],
+                [0, 0, 0, 1, 0, 0],
+                [0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 0, 1],
+                [1, 0, 0, 0, 0, 0],
+            ]
+        elif example == '1-1-1-1-1-1-1-1':
+            A_ancestral = [
+                [0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 1, 0, 0, 0, 0, 0],
+                [0, 0, 0, 1, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0],
+                [0, 0, 0, 0, 0, 1, 0, 0],
+                [1, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 1],
+                [0, 1, 0, 0, 0, 0, 0, 0],
+            ]
         else:
-            raise ValueError("Valid examples are '4', '2-1', '3-2-1' and '2-2-1'")
+            raise ValueError("Valid examples are 'lineage', '4-2', '2-1', '3-2-1' and '2-2-1'")
 
         A_ancestral = np.asarray(A_ancestral)
         nh, nm = A_ancestral.shape
