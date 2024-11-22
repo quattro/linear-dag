@@ -143,6 +143,25 @@ def _hutchinson_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tup
 
 
 def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
+    """
+    Hutch++ trace estimator, but generalized to estimate tr(A) and tr(A^2) in an efficient manner.
+
+    This improves upon the variance in the stochastic estimate compared with Hutchinson by
+    recognizing that tr(A) = tr(hat(A)) - tr(A - hat(A)), due to linearity of trace, where
+    hat(A) is the rank-k approximation to A. We can perform two stoachastic trace estimates,
+        1) tr(hat(A)) and 2) tr(A - hat(A))
+
+    Note that tr(A - hat(A)) = tr((I - QQ') A) = tr((I - QQ')A(I - QQ')), where hat(A) = QQ' A is the
+    randomized rank-k SVD approximation of A. Since (I - QQ') is a projection matrix, (I - QQ') = (I - QQ')(I - QQ').
+
+    To estimate the trace of 2), we define G := (I - QQ')X, where X is an independent set of rvs and compute
+        tr(G' A G).
+
+    Note that to estimate the tr(AA) we can make a change of basis from A to AA by computing a new Q from QR(AQ) as
+    well as G = (I - QQ'), followed by,
+        1) tr(Q A A Q) = ||A Q||_F^2 = sum(AQ ** 2) and similarly,
+        2) tr(G A A G) = ||A G||_F^2 = sum(AG ** 2).
+    """
     n, _ = GRM.shape
     m = k // 3
 
@@ -158,14 +177,21 @@ def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple
     # compute G = X2 - Q @ (Q.T @ X2)
     G = X2 - Q @ (Q.T @ X2)
 
-    # estimate trace = tr(Q.T @ A @ Q) + tr(G.T @ A @ G) / k
     AQ = GRM.matmat(Q)
     AG = GRM.matmat(G)
-    trace_grm = np.sum(AQ * Q) + np.sum(AG * G) / (G.shape[1])
+    # estimate trace = tr(Q.T @ A @ Q) + tr(G.T @ A @ G) / m
+    trace_grm = np.sum(AQ * Q) + np.sum(AG * G) / m
 
-    # we should be able to re-use the same basis Q, since (GRM @ GRM @ X1) spans the same basis
-    # but with squared eigenvalues
-    trace_grm_sq = np.sum(AQ**2) + np.sum(AG**2) / (G.shape[1])
+    # we can't reuse the same basis due to scaling diff in eigenvalues between A and AA
+    # but we can compute new basis cheaply from AQ
+    Q, _ = np.linalg.qr(AQ)
+    AQ = GRM.matmat(Q)
+
+    # update G = X2 - Q @ (Q.T @ X2)
+    G = X2 - Q @ (Q.T @ X2)
+    AG = GRM.matmat(G)
+    # estimate trace = tr(Q.T @ A @ A @ Q) + tr(G.T @ A @ A @ G) / m
+    trace_grm_sq = np.sum(AQ**2) + np.sum(AG**2) / m
 
     return trace_grm, trace_grm_sq, {}
 

@@ -16,7 +16,7 @@ def simulate_phenotype(
     heritability: float,
     alpha: float = 0.0,
     fraction_causal: float = 1.0,
-    generator=None,
+    seed=None,
 ):
     """
     Simulates quantitative phenotypes
@@ -30,8 +30,7 @@ def simulate_phenotype(
     """
 
     N, M = linarg.shape
-    if generator is None:
-        generator = np.random.default_rng()
+    generator = np.random.default_rng(seed=seed)
     beta = generator.standard_normal(size=(M,))
 
     heterozygosity = 2 * linarg.allele_frequencies * (1 - linarg.allele_frequencies)
@@ -50,7 +49,7 @@ def simulate_phenotype(
     return y
 
 
-def _rhe(linarg, ys, B, alpha=-0.5, seed=0):
+def _rhe(linarg, ys, B, alpha=-0.5, seed=None):
     n = linarg.shape[0]
 
     generator = np.random.default_rng(seed=seed)
@@ -108,16 +107,34 @@ def main(args):
     y = np.zeros((linarg.shape[0], traits))
     generator = np.random.default_rng(seed=args.seed)
     for i in range(traits):
-        y[:, i] = simulate_phenotype(linarg, h2, args.alpha, pi, generator)
+        y[:, i] = simulate_phenotype(linarg, h2, args.alpha, pi, seed=generator)
 
     h2_est = randomized_haseman_elston(
-        linarg, y, B=args.num_vec, alpha=args.alpha, trace_est=args.method, sampler=args.distribution, seed=args.seed
+        linarg,
+        y,
+        B=args.num_vec,
+        alpha=args.alpha,
+        trace_est=args.method,
+        sampler=args.distribution,
+        seed=generator,
     )
 
     mean_h2 = np.mean(h2_est)
     std_h2 = np.std(h2_est)
     mse = np.sqrt(np.mean(h2 - h2_est) ** 2)
     args.output.write(f"mean estimate (sd): {mean_h2} ({std_h2}) | mse = {mse}\n")
+
+    h2_est = _rhe(
+        linarg,
+        y,
+        B=args.num_vec,
+        alpha=args.alpha,
+        seed=generator,
+    )
+    mean_h2 = np.mean(h2_est)
+    std_h2 = np.std(h2_est)
+    mse = np.sqrt(np.mean(h2 - h2_est) ** 2)
+    args.output.write(f"classic mean estimate (sd): {mean_h2} ({std_h2}) | mse = {mse}\n")
 
     return 0
 
