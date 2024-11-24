@@ -69,5 +69,3 @@ def linearize_brick_graph(G: DiGraph) -> csr_matrix:
 
     return csr_matrix((data[:counter], (row_ind[:counter], col_ind[:counter])),
                       shape=(G.maximum_number_of_nodes, G.maximum_number_of_nodes))
-
-
