@@ -7,7 +7,7 @@ name = "linear-dag"
 dynamic = ["version"]
 description = ''
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 keywords = [
   "statistics",
@@ -16,6 +16,7 @@ keywords = [
 authors = [
   { name = "Luke O'Connor", email = "loconnor@broadinstitute.org"},
   { name = "Nicholas Mancuso", email = "nmancuso@usc.edu" },
+  { name = "Amber Shen", email = "amberzshen@gmail.com" },
 ]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -27,9 +28,8 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Information Analysis",
   "Topic :: Scientific/Engineering :: Mathematics",
   "Programming Language :: Python",
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
@@ -38,9 +38,9 @@ dependencies = [
   "cyvcf2",
   "bed_reader[sparse]",
   "numpy",
-  "scipy",
+  "scipy>=1.14.1",
   "polars",
-  "networkx",
+  "jupyter",
 ]
 
 [project.scripts]
