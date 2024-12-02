@@ -3,6 +3,7 @@ from functools import partial
 from typing import Callable, Optional
 
 import numpy as np
+import scipy as sp
 
 from numpy.random import Generator
 from scipy.sparse import diags
@@ -54,7 +55,7 @@ def randomized_haseman_elston(
     ys = ys / np.std(ys, axis=0)
 
     # compute y_j' K y_j for each y_j \in y
-    C = np.sum(K.matmat(ys) ** 2, axis=0)
+    C = np.sum(K.matmat(ys) * ys, axis=0)
 
     # construct linear equations to solve
     LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, N]])
@@ -198,7 +199,7 @@ def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple
 
 def _xtrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
     # WIP
-    raise NotImplementedError("xnystrace_estimator is not yet implemented")
+    # raise NotImplementedError("xnystrace_estimator is not yet implemented")
     n, _ = GRM.shape
     m = k // 2
 
@@ -234,8 +235,65 @@ def _xtrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[f
     trace_grm_sq = np.mean(estimates)  # TODO WRONG WRONG; just placeholder
     std_err = np.std(estimates) / np.sqrt(m)
 
+    # TODO: WIP
+    """
+    G = samples - Q @ W
+    AG = GRM.matmat(G)
+    WPA = Y.T - W.T @ Z.T
+    QS = Q @ S
+    np.sum(AG * G, axis=0)
+    """
     return trace_grm, trace_grm_sq, {"std.err": std_err}
 
 
 def _xnystrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
+    # TODO: WIP
+    n, _ = GRM.shape
+    m = k // 2
+
+    samples = sampler(n, m)
+
+    Y = GRM.matmat(samples)
+
+    # shift for numerical issues
+    nu = np.finfo(Y.dtype).eps * np.linalg.norm(Y, "fro") / np.sqrt(n)
+    Y = Y + samples * nu
+    Q, R = np.linalg.qr(Y)
+
+    # compute and symmetrize H, then take cholesky factor
+    H = samples.T @ Y
+    L = np.linalg.cholesky(0.5 * (H + H.T))
+    B = sp.linalg.solve_triangular(L, R.T, lower=True)
+
+    W = Q.T @ samples
+    E = sp.linalg.solve_triangular(L, np.eye(m), lower=True)
+
+    # e_i ' inv(H) e_i
+    denom = np.sum(E**2, axis=0)
+
+    # R @ inv(H)
+    BtE = B.T @ E
+
+    # X' @ Q @ R @ inv(H)
+    WtBtE = W.T @ BtE
+
+    # tr[hat(A)_i]
+    low_rank_est = np.sum(B**2) - np.sum(BtE**2, axis=0) / denom
+
+    # tr[X'(A - hat(A)_i)X] = tr[X'QR] - tr[X'hat(A)_i)X]
+    resid_est = np.sum(W.T * R, axis=0) - np.sum(WtBtE * W, axis=0) + np.sum(WtBtE**2, axis=0) / denom
+    estimates = low_rank_est + resid_est - nu * n
+    trace_est = np.mean(estimates)
+
+    # S == BtE / sqrt(denom)
+    S = sp.linalg.solve_triangular(L.T, B, lower=False).T / np.sqrt(np.diag(np.linalg.inv(H)))
+    dSW = np.sum(S * W, axis=0)
+    # first term is, np.sum(B ** 2, axis=0)
+    # second term is, - np.sum(BtE ** 2, axis=0) / denom
+    # last term is,
+    old_estimates = np.linalg.norm(B, "fro") ** 2 - np.linalg.norm(S, axis=0) ** 2 + (np.abs(dSW) ** 2) - nu * n
+    old_trace_est = np.mean(old_estimates)
+
     raise NotImplementedError("xnystrace_estimator is not yet implemented")
+    # TODO: WIP
+    return trace_est, old_trace_est, {}

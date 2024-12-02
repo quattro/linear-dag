@@ -77,7 +77,7 @@ def _rhe(linarg, ys, B, alpha=-0.5, seed=None):
     ys = ys / np.std(ys, axis=0)
 
     # compute y_j' K y_j for each y_j \in y
-    C = np.sum(K.matmat(ys) ** 2, axis=0)
+    C = np.sum(K.matmat(ys) * ys, axis=0)
 
     # construct linear equations to solve
     LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, n]])
@@ -91,6 +91,9 @@ def _rhe(linarg, ys, B, alpha=-0.5, seed=None):
 def main(args):
     argp = ap.ArgumentParser(description="")
     argp.add_argument("-B", "--num-vec", type=int, default=10)
+    argp.add_argument("-n", "--num-trait", type=int, default=100)
+    argp.add_argument("--h2", type=float, default=0.2, help="SNP heritability")
+    argp.add_argument("--pi", type=float, default=0.01, help="Proportion of causal SNPs")
     argp.add_argument("-a", "--alpha", type=float, default=-0.5)
     argp.add_argument("-m", "--method", choices=["hutchinson", "hutch++", "xtrace", "xnystrace"], default="hutchinson")
     argp.add_argument("-d", "--distribution", choices=["normal", "sphere", "rademacher"], default="normal")
@@ -103,11 +106,10 @@ def main(args):
     linarg = LinearARG.read(path)
     print(linarg.shape)
 
-    h2, pi, traits = 0.2, 0.01, 100
-    y = np.zeros((linarg.shape[0], traits))
+    y = np.zeros((linarg.shape[0], args.num_trait))
     generator = np.random.default_rng(seed=args.seed)
-    for i in range(traits):
-        y[:, i] = simulate_phenotype(linarg, h2, args.alpha, pi, seed=generator)
+    for i in range(args.num_trait):
+        y[:, i] = simulate_phenotype(linarg, args.h2, args.alpha, args.pi, seed=generator)
 
     h2_est = randomized_haseman_elston(
         linarg,
@@ -121,7 +123,7 @@ def main(args):
 
     mean_h2 = np.mean(h2_est)
     std_h2 = np.std(h2_est)
-    mse = np.sqrt(np.mean(h2 - h2_est) ** 2)
+    mse = np.sqrt(np.mean(args.h2 - h2_est) ** 2)
     args.output.write(f"mean estimate (sd): {mean_h2} ({std_h2}) | mse = {mse}\n")
 
     h2_est = _rhe(
@@ -133,7 +135,7 @@ def main(args):
     )
     mean_h2 = np.mean(h2_est)
     std_h2 = np.std(h2_est)
-    mse = np.sqrt(np.mean(h2 - h2_est) ** 2)
+    mse = np.sqrt(np.mean(args.h2 - h2_est) ** 2)
     args.output.write(f"classic mean estimate (sd): {mean_h2} ({std_h2}) | mse = {mse}\n")
 
     return 0
