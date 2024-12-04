@@ -105,10 +105,10 @@ def _rademacher_sampler(n: int, k: int, generator: Generator) -> np.ndarray:
     return 2 * generator.binomial(1, 0.5, size=(n, k)) - 1
 
 
-_TraceEstimator = Callable[[LinearOperator, int, _Sampler], float]
+_TraceEstimator = Callable[[LinearOperator, int, _Sampler], tuple[float, float, dict]]
 
 
-def _construct_estimator(tr_est: str):
+def _construct_estimator(tr_est: str) -> _TraceEstimator:
     """
     Helper function to return the correct estimator function based on a string
     """
@@ -120,7 +120,7 @@ def _construct_estimator(tr_est: str):
         estimator = _hutch_pp_estimator
     elif tr_est == "xtrace":
         estimator = _xtrace_estimator
-    elif tr_est == "xnystrace" or tr_est == "xnystrom":
+    elif tr_est in {"xnystrace", "xnystrom"}:
         estimator = _xnystrace_estimator
     else:
         raise ValueError(f"{tr_est} not valid estimator (e.g., 'hutchinson', 'hutch++', 'xtrace', 'xnystrace')")
@@ -199,7 +199,7 @@ def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple
 
 def _xtrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
     # WIP
-    raise NotImplementedError("xnystrace_estimator is not yet implemented")
+    raise NotImplementedError("xtrace estimator is not yet implemented")
     n, _ = GRM.shape
     m = k // 2
 
@@ -247,7 +247,6 @@ def _xtrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[f
 
 
 def _xnystrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
-    # TODO: WIP
     n, _ = GRM.shape
     m = k // 2
 
