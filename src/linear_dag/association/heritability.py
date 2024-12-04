@@ -1,6 +1,5 @@
-# heritability.py
 from functools import partial
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import numpy as np
 import scipy as sp
@@ -14,12 +13,12 @@ from ..core import LinearARG
 
 def randomized_haseman_elston(
     linarg: LinearARG,
-    ys: np.ndarray,
-    B: int = 20,
+    phenos: np.ndarray,
+    num_matvecs: int = 20,
     alpha: float = -1,
     trace_est: str = "hutchinson",
     sampler: str = "normal",
-    seed: Optional[int] = None,
+    seed: Optional[Union[int, Generator]] = None,
 ) -> list[float]:
     """
     Implementation of the RHE algorithm from:
@@ -48,14 +47,14 @@ def randomized_haseman_elston(
     estimator = _construct_estimator(trace_est)
 
     # se not used atm, but for some trace estimators (eg xtrace, xnystrace) we can compute it
-    grm_trace, grm_sq_trace, se = estimator(K, B, sampler)
+    grm_trace, grm_sq_trace, se = estimator(K, num_matvecs, sampler)
 
     # center and standardize
-    ys = ys - np.mean(ys, axis=0)
-    ys = ys / np.std(ys, axis=0)
+    phenos = phenos - np.mean(phenos, axis=0)
+    phenos = phenos / np.std(phenos, axis=0)
 
     # compute y_j' K y_j for each y_j \in y
-    C = np.sum(K.matmat(ys) * ys, axis=0)
+    C = np.sum(K.matmat(phenos) * phenos, axis=0)
 
     # construct linear equations to solve
     LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, N]])
