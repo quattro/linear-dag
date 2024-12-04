@@ -1,6 +1,5 @@
-# heritability.py
 from functools import partial
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import numpy as np
 import scipy as sp
@@ -14,12 +13,12 @@ from ..core import LinearARG
 
 def randomized_haseman_elston(
     linarg: LinearARG,
-    ys: np.ndarray,
-    B: int = 20,
+    phenos: np.ndarray,
+    num_matvecs: int = 20,
     alpha: float = -1,
     trace_est: str = "hutchinson",
     sampler: str = "normal",
-    seed: Optional[int] = None,
+    seed: Optional[Union[int, Generator]] = None,
 ) -> list[float]:
     """
     Implementation of the RHE algorithm from:
@@ -48,14 +47,14 @@ def randomized_haseman_elston(
     estimator = _construct_estimator(trace_est)
 
     # se not used atm, but for some trace estimators (eg xtrace, xnystrace) we can compute it
-    grm_trace, grm_sq_trace, se = estimator(K, B, sampler)
+    grm_trace, grm_sq_trace, se = estimator(K, num_matvecs, sampler)
 
     # center and standardize
-    ys = ys - np.mean(ys, axis=0)
-    ys = ys / np.std(ys, axis=0)
+    phenos = phenos - np.mean(phenos, axis=0)
+    phenos = phenos / np.std(phenos, axis=0)
 
     # compute y_j' K y_j for each y_j \in y
-    C = np.sum(K.matmat(ys) * ys, axis=0)
+    C = np.sum(K.matmat(phenos) * phenos, axis=0)
 
     # construct linear equations to solve
     LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, N]])
@@ -76,6 +75,7 @@ _Sampler = Callable[[int, int], np.ndarray]
 def _construct_sampler(name: str, generator: Generator) -> _Sampler:
     """
     Helper function to return the correct sampling distribution function based on a string
+    requires x ~ Dist are E[x] = 0 and E[x x'] = I
     """
     name = str(name).lower()
     sampler = None
@@ -105,10 +105,10 @@ def _rademacher_sampler(n: int, k: int, generator: Generator) -> np.ndarray:
     return 2 * generator.binomial(1, 0.5, size=(n, k)) - 1
 
 
-_TraceEstimator = Callable[[LinearOperator, int, _Sampler], float]
+_TraceEstimator = Callable[[LinearOperator, int, _Sampler], tuple[float, float, dict]]
 
 
-def _construct_estimator(tr_est: str):
+def _construct_estimator(tr_est: str) -> _TraceEstimator:
     """
     Helper function to return the correct estimator function based on a string
     """
@@ -120,7 +120,7 @@ def _construct_estimator(tr_est: str):
         estimator = _hutch_pp_estimator
     elif tr_est == "xtrace":
         estimator = _xtrace_estimator
-    elif tr_est == "xnystrace" or tr_est == "xnystrom":
+    elif tr_est in {"xnystrace", "xnystrom"}:
         estimator = _xnystrace_estimator
     else:
         raise ValueError(f"{tr_est} not valid estimator (e.g., 'hutchinson', 'hutch++', 'xtrace', 'xnystrace')")
@@ -199,7 +199,7 @@ def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple
 
 def _xtrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
     # WIP
-    # raise NotImplementedError("xnystrace_estimator is not yet implemented")
+    raise NotImplementedError("xtrace estimator is not yet implemented")
     n, _ = GRM.shape
     m = k // 2
 
@@ -247,7 +247,6 @@ def _xtrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[f
 
 
 def _xnystrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
-    # TODO: WIP
     n, _ = GRM.shape
     m = k // 2
 
@@ -263,37 +262,69 @@ def _xnystrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tupl
     # compute and symmetrize H, then take cholesky factor
     H = samples.T @ Y
     L = np.linalg.cholesky(0.5 * (H + H.T))
+
+    # Nystrom approx is Q @ B @ B' Q'
     B = sp.linalg.solve_triangular(L, R.T, lower=True)
 
     W = Q.T @ samples
-    E = sp.linalg.solve_triangular(L, np.eye(m), lower=True)
+
+    # invert L here, to simplify a few downstream calculations
+    invL = sp.linalg.solve_triangular(L, np.eye(m), lower=True)
 
     # e_i ' inv(H) e_i
-    denom = np.sum(E**2, axis=0)
+    denom = np.sum(invL**2, axis=1)
 
-    # R @ inv(H)
-    BtE = B.T @ E
+    # B' = R @ inv(L) => B' @ inv(L) = R @ inv(H)
+    RinvH = B.T @ invL
 
     # X' @ Q @ R @ inv(H)
-    WtBtE = W.T @ BtE
+    WtRinvH = W.T @ RinvH
 
-    # tr[hat(A)_i]
-    low_rank_est = np.sum(B**2) - np.sum(BtE**2, axis=0) / denom
+    # compute tr of leave-one-out low-rank nystrom approximation
+    low_rank_est = np.sum(B**2) - np.sum(RinvH**2, axis=0) / denom
 
-    # tr[X'(A - hat(A)_i)X] = tr[X'QR] - tr[X'hat(A)_i)X]
-    resid_est = np.sum(W.T * R, axis=0) - np.sum(WtBtE * W, axis=0) + np.sum(WtBtE**2, axis=0) / denom
+    # compute hutchinson tr estimator on the residuals between A and leave-one-out nsytrom approx
+    # okay this took me a while to figure out, but in hindsight is ezpz. :D
+    # residuals = diag[X'(A - hat(A)_i)X] = diag[X'(A - hat(A) + rank_one_term)X]
+    #  = diag[X'(A - A X inv(H) X' A)X] + diag[X' rank_one_term X ]
+    # Notice that the first diag term cancels out due to,
+    #  = X' A X - X ' A X inv(H) X' A X = X' A X - X ' A X inv(X' A X) X' A X
+    #  = X' A X - X' A X = 0
+    # the remaining diag term can be computed as,
+    # WtRinvH**2 == [X' Q R inv(H) e_i e_i' inv(H) R' Q' X for e_i in I] and rescaled
+    resid_est = np.sum(WtRinvH**2, axis=0) / denom
+
+    # combine low-rank nystrom trace estimate plus hutchinson on the nystrom residuals (and epsilon noise term)
     estimates = low_rank_est + resid_est - nu * n
     trace_est = np.mean(estimates)
+    trace_std_err = np.std(estimates) / np.sqrt(k)
 
-    # S == BtE / sqrt(denom)
-    S = sp.linalg.solve_triangular(L.T, B, lower=False).T / np.sqrt(np.diag(np.linalg.inv(H)))
-    dSW = np.sum(S * W, axis=0)
-    # first term is, np.sum(B ** 2, axis=0)
-    # second term is, - np.sum(BtE ** 2, axis=0) / denom
-    # last term is,
-    old_estimates = np.linalg.norm(B, "fro") ** 2 - np.linalg.norm(S, axis=0) ** 2 + (np.abs(dSW) ** 2) - nu * n
-    old_trace_est = np.mean(old_estimates)
+    # compute low-rank nystrom approx of A^2 re-using existing terms...
+    # Recall Q' Q = I_m
+    # AA<X> = A A X inv(X' A A X) X' A A = A Q R inv(R' Q' Q R) R' Q' A
+    #  = A Q R inv(R' R) R' Q' A
+    #  = A Q R inv(R) inv(R') R' Q' A = A Q Q' A
+    # this simplifies the rank-one update too
+    invRt = sp.linalg.solve_triangular(R.T, np.eye(m), lower=True)
+    denom = np.sum(invRt**2, axis=1)
 
-    raise NotImplementedError("xnystrace_estimator is not yet implemented")
-    # TODO: WIP
-    return trace_est, old_trace_est, {}
+    Z = GRM.matmat(Q)
+    Ztilde = Z @ invRt
+    low_rank_sq_est = np.sum(Z**2) - np.sum(Ztilde**2, axis=0) / denom
+
+    # A similar argument regarding the residuals can be made as above. Namely,
+    # residuals = diag[X'(AA - hat(AA)_i)X] = diag[X'(AA - hat(AA) + rank_one_term)X]
+    #  = diag[X'(AA - AA X inv(X' AA X) X' AA)X] + diag[X' rank_one_term X ]
+    # Notice that the first diag term cancels out due to,
+    #  = X'A AX - X'A AX inv(X' AA X) X'A AX = R'Q'QR - R'Q'Q R = R'R - R'R = 0
+    # interestingly however, the final rank_one diag term reduces substantially to diag(invRt).
+    # Recall AX = QR, rank_one_term = AQ inv(R) e_i e_i' inv(R) Q'A / e_i' inv(R) e_i, thus (ignoring normalizing term)
+    # diag[X' rank_one_term X] = diag[X'AQ inv(R) e_i e_i' inv(R)Q'AX] = diag[R'Q'Qinv(R) e_i e_i' inv(R)Q'QR]
+    #  = diag[R inv(R) e_i e_i' inv(R) R] = diag[e_i e_i] = I. Bringing back the normalizing term we have
+    #  I / ||inv(R) e_i||^2 = 1 / denom
+    resid_sq_est = 1.0 / denom
+    sq_estimates = low_rank_sq_est + resid_sq_est - nu * n  # n-sq?
+    sq_trace_est = np.mean(sq_estimates)
+    sq_trace_std_err = np.std(sq_estimates) / np.sqrt(k)
+
+    return trace_est, sq_trace_est, {"tr.std.err": trace_std_err, "sq.tr.std.err": sq_trace_std_err}

@@ -114,7 +114,7 @@ def main(args):
     h2_est = randomized_haseman_elston(
         linarg,
         y,
-        B=args.num_vec,
+        num_matvecs=args.num_vec,
         alpha=args.alpha,
         trace_est=args.method,
         sampler=args.distribution,
