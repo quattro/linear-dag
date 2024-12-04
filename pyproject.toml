@@ -80,6 +80,9 @@ compile_py = false
 include_numpy = true
 directives = { boundscheck = false, nonecheck = false, language_level = 3, binding = true }
 
+[tool.hatch.build.hooks.cython.build]
+force_rebuild = true
+
 [build.targets.wheel.hooks.cython.options.files]
 include = [
   "recombination.pyx",
