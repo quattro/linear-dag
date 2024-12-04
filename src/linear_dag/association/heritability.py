@@ -299,8 +299,8 @@ def _xnystrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tupl
     # combine low-rank nystrom trace estimate plus hutchinson on the nystrom residuals (and epsilon noise term)
     estimates = low_rank_est + resid_est - nu * n
     trace_est = np.mean(estimates)
+    trace_std_err = np.std(estimates) / np.sqrt(k)
 
-    # TODO: WIP, something is off here...
     # compute low-rank nystrom approx of A^2 re-using existing terms...
     # Recall Q' Q = I_m
     # AA<X> = A A X inv(X' A A X) X' A A = A Q R inv(R' Q' Q R) R' Q' A
@@ -326,7 +326,7 @@ def _xnystrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tupl
     #  I / ||inv(R) e_i||^2 = 1 / denom
     resid_sq_est = 1.0 / denom
     sq_estimates = low_rank_sq_est + resid_sq_est - nu * n  # n-sq?
-    trace_sq_est = np.mean(sq_estimates)
+    sq_trace_est = np.mean(sq_estimates)
+    sq_trace_std_err = np.std(sq_estimates) / np.sqrt(k)
 
-    # TODO: WIP
-    return trace_est, trace_sq_est, {}
+    return trace_est, sq_trace_est, {"tr.std.err": trace_std_err, "sq.tr.std.err": sq_trace_std_err}
