@@ -1,18 +1,9 @@
-from networkx.linalg.graphmatrix import adjacency_matrix
-
-# Some of these imports may be superfluous 
-
-import sys
-import linear_dag as ld
-from linear_dag import LinearARG
-
+from ..core import LinearARG
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import LinearOperator, cg, aslinearoperator, gmres, spsolve_triangular
 from scipy.sparse import eye, diags, csc_matrix, csr_matrix
-import time
 from dataclasses import dataclass
-import pandas as pd
 
 @dataclass
 class triangular_solver(LinearOperator):
@@ -38,10 +29,12 @@ class triangular_solver(LinearOperator):
 
         return spsolve_triangular(eye(self.A.shape[1]) - self.A.T, other.T, lower=False).T
 
-def method_Schur(linarg: LinearARG, heritability: float,
-                       y):
+def blup(linarg: LinearARG, heritability: float, y: np.ndarray):
     """
-    
+    Computes the best linear unbiased predictor (BLUP) for the phenotype vector y.
+    :param linarg: linear ARG for the genotype matrix
+    :param y: phenotype vector
+    :return: BLUP, a vector of the same size as y
     """
 
     X = linarg
@@ -58,9 +51,8 @@ def method_Schur(linarg: LinearARG, heritability: float,
     T = T[non_sample_indices, :]
 
     # Set scalar for error variance
-    h2 = heritability
-    var_e = 1 - h2
-    var_g = h2 / m
+    var_e = 1 - heritability
+    var_g = heritability / m
 
     ## Generate Sigma vector
     Sigma = var_g * eye(m)

@@ -33,6 +33,9 @@ def randomized_haseman_elston(
     """
 
     N, M = linarg.shape
+    if phenos.ndim == 1:
+        phenos = phenos.reshape(-1, 1)
+
 
     heterozygosity = linarg.allele_frequencies * (1 - linarg.allele_frequencies)
     heterozygosity[heterozygosity == 0] = 1
