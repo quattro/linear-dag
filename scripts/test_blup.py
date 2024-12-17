@@ -4,7 +4,7 @@ from time import time
 
 def main():
     np.random.seed(0)
-    path = "/Users/lukeoconnor/Desktop/1kg_chr20_1000000_50000000"
+    path = "data/linearg_shared/data/linarg/1kg_chr20_1000000_2000000"
     linarg = ld.LinearARG.read(path + ".npz", path + ".pvar", path + ".psam")
 
     y, y_bar = ld.association.simulate_phenotype(linarg=linarg, heritability=0.1, return_genetic_component=1)
