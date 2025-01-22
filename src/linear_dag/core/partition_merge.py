@@ -3,25 +3,20 @@ import time
 
 import numpy as np
 import polars as pl
-import scipy.sparse
+import scipy.sparse as sp
 
 from cyvcf2 import VCF
 
+from linear_dag.genotype import read_vcf
 from .brick_graph import BrickGraph, merge_brick_graphs
 from .lineararg import LinearARG, VariantInfo
 from .one_summed_cy import linearize_brick_graph
 from .recombination import Recombination
 
 
-def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=True, flip_minor_alleles=False):
-    """
-    From vcf file, saves the genotype matrix as csc sparse matrix, variant metadata, and filtered out variants.
-    Codes unphased genotypes as 0/1/2/3, where 3 means that at least one of the two alleles is unknown.
-    Codes phased genotypes as 0/1, and there are 2n rows, where rows 2*k and 2*k+1 correspond to individual k.
-    """
+def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=True, flip_minor_alleles=False, whitelist_path=None):
     if not os.path.exists(f"{linarg_dir}/variant_metadata/"):
         os.makedirs(f"{linarg_dir}/variant_metadata/")
-    # if not os.path.exists(f'{linarg_dir}/filtered_variants/'): os.makedirs(f'{linarg_dir}/filtered_variants/')
     if not os.path.exists(f"{linarg_dir}/genotype_matrices/"):
         os.makedirs(f"{linarg_dir}/genotype_matrices/")
 
@@ -29,59 +24,16 @@ def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=
     start = int(region.split("-")[1])
     end = int(region.split("-")[2])
     region_formatted = f'{region.split("-")[0]}:{region.split("-")[1]}-{region.split("-")[2]}'
-    vcf = VCF(vcf_path, gts012=True, strict_gt=True)
+    
+    if whitelist_path is None:
+        whitelist = None
+    else:
+        whitelist = np.loadtxt(whitelist_path, dtype=int)
+    
+    genotypes, v_info = read_vcf(vcf_path, phased=phased, region=region_formatted, flip_minor_alleles=flip_minor_alleles, whitelist=whitelist)
+    sp.save_npz(f"{linarg_dir}/genotype_matrices/{partition_number}_{region}.npz", genotypes)
+    v_info.write_csv(f"{linarg_dir}/variant_metadata/{partition_number}_{region}.txt", separator=" ")
 
-    data = []
-    idxs = []
-    ptrs = [0]
-    flip = False
-    ploidy = 1 if phased else 2
-
-    f_var = open(f"{linarg_dir}/variant_metadata/{partition_number}_{region}.txt", "w")
-    f_var.write(" ".join(["CHROM", "POS", "ID", "REF", "ALT", "FLIP", "IDX"]) + "\n")
-
-    # f_filt = open(f'{linarg_dir}/filtered_variants/{partition_number}_{region}.txt', 'w')
-    # f_filt.write(' '.join(['CHROM', 'POS', 'ID', 'REF', 'ALT', 'AF'])+'\n')
-
-    var_index = 0
-    for var in vcf(region_formatted):
-        if (var.POS < start) or (var.POS > end):
-            continue  # ignore indels that are outside of region
-        if phased:
-            gts = np.ravel(np.asarray(var.genotype.array())[:, :2])
-        else:
-            gts = var.gt_types
-        if flip_minor_alleles:
-            af = np.mean(gts) / ploidy
-            if af > 0.5:
-                gts = ploidy - gts
-                flip = True
-            else:
-                flip = False
-
-        af = np.mean(gts) / ploidy
-        # if (af == 0) or (af == 1): # filter out variants with af=0 or af=1
-        #     f_filt.write(' '.join([chrom, str(var.POS), '.', var.REF, ','.join(var.ALT), str(af)])+'\n')
-        #     continue
-
-        (idx,) = np.where(gts != 0)
-        data.append(gts[idx])
-        idxs.append(idx)
-        ptrs.append(ptrs[-1] + len(idx))
-        f_var.write(
-            " ".join([chrom, str(var.POS), ".", var.REF, ",".join(var.ALT), str(int(flip)), str(var_index)]) + "\n"
-        )
-        var_index += 1
-
-    f_var.close()
-    # f_filt.close()
-
-    data = np.concatenate(data)
-    idxs = np.concatenate(idxs)
-    ptrs = np.array(ptrs)
-    genotypes = scipy.sparse.csc_matrix((data, idxs, ptrs), shape=(gts.shape[0], len(ptrs) - 1))
-
-    scipy.sparse.save_npz(f"{linarg_dir}/genotype_matrices/{partition_number}_{region}.npz", genotypes)
 
 
 def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
@@ -94,7 +46,7 @@ def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
         os.makedirs(f"{linarg_dir}/brick_graph_partition_stats/")
 
     t1 = time.time()
-    genotypes = scipy.sparse.load_npz(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.npz")
+    genotypes = sp.load_npz(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.npz")
     n, m = genotypes.shape
     t2 = time.time()
     brick_graph, samples_idx, variants_idx = BrickGraph.from_genotypes(genotypes)
@@ -175,6 +127,7 @@ def merge(linarg_dir, load_dir):
     var_info = VariantInfo(df)
 
     linarg = LinearARG(linear_arg_adjacency_matrix, sample_indices, var_info)
+    linarg = linarg.make_triangular()
     linarg.write(f"{linarg_dir}/linear_arg")
     get_linarg_stats(linarg_dir, load_dir)
 
@@ -191,9 +144,8 @@ def get_linarg_stats(linarg_dir, load_dir):
     df_flip = df_flip.with_columns(pl.Series([0] * df_flip.shape[0]).alias("FLIP"))
     linarg.variants.table = df_flip
 
-    linarg_triangular = linarg.make_triangular()
     v = np.ones(linarg.shape[0])
-    allele_count_from_linarg = v @ linarg_triangular
+    allele_count_from_linarg = v @ linarg
 
     files = os.listdir(f"{load_dir}{linarg_dir}/genotype_matrices/")
     ind_arr = np.array([int(f.split("_")[0]) for f in files])
@@ -202,7 +154,7 @@ def get_linarg_stats(linarg_dir, load_dir):
     genotypes_nnz = 0
     allele_counts = []
     for f in files:
-        genotypes = scipy.sparse.load_npz(f"{load_dir}{linarg_dir}/genotype_matrices/{f}")
+        genotypes = sp.load_npz(f"{load_dir}{linarg_dir}/genotype_matrices/{f}")
         genotypes_nnz += np.sum(
             [
                 np.minimum(genotypes[:, i].nnz, genotypes.shape[0] - genotypes[:, i].nnz)
@@ -225,7 +177,7 @@ def get_linarg_stats(linarg_dir, load_dir):
         brick_graph_nnz,
         np.round(genotypes_nnz / linarg.nnz, 3),
         np.round(genotypes_nnz / brick_graph_nnz, 3),
-        all(allele_counts_from_genotype == allele_count_from_linarg[0]),
+        all(allele_counts_from_genotype == allele_count_from_linarg),
     ]
     stats = [str(x) for x in stats]
     with open(f"{linarg_dir}/linear_arg_stats.txt", "w") as file:

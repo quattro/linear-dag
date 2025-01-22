@@ -139,7 +139,7 @@ def _assoc_scan(args):
 
 def _make_geno(args):
     make_genotype_matrix(
-        args.vcf_path, args.linarg_dir, args.region, args.partition_number, args.phased, args.flip_minor_alleles
+        args.vcf_path, args.linarg_dir, args.region, args.partition_number, args.phased, args.flip_minor_alleles, args.whitelist_path
     )
 
 
@@ -194,6 +194,9 @@ def _main(args):
     make_geno_p.add_argument("--partition_number", type=str, help="Partition number in genomic ordering")
     make_geno_p.add_argument("--phased", action="store_true", help="Is data phased?")
     make_geno_p.add_argument("--flip_minor_alleles", action="store_true", help="Should minor alleles be flipped?")
+    make_geno_p.add_argument(
+        "--whitelist_path", type=str, help="Path to .txt file of sample indices to include in construction of the genotype matrix."
+    )
     make_geno_p.set_defaults(func=_make_geno)
 
     infer_brick_graph_p = subp.add_parser(

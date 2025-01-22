@@ -14,7 +14,7 @@ from scipy.sparse import csc_matrix
 
 
 def read_vcf(
-    path: Union[str, PathLike], phased: bool = True, region: Optional[str] = None, flip_minor_alleles: bool = False
+    path: Union[str, PathLike], phased: bool = True, region: Optional[str] = None, flip_minor_alleles: bool = False, whitelist: np.array = None,
 ):
     def _update_dict_from_vcf(
         var: cv.Variant, is_flipped: bool, data: DefaultDict[str, list]
@@ -37,9 +37,9 @@ def read_vcf(
 
     # push most of the branching up here to define functions for fewer branch conditions during loop
     if phased:
-        read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2])  # noqa: E731
+        read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2]) if whitelist is None else np.ravel(np.asarray(var.genotype.array())[:, :2][whitelist]) # noqa: E731
     else:
-        read_gt = lambda var: var.gt_types  # noqa: E731
+        read_gt = lambda var: var.gt_types if whitelist is None else var.gt_types[whitelist] # noqa: E731
 
     def final_read(var, flip_minor_alleles):
         gts = read_gt(var)
@@ -67,7 +67,7 @@ def read_vcf(
     data = np.concatenate(data)
     idxs = np.concatenate(idxs)
     ptrs = np.array(ptrs)
-    genotypes = csc_matrix((data, idxs, ptrs))
+    genotypes = csc_matrix((data, idxs, ptrs), shape=(gts.shape[0], len(ptrs) - 1)) # some samples may have no variants, so shape must be specified
 
     return genotypes, v_info
 
