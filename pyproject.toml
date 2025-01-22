@@ -39,7 +39,8 @@ dependencies = [
   "cyvcf2",
 #   "bed_reader[sparse]",
   "numpy",
-  "scipy>=1.14.1",
+#   "scipy>=1.14.1",
+  "scipy",
   "polars",
   "jupyter",
 ]
