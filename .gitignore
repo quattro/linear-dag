@@ -8,7 +8,12 @@ clean
 *.cache
 # don't track cython-generated c files
 src/linear_dag/*.c
+src/linear_dag/*.o
 src/linear_dag/core/*.c
+src/linear_dag/core/*.o
+src/linear_dag/build/*.c
+src/linear_dag/build/*/*.o
+
 
 # Temporary and binary files
 foo.py
@@ -33,8 +38,8 @@ MATLAB/*.asv
 .project
 .pydevproject
 .settings
-.idea
-.vscode
+.idea/
+.vscode/
 tags
 
 # Package files
@@ -42,6 +47,22 @@ tags
 *.eggs/
 .installed.cfg
 *.egg-info
+
+# Package management
+.venv*/
+.conda*/
+.python-version
+.zshrc
+uv.lock
+
+# IDE and editor files
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
 
 # Unittest and coverage
 htmlcov/*
@@ -62,7 +83,7 @@ cover/*
 site/
 MANIFEST
 
-# Per-project virtualenvs
-.venv*/
-.conda*/
-.python-version
+# Luke's stuff
+luke/*
+MATLAB/luke/*
+MATLAB/old/*
