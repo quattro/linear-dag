@@ -7,7 +7,7 @@ name = "linear-dag"
 dynamic = ["version"]
 description = ''
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = { text = "MIT" }
 keywords = [
   "statistics",
