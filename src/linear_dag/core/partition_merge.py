@@ -1,3 +1,4 @@
+from ..memory_logger import MemoryLogger
 import os
 import time
 
@@ -5,9 +6,7 @@ import numpy as np
 import polars as pl
 import scipy.sparse as sp
 
-from cyvcf2 import VCF
-
-from linear_dag.genotype import read_vcf
+from ..genotype import read_vcf
 from .brick_graph import BrickGraph, merge_brick_graphs
 from .lineararg import LinearARG, VariantInfo
 from .one_summed_cy import linearize_brick_graph
@@ -15,14 +14,15 @@ from .recombination import Recombination
 
 
 def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=True, flip_minor_alleles=False, whitelist_path=None):
-    if not os.path.exists(f"{linarg_dir}/variant_metadata/"):
-        os.makedirs(f"{linarg_dir}/variant_metadata/")
-    if not os.path.exists(f"{linarg_dir}/genotype_matrices/"):
-        os.makedirs(f"{linarg_dir}/genotype_matrices/")
-
-    chrom = region.split("chr")[1].split("-")[0]
-    start = int(region.split("-")[1])
-    end = int(region.split("-")[2])
+    """
+    From a vcf file, save the genotype matrix and variant metadata for the given region.
+    """
+    os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
+    os.makedirs(f"{linarg_dir}/variant_metadata/", exist_ok=True)
+    os.makedirs(f"{linarg_dir}/genotype_matrices/", exist_ok=True)
+    
+    logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_number}_{region}_make_genotype_matrix.log")
+        
     region_formatted = f'{region.split("-")[0]}:{region.split("-")[1]}-{region.split("-")[2]}'
     
     if whitelist_path is None:
@@ -30,32 +30,42 @@ def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=
     else:
         whitelist = np.loadtxt(whitelist_path, dtype=int)
     
+    logger.info("Reading vcf as sparse matrix")
+    t1 = time.time()
     genotypes, v_info = read_vcf(vcf_path, phased=phased, region=region_formatted, flip_minor_alleles=flip_minor_alleles, whitelist=whitelist)
+    t2 = time.time()
+    logger.info(f"vcf to sparse matrix completed in {np.round(t2 - t1, 3)} seconds")
+    logger.info("Saving genotype matrix and variant metadata")
     sp.save_npz(f"{linarg_dir}/genotype_matrices/{partition_number}_{region}.npz", genotypes)
     v_info.write_csv(f"{linarg_dir}/variant_metadata/{partition_number}_{region}.txt", separator=" ")
-
 
 
 def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
     """
     From a genotype matrix, infer the brick graph and find recombinations.
     """
-    if not os.path.exists(f"{linarg_dir}/brick_graph_partitions/"):
-        os.makedirs(f"{linarg_dir}/brick_graph_partitions/")
-    if not os.path.exists(f"{linarg_dir}/brick_graph_partition_stats/"):
-        os.makedirs(f"{linarg_dir}/brick_graph_partition_stats/")
-
+    os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
+    os.makedirs(f"{linarg_dir}/brick_graph_partitions/", exist_ok=True)
+    
+    logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_identifier}_infer_brick_graph.log")
+    logger.info("Loading genotype matrix")
     t1 = time.time()
     genotypes = sp.load_npz(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.npz")
     n, m = genotypes.shape
     t2 = time.time()
+    logger.info(f"Genotype matrix loaded in {np.round(t2 - t1, 3)} seconds")
+    logger.info("Inferring brick graph")
     brick_graph, samples_idx, variants_idx = BrickGraph.from_genotypes(genotypes)
     t3 = time.time()
+    logger.info(f"Brick graph inferred in {np.round(t3 - t2, 3)} seconds")
+    logger.info("Finding recombinations")
     recom = Recombination.from_graph(brick_graph)
     recom.find_recombinations()
     t4 = time.time()
+    logger.info(f"Recombinations found in {np.round(t4 - t3, 3)} seconds")
     adj_mat = recom.to_csr()
-
+    
+    logger.info("Saving brick graph")
     np.savez(
         f"{linarg_dir}/brick_graph_partitions/{partition_identifier}.npz",
         brick_graph_data=adj_mat.data,
@@ -69,53 +79,39 @@ def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
     af = np.diff(genotypes.indptr) / n
     geno_nnz = np.sum(n * np.minimum(af, 1 - af))
     nnz_ratio = geno_nnz / adj_mat.nnz
-    stats = [
-        partition_identifier,
-        str(n),
-        str(m),
-        str(np.round(t2 - t1, 3)),
-        str(np.round(t3 - t2, 3)),
-        str(np.round(t4 - t3, 3)),
-        str(geno_nnz),
-        str(adj_mat.nnz),
-        str(np.round(nnz_ratio, 3)),
-    ]
-
-    with open(f"{linarg_dir}/brick_graph_partition_stats/{partition_identifier}.txt", "w") as file:
-        file.write(
-            " ".join(
-                [
-                    "partition_identifier",
-                    "n",
-                    "m",
-                    "mtx_load_time",
-                    "brickgraph_inference_time",
-                    "find_recombinations_time",
-                    "geno_nnz",
-                    "brickgraph_nnz",
-                    "nnz_ratio",
-                ]
-            )
-            + "\n"
-        )
-        file.write(" ".join(stats) + "\n")
+    logger.info(f"Stats - n: {n}, m: {m}, geno_nnz: {geno_nnz}, brickgraph_nnz: {adj_mat.nnz}, nnz_ratio: {nnz_ratio}")
 
 
 def merge(linarg_dir, load_dir):
     """
     Merged partitioned brick graphs, find recombinations, and linearize.
     """
-    if not os.path.exists(f"{linarg_dir}/"):
-        os.makedirs(f"{linarg_dir}/")
+    os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
+    os.makedirs(f"{linarg_dir}/", exist_ok=True)
+    
+    logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/merge.log")
+    logger.info("Merging brick graphs")
+    t1 = time.time()
     merged_graph, variant_indices, num_samples, index_mapping = merge_brick_graphs(
         f"{load_dir}{linarg_dir}/brick_graph_partitions"
     )
+    t2 = time.time()
+    logger.info(f"Brick graphs merged in {np.round(t2 - t1, 3)} seconds")
+    
+    logger.info("Finding recombinations")
+    t3 = time.time()    
     merged_graph_recom = Recombination.from_graph(merged_graph)
     merged_graph_recom.find_recombinations()
+    t4 = time.time()
+    logger.info(f"Recombinations found in {np.round(t4 - t3, 3)} seconds")
+    logger.info("Linearizing brick graph")
+    t5 = time.time()
     linear_arg_adjacency_matrix = linearize_brick_graph(merged_graph_recom)
+    t6 = time.time()
+    logger.info(f"Linearized brick graph in {np.round(t6 - t5, 3)} seconds")
     sample_indices = np.arange(num_samples)
 
-    # get VariantInfo
+    logger.info("Saving merged linear ARG and variant metadata")
     files = os.listdir(f"{load_dir}{linarg_dir}/variant_metadata/")
     ind_arr = np.array([int(f.split("_")[0]) for f in files])
     order = ind_arr.argsort()

@@ -1,3 +1,4 @@
+from .memory_logger import MemoryLogger
 import argparse
 import logging
 import os
@@ -138,19 +139,25 @@ def _assoc_scan(args):
 
 
 def _make_geno(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
     make_genotype_matrix(
         args.vcf_path, args.linarg_dir, args.region, args.partition_number, args.phased, args.flip_minor_alleles, args.whitelist_path
     )
 
 
 def _infer_brick_graph(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
     if args.load_dir is None:
         infer_brick_graph(args.linarg_dir, "", args.partition_identifier)
     else:
         infer_brick_graph(args.linarg_dir, args.load_dir, args.partition_identifier)
-
+    
 
 def _merge(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
     if args.load_dir is None:
         merge(args.linarg_dir, "")
     else:
