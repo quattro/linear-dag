@@ -3,7 +3,7 @@ from functools import cached_property
 from os import PathLike
 from typing import ClassVar, Optional, Union
 
-import bed_reader as br
+# import bed_reader as br
 import numpy as np
 import numpy.typing as npt
 import polars as pl
@@ -59,23 +59,23 @@ class SampleInfo:
         self.table.write_csv(path, separator=" ")
         return
 
-    @classmethod
-    def from_open_bed(cls, bed: br.open_bed, indices: Optional[npt.ArrayLike] = None) -> "SampleInfo":
-        # doesn't really follow conventions for a class name...
-        df = dict()
-        df["IID"] = bed.iid
-        df["SID"] = np.zeros(len(bed.iid))
-        df["PAT"] = bed.father
-        df["MAT"] = bed.mother
-        df["SEX"] = bed.sex
-        if indices is None:
-            df[cls.idx_col] = -1 * np.ones(len(bed.iid), dtype=int)
-        else:
-            if len(indices) != len(bed.iid):
-                raise ValueError("Length of indices does not match number of samples")
-            df[cls.idx_col] = np.asarray(indices)
+    # @classmethod
+    # def from_open_bed(cls, bed: br.open_bed, indices: Optional[npt.ArrayLike] = None) -> "SampleInfo":
+    #     # doesn't really follow conventions for a class name...
+    #     df = dict()
+    #     df["IID"] = bed.iid
+    #     df["SID"] = np.zeros(len(bed.iid))
+    #     df["PAT"] = bed.father
+    #     df["MAT"] = bed.mother
+    #     df["SEX"] = bed.sex
+    #     if indices is None:
+    #         df[cls.idx_col] = -1 * np.ones(len(bed.iid), dtype=int)
+    #     else:
+    #         if len(indices) != len(bed.iid):
+    #             raise ValueError("Length of indices does not match number of samples")
+    #         df[cls.idx_col] = np.asarray(indices)
 
-        return cls(pl.DataFrame(df))
+    #     return cls(pl.DataFrame(df))
 
     @classmethod
     def from_ids_and_indices(cls, ids: npt.ArrayLike, indices: npt.ArrayLike) -> "SampleInfo":
