@@ -28,7 +28,8 @@ def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=
     if whitelist_path is None:
         whitelist = None
     else:
-        whitelist = np.loadtxt(whitelist_path, dtype=int)
+        with open(whitelist_path, 'r') as f:
+            whitelist = [line.strip() for line in f]
     
     logger.info("Reading vcf as sparse matrix")
     t1 = time.time()

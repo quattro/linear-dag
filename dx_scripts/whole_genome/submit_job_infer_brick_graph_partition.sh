@@ -9,7 +9,7 @@ chroms=({1..22})
 for chrom in "${chroms[@]}"; do
 
     # test run
-    if [[ $chrom != 22 ]]; then
+    if [[ $chrom != 21 ]]; then
         continue 
     fi
 
@@ -37,7 +37,7 @@ for chrom in "${chroms[@]}"; do
                 -icmd="bash run_infer_brick_graph_partition.sh $linarg_dir $load_dir $partition_identifier" \
                 --destination "/" \
                 --instance-type $instance_type \
-                --priority low \
+                --priority high \
                 --name "brick_graph_${partition_identifier}" \
                 --brief \
                 -y

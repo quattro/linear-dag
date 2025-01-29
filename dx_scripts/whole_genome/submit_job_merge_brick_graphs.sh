@@ -9,7 +9,7 @@ chroms=({1..22})
 for chrom in "${chroms[@]}"; do
 
     # test run
-    if [[ $chrom != 22 ]]; then
+    if [[ $chrom != 21 ]]; then
         continue 
     fi
 

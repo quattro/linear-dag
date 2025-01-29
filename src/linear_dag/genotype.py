@@ -14,21 +14,21 @@ from scipy.sparse import csc_matrix
 
 
 def read_vcf(
-    path: Union[str, PathLike], phased: bool = True, region: Optional[str] = None, flip_minor_alleles: bool = False, whitelist: np.array = None,
+    path: Union[str, PathLike], phased: bool = True, region: Optional[str] = None, flip_minor_alleles: bool = False, whitelist: list = None,
 ):
     def _update_dict_from_vcf(
         var: cv.Variant, is_flipped: bool, data: DefaultDict[str, list]
     ) -> DefaultDict[str, list]:
         data["CHROM"].append(var.CHROM)
-        data["ID"].append(var.ID)
         data["POS"].append(var.POS)
+        data["ID"].append(var.ID)
         data["REF"].append(var.REF)
         data["ALT"].append(",".join(var.ALT))
         data["FLIP"].append(is_flipped)
 
         return data
 
-    vcf = cv.VCF(path, gts012=True, strict_gt=True)
+    vcf = cv.VCF(path, gts012=True, strict_gt=True, samples=whitelist)
     data = []
     idxs = []
     ptrs = [0]
@@ -37,9 +37,9 @@ def read_vcf(
 
     # push most of the branching up here to define functions for fewer branch conditions during loop
     if phased:
-        read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2]) if whitelist is None else np.ravel(np.asarray(var.genotype.array())[:, :2][whitelist]) # noqa: E731
+        read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2]) # noqa: E731
     else:
-        read_gt = lambda var: var.gt_types if whitelist is None else var.gt_types[whitelist] # noqa: E731
+        read_gt = lambda var: var.gt_types # noqa: E731
 
     def final_read(var, flip_minor_alleles):
         gts = read_gt(var)
