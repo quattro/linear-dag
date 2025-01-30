@@ -100,7 +100,7 @@ cdef class BrickGraph:
         matters, order of samples does not.
         :param add_samples: whether to add nodes to the brick graph for the sample haplotypes.
         """
-        forward_graph, backward_graph, sample_indices = BrickGraph.forward_backwards(genotypes, add_samples)
+        forward_graph, backward_graph, sample_indices = BrickGraph.forward_backward(genotypes, add_samples)
         brick_graph, variant_indices = BrickGraph.brick_graph(forward_graph, backward_graph, genotypes.shape[1])
         return brick_graph, sample_indices, variant_indices
 
