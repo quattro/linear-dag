@@ -3,7 +3,7 @@ import numpy as np
 from .data_structures cimport node, edge, list_node
 from .data_structures cimport DiGraph, LinkedListArray, CountingArray, Stack, IntegerList, IntegerSet
 cimport numpy as cnp
-from scipy.sparse import csr_matrix, csc_matrix
+from scipy.sparse import csr_matrix, csc_matrix, coo_matrix
 import os
 cdef int MAXINT = 2147483647
 
@@ -22,10 +22,12 @@ cdef class BrickGraph:
     cdef int num_samples
     cdef int num_variants
     cdef int direction
+    cdef bint save_to_disk
+    cdef str out
 
 
     @staticmethod
-    def forward_backward(genotypes: csc_matrix, add_samples: bint = True, save_to_disk: bint = False, out: str = None):
+    def forward_backward(genotypes: csc_matrix, bint add_samples = True, bint save_to_disk = False, str out = None):
         """
         Runs the forward and backward brick graph algorithms on a genotype matrix.
         :param genotypes: sparse genotype matrix in csc_matrix format; rows=samples, columns=variants. Order of variants
@@ -34,13 +36,11 @@ cdef class BrickGraph:
         :param save_to_disk: If False, saves the forward and backward graph as a sparse matrix to disk. If True, returns forward and backward graphs.
         :param out: If save_to_disk is True, the path save the forward and backward graphs.
         """
-        if save_to_disk:
-            assert out is not None
 
         num_samples, num_variants = genotypes.shape
 
         # Forward pass
-        cdef BrickGraph forward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_forward_graph.h5')
+        cdef BrickGraph forward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_forward_graph.txt')
         forward_pass.direction = 1
         cdef int i
         for i in range(num_variants):
@@ -60,7 +60,7 @@ cdef class BrickGraph:
 
 
         # Backward pass
-        cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_backward_graph.h5')
+        cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_backward_graph.txt')
         backward_pass.direction = -1
         for i in reversed(range(num_variants)):
             carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i+1]]
@@ -74,6 +74,7 @@ cdef class BrickGraph:
             del backward_graph
             return sample_indices
     
+
     @staticmethod
     def brick_graph(forward_graph: DiGraph, backward_graph: DiGraph, num_variants: int):
 
@@ -137,16 +138,33 @@ cdef class BrickGraph:
     #     return brick_graph, sample_indices, variant_indices[:num_variants]
 
     def __cinit__(self, int num_samples, int num_variants, bint save_to_disk=False, str out=None):
+        
+        if save_to_disk:
+            assert out is not None
+            with open(out, "w") as f:
+                f.write(f"# n_nodes: {num_variants + num_samples}\n")
+        
         cnp.import_array()
         self.num_samples = num_samples
         self.num_variants = num_variants
-        self.graph = DiGraph(num_variants + num_samples, num_variants + num_samples, save_to_disk=save_to_disk, out=out)
+        self.graph = DiGraph(num_variants + num_samples, num_variants + num_samples)
         self.graph.initialize_all_nodes()
         self.initialize_tree()
         tree_num_nodes = self.tree.maximum_number_of_nodes
         self.times_visited = CountingArray(tree_num_nodes)
         self.times_revisited = CountingArray(tree_num_nodes)
         self.direction = 0
+        self.save_to_disk = save_to_disk
+        self.out = out
+
+    
+    cpdef void add_edge(self, variant_idx, node_idx):
+        if self.save_to_disk:
+            with open(self.out, "a") as f:
+                f.write(f"{variant_idx} {node_idx}\n")
+        else:
+            self.graph.add_edge(variant_idx, node_idx)
+
 
     cpdef void initialize_tree(self):
         self.tree = DiGraph(self.num_samples * 2, self.num_samples * 2 - 1)
@@ -323,7 +341,7 @@ cdef class BrickGraph:
             while place_in_list != NULL:
                 variant_idx = place_in_list.value
                 if variant_idx * self.direction > last_variant_found * self.direction:
-                    self.graph.add_edge(variant_idx, node_index)
+                    self.add_edge(variant_idx, node_index)
                     last_variant_found = variant_idx
                 place_in_list = place_in_list.next
             if self.tree.nodes[tree_node].first_in is NULL:
@@ -674,3 +692,28 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
             add_neighbors(result, graph.nodes[node_idx], new_node_ids)
 
     return result, variant_indices, num_samples, index_mapping
+
+
+def read_graph_from_disk(file_path):
+    cdef list rows = []
+    cdef list cols = []
+    cdef list data = []
+
+    with open(file_path, "r") as f:
+        for l in f:
+            l = l.strip()
+
+            # Skip comments or header
+            if l.startswith("#"):
+                if "n_nodes" in l:
+                    n_nodes = int(l.split(":")[1].strip())
+                continue
+
+            r, c = map(int, l.split())
+            rows.append(r)
+            cols.append(c)
+            data.append(1)
+
+    sparse_matrix = coo_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes)).tocsr()
+    digraph = DiGraph.from_csr(sparse_matrix)
+    return digraph

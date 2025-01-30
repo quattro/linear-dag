@@ -7,11 +7,10 @@ import scipy.sparse as sp
 import h5py
 
 from ..genotype import read_vcf
-from .brick_graph import BrickGraph, merge_brick_graphs
+from .brick_graph import BrickGraph, read_graph_from_disk, merge_brick_graphs
 from .lineararg import LinearARG, VariantInfo
 from .one_summed_cy import linearize_brick_graph
 from .recombination import Recombination
-from .data_structures cimport DiGraph
 
 
 def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=True, flip_minor_alleles=False, whitelist_path=None):
@@ -76,16 +75,8 @@ def reduction_union_recom(linarg_dir, load_dir, partition_identifier):
     t1 = time.time()
     genotypes = sp.load_npz(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.npz")
     n, m = genotypes.shape
-    with h5py.File(f'{linarg_dir}/forward_backward_graphs/{partition_identifier}_forward_graph.h5', 'r') as f:
-        matrix = np.array([f['data'][:], f['rows'][:], f['cols'][:]])
-        matrix = np.unique(matrix, axis=1) # remove duplicate edges
-        forward_graph = sp.coo_matrix((matrix[0], (matrix[1], matrix[2])), shape=(f.attrs['n'], f.attrs['n']))  
-    with h5py.File(f'{linarg_dir}/forward_backward_graphs/{partition_identifier}_backward_graph.h5', 'r') as f:
-        matrix = np.array([f['data'][:], f['rows'][:], f['cols'][:]])
-        matrix = np.unique(matrix, axis=1) # remove duplicate edges
-        backward_graph = sp.coo_matrix((matrix[0], (matrix[1], matrix[2])), shape=(f.attrs['n'], f.attrs['n']))  
-    forward_graph = DiGraph.from_csr(forward_graph.tocsr())
-    backward_graph = DiGraph.from_csr(backward_graph.tocsr())
+    forward_graph = read_graph_from_disk(f'{linarg_dir}/forward_backward_graphs/{partition_identifier}_forward_graph.txt')
+    backward_graph = read_graph_from_disk(f'{linarg_dir}/forward_backward_graphs/{partition_identifier}_backward_graph.txt')
     sample_indices = np.loadtxt(f'{linarg_dir}/forward_backward_graphs/{partition_identifier}_sample_indices.txt')
     t2 = time.time()
     logger.info(f"Loaded in {np.round(t2 - t1, 3)} seconds")

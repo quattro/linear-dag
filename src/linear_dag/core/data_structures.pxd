@@ -94,12 +94,6 @@ cdef class DiGraph:
     cdef Stack available_edges
     cdef int maximum_number_of_nodes
     cdef int maximum_number_of_edges
-    cdef bint save_to_disk
-    cdef object add_edge_hdf5
-    cdef object save_batch_hdf5
-    cdef object cleanup_hdf5
-    cdef object f
-    cdef str out
 
     cpdef bint has_node(self, int node_index)
     cpdef int some_parent(self, int node_index)

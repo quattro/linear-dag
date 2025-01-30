@@ -9,9 +9,6 @@ from scipy.sparse import csr_matrix, csc_matrix
 cimport numpy as cnp
 from .data_structures cimport node, edge, stack_node, queue_node, list_node # in data_structures.pxd
 
-import h5py
-import scipy.sparse as sp
-
 cdef int MAXINT = 32767
 
 cdef class IntegerList:
@@ -441,49 +438,29 @@ cdef class DiGraph:
     and edges are indexed, with nodes[i].index == i and likewise for edges; order of indices is arbitrary.
     Unused edge/node indices are stored in stacks, and when a new node or edge is added, an element is popped arbitrarily.
     """
-    # cdef node** nodes
+    # cdef node**
     # cdef bint* is_node
     # cdef edge** edges
     # cdef Stack available_nodes
     # cdef Stack available_edges
     # cdef int maximum_number_of_nodes
     # cdef int maximum_number_of_edges
-    # cdef bint save_to_disk
-    # cdef object add_edge_hdf5
-    # cdef object save_batch_hdf5
-    # cdef object cleanup_hdf5
-    # cdef object f
-    # cdef str out
 
-    def __cinit__(self, int number_of_nodes, int number_of_edges, bint save_to_disk=False, str out=None):
+    def __cinit__(self, int number_of_nodes, int number_of_edges):
         """
         Initialize a directed graph with specified number of nodes and edges.
 
         :param number_of_nodes: Total number of nodes in the graph.
         :param number_of_edges: Total number of edges in the graph.
-        :param save_to_disk: Whether to save the graph to disk. Defaults to False.
-        :param out: If save_to_disk is True, the path to save the graph.
         """
-        if save_to_disk:
-            assert out is not None
-            self.add_edge_hdf5, self.save_batch_hdf5, self.cleanup_hdf5, self.f = build_sparse_matrix_with_hdf5(out, number_of_nodes)
-        else:
-            self.add_edge_hdf5 = None
-            self.save_batch_hdf5 = None
-            self.cleanup_hdf5 = None
-            self.f = None
-
         self.nodes = <node**> malloc(number_of_nodes * sizeof(node *))
         self.is_node = <bint*> malloc(number_of_nodes * sizeof(bint))
         self.edges = <edge**> malloc(number_of_edges * sizeof(edge *))
-        self.out = out
 
-    def __init__(self, int number_of_nodes, int number_of_edges, bint save_to_disk=False, str out=None):
+    def __init__(self, int number_of_nodes, int number_of_edges):
+
         if not self.nodes or not self.edges:
             raise MemoryError("Could not allocate memory for DiGraph.")
-
-        self.save_to_disk = save_to_disk
-        self.out = out
 
         self.available_nodes = Stack()
         self.available_edges = Stack()
@@ -499,10 +476,6 @@ cdef class DiGraph:
         self.maximum_number_of_edges = number_of_edges
 
     def __dealloc__(self):
-        if self.save_to_disk:
-            self.save_batch_hdf5()
-            self.cleanup_hdf5()
-
         cdef int i
         for i in range(self.maximum_number_of_edges):
             if self.edges[i] is not NULL:
@@ -670,39 +643,32 @@ cdef class DiGraph:
         return new_node
 
     cdef edge* add_edge(self, int u_index, int v_index):
-        cdef edge* new_edge
-        cdef int edge_index
-
+        if self.available_edges.length == 0:
+            self.extend_edge_array(self.maximum_number_of_edges * 2)
         if u_index == v_index:
             raise ValueError("Self edges are not supported")
 
-        if self.save_to_disk:
-            self.add_edge_hdf5(u_index, v_index)
-        else:
-            if self.available_edges.length == 0:
-                self.extend_edge_array(self.maximum_number_of_edges * 2)
+        if max(u_index, v_index) >= self.maximum_number_of_nodes:
+            self.extend_node_array(2 * max(u_index, v_index))
 
-            if max(u_index, v_index) >= self.maximum_number_of_nodes:
-                self.extend_node_array(2 * max(u_index, v_index))
+        if not self.is_node[u_index]:
+            self.add_node(u_index)
+        if not self.is_node[v_index]:
+            self.add_node(v_index)
 
-            if not self.is_node[u_index]:
-                self.add_node(u_index)
-            if not self.is_node[v_index]:
-                self.add_node(v_index)
-
-            edge_index = self.available_edges.pop()
+        edge_index = self.available_edges.pop()
+        if self.edges[edge_index] is NULL:
+            self.edges[edge_index]  = <edge*> malloc(sizeof(edge))
             if self.edges[edge_index] is NULL:
-                self.edges[edge_index]  = <edge*> malloc(sizeof(edge))
-                if self.edges[edge_index] is NULL:
-                    raise MemoryError("Could not allocate memory for a new edge")
-            new_edge = self.edges[edge_index]
-            new_edge.u = NULL
-            new_edge.v = NULL
-            new_edge.index = edge_index
-            self.set_edge_parent(new_edge, self.nodes[u_index])
-            self.set_edge_child(new_edge, self.nodes[v_index])
+                raise MemoryError("Could not allocate memory for a new edge")
+        cdef edge* new_edge = self.edges[edge_index]
+        new_edge.u = NULL
+        new_edge.v = NULL
+        new_edge.index = edge_index
+        self.set_edge_parent(new_edge, self.nodes[u_index])
+        self.set_edge_child(new_edge, self.nodes[v_index])
 
-            return new_edge
+        return new_edge
 
     cdef void extend_node_array(self, int new_maximum_number_of_nodes):
         if new_maximum_number_of_nodes <= self.maximum_number_of_nodes:
@@ -1056,49 +1022,3 @@ cdef class ModHeap:
                 self.priority[node.index] = 0
                 return node.index
         return -1
-
-
-def build_sparse_matrix_with_hdf5(filename, n, batch_size=100000):
-    f = h5py.File(filename, 'w')
-    f.attrs['n'] = n
-    f.create_dataset('data', (0,), maxshape=(None,), dtype=np.float64)
-    f.create_dataset('rows', (0,), maxshape=(None,), dtype=np.int32)
-    f.create_dataset('cols', (0,), maxshape=(None,), dtype=np.int32)
-    
-    rows, cols, data = [], [], []
-    
-    def save_batch():
-        if not rows:
-            return
-        
-        # Get current sizes
-        current_size = f['data'].shape[0]
-        new_size = current_size + len(data)
-        
-        # Resize and append to all three datasets
-        f['data'].resize((new_size,))
-        f['data'][current_size:new_size] = data
-        
-        f['rows'].resize((new_size,))
-        f['rows'][current_size:new_size] = rows
-        
-        f['cols'].resize((new_size,))
-        f['cols'][current_size:new_size] = cols
-    
-    def add_edge(i, j, val=1):
-        rows.append(i)
-        cols.append(j)
-        data.append(val)
-        
-        # When batch_size reached, save batch
-        if len(rows) >= batch_size:
-            save_batch()
-            rows.clear()
-            cols.clear()
-            data.clear()
-
-    def cleanup():
-        save_batch() 
-        f.close()    
-
-    return add_edge, save_batch, cleanup, f
