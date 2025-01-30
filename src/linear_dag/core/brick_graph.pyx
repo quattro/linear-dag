@@ -23,18 +23,24 @@ cdef class BrickGraph:
     cdef int num_variants
     cdef int direction
 
+
     @staticmethod
-    def from_genotypes(genotypes: csc_matrix, add_samples: bool = True) -> tuple[DiGraph, int[:], int[:]]:
+    def forward_backward(genotypes: csc_matrix, add_samples: bint = True, save_to_disk: bint = False, out: str = None):
         """
-        Runs the brick graph algorithm on a genotype matrix
+        Runs the forward and backward brick graph algorithms on a genotype matrix.
         :param genotypes: sparse genotype matrix in csc_matrix format; rows=samples, columns=variants. Order of variants
         matters, order of samples does not.
         :param add_samples: whether to add nodes to the brick graph for the sample haplotypes.
+        :param save_to_disk: If False, saves the forward and backward graph as a sparse matrix to disk. If True, returns forward and backward graphs.
+        :param out: If save_to_disk is True, the path save the forward and backward graphs.
         """
+        if save_to_disk:
+            assert out is not None
+
         num_samples, num_variants = genotypes.shape
 
         # Forward pass
-        cdef BrickGraph forward_pass = BrickGraph(num_samples, num_variants)
+        cdef BrickGraph forward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_forward_graph.h5')
         forward_pass.direction = 1
         cdef int i
         for i in range(num_variants):
@@ -52,13 +58,24 @@ cdef class BrickGraph:
             sample_indices = np.array([])
         cdef DiGraph forward_graph = forward_pass.graph
 
+
         # Backward pass
-        cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants)
+        cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_backward_graph.h5')
         backward_pass.direction = -1
         for i in reversed(range(num_variants)):
             carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i+1]]
             backward_pass.intersect_clades(carriers, i)
         cdef DiGraph backward_graph = backward_pass.graph
+
+        if not save_to_disk:
+            return forward_graph, backward_graph, sample_indices
+        else:
+            del forward_graph # calls __dealloc__ to save to disk
+            del backward_graph
+            return sample_indices
+    
+    @staticmethod
+    def brick_graph(forward_graph: DiGraph, backward_graph: DiGraph, num_variants: int):
 
         # For variants i,j with paths i->j and also j->i, combine them into a single node
         cdef int[:] variant_indices = combine_cliques(forward_graph, backward_graph)
@@ -66,13 +83,64 @@ cdef class BrickGraph:
         # Transitive reduction of the union of the forward and reverse graphs
         cdef DiGraph brick_graph = reduction_union(forward_graph, backward_graph)
 
-        return brick_graph, sample_indices, variant_indices[:num_variants]
+        return brick_graph, variant_indices[:num_variants]
 
-    def __cinit__(self, int num_samples, int num_variants):
+
+    @staticmethod
+    def from_genotypes(genotypes: csc_matrix, add_samples: bint = True) -> tuple[DiGraph, int[:], int[:]]:
+        """
+        Runs the brick graph algorithm on a genotype matrix
+        :param genotypes: sparse genotype matrix in csc_matrix format; rows=samples, columns=variants. Order of variants
+        matters, order of samples does not.
+        :param add_samples: whether to add nodes to the brick graph for the sample haplotypes.
+        """
+        forward_graph, backward_graph, sample_indices = BrickGraph.forward_backwards(genotypes, add_samples)
+        brick_graph, variant_indices = BrickGraph.brick_graph(forward_graph, backward_graph, genotypes.shape[1])
+        return brick_graph, sample_indices, variant_indices
+
+
+    #     num_samples, num_variants = genotypes.shape
+    # 
+    #     # Forward pass
+    #     cdef BrickGraph forward_pass = BrickGraph(num_samples, num_variants)
+    #     forward_pass.direction = 1
+    #     cdef int i
+    #     for i in range(num_variants):
+    #         carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i + 1]]
+    #         forward_pass.intersect_clades(carriers, i)
+    # 
+    #     # Add samples
+    #     cdef int[:] sample_indices
+    #     if add_samples:
+    #         sample_indices =  np.arange(num_variants, num_variants+num_samples, dtype=np.intc)
+    #         for i in range(num_samples):
+    #             forward_pass.add_edges_from_subsequence(i, sample_indices[i])
+    #             forward_pass.subsequence.clear_list(i)
+    #     else:
+    #         sample_indices = np.array([])
+    #     cdef DiGraph forward_graph = forward_pass.graph
+    # 
+    #     # Backward pass
+    #     cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants)
+    #     backward_pass.direction = -1
+    #     for i in reversed(range(num_variants)):
+    #         carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i+1]]
+    #         backward_pass.intersect_clades(carriers, i)
+    #     cdef DiGraph backward_graph = backward_pass.graph
+    # 
+    #     # For variants i,j with paths i->j and also j->i, combine them into a single node
+    #     cdef int[:] variant_indices = combine_cliques(forward_graph, backward_graph)
+    # 
+    #     # Transitive reduction of the union of the forward and reverse graphs
+    #     cdef DiGraph brick_graph = reduction_union(forward_graph, backward_graph)
+    # 
+    #     return brick_graph, sample_indices, variant_indices[:num_variants]
+
+    def __cinit__(self, int num_samples, int num_variants, bint save_to_disk=False, str out=None):
         cnp.import_array()
         self.num_samples = num_samples
         self.num_variants = num_variants
-        self.graph = DiGraph(num_variants + num_samples, num_variants + num_samples)
+        self.graph = DiGraph(num_variants + num_samples, num_variants + num_samples, save_to_disk=save_to_disk, out=out)
         self.graph.initialize_all_nodes()
         self.initialize_tree()
         tree_num_nodes = self.tree.maximum_number_of_nodes

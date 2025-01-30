@@ -26,6 +26,11 @@ extensions = [
         sources=["core/brick_graph.pyx"],  # Source file for the second extension
         include_dirs=[numpy.get_include()],  # Include directory for NumPy headers
     ),
+    Extension(
+        name="partition_merge",  # Add the new extension
+        sources=["core/partition_merge.pyx"],
+        include_dirs=[numpy.get_include()],
+    ),
 ]
 
 setup(
