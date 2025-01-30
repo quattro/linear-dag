@@ -5,6 +5,7 @@ from .data_structures cimport DiGraph, LinkedListArray, CountingArray, Stack, In
 cimport numpy as cnp
 from scipy.sparse import csr_matrix, csc_matrix, coo_matrix
 import os
+import h5py
 cdef int MAXINT = 2147483647
 
 cdef class BrickGraph:
@@ -24,6 +25,10 @@ cdef class BrickGraph:
     cdef int direction
     cdef bint save_to_disk
     cdef str out
+    cdef object _add_edge_to_file  # Function to add edge to HDF5
+    cdef object _save_batch        # Function to save current batch
+    cdef object _cleanup          # Function to cleanup HDF5 file
+    cdef object _hdf5_file        # HDF5 file object
 
 
     @staticmethod
@@ -40,7 +45,7 @@ cdef class BrickGraph:
         num_samples, num_variants = genotypes.shape
 
         # Forward pass
-        cdef BrickGraph forward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_forward_graph.txt')
+        cdef BrickGraph forward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_forward_graph.h5')
         forward_pass.direction = 1
         cdef int i
         for i in range(num_variants):
@@ -60,7 +65,7 @@ cdef class BrickGraph:
 
 
         # Backward pass
-        cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_backward_graph.txt')
+        cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_backward_graph.h5')
         backward_pass.direction = -1
         for i in reversed(range(num_variants)):
             carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i+1]]
@@ -100,49 +105,21 @@ cdef class BrickGraph:
         return brick_graph, sample_indices, variant_indices
 
 
-    #     num_samples, num_variants = genotypes.shape
-    # 
-    #     # Forward pass
-    #     cdef BrickGraph forward_pass = BrickGraph(num_samples, num_variants)
-    #     forward_pass.direction = 1
-    #     cdef int i
-    #     for i in range(num_variants):
-    #         carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i + 1]]
-    #         forward_pass.intersect_clades(carriers, i)
-    # 
-    #     # Add samples
-    #     cdef int[:] sample_indices
-    #     if add_samples:
-    #         sample_indices =  np.arange(num_variants, num_variants+num_samples, dtype=np.intc)
-    #         for i in range(num_samples):
-    #             forward_pass.add_edges_from_subsequence(i, sample_indices[i])
-    #             forward_pass.subsequence.clear_list(i)
-    #     else:
-    #         sample_indices = np.array([])
-    #     cdef DiGraph forward_graph = forward_pass.graph
-    # 
-    #     # Backward pass
-    #     cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants)
-    #     backward_pass.direction = -1
-    #     for i in reversed(range(num_variants)):
-    #         carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i+1]]
-    #         backward_pass.intersect_clades(carriers, i)
-    #     cdef DiGraph backward_graph = backward_pass.graph
-    # 
-    #     # For variants i,j with paths i->j and also j->i, combine them into a single node
-    #     cdef int[:] variant_indices = combine_cliques(forward_graph, backward_graph)
-    # 
-    #     # Transitive reduction of the union of the forward and reverse graphs
-    #     cdef DiGraph brick_graph = reduction_union(forward_graph, backward_graph)
-    # 
-    #     return brick_graph, sample_indices, variant_indices[:num_variants]
-
     def __cinit__(self, int num_samples, int num_variants, bint save_to_disk=False, str out=None):
         
         if save_to_disk:
             assert out is not None
-            with open(out, "w") as f:
-                f.write(f"# n_nodes: {num_variants + num_samples}\n")
+            # Initialize HDF5 file and get helper functions
+            self._add_edge_to_file, self._save_batch, self._cleanup, self._hdf5_file = build_sparse_matrix_with_hdf5(
+                out, 
+                num_variants + num_samples, 
+                batch_size=100000
+            )
+        else:
+            self._add_edge_to_file = None
+            self._save_batch = None
+            self._cleanup = None
+            self._hdf5_file = None
         
         cnp.import_array()
         self.num_samples = num_samples
@@ -158,10 +135,13 @@ cdef class BrickGraph:
         self.out = out
 
     
+    def __dealloc__(self):
+        if self.save_to_disk:
+            self._cleanup()
+    
     cpdef void add_edge(self, variant_idx, node_idx):
         if self.save_to_disk:
-            with open(self.out, "a") as f:
-                f.write(f"{variant_idx} {node_idx}\n")
+            self._add_edge_to_file(variant_idx, node_idx)
         else:
             self.graph.add_edge(variant_idx, node_idx)
 
@@ -646,6 +626,7 @@ cdef add_neighbors(DiGraph graph_to_modify, node* v, node_ids):
         graph_to_modify.add_edge(node_ids[e.u.index], node_idx)
         e = e.prev_in
 
+
 cpdef tuple merge_brick_graphs(str brick_graph_dir):
     """
     Merge multiple brick graphs with shared sample nodes and other nodes disjoint.
@@ -694,26 +675,53 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
     return result, variant_indices, num_samples, index_mapping
 
 
+def build_sparse_matrix_with_hdf5(filename, n, batch_size=100000):
+    
+    f = h5py.File(filename, 'w')
+    f.attrs['n'] = n
+    f.create_dataset('rows', (0,), maxshape=(None,), dtype=np.int32)
+    f.create_dataset('cols', (0,), maxshape=(None,), dtype=np.int32)
+    
+    rows, cols = [], []
+    
+    def save_batch():
+        if not rows:
+            return
+        
+        current_size = f['rows'].shape[0]
+        new_size = current_size + len(rows)
+        
+        f['rows'].resize((new_size,))
+        f['rows'][current_size:new_size] = rows
+        
+        f['cols'].resize((new_size,))
+        f['cols'][current_size:new_size] = cols
+    
+    def add_edge_to_file(i, j, val=1):
+        rows.append(i)
+        cols.append(j)
+        
+        if len(rows) >= batch_size:
+            save_batch()
+            rows.clear()
+            cols.clear()
+    def cleanup():
+        save_batch() 
+        f.close()    
+
+    return add_edge_to_file, save_batch, cleanup, f
+
+
+@staticmethod
 def read_graph_from_disk(file_path):
-    cdef list rows = []
-    cdef list cols = []
-    cdef list data = []
-
-    with open(file_path, "r") as f:
-        for l in f:
-            l = l.strip()
-
-            # Skip comments or header
-            if l.startswith("#"):
-                if "n_nodes" in l:
-                    n_nodes = int(l.split(":")[1].strip())
-                continue
-
-            r, c = map(int, l.split())
-            rows.append(r)
-            cols.append(c)
-            data.append(1)
-
-    sparse_matrix = coo_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes)).tocsr()
+    """Read graph from HDF5 file"""
+    with h5py.File(file_path, 'r') as f:
+        n = f.attrs['n']
+        rows = f['rows'][:]
+        cols = f['cols'][:]
+        
+    sparse_matrix = coo_matrix((np.ones(len(rows)), (rows, cols)), 
+                             shape=(n, n)).tocsr()
     digraph = DiGraph.from_csr(sparse_matrix)
     return digraph
+
