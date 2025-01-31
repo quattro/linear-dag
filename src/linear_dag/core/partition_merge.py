@@ -75,8 +75,8 @@ def reduction_union_recom(linarg_dir, load_dir, partition_identifier):
     t1 = time.time()
     genotypes = sp.load_npz(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.npz")
     n, m = genotypes.shape
-    forward_graph = read_graph_from_disk(f'{linarg_dir}/forward_backward_graphs/{partition_identifier}_forward_graph.txt')
-    backward_graph = read_graph_from_disk(f'{linarg_dir}/forward_backward_graphs/{partition_identifier}_backward_graph.txt')
+    forward_graph = read_graph_from_disk(f'{linarg_dir}/forward_backward_graphs/{partition_identifier}_forward_graph.h5')
+    backward_graph = read_graph_from_disk(f'{linarg_dir}/forward_backward_graphs/{partition_identifier}_backward_graph.h5')
     sample_indices = np.loadtxt(f'{linarg_dir}/forward_backward_graphs/{partition_identifier}_sample_indices.txt')
     t2 = time.time()
     logger.info(f"Loaded in {np.round(t2 - t1, 3)} seconds")

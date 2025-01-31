@@ -273,7 +273,7 @@ def _main(args):
     
     
     reduction_union_recom_p = subp.add_parser(
-        "reduction-union-recom", help="Step 2.2 of partition and merge pipeline. Finds recombinations and reduces brick graph."
+        "reduction-union-recom", help="Step 2.2 of partition and merge pipeline. Computes the brick graph from the forward and backward graphs and finds recombinations."
     )
     reduction_union_recom_p.add_argument(
         "--linarg_dir", type=str, help="Directory to store linear ARG outputs (must be the same for Steps 1-3)"
