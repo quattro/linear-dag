@@ -7,7 +7,7 @@ import sys
 from importlib import metadata
 
 from .core.lineararg import LinearARG
-from .core.partition_merge import infer_brick_graph, make_genotype_matrix, merge
+from .core.partition_merge import infer_brick_graph, make_genotype_matrix, merge, run_forward_backward, reduction_union_recom
 
 title = """                            @@@@
           @@@@@@            @@@@@
@@ -162,6 +162,25 @@ def _merge(args):
         merge(args.linarg_dir, "")
     else:
         merge(args.linarg_dir, args.load_dir)
+        
+
+def _run_forward_backward(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    if args.load_dir is None:
+        run_forward_backward(args.linarg_dir, "", args.partition_identifier)
+    else:
+        run_forward_backward(args.linarg_dir, args.load_dir, args.partition_identifier)
+        
+        
+def _reduction_union_recom(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    if args.load_dir is None:
+        reduction_union_recom(args.linarg_dir, "", args.partition_identifier)
+    else:
+        reduction_union_recom(args.linarg_dir, args.load_dir, args.partition_identifier)
+        
 
 
 def _main(args):
@@ -234,6 +253,42 @@ def _main(args):
         help="Directory to load data.",
     )
     merge_p.set_defaults(func=_merge)
+    
+    
+    run_forward_backward_p = subp.add_parser(
+        "run-forward-backward", help="Step 2a of partition and merge pipeline. Runs forward and backward passes on genotype matrix to obtain the forward and backward graphs."
+    )
+    run_forward_backward_p.add_argument(
+        "--linarg_dir", type=str, help="Directory to store linear ARG outputs (must be the same for Steps 1-3)"
+    )
+    run_forward_backward_p.add_argument(
+        "--load_dir",
+        type=str,
+        help="Directory to load data.",
+    )
+    run_forward_backward_p.add_argument(
+        "--partition_identifier", type=str, help="Partition identifier in the form {paritition_number}_{region}"
+    )
+    run_forward_backward_p.set_defaults(func=_run_forward_backward)
+    
+    
+    reduction_union_recom_p = subp.add_parser(
+        "reduction-union-recom", help="Step 2b of partition and merge pipeline. Computes the brick graph from the forward and backward graphs and finds recombinations."
+    )
+    reduction_union_recom_p.add_argument(
+        "--linarg_dir", type=str, help="Directory to store linear ARG outputs (must be the same for Steps 1-3)"
+    )
+    reduction_union_recom_p.add_argument(
+        "--load_dir",
+        type=str,
+        help="Directory to load data.",
+    )
+    reduction_union_recom_p.add_argument(
+        "--partition_identifier", type=str, help="Partition identifier in the form {paritition_number}_{region}"
+    )
+    reduction_union_recom_p.set_defaults(func=_reduction_union_recom)
+    
+    
 
     # parse arguments
     args = argp.parse_args(args)

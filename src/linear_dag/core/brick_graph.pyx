@@ -3,9 +3,11 @@ import numpy as np
 from .data_structures cimport node, edge, list_node
 from .data_structures cimport DiGraph, LinkedListArray, CountingArray, Stack, IntegerList, IntegerSet
 cimport numpy as cnp
-from scipy.sparse import csr_matrix, csc_matrix
+from scipy.sparse import csr_matrix, csc_matrix, coo_matrix
 import os
+import h5py
 cdef int MAXINT = 2147483647
+
 
 cdef class BrickGraph:
     """
@@ -22,19 +24,29 @@ cdef class BrickGraph:
     cdef int num_samples
     cdef int num_variants
     cdef int direction
+    cdef bint save_to_disk
+    cdef str out
+    cdef object _add_edge_to_file  # Function to add edge to HDF5
+    cdef object _save_batch        # Function to save current batch
+    cdef object _cleanup          # Function to cleanup HDF5 file
+    cdef object _hdf5_file        # HDF5 file object
+
 
     @staticmethod
-    def from_genotypes(genotypes: csc_matrix, add_samples: bool = True) -> tuple[DiGraph, int[:], int[:]]:
+    def forward_backward(genotypes: csc_matrix, bint add_samples = True, bint save_to_disk = False, str out = None):
         """
-        Runs the brick graph algorithm on a genotype matrix
+        Runs the forward and backward brick graph algorithms on a genotype matrix.
         :param genotypes: sparse genotype matrix in csc_matrix format; rows=samples, columns=variants. Order of variants
         matters, order of samples does not.
         :param add_samples: whether to add nodes to the brick graph for the sample haplotypes.
+        :param save_to_disk: If False, saves the forward and backward graph as a sparse matrix to disk. If True, returns forward and backward graphs.
+        :param out: If save_to_disk is True, the path save the forward and backward graphs.
         """
+
         num_samples, num_variants = genotypes.shape
 
         # Forward pass
-        cdef BrickGraph forward_pass = BrickGraph(num_samples, num_variants)
+        cdef BrickGraph forward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_forward_graph.h5')
         forward_pass.direction = 1
         cdef int i
         for i in range(num_variants):
@@ -53,12 +65,23 @@ cdef class BrickGraph:
         cdef DiGraph forward_graph = forward_pass.graph
 
         # Backward pass
-        cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants)
+        cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_backward_graph.h5')
         backward_pass.direction = -1
         for i in reversed(range(num_variants)):
             carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i+1]]
             backward_pass.intersect_clades(carriers, i)
         cdef DiGraph backward_graph = backward_pass.graph
+
+        if not save_to_disk:
+            return forward_graph, backward_graph, sample_indices
+        else:
+            del forward_graph # calls __dealloc__ to save to disk
+            del backward_graph
+            return sample_indices
+    
+
+    @staticmethod
+    def combine_graphs(forward_graph: DiGraph, backward_graph: DiGraph, num_variants: int):
 
         # For variants i,j with paths i->j and also j->i, combine them into a single node
         cdef int[:] variant_indices = combine_cliques(forward_graph, backward_graph)
@@ -66,9 +89,38 @@ cdef class BrickGraph:
         # Transitive reduction of the union of the forward and reverse graphs
         cdef DiGraph brick_graph = reduction_union(forward_graph, backward_graph)
 
-        return brick_graph, sample_indices, variant_indices[:num_variants]
+        return brick_graph, variant_indices[:num_variants]
 
-    def __cinit__(self, int num_samples, int num_variants):
+
+    @staticmethod
+    def from_genotypes(genotypes: csc_matrix, add_samples: bint = True) -> tuple[DiGraph, int[:], int[:]]:
+        """
+        Runs the brick graph algorithm on a genotype matrix
+        :param genotypes: sparse genotype matrix in csc_matrix format; rows=samples, columns=variants. Order of variants
+        matters, order of samples does not.
+        :param add_samples: whether to add nodes to the brick graph for the sample haplotypes.
+        """
+        forward_graph, backward_graph, sample_indices = BrickGraph.forward_backward(genotypes, add_samples)
+        brick_graph, variant_indices = BrickGraph.combine_graphs(forward_graph, backward_graph, genotypes.shape[1])
+        return brick_graph, sample_indices, variant_indices
+
+
+    def __cinit__(self, int num_samples, int num_variants, bint save_to_disk=False, str out=None):
+        
+        if save_to_disk:
+            assert out is not None
+            # Initialize HDF5 file and get helper functions
+            self._add_edge_to_file, self._save_batch, self._cleanup, self._hdf5_file = build_sparse_matrix_with_hdf5(
+                out, 
+                num_variants + num_samples, 
+                batch_size=100000
+            )
+        else:
+            self._add_edge_to_file = None
+            self._save_batch = None
+            self._cleanup = None
+            self._hdf5_file = None
+        
         cnp.import_array()
         self.num_samples = num_samples
         self.num_variants = num_variants
@@ -79,6 +131,21 @@ cdef class BrickGraph:
         self.times_visited = CountingArray(tree_num_nodes)
         self.times_revisited = CountingArray(tree_num_nodes)
         self.direction = 0
+        self.save_to_disk = save_to_disk
+        self.out = out
+
+    
+    def __dealloc__(self):
+        if self.save_to_disk:
+            self._cleanup()
+    
+    cpdef void add_edge(self, variant_idx, node_idx):
+
+        if self.save_to_disk:
+            self._add_edge_to_file(variant_idx, node_idx)
+        else:
+            self.graph.add_edge(variant_idx, node_idx)
+
 
     cpdef void initialize_tree(self):
         self.tree = DiGraph(self.num_samples * 2, self.num_samples * 2 - 1)
@@ -255,7 +322,7 @@ cdef class BrickGraph:
             while place_in_list != NULL:
                 variant_idx = place_in_list.value
                 if variant_idx * self.direction > last_variant_found * self.direction:
-                    self.graph.add_edge(variant_idx, node_index)
+                    self.add_edge(variant_idx, node_index)
                     last_variant_found = variant_idx
                 place_in_list = place_in_list.next
             if self.tree.nodes[tree_node].first_in is NULL:
@@ -560,6 +627,7 @@ cdef add_neighbors(DiGraph graph_to_modify, node* v, node_ids):
         graph_to_modify.add_edge(node_ids[e.u.index], node_idx)
         e = e.prev_in
 
+
 cpdef tuple merge_brick_graphs(str brick_graph_dir):
     """
     Merge multiple brick graphs with shared sample nodes and other nodes disjoint.
@@ -606,3 +674,62 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
             add_neighbors(result, graph.nodes[node_idx], new_node_ids)
 
     return result, variant_indices, num_samples, index_mapping
+
+
+def build_sparse_matrix_with_hdf5(filename, n, batch_size=100000):
+    
+    f = h5py.File(filename, 'w')
+    f.attrs['n'] = n
+    f.create_dataset('rows', (0,), maxshape=(None,), dtype=np.int32)
+    f.create_dataset('cols', (0,), maxshape=(None,), dtype=np.int32)
+    
+    rows, cols = [], []
+
+    def add_edge_to_file(i, j):
+        rows.append(i)
+        cols.append(j)
+
+        if len(rows) >= batch_size:
+            save_batch()
+            rows.clear()
+            cols.clear()
+    
+    def save_batch():
+        if not rows:
+            return
+        
+        current_size = f['rows'].shape[0]
+        new_size = current_size + len(rows)
+        
+        f['rows'].resize((new_size,))
+        f['rows'][current_size:new_size] = rows
+        
+        f['cols'].resize((new_size,))
+        f['cols'][current_size:new_size] = cols
+    
+    def cleanup():
+        save_batch() 
+        f.close()    
+
+    return add_edge_to_file, save_batch, cleanup, f
+
+
+@staticmethod
+def read_graph_from_disk(file_path):
+    """
+    Read graph from HDF5 file adding edges in the order they were inferred.
+    """
+    with h5py.File(file_path, 'r') as f:
+        n = f.attrs['n']
+        rows = f['rows'][:]
+        cols = f['cols'][:]
+
+    digraph = DiGraph(n, len(rows))
+    digraph.initialize_all_nodes()
+    
+    # add edges in order they were stored
+    for i in range(len(rows)):
+        digraph.add_edge(rows[i], cols[i])
+        
+    return digraph
+
