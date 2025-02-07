@@ -75,7 +75,7 @@ class VariantInfo:
         open_f = gzip.open if str(path).endswith(".gz") else open
         header_map = None
         var_table = defaultdict(list)
-        with open_f(path, "r") as var_file:
+        with open_f(path, "rt") as var_file:
             for line in var_file:
                 if line.startswith("##"):
                     continue
@@ -130,7 +130,7 @@ class VariantInfo:
 
             info_col = pl.Series([f"IDX={idx};FLIP={flip}" for idx, flip in zip(self.table["IDX"], self.table["FLIP"])])
             sub_table = self.table.with_columns(info_col.alias("INFO")).drop([self.idx_field, self.flip_field])
-            sub_table.write_csv(pvar_file, include_header=False, separator="\t")
+            pvar_file.write(sub_table.write_csv(include_header=False, separator="\t"))
 
         return
 
@@ -347,7 +347,7 @@ class LinearARG(LinearOperator):
         # write out sample info
         # temporary fix
         iids = None
-        with open(f"{prefix}.psam", "w") as f_samples:
+        with gzip.open(f"{prefix}.psam.gz", "wt") as f_samples:
             f_samples.write("#IID IDX\n")
             if iids is None:
                 iids = [f"sample_{idx}" for idx in range(self.shape[0])]
@@ -356,7 +356,7 @@ class LinearARG(LinearOperator):
         # self.samples.write(prefix + ".psam")
 
         # write out variant info
-        self.variants.write(prefix + ".pvar")
+        self.variants.write(prefix + ".pvar.gz")
 
         # write out DAG info
         if format == "npz":
@@ -382,9 +382,9 @@ class LinearARG(LinearOperator):
         :return: A tuple containing the LinearARG object, list of variant IDs, and list of IIDs.
         """
         if not variant_fname:
-            variant_fname = matrix_fname[:-4] + ".pvar"
+            variant_fname = matrix_fname[:-4] + ".pvar.gz"
         if not samples_fname:
-            samples_fname = matrix_fname[:-4] + ".psam"
+            samples_fname = matrix_fname[:-4] + ".psam.gz"
 
         # Load sample info
         # temporary fix

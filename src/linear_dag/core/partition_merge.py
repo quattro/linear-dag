@@ -205,7 +205,7 @@ def get_linarg_stats(linarg_dir, load_dir):
     Get stats from linear ARG.
     """
     linarg = LinearARG.read(
-        f"{linarg_dir}/linear_arg.npz", f"{linarg_dir}/linear_arg.pvar", f"{linarg_dir}/linear_arg.psam"
+        f"{linarg_dir}/linear_arg.npz", f"{linarg_dir}/linear_arg.pvar.gz", f"{linarg_dir}/linear_arg.psam.gz"
     )
 
     df_flip = linarg.variants.table.clone()
