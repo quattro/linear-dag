@@ -17,7 +17,8 @@ eval "$(pyenv init -)"
 pyenv install 3.10.13
 pyenv global 3.10.13
 
-pip install git+https://github.com/quattro/linear-dag.git@update_partition_merge
+pip install h5py
+pip install git+https://github.com/quattro/linear-dag.git
 kodama make-geno --vcf_path "$vcf_path" \
                  --linarg_dir $linarg_dir \
                  --region $region \

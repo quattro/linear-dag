@@ -14,7 +14,7 @@ from scipy.sparse import csc_matrix
 
 
 def read_vcf(
-    path: Union[str, PathLike], phased: bool = True, region: Optional[str] = None, flip_minor_alleles: bool = False, whitelist: list = None,
+    path: Union[str, PathLike], phased: bool = True, region: Optional[str] = None, flip_minor_alleles: bool = False, whitelist: list = None, maf_filter: float = None, remove_indels: bool = False
 ):
     def _update_dict_from_vcf(
         var: cv.Variant, is_flipped: bool, data: DefaultDict[str, list]
@@ -54,7 +54,17 @@ def read_vcf(
     var_table = defaultdict(list)
     # TODO: handle missing data
     for var in vcf(region):
+        
+        if remove_indels:
+            if any(len(alt) != 1 for alt in var.ALT) or len(var.REF) != 1:
+                continue
+        
         gts, is_flipped = final_read(var, flip_minor_alleles)
+        
+        if maf_filter is not None:
+            af = np.mean(gts) / ploidy
+            if (af < maf_filter) or (1-af < maf_filter):
+                continue
 
         (idx,) = np.where(gts != 0)
         data.append(gts[idx])

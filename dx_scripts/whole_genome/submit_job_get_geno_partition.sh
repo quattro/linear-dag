@@ -3,15 +3,16 @@ instance_type=$1
 
 out="linear_args"
 data_identifier="ukb20279"
-whitelist_path="/mnt/project/sample_metadata/ukb20279/250122_sample_index_whitelist.csv"
-chroms=({1..22})
+whitelist_path="/mnt/project/sample_metadata/ukb20279/250129_whitelist.txt"
+# chroms=({1..22})
+chroms=({1..14})
 
 for chrom in "${chroms[@]}"; do
 
     # test run
-    if [[ $chrom != 22 ]]; then
-        continue 
-    fi
+    # if [[ $chrom != 14 ]]; then
+    #     continue 
+    # fi
 
     chrom_dir="${out}/${data_identifier}/chr${chrom}"
     linarg_dir_list=($(dx ls $chrom_dir))

@@ -4,14 +4,15 @@ instance_type=$1
 load_dir='/mnt/project/'
 out="linear_args"
 data_identifier="ukb20279"
-chroms=({1..22})
+# chroms=({1..22})
+chroms=(18 17 16)
 
 for chrom in "${chroms[@]}"; do
 
     # test run
-    if [[ $chrom != 21 ]]; then
-        continue 
-    fi
+    # if [[ $chrom != 18 ]]; then
+    #     continue 
+    # fi
 
     chrom_dir="${out}/${data_identifier}/chr${chrom}"
     linarg_dir_list=($(dx ls $chrom_dir))

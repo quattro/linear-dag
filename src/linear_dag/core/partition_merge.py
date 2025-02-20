@@ -13,7 +13,7 @@ from .one_summed_cy import linearize_brick_graph
 from .recombination import Recombination
 
 
-def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=True, flip_minor_alleles=False, whitelist_path=None):
+def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=True, flip_minor_alleles=False, whitelist_path=None, maf_filter=None, remove_indels=False):
     """
     From a vcf file, save the genotype matrix and variant metadata for the given region.
     """
@@ -33,7 +33,7 @@ def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=
     
     logger.info("Reading vcf as sparse matrix")
     t1 = time.time()
-    genotypes, v_info = read_vcf(vcf_path, phased=phased, region=region_formatted, flip_minor_alleles=flip_minor_alleles, whitelist=whitelist)
+    genotypes, v_info = read_vcf(vcf_path, phased=phased, region=region_formatted, flip_minor_alleles=flip_minor_alleles, whitelist=whitelist, maf_filter=maf_filter, remove_indels=remove_indels)
     t2 = time.time()
     logger.info(f"vcf to sparse matrix completed in {np.round(t2 - t1, 3)} seconds")
     logger.info("Saving genotype matrix and variant metadata")
