@@ -34,6 +34,8 @@ def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=
     logger.info("Reading vcf as sparse matrix")
     t1 = time.time()
     genotypes, v_info = read_vcf(vcf_path, phased=phased, region=region_formatted, flip_minor_alleles=flip_minor_alleles, whitelist=whitelist, maf_filter=maf_filter, remove_indels=remove_indels)
+    if genotypes is None: # no variants found
+        return None
     t2 = time.time()
     logger.info(f"vcf to sparse matrix completed in {np.round(t2 - t1, 3)} seconds")
     logger.info("Saving genotype matrix and variant metadata")

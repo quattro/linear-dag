@@ -73,6 +73,10 @@ def read_vcf(
         var_table = _update_dict_from_vcf(var, is_flipped, var_table)
 
     v_info = pl.DataFrame(var_table)
+    
+    if len(data) == 0:
+        print('No variants found.')
+        return None, None
 
     data = np.concatenate(data)
     idxs = np.concatenate(idxs)

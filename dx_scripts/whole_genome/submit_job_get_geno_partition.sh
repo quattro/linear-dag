@@ -43,6 +43,7 @@ for chrom in "${chroms[@]}"; do
                 --priority low \
                 --name "get_mat_${partition_region}" \
                 --brief \
+                --extra-args '{"executionPolicy": {"maxRestarts": 5}}' \
                 -y
         done
     done
