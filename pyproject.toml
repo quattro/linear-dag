@@ -58,6 +58,7 @@ allow-direct-references = true
 
 [tool.hatch.version]
 source = "vcs"
+raw-options = { search_parent_directories = true }
 
 [tool.hatch.build.hooks.vcs]
 version-file = "src/linear_dag/_version.py"
