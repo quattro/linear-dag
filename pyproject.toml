@@ -37,12 +37,13 @@ classifiers = [
 dependencies = [
   "cython",
   "cyvcf2",
-#  "bed_reader[sparse]",
+  #  "bed_reader[sparse]",
   "numpy",
   "scipy>=1.14.1",
   "polars",
   "jupyter",
   "psutil",
+  "h5py>=3.13.0",
 ]
 
 [project.scripts]

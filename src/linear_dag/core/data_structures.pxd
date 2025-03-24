@@ -21,6 +21,9 @@ cdef class Stack:
     cdef void remove(self, stack_node * element)
     cdef void clear(self)
 
+cdef class InfiniteStack(Stack):
+    cdef int last
+
 cdef struct queue_node:
     node* value
     queue_node* next
