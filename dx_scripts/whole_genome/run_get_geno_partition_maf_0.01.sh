@@ -25,4 +25,5 @@ kodama make-geno --vcf_path "$vcf_path" \
                  --partition_number $partition_number \
                  --phased \
                  --flip_minor_alleles \
-                 --whitelist_path $whitelist_path
+                 --whitelist_path $whitelist_path \\
+                 --maf_filter 0.01
