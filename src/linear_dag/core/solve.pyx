@@ -1,7 +1,90 @@
+# cython: boundscheck=False
+# cython: wraparound=False
+# cython: cdivision=True
+# cython: nonecheck=False
+# cython: initializedcheck=False
+
 import numpy as np
 cimport numpy as np
 from scipy.sparse import csc_matrix, csr_matrix
 from .data_structures cimport Stack
+
+# cimport scipy.linalg.cython_blas as blas
+# def spsolve_forward_triangular_matmat(A: "csr_matrix", b: np.ndarray) -> None:
+#     """Solves (I-A)x' = b' in place, where A is a lower-triangular, zero-diagonal CSR matrix.
+#     Assumes that b is Fortran-contiguous (columns contiguous)."""
+    
+#     if b.ndim == 1:
+#         b = b.reshape(1, -1)
+    
+#     cdef int node_idx
+#     cdef int edge_idx = 0
+
+#     cdef int[:] indptr = A.indptr
+#     cdef int[:] indices = A.indices
+#     cdef int[:] data = A.data
+
+#     cdef double[:, :] b_view = b  # b is Fortran-contiguous (e.g. created with np.asfortranarray)
+#     cdef int num_nodes = len(indptr) - 1
+#     cdef int vector_length = b_view.shape[0]
+#     cdef int* vector_length_ptr = &vector_length
+#     cdef int inc = 1
+#     cdef int* inc_ptr = &inc
+#     cdef double alpha
+#     cdef double* alpha_ptr = &alpha
+
+#     # Get a pointer to the underlying data of b_view.
+#     cdef double* b_ptr = &b_view[0, 0]
+#     cdef double* source_ptr
+#     cdef double* destination_ptr = b_ptr 
+
+#     # with nogil:
+#     for node_idx in range(num_nodes):
+#         destination_ptr = destination_ptr + vector_length
+#         while edge_idx < indptr[node_idx + 1]:
+#             alpha = <double> data[edge_idx]
+#             source_ptr = b_ptr + indices[edge_idx] * vector_length
+
+#             # Call the BLAS axpy routine for destination += alpha * source:
+#             ddaxpy(vector_length_ptr, alpha_ptr, source_ptr, inc_ptr, destination_ptr, inc_ptr)
+#             edge_idx += 1
+
+def spsolve_forward_triangular(A: "csr_matrix", b: np.ndarray) -> None:
+    """Solves the system (I-A)x = b in place, where A is a lower triangular zero-diagonal CSR matrix."""
+    
+    cdef int node_idx
+    cdef int edge_idx = 0
+    
+    cdef int[:] indptr = A.indptr
+    cdef int[:] indices = A.indices
+    cdef int[:] data = A.data
+    cdef double[:] b_view = b
+    
+    cdef int num_nodes = len(indptr) - 1
+    with nogil:
+        for node_idx in range(num_nodes):
+            while edge_idx < indptr[node_idx + 1]:
+                b_view[node_idx] += b_view[indices[edge_idx]] * data[edge_idx]
+                edge_idx += 1
+
+
+def spsolve_backward_triangular(A: "csr_matrix", b: np.ndarray) -> None:
+    """Solves the system (I-A)'x = b in place, where A is a lower triangular zero-diagonal matrix."""
+    
+    cdef int node_idx
+    cdef int edge_idx = A.indptr[-1]
+    
+    cdef int[:] indptr = A.indptr
+    cdef int[:] indices = A.indices
+    cdef int[:] data = A.data
+    cdef double[:] b_view = b
+
+    cdef int num_nodes = len(indptr) - 1
+    with nogil:
+        for node_idx in range(num_nodes - 1, -1, -1):
+            while edge_idx > indptr[node_idx]:
+                edge_idx -= 1
+                b_view[indices[edge_idx]] += b_view[node_idx] * data[edge_idx]
 
 
 def spinv_make_triangular(sparse_matrix: "csr_matrix") -> "csc_matrix":
@@ -97,6 +180,7 @@ def spinv_triangular(A: "csr_matrix") -> "csc_matrix":
 
     x_indptr[i+1] = next_x_indptr
     return csc_matrix((x_data[:next_x_indptr], x_indices[:next_x_indptr], x_indptr))
+
 
 def topological_sort(A: "csr_matrix") -> np.ndarray:
     """

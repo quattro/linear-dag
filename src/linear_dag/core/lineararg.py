@@ -19,7 +19,7 @@ from scipy.sparse.linalg import aslinearoperator, LinearOperator, spsolve_triang
 from linear_dag.genotype import read_vcf
 
 from .linear_arg_inference import linear_arg_from_genotypes
-from .solve import topological_sort
+from .solve import topological_sort, spsolve_forward_triangular, spsolve_backward_triangular
 
 
 @dataclass
@@ -223,8 +223,11 @@ class LinearARG(LinearOperator):
         flip_minor_alleles: bool = False,
         return_genotypes: bool = False,
         verbosity: int = 0,
+        maf_filter: float = None, 
+        snps_only: bool = False
     ) -> Union[tuple, "LinearARG"]:
-        genotypes, v_info = read_vcf(path, phased, region, flip_minor_alleles)
+        genotypes, v_info = read_vcf(path, phased, region, flip_minor_alleles,
+                                    maf_filter=maf_filter, remove_indels=snps_only)
         if include_samples:
             genotypes = genotypes[include_samples, :]
         result = LinearARG.from_genotypes(genotypes, v_info, verbosity=verbosity)
@@ -273,7 +276,7 @@ class LinearARG(LinearOperator):
     def __str__(self):
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
 
-    def _matmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+    def _matmat(self, other: npt.ArrayLike, method: str='scipy') -> npt.NDArray[np.number]:
         if other.ndim == 1:
             other = other.reshape(-1, 1)
         if other.shape[0] != self.shape[1]:
@@ -281,55 +284,60 @@ class LinearARG(LinearOperator):
                 f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and {other.shape}."
             )
 
-        v = np.zeros((self.A.shape[0], other.shape[1]))
+        v = np.zeros((self.A.shape[0], other.shape[1]), dtype=np.float32)
         temp = (other.T * (-1) ** self.flip).T
         np.add.at(v, self.variant_indices, temp)  # handles duplicate variant indices; TODO handle matrix-valued v
         x = spsolve_triangular(eye(self.A.shape[0]) - self.A, v)
         return x[self.sample_indices] + np.sum(other[self.flip], axis=0)
 
-    def _rmatmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
-        if other.ndim == 1:
-            other = other.reshape(1, -1)
-        if other.shape[0] != self.shape[0]:
-            raise ValueError(
-                f"Incorrect dimensions for matrix multiplication. " f"Inputs had size {other.shape} and {self.shape}."
-            )
-        v = np.zeros((other.shape[1], self.A.shape[1]))
-        v[:, self.sample_indices] = other.T
-        x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T, lower=False)
-        x = x[self.variant_indices]
-        if np.any(self.flip):
-            x[self.flip] = np.sum(other, axis=0) - x[self.flip]  # TODO what if other is a matrix?
-        return x
-
-    def _matvec(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
-        if other.ndim == 1:
-            other = other.reshape(-1, 1)
-        if other.shape[0] != self.shape[1]:
-            raise ValueError(
-                f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and {other.shape}."
-            )
-
-        v = np.zeros((self.A.shape[0], other.shape[1]))
-        temp = (other.T * (-1) ** self.flip).T
-        np.add.at(v, self.variant_indices, temp)  # handles duplicate variant indices; TODO handle matrix-valued v
-        x = spsolve_triangular(eye(self.A.shape[0]) - self.A, v)
-        return x[self.sample_indices] + np.sum(other[self.flip])
-
-    def _rmatvec(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+    def _rmatmat(self, other: npt.ArrayLike, method: str='scipy') -> npt.NDArray[np.number]:
         if other.ndim == 1:
             other = other.reshape(1, -1)
         if other.shape[1] != self.shape[0]:
             raise ValueError(
                 f"Incorrect dimensions for matrix multiplication. " f"Inputs had size {other.shape} and {self.shape}."
             )
-        v = np.zeros((other.shape[0], self.A.shape[1]))
+        v = np.zeros((other.shape[0], self.A.shape[1]), dtype=np.float32)
         v[:, self.sample_indices] = other
-        x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T, lower=False)
+        
+        if method.lower() == 'scipy':
+            x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T, lower=False)
+        elif method.lower() == 'cython':
+            # v_t = v.T  # Transpose to match the expected format
+            spsolve_backward_triangular(self.A, v.ravel())
+            x = v.ravel()
+        
         x = x[self.variant_indices]
         if np.any(self.flip):
-            x[self.flip] = np.sum(other, axis=1) - x[self.flip]  # TODO what if other is a matrix?
-        return x.T
+            print('flipping stuff')
+            x[self.flip] = np.sum(other, axis=0) - x[self.flip]  # TODO what if other is a matrix?
+        return x
+
+    def _matvec(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+        if other.shape != (self.shape[1],):
+            raise ValueError(
+                f"Incorrect dimensions for matrix-vector multiplication. Inputs had size {self.shape} and {other.shape}."
+            )
+
+        v = np.zeros(self.A.shape[0])
+        temp = other * ((-1) ** self.flip.ravel())
+        np.add.at(v, self.variant_indices, temp)  # handles duplicate variant indices
+        spsolve_forward_triangular(self.A, v)
+        return np.asarray(v[self.sample_indices]) + np.sum(other[self.flip])
+
+    def _rmatvec(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+        if other.shape != (self.shape[0],):
+            raise ValueError(
+                f"Incorrect dimensions for vector-matrix multiplication. Inputs had size {other.shape} and {self.shape}."
+            )
+        v = np.zeros(self.A.shape[0])
+        v[self.sample_indices] = other
+        spsolve_backward_triangular(self.A, v)
+        v = v[self.variant_indices]
+        if np.any(self.flip):
+            print('flipping stuff')
+            v[self.flip] = np.sum(other) - x[self.flip]  # TODO what if other is a matrix?
+        return v
 
     def __getitem__(self, key: tuple[slice, slice]) -> "LinearARG":
         # TODO make this work with syntax like linarg[:100,] (works with linarg[:100,:])
@@ -337,7 +345,7 @@ class LinearARG(LinearOperator):
         return LinearARG(self.A, self.sample_indices[rows], self.variants[cols])
 
     def copy(self) -> "LinearARG":
-        return LinearARG(self.A.copy(), self.samples.copy(), self.variants.copy())
+        return LinearARG(self.A.copy(), self.sample_indices.copy(), self.variants.copy())
 
     def write(self, prefix: Union[str, PathLike], format: str = "npz"):
         """Writes LinearARG triplet to disk.
