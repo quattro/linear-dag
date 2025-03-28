@@ -5,13 +5,13 @@ load_dir='/mnt/project/'
 out="linear_args"
 data_identifier="ukb20279"
 # chroms=({1..22})
-chroms=(18 17 16)
+chroms=(6 8)
 
 for chrom in "${chroms[@]}"; do
 
     # test run
-    # if [[ $chrom != 18 ]]; then
-    #     continue 
+    # if [[ "$chrom" -eq 6 || "$chrom" -eq 8 ]]; then
+    #     continue
     # fi
 
     chrom_dir="${out}/${data_identifier}/chr${chrom}"

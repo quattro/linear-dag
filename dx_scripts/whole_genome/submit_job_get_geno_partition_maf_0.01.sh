@@ -1,16 +1,13 @@
 #!/bin/bash
-instance_type=$1
+# instance_type=$1
+instance_type="mem3_ssd1_v2_x2"
 
 out="linear_args"
-data_identifier="ukb20279"
+data_identifier="ukb20279_maf_0.01"
 whitelist_path="/mnt/project/sample_metadata/ukb20279/250129_whitelist.txt"
 chroms=({1..22})
 
 for chrom in "${chroms[@]}"; do
-
-    if [[ $chrom != 8 ]]; then
-        continue 
-    fi
 
     chrom_dir="${out}/${data_identifier}/chr${chrom}"
     linarg_dir_list=($(dx ls $chrom_dir))
@@ -34,8 +31,8 @@ for chrom in "${chroms[@]}"; do
 
             echo $partition_region
             dx run app-swiss-army-knife \
-                -iin="/amber/scripts/run_get_geno_partition.sh" \
-                -icmd="bash run_get_geno_partition.sh \"$vcf_path\" $linarg_dir $partition_region $partition_number $whitelist_path" \
+                -iin="/amber/scripts/run_get_geno_partition_maf_0.01.sh" \
+                -icmd="bash run_get_geno_partition_maf_0.01.sh \"$vcf_path\" $linarg_dir $partition_region $partition_number $whitelist_path" \
                 --destination "/" \
                 --instance-type $instance_type \
                 --priority high \

@@ -9,9 +9,9 @@ chroms=({1..22})
 for chrom in "${chroms[@]}"; do
 
     # test run
-    if [[ $chrom != 15 ]]; then
-        continue 
-    fi
+    # if [[ $chrom != 15 ]]; then
+    #     continue 
+    # fi
 
     chrom_dir="${out}/${data_identifier}/chr${chrom}"
     linarg_dir_list=($(dx ls $chrom_dir))
@@ -37,7 +37,7 @@ for chrom in "${chroms[@]}"; do
                 -icmd="bash run_reduction_union_recom.sh $linarg_dir $load_dir $partition_identifier" \
                 --destination "/" \
                 --instance-type $instance_type \
-                --priority low \
+                --priority high \
                 --name "reduction_union_recom_${partition_identifier}" \
                 --brief \
                 -y

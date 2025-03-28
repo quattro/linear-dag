@@ -55,6 +55,8 @@ def read_vcf(
     # TODO: handle missing data
     for var in vcf(region):
         
+        if (var.POS < start) or (var.POS > end): continue # ignore indels that are outside of region
+        
         if remove_indels:
             if any(len(alt) != 1 for alt in var.ALT) or len(var.REF) != 1:
                 continue
@@ -75,7 +77,6 @@ def read_vcf(
     v_info = pl.DataFrame(var_table)
     
     if len(data) == 0:
-        print('No variants found.')
         return None, None
 
     data = np.concatenate(data)

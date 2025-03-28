@@ -33,7 +33,7 @@ if __name__ == "__main__":
     
     large_partition_size = 2e7
     small_partition_size = 1e6
-    data_identifier = 'ukb20279'
+    data_identifier = 'ukb20279_maf_0.01'
     out = 'linear_args'
     
     start_end_path = '/mnt/project/GRCh38_metadata/GRCh38_first_last_variant_coordinate.txt'
