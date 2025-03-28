@@ -98,6 +98,21 @@ cdef class Stack:
         while self.head is not NULL:
             self.pop()
 
+cdef class InfiniteStack(Stack):
+    """
+    Stack of integers initialized (implicitly) as 0, 1, 2, ...
+    """
+    # cdef int last
+    def __init__(self):
+        super().__init__()
+        self.last = -1
+
+    cdef int pop(self):
+        if self.head is NULL:
+            self.last += 1
+            return self.last
+        return Stack.pop(self)
+
 cdef class Queue:
     """
     Queue of nodes implemented as a doubly linked list. A queue_node has pointers to a next

@@ -1,4 +1,3 @@
-
 module LinearARG
 using MatrixMarket, CSV, DataFrames, SparseArrays, LinearAlgebra
 
@@ -13,11 +12,12 @@ end
 
 "Read a linear ARG from a trio of files named *.mtx, *.psam, *.pvar"
 function read_linarg(linarg_path::String)
-    A = MatrixMarket.mmread(linarg_path * ".mtx")
-    @assert istril(A) "Adjacency matrix should be lower-triangular"
 
     samples = CSV.read(linarg_path * ".psam", DataFrame; delim=' ', comment="##")
     variants = CSV.read(linarg_path * ".pvar", DataFrame; delim='\t', comment="##")
+    
+    A = MatrixMarket.mmread(linarg_path * ".mtx")
+    @assert istril(A) "Adjacency matrix should be lower-triangular"
 
     function fix_index_column(df::DataFrame)
         rename!(df, Symbol.(replace.(string.(names(df)), r"^#" => ""))) # strip '#' from first column name
@@ -29,12 +29,21 @@ function read_linarg(linarg_path::String)
     function parse_info_field(df::DataFrame)
         @assert "INFO" in names(df)
 
-        pattern = r"IDX=(\d+);FLIP=([0-9.]+)"
+        pattern = r"IDX=(\d+);FLIP=([0-9.]+|True|False)"
         df = transform(df, :INFO => ByRow(x -> match(pattern, x)) => :match)
 
         df.IDX = parse.(Int, getindex.(df.match, 1))
-        df.FLIP = parse.(Float64, getindex.(df.match, 2))
-        df.FLIP .= df.FLIP.==1.0
+        df.FLIP = map(m -> begin
+            flip_value = m[2]
+            if flip_value == "True"
+                return true
+            elseif flip_value == "False"
+                return false
+            else
+                return parse(Float64, flip_value) == 1.0
+            end
+        end, df.match)
+        
         return df
     end
     
