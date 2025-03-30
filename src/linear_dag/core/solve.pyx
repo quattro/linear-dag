@@ -8,84 +8,240 @@ import numpy as np
 cimport numpy as np
 from scipy.sparse import csc_matrix, csr_matrix
 from .data_structures cimport Stack
-
-# cimport scipy.linalg.cython_blas as blas
-# def spsolve_forward_triangular_matmat(A: "csr_matrix", b: np.ndarray) -> None:
-#     """Solves (I-A)x' = b' in place, where A is a lower-triangular, zero-diagonal CSR matrix.
-#     Assumes that b is Fortran-contiguous (columns contiguous)."""
-    
-#     if b.ndim == 1:
-#         b = b.reshape(1, -1)
-    
-#     cdef int node_idx
-#     cdef int edge_idx = 0
-
-#     cdef int[:] indptr = A.indptr
-#     cdef int[:] indices = A.indices
-#     cdef int[:] data = A.data
-
-#     cdef double[:, :] b_view = b  # b is Fortran-contiguous (e.g. created with np.asfortranarray)
-#     cdef int num_nodes = len(indptr) - 1
-#     cdef int vector_length = b_view.shape[0]
-#     cdef int* vector_length_ptr = &vector_length
-#     cdef int inc = 1
-#     cdef int* inc_ptr = &inc
-#     cdef double alpha
-#     cdef double* alpha_ptr = &alpha
-
-#     # Get a pointer to the underlying data of b_view.
-#     cdef double* b_ptr = &b_view[0, 0]
-#     cdef double* source_ptr
-#     cdef double* destination_ptr = b_ptr 
-
-#     # with nogil:
-#     for node_idx in range(num_nodes):
-#         destination_ptr = destination_ptr + vector_length
-#         while edge_idx < indptr[node_idx + 1]:
-#             alpha = <double> data[edge_idx]
-#             source_ptr = b_ptr + indices[edge_idx] * vector_length
-
-#             # Call the BLAS axpy routine for destination += alpha * source:
-#             ddaxpy(vector_length_ptr, alpha_ptr, source_ptr, inc_ptr, destination_ptr, inc_ptr)
-#             edge_idx += 1
+cimport scipy.linalg.cython_blas as blas
 
 def spsolve_forward_triangular(A: "csr_matrix", b: np.ndarray) -> None:
-    """Solves the system (I-A)x = b in place, where A is a lower triangular zero-diagonal CSR matrix."""
+    """Solves the system (I-A)x = b in place, where A is a lower triangular zero-diagonal CSR matrix.
     
-    cdef int node_idx
-    cdef int edge_idx = 0
-    
-    cdef int[:] indptr = A.indptr
-    cdef int[:] indices = A.indices
-    cdef int[:] data = A.data
-    cdef double[:] b_view = b
-    
-    cdef int num_nodes = len(indptr) - 1
-    with nogil:
-        for node_idx in range(num_nodes):
-            while edge_idx < indptr[node_idx + 1]:
-                b_view[node_idx] += b_view[indices[edge_idx]] * data[edge_idx]
-                edge_idx += 1
+    Parameters
+    ----------
+    A : csr_matrix
+        Lower triangular zero-diagonal CSR matrix
+    b : ndarray
+        Right-hand side vector, must be float64 dtype
+    """
+    _spsolve_forward_triangular_float64(A.indptr, A.indices, A.data, b)
 
+cdef void _spsolve_forward_triangular_float64(int[:] indptr, int[:] indices, int[:] data, double[:] b_view) nogil:
+    cdef int node_idx, edge_idx = 0
+    cdef int num_nodes = len(indptr) - 1
+    
+    for node_idx in range(num_nodes):
+        while edge_idx < indptr[node_idx + 1]:
+            b_view[node_idx] += b_view[indices[edge_idx]] * data[edge_idx]
+            edge_idx += 1
 
 def spsolve_backward_triangular(A: "csr_matrix", b: np.ndarray) -> None:
     """Solves the system (I-A)'x = b in place, where A is a lower triangular zero-diagonal matrix."""
     
+    cdef int num_nodes = len(A.indptr) - 1
     cdef int node_idx
-    cdef int edge_idx = A.indptr[-1]
+    cdef int edge_idx = A.indptr[num_nodes]
     
     cdef int[:] indptr = A.indptr
     cdef int[:] indices = A.indices
     cdef int[:] data = A.data
     cdef double[:] b_view = b
 
-    cdef int num_nodes = len(indptr) - 1
     with nogil:
         for node_idx in range(num_nodes - 1, -1, -1):
             while edge_idx > indptr[node_idx]:
                 edge_idx -= 1
                 b_view[indices[edge_idx]] += b_view[node_idx] * data[edge_idx]
 
+
+def spsolve_forward_triangular_matmat(A: "csr_matrix", b: np.ndarray) -> None:
+    """Solves (I-A)x' = b' in place, where A is a lower-triangular, zero-diagonal CSR matrix.
+    Assumes that b is Fortran-contiguous."""
+    
+    if b.ndim == 1:
+        b = b.reshape(1, -1)
+    
+    if b.dtype == np.float64:
+        _spsolve_forward_triangular_matmat_float64(A.indptr, A.indices, A.data, b)
+    elif b.dtype == np.float32:
+        _spsolve_forward_triangular_matmat_float32(A.indptr, A.indices, A.data, b)
+    else:
+        # Fall back to float64
+        b_copy = b.astype(np.float64)
+        _spsolve_forward_triangular_matmat_float64(A.indptr, A.indices, A.data, b_copy)
+        b[:] = b_copy
+
+cdef void _spsolve_forward_triangular_matmat_float64(int[:] indptr, int[:] indices, int[:] data, double[:, :] b_view) nogil:
+    cdef int node_idx, edge_idx = 0
+    cdef int num_nodes = len(indptr) - 1
+    cdef int vector_length = b_view.shape[0]
+    cdef int* vector_length_ptr = &vector_length
+    cdef int inc = 1
+    cdef int* inc_ptr = &inc
+    cdef double alpha
+    cdef double* alpha_ptr = &alpha
+
+    # Get a pointer to the underlying data of b_view
+    cdef double* b_ptr = &b_view[0, 0]
+    cdef double* source_ptr
+    cdef double* destination_ptr = b_ptr 
+
+    for node_idx in range(num_nodes):
+        while edge_idx < indptr[node_idx + 1]:
+            alpha = <double> data[edge_idx]
+            source_ptr = b_ptr + indices[edge_idx] * vector_length
+
+            # Call the BLAS axpy routine for destination += alpha * source
+            blas.daxpy(vector_length_ptr, alpha_ptr, source_ptr, inc_ptr, destination_ptr, inc_ptr)
+            
+            edge_idx += 1
+        
+        destination_ptr += vector_length
+
+cdef void _spsolve_forward_triangular_matmat_float32(int[:] indptr, int[:] indices, int[:] data, float[:, :] b_view) nogil:
+    cdef int node_idx, edge_idx = 0
+    cdef int num_nodes = len(indptr) - 1
+    cdef int vector_length = b_view.shape[0]
+    cdef int* vector_length_ptr = &vector_length
+    cdef int inc = 1
+    cdef int* inc_ptr = &inc
+    cdef float alpha
+    cdef float* alpha_ptr = &alpha
+
+    # Get a pointer to the underlying data of b_view
+    cdef float* b_ptr = &b_view[0, 0]
+    cdef float* source_ptr
+    cdef float* destination_ptr = b_ptr 
+
+    for node_idx in range(num_nodes):
+        while edge_idx < indptr[node_idx + 1]:
+            alpha = <float> data[edge_idx]
+            source_ptr = b_ptr + indices[edge_idx] * vector_length
+
+            # Call the BLAS axpy routine for destination += alpha * source
+            blas.saxpy(vector_length_ptr, alpha_ptr, source_ptr, inc_ptr, destination_ptr, inc_ptr)
+            
+            edge_idx += 1
+        
+        destination_ptr += vector_length
+
+
+def spsolve_backward_triangular_matmat(A: "csr_matrix", b: np.ndarray) -> None:
+    """Solves (I-A)'x' = b' in place, where A is a lower-triangular, zero-diagonal CSR matrix.
+    Assumes that b is Fortran-contiguous."""
+    
+    if b.ndim == 1:
+        b = b.reshape(1, -1)
+    
+    if b.dtype == np.float64:
+        _spsolve_backward_triangular_matmat_float64(A.indptr, A.indices, A.data, b)
+    elif b.dtype == np.float32:
+        _spsolve_backward_triangular_matmat_float32(A.indptr, A.indices, A.data, b)
+    else:
+        # Fall back to float64
+        b_copy = b.astype(np.float64)
+        _spsolve_backward_triangular_matmat_float64(A.indptr, A.indices, A.data, b_copy)
+        b[:] = b_copy
+
+cdef void _spsolve_backward_triangular_matmat_float64(int[:] indptr, int[:] indices, int[:] data, double[:, :] b_view) nogil:
+    cdef int num_nodes = len(indptr) - 1
+    cdef int node_idx
+    cdef int edge_idx = indptr[num_nodes]
+    cdef int vector_length = b_view.shape[0]
+    cdef int* vector_length_ptr = &vector_length
+    cdef int inc = 1
+    cdef int* inc_ptr = &inc
+    cdef double alpha
+    cdef double* alpha_ptr = &alpha
+
+    # Pointers into b_view
+    cdef double* b_ptr = &b_view[0, 0]
+    cdef double* source_ptr = b_ptr + vector_length * (num_nodes - 1)
+    cdef double* destination_ptr 
+
+    for node_idx in range(num_nodes - 1, -1, -1):
+        while edge_idx > indptr[node_idx]:
+            edge_idx -= 1
+            alpha = <double> data[edge_idx]
+            destination_ptr = b_ptr + indices[edge_idx] * vector_length
+
+            # Call the BLAS axpy routine for destination += alpha * source
+            blas.daxpy(vector_length_ptr, alpha_ptr, source_ptr, inc_ptr, destination_ptr, inc_ptr)
+        
+        source_ptr -= vector_length
+
+cdef void _spsolve_backward_triangular_matmat_float32(int[:] indptr, int[:] indices, int[:] data, float[:, :] b_view) nogil:
+    cdef int num_nodes = len(indptr) - 1
+    cdef int node_idx
+    cdef int edge_idx = indptr[num_nodes]
+    cdef int vector_length = b_view.shape[0]
+    cdef int* vector_length_ptr = &vector_length
+    cdef int inc = 1
+    cdef int* inc_ptr = &inc
+    cdef float alpha
+    cdef float* alpha_ptr = &alpha
+
+    # Pointers into b_view
+    cdef float* b_ptr = &b_view[0, 0]
+    cdef float* source_ptr = b_ptr + vector_length * (num_nodes - 1)
+    cdef float* destination_ptr 
+
+    for node_idx in range(num_nodes - 1, -1, -1):
+        while edge_idx > indptr[node_idx]:
+            edge_idx -= 1
+            alpha = <float> data[edge_idx]
+            destination_ptr = b_ptr + indices[edge_idx] * vector_length
+
+            # Call the BLAS axpy routine for destination += alpha * source
+            blas.saxpy(vector_length_ptr, alpha_ptr, source_ptr, inc_ptr, destination_ptr, inc_ptr)
+        
+        source_ptr -= vector_length
+
+def add_at(destination: np.ndarray, indices: np.ndarray, source: np.ndarray):
+    """
+    Adds source values to destination at specified indices.
+    Equivalent to np.add.at(destination, (np.arange(destination.shape[0]).reshape(-1,1), indices.reshape(1,-1)), source)
+    but much faster.
+    
+    Parameters:
+    -----------
+    destination : np.ndarray, shape (n_cols, n_rows)
+        The target array to add values to, must be Fortran-contiguous
+    indices : np.ndarray, shape (n_indices,)
+        The indices to add values at
+    source : np.ndarray, shape (n_cols, n_indices)
+        The source values to add, must be Fortran-contiguous
+    """
+    if destination.dtype == np.float64:
+        _add_at_float64(destination, indices, source)
+    elif destination.dtype == np.float32:
+        _add_at_float32(destination, indices, source)
+    else:
+        # Fall back to float64
+        dest_copy = destination.astype(np.float64)
+        source_copy = source.astype(np.float64)
+        _add_at_float64(dest_copy, indices, source_copy)
+        destination[:] = dest_copy
+
+cdef void _add_at_float64(double[:, :] dest_view, long[:] indices_view, double[:, :] source_view) nogil:
+    cdef int n_cols = dest_view.shape[0]
+    cdef int n_rows = dest_view.shape[1]
+    cdef int n_indices = indices_view.shape[0]
+    
+    cdef int col_idx, idx_pos, dest_idx
+    
+    for idx_pos in range(n_indices):
+        for col_idx in range(n_cols):
+            dest_idx = indices_view[idx_pos]
+            dest_view[col_idx, dest_idx] += source_view[col_idx, idx_pos]
+
+cdef void _add_at_float32(float[:, :] dest_view, long[:] indices_view, float[:, :] source_view) nogil:
+    cdef int n_cols = dest_view.shape[0]
+    cdef int n_rows = dest_view.shape[1]
+    cdef int n_indices = indices_view.shape[0]
+    
+    cdef int col_idx, idx_pos, dest_idx
+    
+    for idx_pos in range(n_indices):
+        for col_idx in range(n_cols):
+            dest_idx = indices_view[idx_pos]
+            dest_view[col_idx, dest_idx] += source_view[col_idx, idx_pos]
 
 def spinv_make_triangular(sparse_matrix: "csr_matrix") -> "csc_matrix":
     """

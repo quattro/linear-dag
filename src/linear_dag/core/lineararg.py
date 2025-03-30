@@ -19,7 +19,12 @@ from scipy.sparse.linalg import aslinearoperator, LinearOperator, spsolve_triang
 from linear_dag.genotype import read_vcf
 
 from .linear_arg_inference import linear_arg_from_genotypes
-from .solve import topological_sort, spsolve_forward_triangular, spsolve_backward_triangular
+from .solve import topological_sort, \
+            spsolve_forward_triangular_matmat, \
+            spsolve_backward_triangular_matmat,\
+            spsolve_forward_triangular,\
+            spsolve_backward_triangular,\
+            add_at
 
 
 @dataclass
@@ -276,7 +281,7 @@ class LinearARG(LinearOperator):
     def __str__(self):
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
 
-    def _matmat(self, other: npt.ArrayLike, method: str='scipy') -> npt.NDArray[np.number]:
+    def _matmat_scipy(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
         if other.ndim == 1:
             other = other.reshape(-1, 1)
         if other.shape[0] != self.shape[1]:
@@ -284,32 +289,58 @@ class LinearARG(LinearOperator):
                 f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and {other.shape}."
             )
 
-        v = np.zeros((self.A.shape[0], other.shape[1]), dtype=np.float32)
+        v = np.zeros((self.A.shape[0], other.shape[1]), dtype=other.dtype)
         temp = (other.T * (-1) ** self.flip).T
-        np.add.at(v, self.variant_indices, temp)  # handles duplicate variant indices; TODO handle matrix-valued v
+        np.add.at(v, self.variant_indices, temp)
         x = spsolve_triangular(eye(self.A.shape[0]) - self.A, v)
         return x[self.sample_indices] + np.sum(other[self.flip], axis=0)
 
-    def _rmatmat(self, other: npt.ArrayLike, method: str='scipy') -> npt.NDArray[np.number]:
+    def _matmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+        if other.ndim == 1:
+            other = other.reshape(-1, 1)
+        if other.shape[0] != self.shape[1]:
+            raise ValueError(
+                f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and {other.shape}."
+            )
+
+        v = np.zeros((other.shape[1], self.A.shape[0]), dtype=other.dtype, order='F')
+        if any(self.flip):
+            temp = other.T * (-1) ** self.flip.reshape(1,-1)
+        else:
+            temp = other.T
+        add_at(v, self.variant_indices, temp)
+        spsolve_forward_triangular_matmat(self.A, v)
+        return v[:, self.sample_indices].T + np.sum(other[self.flip], axis=0)
+
+    def _rmatmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+        if other.ndim == 1:
+            other = other.reshape(1, -1)
+        if other.shape[0] != self.shape[0]:
+            raise ValueError(
+                f"Incorrect dimensions for matrix multiplication. " f"Inputs had size {other.shape} and {self.shape}."
+            )
+        v = np.zeros((other.shape[1], self.A.shape[1]), dtype=other.dtype, order='F')
+        v[:, self.sample_indices] = other.T
+        spsolve_backward_triangular_matmat(self.A, v)
+        v = v[:, self.variant_indices]
+        if np.any(self.flip):
+            v[:, self.flip] = np.sum(other, axis=0) - v[:, self.flip]
+        return v.T
+
+    def _rmatmat_scipy(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
         if other.ndim == 1:
             other = other.reshape(1, -1)
         if other.shape[1] != self.shape[0]:
             raise ValueError(
                 f"Incorrect dimensions for matrix multiplication. " f"Inputs had size {other.shape} and {self.shape}."
             )
-        v = np.zeros((other.shape[0], self.A.shape[1]), dtype=np.float32)
+        v = np.zeros((other.shape[0], self.A.shape[1]), dtype=other.dtype)
         v[:, self.sample_indices] = other
         
-        if method.lower() == 'scipy':
-            x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T, lower=False)
-        elif method.lower() == 'cython':
-            # v_t = v.T  # Transpose to match the expected format
-            spsolve_backward_triangular(self.A, v.ravel())
-            x = v.ravel()
+        x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T, lower=False)
         
         x = x[self.variant_indices]
         if np.any(self.flip):
-            print('flipping stuff')
             x[self.flip] = np.sum(other, axis=0) - x[self.flip]  # TODO what if other is a matrix?
         return x
 
@@ -319,8 +350,8 @@ class LinearARG(LinearOperator):
                 f"Incorrect dimensions for matrix-vector multiplication. Inputs had size {self.shape} and {other.shape}."
             )
 
-        v = np.zeros(self.A.shape[0])
-        temp = other * ((-1) ** self.flip.ravel())
+        v = np.zeros(self.A.shape[0], dtype=np.float64)
+        temp = other.astype(np.float64) * ((-1) ** self.flip.ravel())
         np.add.at(v, self.variant_indices, temp)  # handles duplicate variant indices
         spsolve_forward_triangular(self.A, v)
         return np.asarray(v[self.sample_indices]) + np.sum(other[self.flip])
@@ -330,13 +361,12 @@ class LinearARG(LinearOperator):
             raise ValueError(
                 f"Incorrect dimensions for vector-matrix multiplication. Inputs had size {other.shape} and {self.shape}."
             )
-        v = np.zeros(self.A.shape[0])
-        v[self.sample_indices] = other
+        v = np.zeros(self.A.shape[0], dtype=np.float64)
+        v[self.sample_indices] = other.astype(np.float64)
         spsolve_backward_triangular(self.A, v)
         v = v[self.variant_indices]
         if np.any(self.flip):
-            print('flipping stuff')
-            v[self.flip] = np.sum(other) - x[self.flip]  # TODO what if other is a matrix?
+            v[self.flip] = np.sum(other) - v[self.flip]
         return v
 
     def __getitem__(self, key: tuple[slice, slice]) -> "LinearARG":

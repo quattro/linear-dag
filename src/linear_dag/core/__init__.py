@@ -9,6 +9,7 @@ from .solve import (
     spinv_triangular as spinv_triangular,
     topological_sort as topological_sort,
     spsolve_forward_triangular as spsolve_forward_triangular,
+    spsolve_forward_triangular_matmat as spsolve_forward_triangular_matmat,
     spsolve_backward_triangular as spsolve_backward_triangular,
 )
 from .online import reindex as reindex
