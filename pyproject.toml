@@ -64,6 +64,9 @@ raw-options = { search_parent_directories = true }
 [tool.hatch.build.hooks.vcs]
 version-file = "src/linear_dag/_version.py"
 
+[tool.hatch.build.hooks.custom]
+custom = "hatch_build:build_hook"
+
 [tool.hatch.build.targets.sdist]
 include = ["src/"]
 exclude = ["docs/"]
@@ -76,7 +79,7 @@ dependencies = [
 ]
 
 [tool.hatch.build.hooks.cython]
-dependencies = ["Cython", "numpy", "hatch-cython"]
+dependencies = ["Cython", "numpy", "hatch-cython", "scipy"]
 
 [tool.hatch.build.hooks.cython.options]
 src = "linear_dag"
@@ -92,8 +95,9 @@ include = [
   "recombination.pyx",
   "solve.pyx",
   "data_structures.pyx",
-  "brick_graph.pyx"
-]
+  "brick_graph.pyx",
+  "data_structures.pxd"  # Ensure this is included
+] 
 
 [tool.hatch.envs.default.scripts]
 test = "pytest {args:tests}"
