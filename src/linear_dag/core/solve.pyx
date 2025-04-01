@@ -8,6 +8,7 @@ import numpy as np
 cimport numpy as np
 from scipy.sparse import csc_matrix, csr_matrix
 from .data_structures cimport Stack
+cimport scipy.linalg
 cimport scipy.linalg.cython_blas as blas
 
 def spsolve_forward_triangular(A: "csr_matrix", b: np.ndarray) -> None:
