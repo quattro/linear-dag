@@ -17,14 +17,13 @@ def read_vcf(
     path: Union[str, PathLike], phased: bool = True, region: Optional[str] = None, flip_minor_alleles: bool = False, whitelist: list = None, maf_filter: float = None, remove_indels: bool = False
 ):
     def _update_dict_from_vcf(
-        var: cv.Variant, is_flipped: bool, data: DefaultDict[str, list]
+        var: cv.Variant, data: DefaultDict[str, list]
     ) -> DefaultDict[str, list]:
         data["CHROM"].append(var.CHROM)
         data["POS"].append(var.POS)
         data["ID"].append(var.ID)
         data["REF"].append(var.REF)
         data["ALT"].append(",".join(var.ALT))
-        data["FLIP"].append(is_flipped)
 
         return data
 
@@ -32,6 +31,7 @@ def read_vcf(
     data = []
     idxs = []
     ptrs = [0]
+    flip = []
 
     ploidy = 1 if phased else 2
 
@@ -75,7 +75,8 @@ def read_vcf(
         data.append(gts[idx])
         idxs.append(idx)
         ptrs.append(ptrs[-1] + len(idx))
-        var_table = _update_dict_from_vcf(var, is_flipped, var_table)
+        flip.append(is_flipped)
+        var_table = _update_dict_from_vcf(var, var_table)
 
     v_info = pl.DataFrame(var_table)
     
@@ -86,8 +87,9 @@ def read_vcf(
     idxs = np.concatenate(idxs)
     ptrs = np.array(ptrs)
     genotypes = csc_matrix((data, idxs, ptrs), shape=(gts.shape[0], len(ptrs) - 1)) # some samples may have no variants, so shape must be specified
+    flip = np.array(flip)
 
-    return genotypes, v_info
+    return genotypes, flip, v_info
 
 
 def load_genotypes(

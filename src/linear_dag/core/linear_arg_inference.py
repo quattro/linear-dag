@@ -12,7 +12,7 @@ from .recombination import Recombination
 from .solve import spinv_make_triangular
 
 
-def linear_arg_from_genotypes(genotypes, variant_info, find_recombinations, verbosity):
+def linear_arg_from_genotypes(genotypes, flip, variant_info, find_recombinations, verbosity):
     if type(genotypes) is not csc_matrix:
         raise TypeError
 
@@ -39,12 +39,10 @@ def linear_arg_from_genotypes(genotypes, variant_info, find_recombinations, verb
             "ALT": np.ones(num_variants),
             "FLIP": np.zeros(num_variants),
             "ID": np.arange(num_variants),
-            "INFO": np.zeros(num_variants),
         }
         variant_info = pl.DataFrame(data)
-    variant_info = variant_info.with_columns(pl.lit(np.asarray(variants_idx)).alias("IDX"))
 
-    return linear_arg_adjacency_matrix, samples_idx, variant_info
+    return linear_arg_adjacency_matrix, flip, variants_idx, samples_idx, variant_info
 
 
 def infer_brick_graph_using_containment(genotypes: csc_matrix, ploidy) -> csr_matrix:

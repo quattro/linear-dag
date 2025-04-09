@@ -33,14 +33,19 @@ def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=
     
     logger.info("Reading vcf as sparse matrix")
     t1 = time.time()
-    genotypes, v_info = read_vcf(vcf_path, phased=phased, region=region_formatted, flip_minor_alleles=flip_minor_alleles, whitelist=whitelist, maf_filter=maf_filter, remove_indels=remove_indels)
+    genotypes, flip, v_info = read_vcf(vcf_path, phased=phased, region=region_formatted, flip_minor_alleles=flip_minor_alleles, whitelist=whitelist, maf_filter=maf_filter, remove_indels=remove_indels)
     if genotypes is None:
         logger.info(f"No variants found")
         return None
     t2 = time.time()
     logger.info(f"vcf to sparse matrix completed in {np.round(t2 - t1, 3)} seconds")
     logger.info("Saving genotype matrix and variant metadata")
-    sp.save_npz(f"{linarg_dir}/genotype_matrices/{partition_number}_{region}.npz", genotypes)
+    with h5py.File(f"{linarg_dir}/genotype_matrices/{partition_number}_{region}.h5", "w") as f:
+        f.create_dataset('shape', data=genotypes.shape, compression='gzip', shuffle=True)
+        f.create_dataset('indptr', data=genotypes.indptr, compression='gzip', shuffle=True)
+        f.create_dataset('indices', data=genotypes.indices, compression='gzip', shuffle=True)
+        f.create_dataset('data', data=genotypes.data, compression='gzip', shuffle=True)
+        f.create_dataset('flip', data=flip, compression='gzip', shuffle=True)    
     v_info.write_csv(f"{linarg_dir}/variant_metadata/{partition_number}_{region}.txt", separator=" ")
 
 
@@ -54,7 +59,8 @@ def run_forward_backward(linarg_dir, load_dir, partition_identifier):
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_identifier}_forward_backward.log")
     logger.info("Loading genotype matrix")
     t1 = time.time()
-    genotypes = sp.load_npz(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.npz")
+    with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.h5", 'r') as f:
+        genotypes = sp.csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=f['shape'][:])    
     t2 = time.time()
     logger.info(f"Genotype matrix loaded in {np.round(t2 - t1, 3)} seconds")
     logger.info("Running forward and backward brick graph algorithms")
@@ -76,7 +82,8 @@ def reduction_union_recom(linarg_dir, load_dir, partition_identifier):
     
     logger.info("Loading genotypes, forward and backward graphs, and sample indices")
     t1 = time.time()
-    genotypes = sp.load_npz(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.npz")
+    with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.h5", 'r') as f:
+        genotypes = sp.csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=f['shape'][:]) 
     n, m = genotypes.shape
     forward_graph = read_graph_from_disk(f"{load_dir}{linarg_dir}/forward_backward_graphs/{partition_identifier}_forward_graph.h5")
     backward_graph = read_graph_from_disk(f"{load_dir}{linarg_dir}/forward_backward_graphs/{partition_identifier}_backward_graph.h5")
@@ -99,15 +106,13 @@ def reduction_union_recom(linarg_dir, load_dir, partition_identifier):
     adj_mat = recom.to_csr()
     
     logger.info("Saving brick graph")
-    np.savez(
-        f"{linarg_dir}/brick_graph_partitions/{partition_identifier}.npz",
-        brick_graph_data=adj_mat.data,
-        brick_graph_indices=adj_mat.indices,
-        brick_graph_indptr=adj_mat.indptr,
-        brick_graph_shape=adj_mat.shape,
-        sample_indices=np.array(sample_indices),
-        variant_indices=np.array(variant_indices),
-    )
+    with h5py.File(f"{linarg_dir}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
+        f.attrs['n'] = adj_mat.shape[0]
+        f.create_dataset('indptr', data=adj_mat.indptr, compression='gzip', shuffle=True)
+        f.create_dataset('indices', data=adj_mat.indices, compression='gzip', shuffle=True)
+        f.create_dataset('data', data=adj_mat.data, compression='gzip', shuffle=True)
+        f.create_dataset('variant_indices', data=np.array(variant_indices), compression='gzip', shuffle=True)
+        f.create_dataset('sample_indices', data=np.array(sample_indices), compression='gzip', shuffle=True)
 
     af = np.diff(genotypes.indptr) / n
     geno_nnz = np.sum(n * np.minimum(af, 1 - af))
@@ -125,7 +130,8 @@ def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_identifier}_infer_brick_graph.log")
     logger.info("Loading genotype matrix")
     t1 = time.time()
-    genotypes = sp.load_npz(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.npz")
+    with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.h5", 'r') as f:
+        genotypes = sp.csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=f['shape'][:])   
     n, m = genotypes.shape
     t2 = time.time()
     logger.info(f"Genotype matrix loaded in {np.round(t2 - t1, 3)} seconds")
@@ -141,15 +147,13 @@ def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
     adj_mat = recom.to_csr()
     
     logger.info("Saving brick graph")
-    np.savez(
-        f"{linarg_dir}/brick_graph_partitions/{partition_identifier}.npz",
-        brick_graph_data=adj_mat.data,
-        brick_graph_indices=adj_mat.indices,
-        brick_graph_indptr=adj_mat.indptr,
-        brick_graph_shape=adj_mat.shape,
-        sample_indices=np.array(sample_indices),
-        variant_indices=np.array(variant_indices),
-    )
+    with h5py.File(f"{linarg_dir}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
+        f.attrs['n'] = adj_mat.shape[0]
+        f.create_dataset('indptr', data=adj_mat.indptr, compression='gzip', shuffle=True)
+        f.create_dataset('indices', data=adj_mat.indices, compression='gzip', shuffle=True)
+        f.create_dataset('data', data=adj_mat.data, compression='gzip', shuffle=True)
+        f.create_dataset('variant_indices', data=np.array(variant_indices), compression='gzip', shuffle=True)
+        f.create_dataset('sample_indices', data=np.array(sample_indices), compression='gzip', shuffle=True)
 
     af = np.diff(genotypes.indptr) / n
     geno_nnz = np.sum(n * np.minimum(af, 1 - af))
@@ -161,6 +165,8 @@ def merge(linarg_dir, load_dir):
     """
     Merged partitioned brick graphs, find recombinations, and linearize.
     """
+    print(linarg_dir)
+    
     os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
     os.makedirs(f"{linarg_dir}/", exist_ok=True)
     
@@ -193,11 +199,18 @@ def merge(linarg_dir, load_dir):
     files = np.array(files)[order].tolist()  # sort files by index
     df_list = [pl.read_csv(f"{load_dir}{linarg_dir}/variant_metadata/{f}", separator=" ") for f in files]
     df = pl.concat(df_list)
-    variant_indices = pl.Series(variant_indices)
-    df = df.with_columns(variant_indices.alias("IDX"))  # replace old indices with new merged ones
     var_info = VariantInfo(df)
-
-    linarg = LinearARG(linear_arg_adjacency_matrix, sample_indices, var_info)
+    files = os.listdir(f"{load_dir}{linarg_dir}/genotype_matrices/")
+    ind_arr = np.array([int(f.split("_")[0]) for f in files])
+    order = ind_arr.argsort()
+    files = np.array(files)[order].tolist()  # sort files by index
+    flip = []
+    for file in files:
+        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{file}", 'r') as f:
+            flip_partition = list(f['flip'][:])
+        flip += flip_partition    
+    flip = np.array(flip)
+    linarg = LinearARG(linear_arg_adjacency_matrix, flip, variant_indices, sample_indices, var_info)
     linarg = linarg.make_triangular()
     linarg.write(f"{linarg_dir}/linear_arg")
     get_linarg_stats(linarg_dir, load_dir)
@@ -208,12 +221,10 @@ def get_linarg_stats(linarg_dir, load_dir):
     Get stats from linear ARG.
     """
     linarg = LinearARG.read(
-        f"{linarg_dir}/linear_arg.npz", f"{linarg_dir}/linear_arg.pvar.gz", f"{linarg_dir}/linear_arg.psam.gz"
+        f"{linarg_dir}/linear_arg.h5", f"{linarg_dir}/linear_arg.pvar.gz", f"{linarg_dir}/linear_arg.psam.gz"
     )
-
-    df_flip = linarg.variants.table.clone()
-    df_flip = df_flip.with_columns(pl.Series([0] * df_flip.shape[0]).alias("FLIP"))
-    linarg.variants.table = df_flip
+    
+    linarg.flip = np.array([False for i in range(linarg.shape[1])])
 
     v = np.ones(linarg.shape[0])
     allele_count_from_linarg = v @ linarg
@@ -225,7 +236,10 @@ def get_linarg_stats(linarg_dir, load_dir):
     genotypes_nnz = 0
     allele_counts = []
     for f in files:
-        genotypes = sp.load_npz(f"{load_dir}{linarg_dir}/genotype_matrices/{f}")
+        
+        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{f}", 'r') as f:
+            genotypes = sp.csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=f['shape'][:]) 
+        
         genotypes_nnz += np.sum(
             [
                 np.minimum(genotypes[:, i].nnz, genotypes.shape[0] - genotypes[:, i].nnz)

@@ -12,6 +12,7 @@ import numpy as np
 import numpy.typing as npt
 import polars as pl
 
+import h5py
 from scipy.io import mmread
 from scipy.sparse import csc_matrix, csr_matrix, diags, eye, load_npz, save_npz
 from scipy.sparse.linalg import aslinearoperator, LinearOperator, spsolve_triangular
@@ -35,11 +36,8 @@ class VariantInfo:
     """
 
     table: pl.DataFrame
-
-    flip_field: ClassVar[str] = "FLIP"
-    idx_field: ClassVar[str] = "IDX"
-    req_fields: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT", "INFO"]
-    req_cols: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT", idx_field, flip_field]
+    req_fields: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT"]
+    req_cols: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT"]
 
     def __post_init__(self):
         for req_col in self.req_cols:
@@ -65,18 +63,6 @@ class VariantInfo:
         if path is None:
             raise ValueError("path argument cannot be None")
 
-        def _parse_info(info_str):
-            idx = -1
-            flip = False
-            for info in info_str.split(";"):
-                s_info = info.split("=")
-                if len(s_info) == 2 and s_info[0] == "IDX":
-                    idx = int(s_info[1])
-                elif len(s_info) == 1 and s_info[0] == "FLIP":
-                    flip = True
-
-            return idx, flip
-
         open_f = gzip.open if str(path).endswith(".gz") else open
         header_map = None
         var_table = defaultdict(list)
@@ -95,17 +81,11 @@ class VariantInfo:
 
                 # parse row; this can easily break...
                 row = line.strip().split()
-                for field in cls.req_fields:
-                    # skip INFO for now...
-                    if field == "INFO":
-                        continue
+                for field in header_map:
                     value = row[header_map[field]]
+                    if field == 'POS': # cast POS as int to save memory
+                        value = int(value)
                     var_table[field].append(value)
-
-                # parse info to pull index and flip info if they exist
-                idx, flip = _parse_info(row[header_map["INFO"]])
-                var_table[cls.idx_field].append(idx)
-                var_table[cls.flip_field].append(flip)
 
         var_table = pl.DataFrame(var_table)
 
@@ -119,24 +99,8 @@ class VariantInfo:
             pvar_file.write(f'##INFO=<ID=IDX,Number=1,Type=Integer,Description="Variant Index">{linesep}')
             pvar_file.write(f'##INFO=<ID=FLIP,Number=0,Type=Flag,Description="Flip Information">{linesep}')
             pvar_file.write("\t".join([f"#{self.req_fields[0]}"] + self.req_fields[1:]) + linesep)
-
-            # flush to make sure this exists before writing the table out
             pvar_file.flush()
-
-            # we need to map IDX and FLIP columns back to INFO
-            # this was giving me "AttributeError: 'Expr' object has no attribute 'apply'"
-            # sub_table = self.table.with_columns(
-            #     (
-            #         pl.col(self.idx_field).apply(lambda idx: f"IDX={idx}")
-            #         + pl.col(self.flip_field).apply(lambda flip: f";{self.flip_field}" if flip else "")
-            #     ).alias("INFO")
-            # ).drop([self.idx_field, self.flip_field])
-            # sub_table.write_csv(pvar_file, has_header=False, separator="\t")
-
-            info_col = pl.Series([f"IDX={idx};FLIP={flip}" for idx, flip in zip(self.table["IDX"], self.table["FLIP"])])
-            sub_table = self.table.with_columns(info_col.alias("INFO")).drop([self.idx_field, self.flip_field])
-            pvar_file.write(sub_table.write_csv(include_header=False, separator="\t"))
-
+            pvar_file.write(self.table.write_csv(include_header=False, separator="\t"))
         return
 
     # @classmethod
@@ -170,20 +134,15 @@ class VariantInfo:
 @dataclass
 class LinearARG(LinearOperator):
     A: csr_matrix
+    flip: npt.NDArray[np.bool_]
+    variant_indices: npt.NDArray[np.uint]
     sample_indices: npt.NDArray[np.uint]
-    variants: VariantInfo
-
-    @property
-    def variant_indices(self):
-        return self.variants.indices
-
-    @property
-    def flip(self):
-        return self.variants.is_flipped
+    variants: VariantInfo = None
 
     @staticmethod
     def from_genotypes(
         genotypes: csc_matrix,
+        flip: npt.NDArray[np.bool_],
         variant_info: pl.DataFrame = None,
         find_recombinations: bool = True,
         make_triangular: bool = True,
@@ -198,10 +157,10 @@ class LinearARG(LinearOperator):
         :param make_triangular: whether to re-order rows and columns such that the adjacency matrix is triangular
         :return: linear ARG instance
         """
-        linear_arg_adjacency_matrix, samples_idx, variant_info = linear_arg_from_genotypes(
+        linear_arg_adjacency_matrix, flip, variants_idx, samples_idx, variant_info = linear_arg_from_genotypes(
             genotypes, variant_info, find_recombinations, verbosity
         )
-        result = LinearARG(linear_arg_adjacency_matrix, samples_idx, VariantInfo(variant_info))
+        result = LinearARG(linear_arg_adjacency_matrix, flip, variants_idx, samples_idx, VariantInfo(variant_info))
         if make_triangular:
             result = result.make_triangular()
 
@@ -231,11 +190,11 @@ class LinearARG(LinearOperator):
         maf_filter: float = None, 
         snps_only: bool = False
     ) -> Union[tuple, "LinearARG"]:
-        genotypes, v_info = read_vcf(path, phased, region, flip_minor_alleles,
+        genotypes, flip, v_info = read_vcf(path, phased, region, flip_minor_alleles,
                                     maf_filter=maf_filter, remove_indels=snps_only)
         if include_samples:
             genotypes = genotypes[include_samples, :]
-        result = LinearARG.from_genotypes(genotypes, v_info, verbosity=verbosity)
+        result = LinearARG.from_genotypes(genotypes, flip, v_info, verbosity=verbosity)
         return result, genotypes if return_genotypes else result
 
     @property
@@ -377,7 +336,7 @@ class LinearARG(LinearOperator):
     def copy(self) -> "LinearARG":
         return LinearARG(self.A.copy(), self.sample_indices.copy(), self.variants.copy())
 
-    def write(self, prefix: Union[str, PathLike], format: str = "npz"):
+    def write(self, prefix: Union[str, PathLike], compression_option: str = "gzip"):
         """Writes LinearARG triplet to disk.
         :param prefix: The base path and prefix used for output files.
         :return: None
@@ -397,12 +356,13 @@ class LinearARG(LinearOperator):
         self.variants.write(prefix + ".pvar.gz")
 
         # write out DAG info
-        if format == "npz":
-            save_npz(f"{prefix}.npz", self.A)
-        elif format == "mtx":
-            from scipy.io import mmwrite
-
-            mmwrite(f"{prefix}.mtx", self.A)
+        with h5py.File(prefix + ".h5", "w") as f:
+            f.attrs['n'] = self.A.shape[0]
+            f.create_dataset('indptr', data=self.A.indptr, compression=compression_option, shuffle=True)
+            f.create_dataset('indices', data=self.A.indices, compression=compression_option, shuffle=True)
+            f.create_dataset('data', data=self.A.data, compression=compression_option, shuffle=True)
+            f.create_dataset('variant_indices', data=self.variant_indices, compression=compression_option, shuffle=True)
+            f.create_dataset('flip', data=self.flip, compression=compression_option, shuffle=True)
         return
 
     @staticmethod
@@ -410,19 +370,20 @@ class LinearARG(LinearOperator):
         matrix_fname: Union[str, PathLike],
         variant_fname: Union[str, PathLike] = None,
         samples_fname: Union[str, PathLike] = None,
+        load_metadata = False,
     ) -> "LinearARG":
         """Reads LinearARG data from provided PLINK2 formatted files.
 
-        :param matrix_fname: Filename for the .npz or .mtx file containing the adjacency matrix.
+        :param matrix_fname: Filename for the .h5 file containing the adjacency matrix, variant_indices, and flip.
         :param variant_fname: Filename for the .pvar file containing variant data.
         :param samples_fname: Filename for the .psam file containing sample IDs.
 
         :return: A tuple containing the LinearARG object, list of variant IDs, and list of IIDs.
         """
         if not variant_fname:
-            variant_fname = matrix_fname[:-4] + ".pvar.gz"
+            variant_fname = matrix_fname[:-3] + ".pvar.gz"
         if not samples_fname:
-            samples_fname = matrix_fname[:-4] + ".psam.gz"
+            samples_fname = matrix_fname[:-3] + ".psam.gz"
 
         # Load sample info
         # temporary fix
@@ -431,19 +392,19 @@ class LinearARG(LinearOperator):
         # s_info = SampleInfo.read(samples_fname)
 
         # Load variant info
-        v_info = VariantInfo.read(variant_fname)
+        if load_metadata:
+            v_info = VariantInfo.read(variant_fname)
+        else:
+            v_info = None
 
         # Load the adjacency matrix
-        if matrix_fname[-4:] == ".npz":
-            A = load_npz(matrix_fname)
-        elif matrix_fname[-4:] == ".mtx":
-            A = mmread(matrix_fname)
-        else:
-            raise ValueError("Adjacency matrix file format should be .npz or .mtx")
+        with h5py.File(matrix_fname, 'r') as f:
+            A = csr_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=(f.attrs['n'], f.attrs['n']))
+            variant_indices = f['variant_indices'][:]
+            flip = f['flip'][:]
 
         # Construct the final object and return!
-        return LinearARG(A, sample_indices, v_info)
-        # return LinearARG(A, s_info.indices, v_info)
+        return LinearARG(A, flip, variant_indices, sample_indices, v_info)
 
     def make_triangular(self) -> "LinearARG":
         order = np.asarray(topological_sort(self.A))
@@ -451,14 +412,11 @@ class LinearARG(LinearOperator):
 
         A = self.A[order, :][:, order]
         s_idx = inv_order[self.sample_indices]
-
         v_idx = inv_order[self.variant_indices]
-        v_info = self.variants.table.clone()
-        v_idx = pl.Series(v_idx)
-        v_info = v_info.with_columns(v_idx.alias("IDX"))
+        
 
         # this results in an out of bounds error since the variant indices are greater than the number of rows in v_info
         # v_info = self.variants[v_idx]
         # return LinearARG(A, s_idx, v_info)
 
-        return LinearARG(A, s_idx, VariantInfo(v_info))
+        return LinearARG(A, self.flip, v_idx, s_idx, self.variants)

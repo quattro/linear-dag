@@ -580,21 +580,22 @@ cdef void add_nonredundant_neighbors(DiGraph result, node * starting_node, Integ
             result.add_edge(starting_node.index, out_edge.v.index)
         out_edge = out_edge.next_out
 
-cpdef tuple read_brick_graph_npz(npz_data):
+cpdef tuple read_brick_graph_h5(filename):
     """
-    From NpzFile, read in brick graph.
-    :param npz_data: NpzFile from infer brick graph
-    :return: graph (adjacency matrix), sample_indices, variant_indices
+    Read in brick graph from h5 file.
+    :param filename: path to .h5 file
+    :return: graph (DiGraph), sample_indices, variant_indices
     """
-    adj_mat = csr_matrix((npz_data['brick_graph_data'], npz_data['brick_graph_indices'], npz_data['brick_graph_indptr']), shape=npz_data['brick_graph_shape'])
-    graph = DiGraph.from_csr(adj_mat)
-    sample_indices = npz_data['sample_indices']
-    variant_indices = npz_data['variant_indices']
+    with h5py.File(filename, 'r') as f:
+        A = csr_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=(f.attrs['n'], f.attrs['n'])) 
+        variant_indices = f['variant_indices'][:]   
+        sample_indices = f['sample_indices'][:]   
+    graph = DiGraph.from_csr(A)
     return graph, sample_indices, variant_indices
 
 cpdef tuple get_graph_statistics(str brick_graph_dir):
     """
-    Get merged graph statisticics from directory of brick graph partitions.
+    Get merged graph statistics from directory of brick graph partitions.
     :param brick_graph_dir: location of brick graph partitions
     :return: num_samples, number_of_nodes, number_of_edges
     """
@@ -602,7 +603,7 @@ cpdef tuple get_graph_statistics(str brick_graph_dir):
     cdef int number_of_edges = 0
     cdef list files = os.listdir(brick_graph_dir)
     for f in files:
-        graph, sample_indices, variant_indices = read_brick_graph_npz(np.load(f'{brick_graph_dir}/{f}'))
+        graph, sample_indices, variant_indices = read_brick_graph_h5(f'{brick_graph_dir}/{f}')
         number_of_nodes += graph.number_of_nodes
         number_of_edges += graph.number_of_edges
     num_samples = len(sample_indices)
@@ -652,7 +653,7 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
 
     for f in files:
 
-        graph, samples, variants = read_brick_graph_npz(np.load(f'{brick_graph_dir}/{f}'))
+        graph, samples, variants = read_brick_graph_h5(f'{brick_graph_dir}/{f}')
 
         # Get new node ids corresponding to the merged graph
         sample_counter = 0
