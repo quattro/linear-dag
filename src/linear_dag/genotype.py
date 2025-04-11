@@ -81,7 +81,7 @@ def read_vcf(
     v_info = pl.DataFrame(var_table)
     
     if len(data) == 0:
-        return None, None
+        return None, None, None
 
     data = np.concatenate(data)
     idxs = np.concatenate(idxs)
