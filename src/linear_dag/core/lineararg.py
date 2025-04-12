@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from os import linesep, PathLike
 from typing import ClassVar, Optional, Union
+import time
 
 # import bed_reader as br
 import numpy as np
@@ -17,7 +18,7 @@ from scipy.sparse import csc_matrix, csr_matrix, diags, eye, load_npz, save_npz
 from scipy.sparse.linalg import aslinearoperator, LinearOperator, spsolve_triangular
 
 from linear_dag.genotype import read_vcf
-
+from linear_dag.core.solve import get_nonunique_indices_csc
 from .linear_arg_inference import linear_arg_from_genotypes
 from .solve import topological_sort, \
             spsolve_forward_triangular_matmat, \
@@ -52,7 +53,7 @@ class VariantInfo:
 
     @cached_property
     def indices(self):
-        return self.table[self.idx_field].to_numpy().astype(int)
+        return self.table[self.idx_field].to_numpy().astype(np.int32)
 
     def copy(self):
         return VariantInfo(self.table.clone())
@@ -169,12 +170,13 @@ class VariantInfo:
 
 @dataclass
 class LinearARG(LinearOperator):
-    A: csr_matrix
-    sample_indices: npt.NDArray[np.uint]
+    A: csc_matrix
+    sample_indices: npt.NDArray[np.int32]
     variants: VariantInfo
+    nonunique_indices: Optional[npt.NDArray[np.int32]] = None
 
     @property
-    def variant_indices(self):
+    def variant_indices(self) -> npt.NDArray[np.int32]:
         return self.variants.indices
 
     @property
@@ -261,7 +263,7 @@ class LinearARG(LinearOperator):
         """
         Returns a linear operator representing the mean-centered genotype matrix
         """
-        mean = aslinearoperator(np.ones((self.shape[0], 1))) @ aslinearoperator(self.allele_frequencies)
+        mean = aslinearoperator(np.ones((self.shape[0], 1), dtype=np.float32)) @ aslinearoperator(self.allele_frequencies)
         return self - mean
 
     @property
@@ -272,11 +274,11 @@ class LinearARG(LinearOperator):
         """
         pq = self.allele_frequencies * (1 - self.allele_frequencies)
         pq[pq == 0] = 1
-        return self.mean_centered * aslinearoperator(diags(pq**-0.5))
+        return self.mean_centered @ aslinearoperator(diags(pq**-0.5))
 
     @cached_property
     def allele_frequencies(self):
-        return (np.ones(self.shape[0]) @ self) / self.shape[0]
+        return (np.ones(self.shape[0], dtype=np.int32) @ self) / self.shape[0]
 
     def __str__(self):
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
@@ -302,15 +304,20 @@ class LinearARG(LinearOperator):
             raise ValueError(
                 f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and {other.shape}."
             )
+        
+        self.calculate_nonunique_indices()
+        v = np.zeros((other.shape[1], self.num_nonunique_index), dtype=other.dtype, order='F')
 
-        v = np.zeros((other.shape[1], self.A.shape[0]), dtype=other.dtype, order='F')
         if any(self.flip):
             temp = other.T * (-1) ** self.flip.reshape(1,-1)
         else:
             temp = other.T
-        add_at(v, self.variant_indices, temp)
-        spsolve_forward_triangular_matmat(self.A, v)
-        return v[:, self.sample_indices].T + np.sum(other[self.flip], axis=0)
+
+        variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
+        add_at(v, variant_nonunique_indices, temp)
+        spsolve_forward_triangular_matmat(self.A, v, self.nonunique_indices)
+        sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
+        return v[:, sample_nonunique_indices].T + np.sum(other[self.flip], axis=0)
 
     def _rmatmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
         if other.ndim == 1:
@@ -319,10 +326,14 @@ class LinearARG(LinearOperator):
             raise ValueError(
                 f"Incorrect dimensions for matrix multiplication. " f"Inputs had size {other.shape} and {self.shape}."
             )
-        v = np.zeros((other.shape[1], self.A.shape[1]), dtype=other.dtype, order='F')
-        v[:, self.sample_indices] = other.T
-        spsolve_backward_triangular_matmat(self.A, v)
-        v = v[:, self.variant_indices]
+
+        self.calculate_nonunique_indices()
+        v = np.zeros((other.shape[1], self.num_nonunique_index), dtype=other.dtype, order='F')   
+        sample_nonunique_indices = self.nonunique_indices[self.sample_indices]   
+        v[:, sample_nonunique_indices] = other.T
+        spsolve_backward_triangular_matmat(self.A, v, self.nonunique_indices)
+        variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
+        v = v[:, variant_nonunique_indices]
         if np.any(self.flip):
             v[:, self.flip] = np.sum(other, axis=0) - v[:, self.flip]
         return v.T
@@ -427,7 +438,7 @@ class LinearARG(LinearOperator):
         # Load sample info
         # temporary fix
         sample_info = pl.read_csv(samples_fname, separator=" ")
-        sample_indices = np.array(sample_info["IDX"])
+        sample_indices = np.array(sample_info["IDX"], dtype=np.int32)
         # s_info = SampleInfo.read(samples_fname)
 
         # Load variant info
@@ -441,13 +452,14 @@ class LinearARG(LinearOperator):
         else:
             raise ValueError("Adjacency matrix file format should be .npz or .mtx")
 
-        # Construct the final object and return!
+        A = csc_matrix(A)
+        
         return LinearARG(A, sample_indices, v_info)
         # return LinearARG(A, s_info.indices, v_info)
 
     def make_triangular(self) -> "LinearARG":
         order = np.asarray(topological_sort(self.A))
-        inv_order = np.argsort(order)
+        inv_order = np.argsort(order).astype(np.int32)
 
         A = self.A[order, :][:, order]
         s_idx = inv_order[self.sample_indices]
@@ -462,3 +474,21 @@ class LinearARG(LinearOperator):
         # return LinearARG(A, s_idx, v_info)
 
         return LinearARG(A, s_idx, VariantInfo(v_info))
+
+    def calculate_nonunique_indices(self) -> None:
+        """Calculates and stores non-unique indices to facilitate memory-efficient matmat and rmatmat operations."""
+        if self.nonunique_indices is None:
+            self.nonunique_indices = get_nonunique_indices_csc(
+                self.A.indices,
+                self.A.indptr,
+                self.sample_indices,
+                self.variant_indices,
+            )
+            self.nonunique_indices = np.asarray(self.nonunique_indices)
+            
+    @cached_property
+    def num_nonunique_index(self) -> Optional[int]:
+        if self.nonunique_indices is None:
+            return None
+        return np.max(self.nonunique_indices) + 1
+            
