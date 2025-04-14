@@ -356,29 +356,30 @@ class LinearARG(LinearOperator):
         return x
 
     def _matvec(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
-        if other.shape != (self.shape[1],):
+        if other.shape != (self.shape[1],) and other.shape != (self.shape[1], 1):
             raise ValueError(
                 f"Incorrect dimensions for matrix-vector multiplication. Inputs had size {self.shape} and {other.shape}."
             )
 
         v = np.zeros(self.A.shape[0], dtype=np.float64)
-        temp = other.astype(np.float64) * ((-1) ** self.flip.ravel())
+        temp = other.ravel().astype(np.float64) * ((-1) ** self.flip.ravel())
         np.add.at(v, self.variant_indices, temp)  # handles duplicate variant indices
         spsolve_forward_triangular(self.A, v)
-        return np.asarray(v[self.sample_indices]) + np.sum(other[self.flip])
+        result = np.asarray(v[self.sample_indices]) + np.sum(other[self.flip])
+        return result if other.ndim == 1 else result.reshape(-1, 1)
 
     def _rmatvec(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
-        if other.shape != (self.shape[0],):
+        if other.shape != (self.shape[0],) and other.shape != (self.shape[0], 1):
             raise ValueError(
                 f"Incorrect dimensions for vector-matrix multiplication. Inputs had size {other.shape} and {self.shape}."
             )
         v = np.zeros(self.A.shape[0], dtype=np.float64)
-        v[self.sample_indices] = other.astype(np.float64)
+        v[self.sample_indices] = other.ravel().astype(np.float64)
         spsolve_backward_triangular(self.A, v)
         v = v[self.variant_indices]
         if np.any(self.flip):
             v[self.flip] = np.sum(other) - v[self.flip]
-        return v
+        return v if other.ndim == 1 else v.reshape(-1, 1)
 
     def __getitem__(self, key: tuple[slice, slice]) -> "LinearARG":
         # TODO make this work with syntax like linarg[:100,] (works with linarg[:100,:])
