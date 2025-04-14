@@ -93,7 +93,7 @@ cdef void _spsolve_forward_triangular_matmat_float64(int[:] indptr,
 
     for node_idx in range(num_nodes):
         if edge_idx == indptr[node_idx + 1]:
-            continue # Avoids zeroing out the initial value assigned to nodes with no neighbors
+            continue # Avoids zeroing out the computed value for samples, which have no column neighbors
         source_ptr = &b_view[0, nonunique_indices[node_idx]]
         while edge_idx < indptr[node_idx + 1]:
             alpha = <double> data[edge_idx]
@@ -131,7 +131,7 @@ cdef void _spsolve_forward_triangular_matmat_float32(int[:] indptr,
 
     for node_idx in range(num_nodes):
         if edge_idx == indptr[node_idx + 1]:
-            continue # Avoids zeroing out the initial value assigned to nodes with no neighbors
+            continue # Avoids zeroing out the computed value for samples, which have no column neighbors
         source_ptr = &b_view[0, nonunique_indices[node_idx]]
         while edge_idx < indptr[node_idx + 1]:
             alpha = <float> data[edge_idx]

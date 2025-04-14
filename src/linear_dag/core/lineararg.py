@@ -306,7 +306,7 @@ class LinearARG(LinearOperator):
             )
         
         self.calculate_nonunique_indices()
-        v = np.zeros((other.shape[1], self.num_nonunique_index), dtype=other.dtype, order='F')
+        v = np.zeros((other.shape[1], self.num_nonunique_indices), dtype=other.dtype, order='F')
 
         if any(self.flip):
             temp = other.T * (-1) ** self.flip.reshape(1,-1)
@@ -328,7 +328,7 @@ class LinearARG(LinearOperator):
             )
 
         self.calculate_nonunique_indices()
-        v = np.zeros((other.shape[1], self.num_nonunique_index), dtype=other.dtype, order='F')   
+        v = np.zeros((other.shape[1], self.num_nonunique_indices), dtype=other.dtype, order='F')   
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]   
         v[:, sample_nonunique_indices] = other.T
         spsolve_backward_triangular_matmat(self.A, v, self.nonunique_indices)
@@ -486,9 +486,10 @@ class LinearARG(LinearOperator):
                 self.variant_indices,
             )
             self.nonunique_indices = np.asarray(self.nonunique_indices)
+            print(f"Non-unique indices: {self.num_nonunique_indices} vs. {self.A.shape[0]}")
             
     @cached_property
-    def num_nonunique_index(self) -> Optional[int]:
+    def num_nonunique_indices(self) -> Optional[int]:
         if self.nonunique_indices is None:
             return None
         return np.max(self.nonunique_indices) + 1
