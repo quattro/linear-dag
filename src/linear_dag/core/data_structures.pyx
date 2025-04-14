@@ -697,7 +697,7 @@ cdef class DiGraph:
         if self.is_node == NULL:
             raise MemoryError("Could not reallocate memory for is_node array.")
 
-        for i in range(self.maximum_number_of_nodes, new_maximum_number_of_nodes):
+        for i in reversed(range(self.maximum_number_of_nodes, new_maximum_number_of_nodes)):
             self.is_node[i] = False
             self.nodes[i] = <node*> self.available_nodes.push(i)
 

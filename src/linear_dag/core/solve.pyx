@@ -5,11 +5,12 @@
 
 import numpy as np
 cimport numpy as np
+from libc.string cimport memset
 from scipy.sparse import csc_matrix, csr_matrix
-from .data_structures cimport Stack
+from .data_structures cimport Stack, InfiniteStack
 cimport scipy.linalg.cython_blas as blas
 
-def spsolve_forward_triangular(A: "csr_matrix", b: np.ndarray) -> None:
+def spsolve_forward_triangular(A: "csc_matrix", b: np.ndarray) -> None:
     """Solves the system (I-A)x = b in place, where A is a lower triangular zero-diagonal matrix."""
     
     cdef int num_nodes = len(A.indptr) - 1
@@ -24,10 +25,10 @@ def spsolve_forward_triangular(A: "csr_matrix", b: np.ndarray) -> None:
     with nogil:
         for node_idx in range(num_nodes):
             while edge_idx < indptr[node_idx + 1]:
-                b_view[node_idx] += b_view[indices[edge_idx]] * data[edge_idx]
+                b_view[indices[edge_idx]] += b_view[node_idx] * data[edge_idx]
                 edge_idx += 1
 
-def spsolve_backward_triangular(A: "csr_matrix", b: np.ndarray) -> None:
+def spsolve_backward_triangular(A: "csc_matrix", b: np.ndarray) -> None:
     """Solves the system (I-A)'x = b in place, where A is a lower triangular zero-diagonal matrix."""
     
     cdef int num_nodes = len(A.indptr) - 1
@@ -43,30 +44,42 @@ def spsolve_backward_triangular(A: "csr_matrix", b: np.ndarray) -> None:
         for node_idx in range(num_nodes - 1, -1, -1):
             while edge_idx > indptr[node_idx]:
                 edge_idx -= 1
-                b_view[indices[edge_idx]] += b_view[node_idx] * data[edge_idx]
+                b_view[node_idx] += b_view[indices[edge_idx]] * data[edge_idx]
 
 
-def spsolve_forward_triangular_matmat(A: "csr_matrix", b: np.ndarray) -> None:
-    """Solves (I-A)x' = b' in place, where A is a lower-triangular, zero-diagonal CSR matrix.
-    Assumes that b is Fortran-contiguous."""
+def spsolve_forward_triangular_matmat(A: "csc_matrix", b: np.ndarray, nonunique_indices: np.ndarray) -> None:
+    """Solves (I-A)x' = b' in place, where A is a lower-triangular, zero-diagonal CSC matrix.
+    Assumes that b is Fortran-contiguous. nonunique_indices is an array of length equal to A.shape[0] that
+    maps each row/col of A (node) to a column of b. There can be multiple nodes mapped to the same column of b.
+    If two nodes i < j have the same nonunique index, then they must have segmented 
+    row neighbors (nonzeros in A[i,:] or A[j,:]): 
+                    {neighbors of i} < i < {neighbors of j} < j
+    The get_nonunique_indices_csc() function produces these indices (the identity mapping also works).
+    """
     
     if b.ndim == 1:
         b = b.reshape(1, -1)
-    
+
     if b.dtype == np.float64:
-        _spsolve_forward_triangular_matmat_float64(A.indptr, A.indices, A.data, b)
+        _spsolve_forward_triangular_matmat_float64(A.indptr, A.indices, A.data, b, nonunique_indices)
     elif b.dtype == np.float32:
-        _spsolve_forward_triangular_matmat_float32(A.indptr, A.indices, A.data, b)
+        _spsolve_forward_triangular_matmat_float32(A.indptr, A.indices, A.data, b, nonunique_indices)
     else:
         # Fall back to float64
         b_copy = b.astype(np.float64)
-        _spsolve_forward_triangular_matmat_float64(A.indptr, A.indices, A.data, b_copy)
+        _spsolve_forward_triangular_matmat_float64(A.indptr, A.indices, A.data, b_copy, nonunique_indices)
         b[:] = b_copy
 
-cdef void _spsolve_forward_triangular_matmat_float64(int[:] indptr, int[:] indices, int[:] data, double[:, :] b_view) noexcept nogil:
+cdef void _spsolve_forward_triangular_matmat_float64(int[:] indptr, 
+                                                    int[:] indices, 
+                                                    int[:] data, 
+                                                    double[:, :] b_view, 
+                                                    int[:] nonunique_indices
+                                                    ) noexcept nogil:
     cdef int node_idx, edge_idx = 0
     cdef int num_nodes = len(indptr) - 1
     cdef int vector_length = b_view.shape[0]
+    cdef int vector_bytes = vector_length * sizeof(double)
     cdef int* vector_length_ptr = &vector_length
     cdef int inc = 1
     cdef int* inc_ptr = &inc
@@ -76,23 +89,36 @@ cdef void _spsolve_forward_triangular_matmat_float64(int[:] indptr, int[:] indic
     # Get a pointer to the underlying data of b_view
     cdef double* source_ptr
     cdef double* destination_ptr
+    cdef int neighbor_nonunique_index
 
     for node_idx in range(num_nodes):
-        destination_ptr = &b_view[0, node_idx]
+        if edge_idx == indptr[node_idx + 1]:
+            continue # Avoids zeroing out the computed value for samples, which have no column neighbors
+        source_ptr = &b_view[0, nonunique_indices[node_idx]]
         while edge_idx < indptr[node_idx + 1]:
             alpha = <double> data[edge_idx]
-            source_ptr = &b_view[0, indices[edge_idx]]
+            neighbor_nonunique_index = nonunique_indices[indices[edge_idx]]
+            destination_ptr = &b_view[0, neighbor_nonunique_index]
 
             # Call the BLAS axpy routine for destination += alpha * source
             blas.daxpy(vector_length_ptr, alpha_ptr, source_ptr, inc_ptr, destination_ptr, inc_ptr)
             
             edge_idx += 1
         
+        # Zero out the source vector, which can now represent a new node
+        memset(source_ptr, 0, vector_bytes)
 
-cdef void _spsolve_forward_triangular_matmat_float32(int[:] indptr, int[:] indices, int[:] data, float[:, :] b_view):
+cdef void _spsolve_forward_triangular_matmat_float32(int[:] indptr, 
+                                                    int[:] indices, 
+                                                    int[:] data, 
+                                                    float[:, :] b_view, 
+                                                    int[:] nonunique_indices
+                                                    ) noexcept nogil:
     cdef int node_idx, edge_idx = 0
+    cdef int neighbor_nonunique_index
     cdef int num_nodes = len(indptr) - 1
     cdef int vector_length = b_view.shape[0]
+    cdef int vector_bytes = vector_length * sizeof(float)
     cdef int* vector_length_ptr = &vector_length
     cdef int inc = 1
     cdef int* inc_ptr = &inc
@@ -104,101 +130,145 @@ cdef void _spsolve_forward_triangular_matmat_float32(int[:] indptr, int[:] indic
     cdef float* destination_ptr 
 
     for node_idx in range(num_nodes):
-        destination_ptr = &b_view[0, node_idx]
+        if edge_idx == indptr[node_idx + 1]:
+            continue # Avoids zeroing out the computed value for samples, which have no column neighbors
+        source_ptr = &b_view[0, nonunique_indices[node_idx]]
         while edge_idx < indptr[node_idx + 1]:
             alpha = <float> data[edge_idx]
-            source_ptr = &b_view[0, indices[edge_idx]]
+            neighbor_nonunique_index = nonunique_indices[indices[edge_idx]]
+            destination_ptr = &b_view[0, neighbor_nonunique_index]
 
             # Call the BLAS axpy routine for destination += alpha * source
             blas.saxpy(vector_length_ptr, alpha_ptr, source_ptr, inc_ptr, destination_ptr, inc_ptr)
             
             edge_idx += 1
 
+        # Zero out the source vector, which can now represent a new node
+        memset(source_ptr, 0, vector_bytes)
 
-def spsolve_backward_triangular_matmat(A: "csr_matrix", b: np.ndarray) -> None:
+def spsolve_backward_triangular_matmat(A: "csc_matrix", b: np.ndarray, nonunique_indices: np.ndarray) -> None:
     """Solves (I-A)'x' = b' in place, where A is a lower-triangular, zero-diagonal CSR matrix.
-    Assumes that b is Fortran-contiguous."""
+    Assumes that b is Fortran-contiguous. nonunique_indices is an array of length equal to A.shape[0] that
+    maps each row/col of A (node) to a column of b. There can be multiple nodes mapped to the same column of b.
+    If two nodes i < j have the same nonunique index, then they must have segmented 
+    row neighbors (nonzeros in A[i,:] or A[j,:]): 
+                    {neighbors of i} < i < {neighbors of j} < j
+    The get_nonunique_indices_csc() function produces these indices (the identity mapping also works)."""
     
     if b.ndim == 1:
         b = b.reshape(1, -1)
     
     if b.dtype == np.float64:
-        _spsolve_backward_triangular_matmat_float64(A.indptr, A.indices, A.data, b)
+        _spsolve_backward_triangular_matmat_float64(A.indptr, A.indices, A.data, b, nonunique_indices)
     elif b.dtype == np.float32:
-        _spsolve_backward_triangular_matmat_float32(A.indptr, A.indices, A.data, b)
+        _spsolve_backward_triangular_matmat_float32(A.indptr, A.indices, A.data, b, nonunique_indices)
     else:
         # Fall back to float64
         b_copy = b.astype(np.float64)
-        _spsolve_backward_triangular_matmat_float64(A.indptr, A.indices, A.data, b_copy)
+        _spsolve_backward_triangular_matmat_float64(A.indptr, A.indices, A.data, b_copy, nonunique_indices)
         b[:] = b_copy
 
-cdef void _spsolve_backward_triangular_matmat_float64(int[:] indptr, int[:] indices, int[:] data, double[:, :] b_view) noexcept nogil:
+cdef void _spsolve_backward_triangular_matmat_float64(
+                                                    int[:] indptr,
+                                                    int[:] indices,
+                                                    int[:] data,
+                                                    double[:, :] b_view,
+                                                    int[:] nonunique_indices,
+                                                    ) noexcept nogil:
     cdef int num_nodes = len(indptr) - 1
     cdef int node_idx
     cdef int edge_idx = indptr[num_nodes]
     cdef int vector_length = b_view.shape[0]
+    cdef int vector_bytes = vector_length * sizeof(double)
     cdef int* vector_length_ptr = &vector_length
     cdef int inc = 1
     cdef int* inc_ptr = &inc
     cdef double alpha
     cdef double* alpha_ptr = &alpha
+    cdef int neighbor_nonunique_index
 
     # Pointers into b_view
     cdef double* source_ptr
     cdef double* destination_ptr 
 
     for node_idx in range(num_nodes - 1, -1, -1):
-        source_ptr = &b_view[0, node_idx]
+        if edge_idx == indptr[node_idx]:
+            continue # Avoids zeroing out the initial value assigned to nodes with no neighbors
+
+        destination_ptr = &b_view[0, nonunique_indices[node_idx]]
+
+        # Zero out the destination vector; its old values were for a different node 
+        memset(destination_ptr, 0, vector_bytes)
+            
         while edge_idx > indptr[node_idx]:
             edge_idx -= 1
             alpha = <double> data[edge_idx]
-            destination_ptr = &b_view[0, indices[edge_idx]]
+            neighbor_nonunique_index = nonunique_indices[indices[edge_idx]]
+            source_ptr = &b_view[0, neighbor_nonunique_index]
 
             # Call the BLAS axpy routine for destination += alpha * source
             blas.daxpy(vector_length_ptr, alpha_ptr, source_ptr, inc_ptr, destination_ptr, inc_ptr)
         
 
-cdef void _spsolve_backward_triangular_matmat_float32(int[:] indptr, int[:] indices, int[:] data, float[:, :] b_view) noexcept nogil:
+cdef void _spsolve_backward_triangular_matmat_float32(
+                                                    int[:] indptr,
+                                                    int[:] indices,
+                                                    int[:] data,
+                                                    float[:, :] b_view,
+                                                    int[:] nonunique_indices,
+                                                    ) noexcept nogil:
     cdef int num_nodes = len(indptr) - 1
     cdef int node_idx
     cdef int edge_idx = indptr[num_nodes]
     cdef int vector_length = b_view.shape[0]
+    cdef int vector_bytes = vector_length * sizeof(float)
     cdef int* vector_length_ptr = &vector_length
     cdef int inc = 1
     cdef int* inc_ptr = &inc
     cdef float alpha
     cdef float* alpha_ptr = &alpha
+    cdef int neighbor_nonunique_index
 
     # Pointers into b_view
     cdef float* source_ptr
     cdef float* destination_ptr 
 
     for node_idx in range(num_nodes - 1, -1, -1):
-        source_ptr = &b_view[0, node_idx]
+        if edge_idx == indptr[node_idx]:
+            continue # Avoids zeroing out the initial value assigned to nodes with no neighbors
+
+        destination_ptr = &b_view[0, nonunique_indices[node_idx]]
+
+        # Zero out the destination vector; its old values were for a different node 
+        memset(destination_ptr, 0, vector_bytes)
+
         while edge_idx > indptr[node_idx]:
             edge_idx -= 1
             alpha = <float> data[edge_idx]
-            destination_ptr = &b_view[0, indices[edge_idx]]
+            neighbor_nonunique_index = nonunique_indices[indices[edge_idx]]
+            source_ptr = &b_view[0, neighbor_nonunique_index]
 
             # Call the BLAS axpy routine for destination += alpha * source
             blas.saxpy(vector_length_ptr, alpha_ptr, source_ptr, inc_ptr, destination_ptr, inc_ptr)
         
 
-def add_at(destination: np.ndarray, indices: np.ndarray, source: np.ndarray):
+def add_at(destination: np.ndarray, 
+           indices: np.ndarray[int], 
+           source: np.ndarray
+           ) -> None:
     """
-    Adds source values to destination at specified indices.
-    Equivalent to np.add.at(destination, (np.arange(destination.shape[0]).reshape(-1,1), indices.reshape(1,-1)), source)
-    but much faster.
-    
-    Parameters:
-    -----------
-    destination : np.ndarray, shape (n_cols, n_rows)
-        The target array to add values to, must be Fortran-contiguous
-    indices : np.ndarray, shape (n_indices,)
-        The indices to add values at
-    source : np.ndarray, shape (n_cols, n_indices)
-        The source values to add, must be Fortran-contiguous
+    Adds source values to destination at specified column indices.
+    Column j of `source` is added to column indices[j] of `destination`. 
     """
+    if destination.dtype != source.dtype:
+        raise ValueError("Destination and source must have the same dtype")
+    if destination.shape[0] != source.shape[0]:
+        raise ValueError("Destination and source must have the same number of rows")
+    if source.shape[1] != indices.shape[0]:
+        raise ValueError("There should be an index for each column in source")
+    if np.max(indices) >= destination.shape[1]:
+        raise ValueError("An index must be less than the number of columns in destination")
+
     if destination.dtype == np.float64:
         _add_at_float64(destination, indices, source)
     elif destination.dtype == np.float32:
@@ -210,11 +280,10 @@ def add_at(destination: np.ndarray, indices: np.ndarray, source: np.ndarray):
         _add_at_float64(dest_copy, indices, source_copy)
         destination[:] = dest_copy
 
-cdef void _add_at_float64(double[:, :] dest_view, long[:] indices_view, double[:, :] source_view) noexcept nogil:
+cdef void _add_at_float64(double[:, :] dest_view, int[:] indices_view, double[:, :] source_view) noexcept nogil:
     cdef int n_cols = dest_view.shape[0]
     cdef int n_rows = dest_view.shape[1]
     cdef int n_indices = indices_view.shape[0]
-    
     cdef int col_idx, idx_pos, dest_idx
     
     for idx_pos in range(n_indices):
@@ -222,17 +291,85 @@ cdef void _add_at_float64(double[:, :] dest_view, long[:] indices_view, double[:
             dest_idx = indices_view[idx_pos]
             dest_view[col_idx, dest_idx] += source_view[col_idx, idx_pos]
 
-cdef void _add_at_float32(float[:, :] dest_view, long[:] indices_view, float[:, :] source_view) noexcept nogil:
+cdef void _add_at_float32(float[:, :] dest_view, int[:] indices_view, float[:, :] source_view) noexcept nogil:
     cdef int n_cols = dest_view.shape[0]
     cdef int n_rows = dest_view.shape[1]
     cdef int n_indices = indices_view.shape[0]
-    
     cdef int col_idx, idx_pos, dest_idx
     
     for idx_pos in range(n_indices):
         for col_idx in range(n_cols):
             dest_idx = indices_view[idx_pos]
             dest_view[col_idx, dest_idx] += source_view[col_idx, idx_pos]
+
+cdef int[:] get_index_count(np.ndarray[int, ndim=1] indices, int num_nodes):
+    """
+    Returns an array of length num_nodes whose entry i contains the count of 
+    occurrences of i in indices.
+    """
+    cdef int index
+    cdef int[:] counts = np.zeros(num_nodes, dtype=np.int32)
+    
+    for index in indices:
+        if index >= num_nodes or index < 0:
+            raise ValueError("Entrices of indices must belong to [0, num_nodes)")
+        counts[index] += 1
+        
+    return counts
+
+def get_nonunique_indices_csc(
+                        np.ndarray[int, ndim=1] indices, 
+                        np.ndarray[int, ndim=1] indptr, 
+                        np.ndarray[int, ndim=1] sample_indices, 
+                        np.ndarray[int, ndim=1] variant_indices,
+                        ) -> np.ndarray[int]:
+    """
+    Obtains a non-unique index for each node, with the property that if two nodes i < j have the same 
+    nonunique index, then they have segmented row neighbors (nonzeros in A[i,:] or A[j,:]): 
+                    {neighbors of i} < i < {neighbors of j} < j
+    Sample and variant nodes are assigned their own index, so that values computed for these
+    nodes are not overwritten. `sample_indices` are assumed to be unique; `variant_indices` may be
+    non-unique, and variants with the same node index get the same nonunique index.
+    """
+
+    cdef int num_nodes = len(indptr) - 1
+    cdef int[:] result = -np.ones(num_nodes, dtype=np.int32)
+    cdef int num_samples = len(sample_indices)
+    cdef int num_variants = len(variant_indices)
+
+    # Samples are assigned indices 0,...,len(sample_indices)-1
+    cdef int i
+    for i in range(num_samples):
+        result[sample_indices[i]] = i
+    
+    # One index is assigned per unique variant index (less than num_variants)
+    cdef int node = -1
+    cdef int next_index = num_samples-1
+    cdef long[:] variant_order = np.argsort(variant_indices)
+    for i in variant_order:
+        next_index += (variant_indices[i] != node)
+        result[variant_indices[i]] = next_index
+        node = variant_indices[i]
+    
+    cdef int num_unique = next_index + 1
+    cdef InfiniteStack available = InfiniteStack()
+    available.last = num_unique - 1
+
+    cdef int[:] column_count = get_index_count(indices, num_nodes)
+
+    for node in range(num_nodes-1, -1, -1):
+        if result[node] == -1:
+            result[node] = available.pop()
+            assert result[node] >= num_unique
+        for i in range(indptr[node], indptr[node+1]):
+            assert indices[i] > node, f"{indices[i]} should be > {node}"
+            column_count[indices[i]] -= 1
+            if column_count[indices[i]] == 0 and result[indices[i]] >= num_unique:
+                available.push(result[indices[i]])
+        if column_count[node] == 0 and result[node] >= num_unique:
+            available.push(result[node])
+    
+    return result
 
 def spinv_make_triangular(sparse_matrix: "csr_matrix") -> "csc_matrix":
     """
