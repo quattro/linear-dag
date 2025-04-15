@@ -28,7 +28,7 @@ def linear_arg_from_genotypes(genotypes, flip, variant_info, find_recombinations
 
     if verbosity > 0:
         print("Linearizing brick graph")
-    linear_arg_adjacency_matrix = linearize_brick_graph(recom)
+    linear_arg_adjacency_matrix = csc_matrix(linearize_brick_graph(recom))
 
     num_variants = len(variants_idx)
     if variant_info is None:

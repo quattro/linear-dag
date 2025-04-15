@@ -587,10 +587,10 @@ cpdef tuple read_brick_graph_h5(filename):
     :return: graph (DiGraph), sample_indices, variant_indices
     """
     with h5py.File(filename, 'r') as f:
-        A = csr_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=(f.attrs['n'], f.attrs['n'])) 
+        A = csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=(f.attrs['n'], f.attrs['n'])) 
         variant_indices = f['variant_indices'][:]   
         sample_indices = f['sample_indices'][:]   
-    graph = DiGraph.from_csr(A)
+    graph = DiGraph.from_csc(A)
     return graph, sample_indices, variant_indices
 
 cpdef tuple get_graph_statistics(str brick_graph_dir):

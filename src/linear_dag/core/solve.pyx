@@ -467,7 +467,7 @@ def spinv_triangular(A: "csr_matrix") -> "csc_matrix":
     return csc_matrix((x_data[:next_x_indptr], x_indices[:next_x_indptr], x_indptr))
 
 
-def topological_sort(A: "csr_matrix") -> np.ndarray:
+def topological_sort(A: "csr_matrix", nodes_to_ignore: np.ndarray = None) -> np.ndarray:
     """
     The topological sort of a directed graph with adjacency matrix equal to A transpose. If A[i,j] != 0,
     then j will come before i in the ordering. The diagonal of A is ignored.
@@ -502,11 +502,13 @@ def topological_sort(A: "csr_matrix") -> np.ndarray:
             num_unvisited_nonself_parents[child] -= 1
             if child == node:
                 assert num_unvisited_nonself_parents[child] == -1
+            if (nodes_to_ignore is not None) and (child in nodes_to_ignore): # do not visit nodes in nodes_to_ignore
+                continue
             if num_unvisited_nonself_parents[child] == 0:
                 nodes_to_visit.push(child)
         i += 1
 
-    if i != num_nodes:
-        raise ValueError("Adjacency matrix is not acyclic")
+    # if i != num_nodes:
+    #     raise ValueError("Adjacency matrix is not acyclic")
 
     return result

@@ -8,7 +8,7 @@ import h5py
 
 from ..genotype import read_vcf
 from .brick_graph import BrickGraph, read_graph_from_disk, merge_brick_graphs
-from .lineararg import LinearARG, VariantInfo
+from .lineararg import LinearARG, VariantInfo, make_triangular
 from .one_summed_cy import linearize_brick_graph
 from .recombination import Recombination
 
@@ -103,7 +103,7 @@ def reduction_union_recom(linarg_dir, load_dir, partition_identifier):
     recom.find_recombinations()
     t6 = time.time()
     logger.info(f"Found recombinations in {np.round(t6 - t5, 3)} seconds")
-    adj_mat = recom.to_csr()
+    adj_mat = recom.to_csc()
     
     logger.info("Saving brick graph")
     with h5py.File(f"{linarg_dir}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
@@ -144,7 +144,7 @@ def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
     recom.find_recombinations()
     t4 = time.time()
     logger.info(f"Recombinations found in {np.round(t4 - t3, 3)} seconds")
-    adj_mat = recom.to_csr()
+    adj_mat = recom.to_csc()
     
     logger.info("Saving brick graph")
     with h5py.File(f"{linarg_dir}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
@@ -187,12 +187,13 @@ def merge(linarg_dir, load_dir):
     logger.info(f"Recombinations found in {np.round(t4 - t3, 3)} seconds")
     logger.info("Linearizing brick graph")
     t5 = time.time()
-    linear_arg_adjacency_matrix = linearize_brick_graph(merged_graph_recom)
+    A = sp.csc_matrix(linearize_brick_graph(merged_graph_recom))
+    # A = linearize_brick_graph(merged_graph_recom)
     t6 = time.time()
     logger.info(f"Linearized brick graph in {np.round(t6 - t5, 3)} seconds")
     sample_indices = np.arange(num_samples)
 
-    logger.info("Saving merged linear ARG and variant metadata")
+    logger.info("Reading variant metadata and flip")
     files = os.listdir(f"{load_dir}{linarg_dir}/variant_metadata/")
     ind_arr = np.array([int(f.split("_")[0]) for f in files])
     order = ind_arr.argsort()
@@ -210,9 +211,14 @@ def merge(linarg_dir, load_dir):
             flip_partition = list(f['flip'][:])
         flip += flip_partition    
     flip = np.array(flip)
-    linarg = LinearARG(linear_arg_adjacency_matrix, flip, variant_indices, sample_indices, var_info)
-    linarg = linarg.make_triangular()
+    
+    logger.info("Triangularizing and computing nonunique indices")
+    A_tri, variant_indices_tri = make_triangular(A, variant_indices, sample_indices)
+    linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), var_info)
+    linarg.calculate_nonunique_indices()
+    logger.info("Saving linear ARG")
     linarg.write(f"{linarg_dir}/linear_arg")
+    logger.info("Computing linear ARG stats")
     get_linarg_stats(linarg_dir, load_dir)
 
 
@@ -220,9 +226,7 @@ def get_linarg_stats(linarg_dir, load_dir):
     """
     Get stats from linear ARG.
     """
-    linarg = LinearARG.read(
-        f"{linarg_dir}/linear_arg.h5", f"{linarg_dir}/linear_arg.pvar.gz", f"{linarg_dir}/linear_arg.psam.gz"
-    )
+    linarg = LinearARG.read(f"{linarg_dir}/linear_arg.h5")
     
     linarg.flip = np.array([False for i in range(linarg.shape[1])])
 
@@ -251,8 +255,7 @@ def get_linarg_stats(linarg_dir, load_dir):
         allele_counts.append(allele_count_from_genotypes)
     allele_counts_from_genotype = np.concatenate(allele_counts)
 
-    coo = linarg.A.tocoo()
-    brick_graph_nnz = np.sum(coo.data > 0)
+    brick_graph_nnz = np.sum(linarg.A.data > 0)
 
     stats = [
         linarg.shape[0],

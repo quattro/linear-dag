@@ -134,23 +134,16 @@ class VariantInfo:
 
 @dataclass
 class LinearARG(LinearOperator):
-    A: csc_matrix
-    sample_indices: npt.NDArray[np.int32]
-    variants: VariantInfo
-    nonunique_indices: Optional[npt.NDArray[np.int32]] = None
-
-    @property
-    def variant_indices(self) -> npt.NDArray[np.int32]:
-        return self.variants.indices
-
-    @property
-    def flip(self):
-        return self.variants.is_flipped
-    A: csr_matrix
-    flip: npt.NDArray[np.bool_]
+    A: csc_matrix # samples must be in descending order starting from the final row/col
     variant_indices: npt.NDArray[np.uint]
-    sample_indices: npt.NDArray[np.uint]
+    flip: npt.NDArray[np.bool_]
+    n_samples: np.int32
     variants: VariantInfo = None
+    nonunique_indices: Optional[npt.NDArray[np.int32]] = None
+    
+    @property
+    def sample_indices(self):
+        return np.arange(self.A.shape[0]-1, self.A.shape[0] - self.n_samples - 1, -1, dtype=np.int32)
 
     @staticmethod
     def from_genotypes(
@@ -158,7 +151,6 @@ class LinearARG(LinearOperator):
         flip: npt.NDArray[np.bool_],
         variant_info: pl.DataFrame = None,
         find_recombinations: bool = True,
-        make_triangular: bool = True,
         verbosity: int = 0,
     ):
         """
@@ -170,14 +162,14 @@ class LinearARG(LinearOperator):
         :param make_triangular: whether to re-order rows and columns such that the adjacency matrix is triangular
         :return: linear ARG instance
         """
-        linear_arg_adjacency_matrix, flip, variants_idx, samples_idx, variant_info = linear_arg_from_genotypes(
+        A, flip, variants_idx, samples_idx, variant_info = linear_arg_from_genotypes(
             genotypes, variant_info, find_recombinations, verbosity
         )
-        result = LinearARG(linear_arg_adjacency_matrix, flip, variants_idx, samples_idx, VariantInfo(variant_info))
-        if make_triangular:
-            result = result.make_triangular()
-
-        return result
+        A_tri, variants_idx_tri = make_triangular(A, variants_idx, samples_idx)
+        linarg = LinearARG(A_tri, variants_idx_tri, flip, len(samples_idx), VariantInfo(variant_info))
+        linarg.calculate_nonunique_indices()
+        return linarg
+        
 
     # @staticmethod
     # def from_plink(prefix: str) -> "LinearARG":
@@ -353,39 +345,34 @@ class LinearARG(LinearOperator):
 
     def __getitem__(self, key: tuple[slice, slice]) -> "LinearARG":
         # TODO make this work with syntax like linarg[:100,] (works with linarg[:100,:])
-        rows, cols = key
-        return LinearARG(self.A, self.sample_indices[rows], self.variants[cols])
+        # rows, cols = key
+        # return LinearARG(self.A, self.sample_indices[rows], self.variants[cols])
+        pass
 
     def copy(self) -> "LinearARG":
-        return LinearARG(self.A.copy(), self.sample_indices.copy(), self.variants.copy())
+        # return LinearARG(self.A.copy(), self.sample_indices.copy(), self.variants.copy())
+        pass
 
     def write(self, prefix: Union[str, PathLike], compression_option: str = "gzip"):
-        """Writes LinearARG triplet to disk.
+        """Writes LinearARG to disk.
         :param prefix: The base path and prefix used for output files.
         :return: None
         """
-        # write out sample info
-        # temporary fix
-        iids = None
-        with gzip.open(f"{prefix}.psam.gz", "wt") as f_samples:
-            f_samples.write("#IID IDX\n")
-            if iids is None:
-                iids = [f"sample_{idx}" for idx in range(self.shape[0])]
-            for i, iid in enumerate(iids):
-                f_samples.write(f"{iid} {self.sample_indices[i]}\n")
-        # self.samples.write(prefix + ".psam")
-
         # write out variant info
-        self.variants.write(prefix + ".pvar.gz")
+        if self.variants is not None:
+            self.variants.write(prefix + ".pvar.gz")
 
         # write out DAG info
         with h5py.File(prefix + ".h5", "w") as f:
             f.attrs['n'] = self.A.shape[0]
+            f.attrs['n_samples'] = self.n_samples
             f.create_dataset('indptr', data=self.A.indptr, compression=compression_option, shuffle=True)
             f.create_dataset('indices', data=self.A.indices, compression=compression_option, shuffle=True)
             f.create_dataset('data', data=self.A.data, compression=compression_option, shuffle=True)
             f.create_dataset('variant_indices', data=self.variant_indices, compression=compression_option, shuffle=True)
             f.create_dataset('flip', data=self.flip, compression=compression_option, shuffle=True)
+            if self.nonunique_indices is not None:
+                f.create_dataset('nonunique_indices', data=self.nonunique_indices, compression=compression_option, shuffle=True)
         return
 
     @staticmethod
@@ -399,20 +386,11 @@ class LinearARG(LinearOperator):
 
         :param matrix_fname: Filename for the .h5 file containing the adjacency matrix, variant_indices, and flip.
         :param variant_fname: Filename for the .pvar file containing variant data.
-        :param samples_fname: Filename for the .psam file containing sample IDs.
 
-        :return: A tuple containing the LinearARG object, list of variant IDs, and list of IIDs.
+        :return: A LinearARG object.
         """
         if not variant_fname:
             variant_fname = matrix_fname[:-3] + ".pvar.gz"
-        if not samples_fname:
-            samples_fname = matrix_fname[:-3] + ".psam.gz"
-
-        # Load sample info
-        # temporary fix
-        sample_info = pl.read_csv(samples_fname, separator=" ")
-        sample_indices = np.array(sample_info["IDX"], dtype=np.int32)
-        # s_info = SampleInfo.read(samples_fname)
 
         # Load variant info
         if load_metadata:
@@ -422,31 +400,16 @@ class LinearARG(LinearOperator):
 
         # Load the adjacency matrix
         with h5py.File(matrix_fname, 'r') as f:
-            A = csr_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=(f.attrs['n'], f.attrs['n']))
+            A = csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=(f.attrs['n'], f.attrs['n']))
             variant_indices = f['variant_indices'][:]
             flip = f['flip'][:]
-
-        A = csc_matrix(A)
+            n_samples = f.attrs['n_samples']
+            if 'nonunique_indices' in f:
+                nonunique_indices = f['nonunique_indices'][:]
+            else:
+                nonunique_indices = None
         
-        return LinearARG(A, sample_indices, v_info)
-        # return LinearARG(A, s_info.indices, v_info)
-        # Construct the final object and return!
-        return LinearARG(A, flip, variant_indices, sample_indices, v_info)
-
-    def make_triangular(self) -> "LinearARG":
-        order = np.asarray(topological_sort(self.A))
-        inv_order = np.argsort(order).astype(np.int32)
-
-        A = self.A[order, :][:, order]
-        s_idx = inv_order[self.sample_indices]
-        v_idx = inv_order[self.variant_indices]
-        
-
-        # this results in an out of bounds error since the variant indices are greater than the number of rows in v_info
-        # v_info = self.variants[v_idx]
-        # return LinearARG(A, s_idx, v_info)
-
-        return LinearARG(A, s_idx, VariantInfo(v_info))
+        return LinearARG(A, variant_indices, flip, n_samples, v_info, nonunique_indices)
 
     def calculate_nonunique_indices(self) -> None:
         """Calculates and stores non-unique indices to facilitate memory-efficient matmat and rmatmat operations."""
@@ -465,5 +428,20 @@ class LinearARG(LinearOperator):
         if self.nonunique_indices is None:
             return None
         return np.max(self.nonunique_indices) + 1
-            
-        return LinearARG(A, self.flip, v_idx, s_idx, self.variants)
+                
+
+def make_triangular(A: csc_matrix, variant_indices: npt.NDArray[np.uint], sample_indices: npt.NDArray[np.uint]) -> tuple:
+    """
+    Triangularizes A by putting nodes in topological order (parents before children) such that sample/leaf nodes are in reverse order
+    starting from the final row/column of the returned csc_matrix. Additionally, variant_indices are reindexed with respect to this
+    new node ordering.
+    """
+    A_csr = csr_matrix(A)
+    order = np.asarray(topological_sort(A_csr, nodes_to_ignore=sample_indices))[:-len(sample_indices)]
+    order = np.append(order, sample_indices[::-1])
+    inv_order = np.argsort(order).astype(np.int32)
+
+    A_triangular = A[order, :][:, order]
+    variant_indices_reordered = inv_order[variant_indices]
+    
+    return A_triangular, variant_indices_reordered
