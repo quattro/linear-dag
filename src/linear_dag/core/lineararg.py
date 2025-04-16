@@ -38,20 +38,11 @@ class VariantInfo:
 
     table: pl.DataFrame
     req_fields: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT"]
-    req_cols: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT"]
 
     def __post_init__(self):
-        for req_col in self.req_cols:
+        for req_col in self.req_fields:
             if req_col not in self.table.columns:
                 raise ValueError(f"Required column {req_col} not found in variant table")
-
-    @cached_property
-    def is_flipped(self):
-        return self.table[self.flip_field].to_numpy().astype(bool)
-
-    @cached_property
-    def indices(self):
-        return self.table[self.idx_field].to_numpy().astype(np.int32)
 
     def copy(self):
         return VariantInfo(self.table.clone())
@@ -63,53 +54,34 @@ class VariantInfo:
     def read(cls, path: Union[str, PathLike]) -> "VariantInfo":
         if path is None:
             raise ValueError("path argument cannot be None")
-
-        open_f = gzip.open if str(path).endswith(".gz") else open
-        header_map = None
+    
         var_table = defaultdict(list)
-        with open_f(path, "rt") as var_file:
-            for line in var_file:
-                if line.startswith("##"):
-                    continue
-                elif line[0] == "#":
-                    names = line[1:].strip().split()
-                    header_map = {key: idx for idx, key in enumerate(names)}
-                    for req_name in cls.req_fields:
-                        if req_name not in header_map:
-                            # we check again later based on dataframe, but better to error out early when parsing
-                            raise ValueError(f"Required column {req_name} not found in header table")
-                    continue
-
-                # parse row; this can easily break...
-                row = line.strip().split()
-                for field in header_map:
-                    value = row[header_map[field]]
-                    if field == 'POS': # cast POS as int to save memory
-                        value = int(value)
-                    var_table[field].append(value)
-
+        with h5py.File(path, "r") as f:
+            for field in cls.req_fields:
+                if field == 'POS':
+                    var_table[field] = f[field][:].astype(int) # cast as int to save memory
+                else:
+                    var_table[field] = f[field][:].astype(str)
         var_table = pl.DataFrame(var_table)
+        return cls(var_table) # return class instance
 
-        # return class instance
-        return cls(var_table)
-
-    def write(self, path: Union[str, PathLike]):
-        open_f = gzip.open if str(path).endswith(".gz") else open
-        with open_f(path, "wt") as pvar_file:
-            pvar_file.write(f"##fileformat=PVARv1.0{linesep}")
-            pvar_file.write(f'##INFO=<ID=IDX,Number=1,Type=Integer,Description="Variant Index">{linesep}')
-            pvar_file.write(f'##INFO=<ID=FLIP,Number=0,Type=Flag,Description="Flip Information">{linesep}')
-            pvar_file.write("\t".join([f"#{self.req_fields[0]}"] + self.req_fields[1:]) + linesep)
-            pvar_file.flush()
-            pvar_file.write(self.table.write_csv(include_header=False, separator="\t"))
-        return
+    # def write(self, path: Union[str, PathLike]):
+    #     open_f = gzip.open if str(path).endswith(".gz") else open
+    #     with open_f(path, "wt") as pvar_file:
+    #         pvar_file.write(f"##fileformat=PVARv1.0{linesep}")
+    #         pvar_file.write(f'##INFO=<ID=IDX,Number=1,Type=Integer,Description="Variant Index">{linesep}')
+    #         pvar_file.write(f'##INFO=<ID=FLIP,Number=0,Type=Flag,Description="Flip Information">{linesep}')
+    #         pvar_file.write("\t".join([f"#{self.req_fields[0]}"] + self.req_fields[1:]) + linesep)
+    #         pvar_file.flush()
+    #         pvar_file.write(self.table.write_csv(include_header=False, separator="\t"))
+    #     return
 
     # @classmethod
     # def from_open_bed(
     #     cls, bed: br.open_bed, indices: Optional[npt.ArrayLike] = None, is_flipped: Optional[npt.ArrayLike] = None
     # ):
     #     # doesn't really follow conventions for a class name...
-    #     # req_cols: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT", idx_field, flip_field]
+    #     # req_fields: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT", idx_field, flip_field]
     #     df = dict()
     #     df["CHROM"] = bed.chromosome
     #     df["POS"] = bed.bp_position
@@ -358,9 +330,6 @@ class LinearARG(LinearOperator):
         :param prefix: The base path and prefix used for output files.
         :return: None
         """
-        # write out variant info
-        if self.variants is not None:
-            self.variants.write(prefix + ".pvar.gz")
 
         # write out DAG info
         with h5py.File(prefix + ".h5", "w") as f:
@@ -373,33 +342,30 @@ class LinearARG(LinearOperator):
             f.create_dataset('flip', data=self.flip, compression=compression_option, shuffle=True)
             if self.nonunique_indices is not None:
                 f.create_dataset('nonunique_indices', data=self.nonunique_indices, compression=compression_option, shuffle=True)
+            if self.variants is not None:
+                for field in self.variants.req_fields:
+                    if field == 'POS':
+                        f.create_dataset(field, data=np.array(self.variants.table[field]).astype(int), compression=compression_option, shuffle=True)
+                    else:
+                        f.create_dataset(field, data=np.array(self.variants.table[field]).astype('S'), compression=compression_option, shuffle=True)
         return
 
     @staticmethod
     def read(
-        matrix_fname: Union[str, PathLike],
-        variant_fname: Union[str, PathLike] = None,
-        samples_fname: Union[str, PathLike] = None,
+        h5_fname: Union[str, PathLike],
         load_metadata = False,
     ) -> "LinearARG":
         """Reads LinearARG data from provided PLINK2 formatted files.
 
-        :param matrix_fname: Filename for the .h5 file containing the adjacency matrix, variant_indices, and flip.
-        :param variant_fname: Filename for the .pvar file containing variant data.
-
+        :param matrix_fname: Filename for the .h5 file.
         :return: A LinearARG object.
         """
-        if not variant_fname:
-            variant_fname = matrix_fname[:-3] + ".pvar.gz"
-
-        # Load variant info
         if load_metadata:
-            v_info = VariantInfo.read(variant_fname)
+            v_info = VariantInfo.read(h5_fname)
         else:
             v_info = None
-
-        # Load the adjacency matrix
-        with h5py.File(matrix_fname, 'r') as f:
+            
+        with h5py.File(h5_fname, 'r') as f:
             A = csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=(f.attrs['n'], f.attrs['n']))
             variant_indices = f['variant_indices'][:]
             flip = f['flip'][:]
@@ -408,7 +374,7 @@ class LinearARG(LinearOperator):
                 nonunique_indices = f['nonunique_indices'][:]
             else:
                 nonunique_indices = None
-        
+                
         return LinearARG(A, variant_indices, flip, n_samples, v_info, nonunique_indices)
 
     def calculate_nonunique_indices(self) -> None:
