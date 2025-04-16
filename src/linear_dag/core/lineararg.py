@@ -135,7 +135,7 @@ class VariantInfo:
 @dataclass
 class LinearARG(LinearOperator):
     A: csc_matrix # samples must be in descending order starting from the final row/col
-    variant_indices: npt.NDArray[np.uint]
+    variant_indices: npt.NDArray[np.int32]
     flip: npt.NDArray[np.bool_]
     n_samples: np.int32
     variants: VariantInfo = None
@@ -256,7 +256,7 @@ class LinearARG(LinearOperator):
         v = np.zeros((self.A.shape[0], other.shape[1]), dtype=other.dtype)
         temp = (other.T * (-1) ** self.flip).T
         np.add.at(v, self.variant_indices, temp)
-        x = spsolve_triangular(eye(self.A.shape[0]) - self.A, v)
+        x = spsolve_triangular(eye(self.A.shape[0]) - self.A, v)    
         return x[self.sample_indices] + np.sum(other[self.flip], axis=0)
 
     def _matmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
@@ -271,7 +271,7 @@ class LinearARG(LinearOperator):
         v = np.zeros((other.shape[1], self.num_nonunique_indices), dtype=other.dtype, order='F')
 
         if any(self.flip):
-            temp = other.T * (-1) ** self.flip.reshape(1,-1)
+            temp = (other.T * (-1) ** self.flip.reshape(1,-1)).astype(other.dtype)
         else:
             temp = other.T
 
@@ -297,7 +297,7 @@ class LinearARG(LinearOperator):
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
         v = v[:, variant_nonunique_indices]
         if np.any(self.flip):
-            v[:, self.flip] = np.sum(other, axis=0) - v[:, self.flip]
+            v[:, self.flip] = np.sum(other, axis=0)[:, np.newaxis] - v[:, self.flip]
         return v.T
 
     def _rmatmat_scipy(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
