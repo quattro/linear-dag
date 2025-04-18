@@ -8,7 +8,7 @@ import h5py
 
 from ..genotype import read_vcf
 from .brick_graph import BrickGraph, read_graph_from_disk, merge_brick_graphs
-from .lineararg import LinearARG, VariantInfo, make_triangular
+from .lineararg import LinearARG, VariantInfo, make_triangular, remove_degree_zero_nodes
 from .one_summed_cy import linearize_brick_graph
 from .recombination import Recombination
 
@@ -188,7 +188,6 @@ def merge(linarg_dir, load_dir):
     logger.info("Linearizing brick graph")
     t5 = time.time()
     A = sp.csc_matrix(linearize_brick_graph(merged_graph_recom))
-    # A = linearize_brick_graph(merged_graph_recom)
     t6 = time.time()
     logger.info(f"Linearized brick graph in {np.round(t6 - t5, 3)} seconds")
     sample_indices = np.arange(num_samples)
@@ -213,7 +212,8 @@ def merge(linarg_dir, load_dir):
     flip = np.array(flip)
     
     logger.info("Triangularizing and computing nonunique indices")
-    A_tri, variant_indices_tri = make_triangular(A, variant_indices, sample_indices)
+    A_filt, variant_indices_reindexed, sample_indices_reindexed  = remove_degree_zero_nodes(A, variant_indices, sample_indices)
+    A_tri, variant_indices_tri = make_triangular(A_filt, variant_indices_reindexed, sample_indices_reindexed)
     linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), var_info)
     linarg.calculate_nonunique_indices()
     logger.info("Saving linear ARG")

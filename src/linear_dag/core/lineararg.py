@@ -137,7 +137,8 @@ class LinearARG(LinearOperator):
         A, flip, variants_idx, samples_idx, variant_info = linear_arg_from_genotypes(
             genotypes, variant_info, find_recombinations, verbosity
         )
-        A_tri, variants_idx_tri = make_triangular(A, variants_idx, samples_idx)
+        A_filt, variants_idx_reindexed, samples_idx_reindexed  = remove_degree_zero_nodes(A, variants_idx, samples_idx)
+        A_tri, variants_idx_tri = make_triangular(A_filt, variants_idx_reindexed, samples_idx_reindexed)
         linarg = LinearARG(A_tri, variants_idx_tri, flip, len(samples_idx), VariantInfo(variant_info))
         linarg.calculate_nonunique_indices()
         return linarg
@@ -394,7 +395,28 @@ class LinearARG(LinearOperator):
         if self.nonunique_indices is None:
             return None
         return np.max(self.nonunique_indices) + 1
-                
+
+
+def remove_degree_zero_nodes(A: csc_matrix, variant_indices: npt.NDArray[np.uint], sample_indices: npt.NDArray[np.uint]) -> tuple:
+    """
+    Removes degree-zero recombination nodes from the graph, while ensuring all nodes
+    in variant_indices and sample_indices are retained. Returns the
+    filtered graph and reindexed variant/sample indices.
+    """
+    node_degree = (A.getnnz(axis=0) + A.getnnz(axis=1))
+    nonzero_indices = set(np.where(node_degree > 0)[0])
+    required_indices = set(variant_indices).union(sample_indices)
+    indices_to_keep = np.array(sorted(nonzero_indices.union(required_indices)), dtype=int)
+    
+    index_map = -np.ones(A.shape[0], dtype=int)
+    index_map[indices_to_keep] = np.arange(len(indices_to_keep))
+    
+    A_filt = A[indices_to_keep, :][:, indices_to_keep]
+    variant_indices_reindexed = index_map[variant_indices]
+    sample_indices_reindexed = index_map[sample_indices]
+    
+    return A_filt, variant_indices_reindexed, sample_indices_reindexed
+            
 
 def make_triangular(A: csc_matrix, variant_indices: npt.NDArray[np.uint], sample_indices: npt.NDArray[np.uint]) -> tuple:
     """
