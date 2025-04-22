@@ -65,44 +65,6 @@ class VariantInfo:
         var_table = pl.DataFrame(var_table)
         return cls(var_table) # return class instance
 
-    # def write(self, path: Union[str, PathLike]):
-    #     open_f = gzip.open if str(path).endswith(".gz") else open
-    #     with open_f(path, "wt") as pvar_file:
-    #         pvar_file.write(f"##fileformat=PVARv1.0{linesep}")
-    #         pvar_file.write(f'##INFO=<ID=IDX,Number=1,Type=Integer,Description="Variant Index">{linesep}')
-    #         pvar_file.write(f'##INFO=<ID=FLIP,Number=0,Type=Flag,Description="Flip Information">{linesep}')
-    #         pvar_file.write("\t".join([f"#{self.req_fields[0]}"] + self.req_fields[1:]) + linesep)
-    #         pvar_file.flush()
-    #         pvar_file.write(self.table.write_csv(include_header=False, separator="\t"))
-    #     return
-
-    # @classmethod
-    # def from_open_bed(
-    #     cls, bed: br.open_bed, indices: Optional[npt.ArrayLike] = None, is_flipped: Optional[npt.ArrayLike] = None
-    # ):
-    #     # doesn't really follow conventions for a class name...
-    #     # req_fields: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT", idx_field, flip_field]
-    #     df = dict()
-    #     df["CHROM"] = bed.chromosome
-    #     df["POS"] = bed.bp_position
-    #     df["ID"] = bed.sid
-    #     df["REF"] = bed.allele_1
-    #     df["ALT"] = bed.allele_2
-    #     if indices is None:
-    #         df[cls.idx_col] = -1 * np.ones(len(bed.bp_position), dtype=int)
-    #     else:
-    #         if len(indices) != len(bed.bp_position):
-    #             raise ValueError("Length of indices does not match number of variants")
-    #         df[cls.idx_col] = indices
-    #     if is_flipped is None:
-    #         df[cls.flip_field] = np.zeros(len(bed.iid)).astype(bool)
-    #     else:
-    #         if len(is_flipped) != len(bed.bp_position):
-    #             raise ValueError("Length of is_flipped flags does not match number of variants")
-    #         df[cls.flip_field] = is_flipped
-
-    #     return cls(pl.DataFrame(df))
-
 
 @dataclass
 class LinearARG(LinearOperator):
@@ -135,7 +97,7 @@ class LinearARG(LinearOperator):
         :return: linear ARG instance
         """
         A, flip, variants_idx, samples_idx, variant_info = linear_arg_from_genotypes(
-            genotypes, variant_info, find_recombinations, verbosity
+            genotypes, flip, variant_info, find_recombinations, verbosity
         )
         A_filt, variants_idx_reindexed, samples_idx_reindexed  = remove_degree_zero_nodes(A, variants_idx, samples_idx)
         A_tri, variants_idx_tri = make_triangular(A_filt, variants_idx_reindexed, samples_idx_reindexed)
@@ -326,34 +288,52 @@ class LinearARG(LinearOperator):
         # return LinearARG(self.A.copy(), self.sample_indices.copy(), self.variants.copy())
         pass
 
-    def write(self, prefix: Union[str, PathLike], compression_option: str = "gzip"):
+    def write(self, prefix: Union[str, PathLike], block_info: Optional[dict]=None, compression_option: str = "gzip"):
         """Writes LinearARG to disk.
         :param prefix: The base path and prefix used for output files.
+        :param block_info: Optional dictionary containing:
+            - 'chrom': Chromosome number
+            - 'start': Start position
+            - 'end': End position
+        :param compression_option: Compression option for writing.
         :return: None
         """
 
         # write out DAG info
-        with h5py.File(prefix + ".h5", "w") as f:
-            f.attrs['n'] = self.A.shape[0]
-            f.attrs['n_samples'] = self.n_samples
-            f.create_dataset('indptr', data=self.A.indptr, compression=compression_option, shuffle=True)
-            f.create_dataset('indices', data=self.A.indices, compression=compression_option, shuffle=True)
-            f.create_dataset('data', data=self.A.data, compression=compression_option, shuffle=True)
-            f.create_dataset('variant_indices', data=self.variant_indices, compression=compression_option, shuffle=True)
-            f.create_dataset('flip', data=self.flip, compression=compression_option, shuffle=True)
+        with h5py.File(prefix + ".h5", "a") as f:
+            if block_info:
+                block_name = f"{block_info['chrom']}_{block_info['start']}_{block_info['end']}"
+                destination = f.create_group(block_name)
+                destination.attrs['chrom'] = block_info['chrom']
+                destination.attrs['start'] = block_info['start']
+                destination.attrs['end'] = block_info['end']
+            else:
+                destination = f
+
+            destination.attrs['n'] = self.A.shape[0]
+            destination.attrs['n_samples'] = self.n_samples
+            destination.attrs['n_variants'] = self.shape[1]
+            destination.attrs['n_entries'] = self.nnz
+  
+            destination.create_dataset('indptr', data=self.A.indptr, compression=compression_option, shuffle=True)
+            destination.create_dataset('indices', data=self.A.indices, compression=compression_option, shuffle=True)
+            destination.create_dataset('data', data=self.A.data, compression=compression_option, shuffle=True)
+            destination.create_dataset('variant_indices', data=self.variant_indices, compression=compression_option, shuffle=True)
+            destination.create_dataset('flip', data=self.flip, compression=compression_option, shuffle=True)
             if self.nonunique_indices is not None:
-                f.create_dataset('nonunique_indices', data=self.nonunique_indices, compression=compression_option, shuffle=True)
+                destination.create_dataset('nonunique_indices', data=self.nonunique_indices, compression=compression_option, shuffle=True)
             if self.variants is not None:
                 for field in self.variants.req_fields:
                     if field == 'POS':
-                        f.create_dataset(field, data=np.array(self.variants.table[field]).astype(int), compression=compression_option, shuffle=True)
+                        destination.create_dataset(field, data=np.array(self.variants.table[field]).astype(int), compression=compression_option, shuffle=True)
                     else:
-                        f.create_dataset(field, data=np.array(self.variants.table[field]).astype('S'), compression=compression_option, shuffle=True)
+                        destination.create_dataset(field, data=np.array(self.variants.table[field]).astype('S'), compression=compression_option, shuffle=True)
         return
 
     @staticmethod
     def read(
         h5_fname: Union[str, PathLike],
+        block: Optional[str] = None,
         load_metadata = False,
     ) -> "LinearARG":
         """Reads LinearARG data from provided PLINK2 formatted files.
@@ -366,7 +346,11 @@ class LinearARG(LinearOperator):
         else:
             v_info = None
             
-        with h5py.File(h5_fname, 'r') as f:
+        with h5py.File(h5_fname, 'r') as file:
+            if block:
+                f = file[block]
+            else:
+                f = file
             A = csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=(f.attrs['n'], f.attrs['n']))
             variant_indices = f['variant_indices'][:]
             flip = f['flip'][:]
@@ -396,6 +380,42 @@ class LinearARG(LinearOperator):
             return None
         return np.max(self.nonunique_indices) + 1
 
+def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
+    """
+    Lists the blocks (groups) and their attributes stored in an HDF5 file.
+    Handles cases where attributes might be at the root if no blocks exist.
+
+    Args:
+        h5_fname: Path to the HDF5 file.
+
+    Returns:
+        A Polars DataFrame where each row corresponds to a block (group)
+        or the root dataset in the HDF5 file. Columns include the block name
+        (or 'root') and its attributes.
+    """
+    block_data = []
+    with h5py.File(h5_fname, 'r') as f:
+        keys = list(f.keys())
+        # Case 1: No groups (keys), check root attributes
+        if not keys:
+            return None
+        else:
+            for block_name in keys:
+                group = f[block_name]
+                attrs = group.attrs
+                block_info = {
+                    'block_name': block_name,
+                    'chrom': attrs.get('chrom'),
+                    'start': attrs.get('start'),
+                    'end': attrs.get('end'),
+                    'n': attrs.get('n'),
+                    'n_samples': attrs.get('n_samples'),
+                    'n_variants': attrs.get('n_variants'),
+                    'n_entries': attrs.get('n_entries'),
+                }
+                block_data.append(block_info)
+
+    return pl.DataFrame(block_data)
 
 def remove_degree_zero_nodes(A: csc_matrix, variant_indices: npt.NDArray[np.uint], sample_indices: npt.NDArray[np.uint]) -> tuple:
     """

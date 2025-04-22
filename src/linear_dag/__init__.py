@@ -8,6 +8,7 @@ from .core import (
     BrickGraph as BrickGraph,
     linear_arg_from_genotypes as linear_arg_from_genotypes,
     LinearARG as LinearARG,
+    list_blocks as list_blocks,
 )
 from .genotype import (
     apply_maf_threshold as apply_maf_threshold,
