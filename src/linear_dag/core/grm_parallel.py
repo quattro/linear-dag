@@ -4,7 +4,8 @@ from typing import Callable, Dict, List, Optional, Tuple, Union, Any
 import numpy as np
 import polars as pl
 from dataclasses import dataclass
-from scipy.sparse.linalg import LinearOperator
+from scipy.sparse.linalg import LinearOperator, aslinearoperator
+from scipy.sparse import diags
 import time
 
 from .lineararg import LinearARG, list_blocks
@@ -17,6 +18,7 @@ FLAGS = {
     "get_data": 1,
     "matmat": 2,
 }
+assert(len(np.unique([val for val in FLAGS.values()])) == len(FLAGS))
 
 class _ParallelManager:
     """Manager for coordinating parallel worker processes.
@@ -74,9 +76,9 @@ class _ParallelManager:
 class GRMOperator(LinearOperator):
     """A parallel implementation of the genetic relatedness matrix (GRM).
 
-    Represents the matrix X @ D @ X.T, where X is the normalized genotype
-    matrix (zero mean/unit variance) and D is a diagonal matrix with entries
-    D_ii = (2p_iq_i)^(1 + alpha) - that is, per-allele effect sizes are 
+    Represents the matrix X @ K @ X.T, where X is the normalized genotype
+    matrix (zero mean/unit variance) and K is a diagonal matrix with entries
+    K_ii = (p_iq_i)^(1 + alpha) - that is, per-allele effect sizes are 
     proportional to the heterozygosity raised to the power alpha.
 
     Supports matrix-matrix multiplication.
@@ -176,7 +178,6 @@ class _ManagerFactory:
         for block in blocks:
             linarg = LinearARG.read(hdf5_file, block)
             linargs.append(linarg)
-        print(linarg.shape)
         
         while True:
             while flag.value == FLAGS["wait"]:
@@ -202,7 +203,9 @@ class _ManagerFactory:
                shared_data: Array,
                alpha: float,
                ) -> None:
-        result = linarg.normalized @ linarg.normalized.T @ y
+        pq = linarg.allele_frequencies * (1 - linarg.allele_frequencies)
+        K = aslinearoperator(diags(pq ** (1 + alpha)))
+        result = linarg.normalized @ K @ linarg.normalized.T @ y
         with shared_data.get_lock():
             shared_data[:np.size(result)] += result.ravel()
 
