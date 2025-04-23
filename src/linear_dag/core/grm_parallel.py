@@ -9,7 +9,6 @@ from scipy.sparse import diags
 import time
 
 from .lineararg import LinearARG, list_blocks
-from .metadata import read_metadata
 
 FLAGS = {
     "wait": 0,
