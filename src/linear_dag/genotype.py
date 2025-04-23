@@ -52,9 +52,15 @@ def read_vcf(
             return gts, False
 
     var_table = defaultdict(list)
-    tmp = region.split(':')[1]
-    start = int(tmp.split('-')[0])
-    end = int(tmp.split('-')[1])
+    if region:
+        tmp = region.split(':')[1]
+        start = int(tmp.split('-')[0])
+        end = int(tmp.split('-')[1])
+    else:
+        tmp = None
+        start = 0
+        end = np.inf
+    
     # TODO: handle missing data
     for var in vcf(region):
         
