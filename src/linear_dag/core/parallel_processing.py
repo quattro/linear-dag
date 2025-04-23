@@ -1,14 +1,14 @@
 from multiprocessing import Array, Process, Value, cpu_count, Lock
-from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union, Any
 import numpy as np
 import polars as pl
 from dataclasses import dataclass
-from scipy.sparse.linalg import LinearOperator
+from scipy.sparse.linalg import LinearOperator, aslinearoperator
+from scipy.sparse import diags
 import time
+from functools import cached_property
 
 from .lineararg import LinearARG, list_blocks
-from .metadata import read_metadata
 
 FLAGS = {
     "wait": 0,
@@ -126,7 +126,7 @@ class ParallelOperator(LinearOperator):
 
     def _rmatmat(self, x: np.ndarray):
         if x.shape[0] != self.shape[0]:
-            raise ValueError("Incorrect dimensions for matrix multiplication. " f"Inputs had size {x.shape} and {self.shape}.")
+            raise ValueError("Incorrect dimensions for matrix multiplication. " f"Inputs had size {self.T.shape} and{x.shape}.")
         result = np.empty((x.shape[1], self.shape[1]), dtype=np.float32)
 
         # Process max_num_traits columns at a time
@@ -142,7 +142,36 @@ class ParallelOperator(LinearOperator):
             result[start:end, :] = np.array(self._variant_data)[:result_size]\
                 .reshape(self.shape[1], end - start).T
 
-        return result
+        return result.T
+
+    def _matvec(self, x: np.ndarray) -> np.ndarray:
+        return self._matmat(x.reshape(-1, 1))
+
+    def _rmatvec(self, x: np.ndarray) -> np.ndarray:
+        return self._rmatmat(x.reshape(-1, 1))
+
+    @cached_property
+    def allele_frequencies(self) -> np.ndarray:
+        return (np.ones(self.shape[0], dtype=np.int32) @ self) / self.shape[0]
+    
+    @property
+    def mean_centered(self) -> LinearOperator:
+        """
+        Returns a linear operator representing the mean-centered genotype matrix
+        """
+        mean = aslinearoperator(np.ones((self.shape[0], 1), dtype=np.float32)) @ \
+            aslinearoperator(self.allele_frequencies)
+        return self - mean
+
+    @property
+    def normalized(self) -> LinearOperator:
+        """
+        Returns a linear operator representing the normalized genotype matrix
+        whose columns have mean zero and variance one
+        """
+        pq = self.allele_frequencies * (1 - self.allele_frequencies)
+        pq[pq == 0] = 1
+        return self.mean_centered @ aslinearoperator(diags(pq**-0.5))
 
     @classmethod
     def from_hdf5(cls, 
