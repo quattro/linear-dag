@@ -28,6 +28,7 @@ def read_vcf(
         return data
 
     vcf = cv.VCF(path, gts012=True, strict_gt=True, samples=whitelist)
+    iids = vcf.samples
     data = []
     idxs = []
     ptrs = [0]
@@ -87,7 +88,7 @@ def read_vcf(
     v_info = pl.DataFrame(var_table)
     
     if len(data) == 0:
-        return None, None, None
+        return None, None, None, None
 
     data = np.concatenate(data)
     idxs = np.concatenate(idxs)
@@ -95,7 +96,7 @@ def read_vcf(
     genotypes = csc_matrix((data, idxs, ptrs), shape=(gts.shape[0], len(ptrs) - 1)) # some samples may have no variants, so shape must be specified
     flip = np.array(flip)
 
-    return genotypes, flip, v_info
+    return genotypes, flip, v_info, iids
 
 
 def load_genotypes(

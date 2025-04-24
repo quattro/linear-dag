@@ -73,6 +73,7 @@ class LinearARG(LinearOperator):
     flip: npt.NDArray[np.bool_]
     n_samples: np.int32
     variants: VariantInfo = None
+    iids: Optional[list] = None
     nonunique_indices: Optional[npt.NDArray[np.int32]] = None
     
     @property
@@ -84,6 +85,7 @@ class LinearARG(LinearOperator):
         genotypes: csc_matrix,
         flip: npt.NDArray[np.bool_],
         variant_info: pl.DataFrame = None,
+        iids: Optional[list] = None, 
         find_recombinations: bool = True,
         verbosity: int = 0,
     ):
@@ -92,6 +94,7 @@ class LinearARG(LinearOperator):
         :param genotypes: CSC matrix of 0-1 valued, phased genotypes; rows = samples, cols = variants
         ref and alt alleles flipped
         :param variant_info: polars dataframe containing required variant information, or none
+        :param iids: Optional list of individual IDs corresponding to genotype rows.
         :param find_recombinations: whether to condense the graph by inferring recombination nodes
         :param make_triangular: whether to re-order rows and columns such that the adjacency matrix is triangular
         :return: linear ARG instance
@@ -101,22 +104,10 @@ class LinearARG(LinearOperator):
         )
         A_filt, variants_idx_reindexed, samples_idx_reindexed  = remove_degree_zero_nodes(A, variants_idx, samples_idx)
         A_tri, variants_idx_tri = make_triangular(A_filt, variants_idx_reindexed, samples_idx_reindexed)
-        linarg = LinearARG(A_tri, variants_idx_tri, flip, len(samples_idx), VariantInfo(variant_info))
+        linarg = LinearARG(A_tri, variants_idx_tri, flip, len(samples_idx), VariantInfo(variant_info), iids=iids)
         linarg.calculate_nonunique_indices()
         return linarg
         
-
-    # @staticmethod
-    # def from_plink(prefix: str) -> "LinearARG":
-    #     import bed_reader as br
-
-    #     with br.open_bed(f"{prefix}.bed") as bed:
-    #         genotypes = bed.read_sparse(dtype="int8")
-
-    #     larg = LinearARG.from_genotypes(genotypes)
-    #     v_info = VariantInfo.from_open_bed(bed, larg.variant_indices)
-    #     larg.variants = v_info
-    #     return larg
 
     @staticmethod
     def from_vcf(
@@ -130,12 +121,21 @@ class LinearARG(LinearOperator):
         maf_filter: float = None, 
         snps_only: bool = False
     ) -> Union[tuple, "LinearARG"]:
-        genotypes, flip, v_info = read_vcf(path, phased, region, flip_minor_alleles,
+        genotypes, flip, v_info, iids = read_vcf(path, phased, region, flip_minor_alleles,
                                     maf_filter=maf_filter, remove_indels=snps_only)
+        if genotypes is None: 
+             raise ValueError("No valid variants found in VCF")
+
+        if phased:
+            iids = [id_ for id_ in iids for _ in range(2)]
+
         if include_samples:
             genotypes = genotypes[include_samples, :]
-        result = LinearARG.from_genotypes(genotypes, flip, v_info, verbosity=verbosity)
-        return result, genotypes if return_genotypes else result
+            iids = iids[include_samples]
+
+        result = LinearARG.from_genotypes(genotypes, flip, v_info, iids=iids, verbosity=verbosity)
+        
+        return (result, genotypes) if return_genotypes else result
 
     @property
     def shape(self):
@@ -278,12 +278,6 @@ class LinearARG(LinearOperator):
             v[self.flip] = np.sum(other) - v[self.flip]
         return v if other.ndim == 1 else v.reshape(-1, 1)
 
-    def __getitem__(self, key: tuple[slice, slice]) -> "LinearARG":
-        # TODO make this work with syntax like linarg[:100,] (works with linarg[:100,:])
-        # rows, cols = key
-        # return LinearARG(self.A, self.sample_indices[rows], self.variants[cols])
-        pass
-
     def copy(self) -> "LinearARG":
         # return LinearARG(self.A.copy(), self.sample_indices.copy(), self.variants.copy())
         pass
@@ -322,6 +316,10 @@ class LinearARG(LinearOperator):
             destination.create_dataset('flip', data=self.flip, compression=compression_option, shuffle=True)
             if self.nonunique_indices is not None:
                 destination.create_dataset('nonunique_indices', data=self.nonunique_indices, compression=compression_option, shuffle=True)
+            if hasattr(self, 'iids') and self.iids is not None:
+                 str_iids = np.array(self.iids, dtype=h5py.string_dtype(encoding='utf-8'))
+                 destination.create_dataset('iids', data=str_iids, compression=compression_option, shuffle=True)
+
             if self.variants is not None:
                 for field in self.variants.req_fields:
                     if field == 'POS':
@@ -345,22 +343,19 @@ class LinearARG(LinearOperator):
             v_info = VariantInfo.read(h5_fname)
         else:
             v_info = None
-            
+
         with h5py.File(h5_fname, 'r') as file:
-            if block:
-                f = file[block]
-            else:
-                f = file
+            f = file[block] if block else file
             A = csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=(f.attrs['n'], f.attrs['n']))
-            variant_indices = f['variant_indices'][:]
-            flip = f['flip'][:]
-            n_samples = f.attrs['n_samples']
-            if 'nonunique_indices' in f:
-                nonunique_indices = f['nonunique_indices'][:]
-            else:
-                nonunique_indices = None
-                
-        return LinearARG(A, variant_indices, flip, n_samples, v_info, nonunique_indices)
+            variant_indices = f['variant_indices'][:] 
+            flip = f['flip'][:] 
+            n_samples = f.attrs['n_samples'] 
+            nonunique_indices = f['nonunique_indices'][:] if 'nonunique_indices' in f else None
+            iids_bytes = f.get('iids')
+            iids = [s.decode('utf-8') for s in iids_bytes[:]] if iids_bytes is not None else None
+            
+        return LinearARG(A, variant_indices, flip, n_samples, v_info, iids, nonunique_indices)
+
 
     def calculate_nonunique_indices(self) -> None:
         """Calculates and stores non-unique indices to facilitate memory-efficient matmat and rmatmat operations."""
@@ -379,6 +374,22 @@ class LinearARG(LinearOperator):
         if self.nonunique_indices is None:
             return None
         return np.max(self.nonunique_indices) + 1
+
+def diploid_operator(haploid_operator: LinearOperator) -> LinearOperator:
+    """
+    Returns a linear operator representing the diploid genotype matrix.
+    Assumes that consecutive rows of the haploid_operator are for the same individual.
+    If the input operator is normalized and it is desired for the output to also be
+    be normalized, divide the output by sqrt(2).
+    """
+    two_n = haploid_operator.shape[0]
+    if two_n % 2 != 0:
+        raise ValueError("Number of rows in haploid_operator must be even")
+    data = np.ones(two_n, dtype=np.int32)
+    indices = np.arange(two_n)
+    indptr = np.arange(0, two_n+1, 2)
+    pairing_matrix = csr_matrix((data, indices, indptr), shape=(two_n//2, two_n))
+    return aslinearoperator(pairing_matrix) @ haploid_operator
 
 def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
     """
