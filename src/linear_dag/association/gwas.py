@@ -126,8 +126,6 @@ def get_gwas_beta_se(
     y_resid = residualize_phenotypes(phenotypes, covariates, is_missing)
     y_resid /= np.sqrt(np.sum(y_resid**2, axis=0) / num_nonmissing) # ||y_resid||^2 == num_nonmissing
     assert np.allclose(np.sum(y_resid**2, axis=0), num_nonmissing), "Non-unit mean squared residuals, indicating a numerical issue; check for collinearity"
-
-    print(f"mean y_resid: {np.mean(y_resid, axis=0)}")
     assert np.allclose(np.mean(y_resid, axis=0), 0, rtol=1e-3), "Non-zero mean residuals, indicating a numerical issue; check for collinearity"
     numerator = genotypes.T @ y_resid / num_nonmissing
     
