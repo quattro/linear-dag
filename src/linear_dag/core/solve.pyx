@@ -495,6 +495,8 @@ def topological_sort(A: "csr_matrix", nodes_to_ignore: np.ndarray = None) -> np.
     i = 0
     while nodes_to_visit.length > 0:
         node = nodes_to_visit.pop()
+        if (nodes_to_ignore is not None) and (node in nodes_to_ignore): # do not visit nodes in nodes_to_ignore
+                continue
         result[i] = node
 
         # Add children to nodes_to_visit once all of their other parents have been visited
@@ -502,8 +504,6 @@ def topological_sort(A: "csr_matrix", nodes_to_ignore: np.ndarray = None) -> np.
             num_unvisited_nonself_parents[child] -= 1
             if child == node:
                 assert num_unvisited_nonself_parents[child] == -1
-            if (nodes_to_ignore is not None) and (child in nodes_to_ignore): # do not visit nodes in nodes_to_ignore
-                continue
             if num_unvisited_nonself_parents[child] == 0:
                 nodes_to_visit.push(child)
         i += 1
