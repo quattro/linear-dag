@@ -3,8 +3,7 @@ from .linear_arg_inference import linear_arg_from_genotypes as linear_arg_from_g
 from .lineararg import LinearARG as LinearARG
 from .lineararg import list_blocks as list_blocks
 from .recombination import Recombination as Recombination
-# from .metadata import read_metadata as read_metadata
-# from .parallel_processing import ParallelOperator as ParallelOperator
+from .parallel_processing import ParallelOperator as ParallelOperator
 from .sample_info import SampleInfo as SampleInfo
 from .solve import (
     spinv_triangular as spinv_triangular,

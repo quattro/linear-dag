@@ -73,7 +73,7 @@ class LinearARG(LinearOperator):
     flip: npt.NDArray[np.bool_]
     n_samples: np.int32
     variants: VariantInfo = None
-    iids: Optional[list] = None
+    iids: Optional[pl.Series] = None
     nonunique_indices: Optional[npt.NDArray[np.int32]] = None
     
     @property
@@ -105,6 +105,7 @@ class LinearARG(LinearOperator):
         A_filt, variants_idx_reindexed, samples_idx_reindexed  = remove_degree_zero_nodes(A, variants_idx, samples_idx)
         A_tri, variants_idx_tri = make_triangular(A_filt, variants_idx_reindexed, samples_idx_reindexed)
         linarg = LinearARG(A_tri, variants_idx_tri, flip, len(samples_idx), VariantInfo(variant_info), iids=iids)
+        linarg = LinearARG(A_tri, variants_idx_tri, flip, len(samples_idx), VariantInfo(variant_info), iids=iids)
         linarg.calculate_nonunique_indices()
         return linarg
         
@@ -131,7 +132,7 @@ class LinearARG(LinearOperator):
 
         if include_samples:
             genotypes = genotypes[include_samples, :]
-            iids = iids[include_samples]
+            iids = [iids[i] for i in include_samples]
 
         result = LinearARG.from_genotypes(genotypes, flip, v_info, iids=iids, verbosity=verbosity)
         
@@ -316,9 +317,9 @@ class LinearARG(LinearOperator):
             destination.create_dataset('flip', data=self.flip, compression=compression_option, shuffle=True)
             if self.nonunique_indices is not None:
                 destination.create_dataset('nonunique_indices', data=self.nonunique_indices, compression=compression_option, shuffle=True)
-            if hasattr(self, 'iids') and self.iids is not None:
+            if self.iids is not None and 'iids' not in f.keys():
                  str_iids = np.array(self.iids, dtype=h5py.string_dtype(encoding='utf-8'))
-                 destination.create_dataset('iids', data=str_iids, compression=compression_option, shuffle=True)
+                 f.create_dataset('iids', data=str_iids, compression=compression_option, shuffle=True)
 
             if self.variants is not None:
                 for field in self.variants.req_fields:
@@ -375,22 +376,6 @@ class LinearARG(LinearOperator):
             return None
         return np.max(self.nonunique_indices) + 1
 
-def diploid_operator(haploid_operator: LinearOperator) -> LinearOperator:
-    """
-    Returns a linear operator representing the diploid genotype matrix.
-    Assumes that consecutive rows of the haploid_operator are for the same individual.
-    If the input operator is normalized and it is desired for the output to also be
-    be normalized, divide the output by sqrt(2).
-    """
-    two_n = haploid_operator.shape[0]
-    if two_n % 2 != 0:
-        raise ValueError("Number of rows in haploid_operator must be even")
-    data = np.ones(two_n, dtype=np.int32)
-    indices = np.arange(two_n)
-    indptr = np.arange(0, two_n+1, 2)
-    pairing_matrix = csr_matrix((data, indices, indptr), shape=(two_n//2, two_n))
-    return aslinearoperator(pairing_matrix) @ haploid_operator
-
 def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
     """
     Lists the blocks (groups) and their attributes stored in an HDF5 file.
@@ -412,6 +397,8 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
             return None
         else:
             for block_name in keys:
+                if not isinstance(f[block_name], h5py.Group):
+                    continue
                 group = f[block_name]
                 attrs = group.attrs
                 block_info = {
@@ -457,8 +444,10 @@ def make_triangular(A: csc_matrix, variant_indices: npt.NDArray[np.uint], sample
     """
     A_csr = csr_matrix(A)
     order = np.asarray(topological_sort(A_csr, nodes_to_ignore=sample_indices))[:-len(sample_indices)]
+    print(f"order: {len(order)}; {np.max(order)}")
     order = np.append(order, sample_indices[::-1])
     inv_order = np.argsort(order).astype(np.int32)
+    print(f"order: {len(order)}; {np.max(order)}")
 
     A_triangular = A[order, :][:, order]
     variant_indices_reordered = inv_order[variant_indices]

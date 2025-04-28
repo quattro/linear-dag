@@ -8,6 +8,7 @@ from .blup import (
     blup as blup,
 )
 from .gwas import (
-    get_gwas_betas as get_gwas_betas,
+    get_gwas_beta_se as get_gwas_beta_se,
+    run_gwas as run_gwas,
 )
 
