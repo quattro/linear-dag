@@ -7,7 +7,8 @@ cimport numpy as cnp
 
 def linearize_brick_graph(G: DiGraph) -> csr_matrix:
     G = G.copy()
-    cdef int[:] edge_weights = np.ones(2 * G.maximum_number_of_edges, dtype=np.intc)
+    # cdef int[:] edge_weights = np.ones(2 * G.maximum_number_of_edges, dtype=np.intc)
+    cdef int[:] edge_weights = np.ones(10 * G.maximum_number_of_edges, dtype=np.intc) # increase number of edges for individual nodes
 
     cdef int[:] order = G.reverse_topological_sort()
 

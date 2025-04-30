@@ -18,6 +18,8 @@ from scipy.io import mmread
 from scipy.sparse import csc_matrix, csr_matrix, diags, eye, load_npz, save_npz
 from scipy.sparse.linalg import aslinearoperator, LinearOperator, spsolve_triangular
 
+from .data_structures import DiGraph
+from .one_summed_cy import linearize_brick_graph
 from linear_dag.genotype import read_vcf
 from linear_dag.core.solve import get_nonunique_indices_csc
 from .linear_arg_inference import linear_arg_from_genotypes
@@ -72,14 +74,25 @@ class LinearARG(LinearOperator):
     variant_indices: npt.NDArray[np.int32]
     flip: npt.NDArray[np.bool_]
     n_samples: np.int32
-    variants: VariantInfo = None
+    n_individuals: Optional[np.int32] = None
+    variants: Optional[VariantInfo] = None
     iids: Optional[pl.Series] = None
     nonunique_indices: Optional[npt.NDArray[np.int32]] = None
+    sex: Optional[npt.NDArray[np.int32]] = None # determines how individual_indices are handled
+    
+    @property
+    def individual_indices(self):
+        if self.n_individuals is None:
+            raise ValueError('The linear ARG does not have individual nodes. Try running add_individual_nodes first.')
+        return np.arange(self.A.shape[0] - 1, self.A.shape[0] - self.n_individuals - 1, -1, dtype=np.int32)
     
     @property
     def sample_indices(self):
-        return np.arange(self.A.shape[0]-1, self.A.shape[0] - self.n_samples - 1, -1, dtype=np.int32)
-
+        if self.n_individuals is None:
+            return np.arange(self.A.shape[0] - 1, self.A.shape[0] - self.n_samples - 1, -1, dtype=np.int32)
+        else:
+            return np.arange(self.A.shape[0] - self.n_individuals - 1, self.A.shape[0] - self.n_individuals - self.n_samples - 1, -1, dtype=np.int32)
+    
     @staticmethod
     def from_genotypes(
         genotypes: csc_matrix,
@@ -87,6 +100,7 @@ class LinearARG(LinearOperator):
         variant_info: pl.DataFrame = None,
         iids: Optional[list] = None, 
         find_recombinations: bool = True,
+        sex: Optional[npt.NDArray[np.int32]] = None,
         verbosity: int = 0,
     ):
         """
@@ -176,6 +190,18 @@ class LinearARG(LinearOperator):
     @cached_property
     def allele_frequencies(self):
         return (np.ones(self.shape[0], dtype=np.int32) @ self) / self.shape[0]
+    
+    @cached_property
+    def number_of_carriers(self):
+        if self.n_individuals is None:
+            raise ValueError('The linear ARG does not have individual nodes. Try running add_individual_nodes first.')
+        v = np.zeros(self.A.shape[0], dtype=np.float64)
+        v[self.individual_indices] = np.ones(self.n_individuals)
+        spsolve_backward_triangular(self.A, v)
+        v = v[self.variant_indices]
+        if np.any(self.flip):
+            v[self.flip] = self.n_individuals - v[self.flip]
+        return v.astype(np.int64)
 
     def __str__(self):
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
@@ -210,10 +236,10 @@ class LinearARG(LinearOperator):
         else:
             temp = other.T
 
-        variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
+        variant_nonunique_indices = self.nonunique_indices[self.variant_indices]        
         add_at(v, variant_nonunique_indices, temp)
-        spsolve_forward_triangular_matmat(self.A, v, self.nonunique_indices)
-        sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
+        spsolve_forward_triangular_matmat(self.A, v, self.nonunique_indices, int(self.sample_indices[-1]))
+        sample_nonunique_indices = self.nonunique_indices[self.sample_indices]        
         return v[:, sample_nonunique_indices].T + np.sum(other[self.flip], axis=0)
 
     def _rmatmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
@@ -228,7 +254,7 @@ class LinearARG(LinearOperator):
         v = np.zeros((other.shape[1], self.num_nonunique_indices), dtype=other.dtype, order='F')   
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]   
         v[:, sample_nonunique_indices] = other.T
-        spsolve_backward_triangular_matmat(self.A, v, self.nonunique_indices)
+        spsolve_backward_triangular_matmat(self.A, v, self.nonunique_indices, int(self.sample_indices[-1]))
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
         v = v[:, variant_nonunique_indices]
         if np.any(self.flip):
@@ -261,11 +287,11 @@ class LinearARG(LinearOperator):
         v = np.zeros(self.A.shape[0], dtype=np.float64)
         temp = other.ravel().astype(np.float64) * ((-1) ** self.flip.ravel())
         np.add.at(v, self.variant_indices, temp)  # handles duplicate variant indices
-        spsolve_forward_triangular(self.A, v)
+        spsolve_forward_triangular(self.A, v)     
         result = np.asarray(v[self.sample_indices]) + np.sum(other[self.flip])
         return result if other.ndim == 1 else result.reshape(-1, 1)
 
-    def _rmatvec(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+    def _rmatvec(self, other: npt.ArrayLike, individual=False) -> npt.NDArray[np.number]:
         if other.shape != (self.shape[0],) and other.shape != (self.shape[0], 1):
             raise ValueError(
                 f"Incorrect dimensions for vector-matrix multiplication. Inputs had size {other.shape} and {self.shape}."
@@ -314,12 +340,14 @@ class LinearARG(LinearOperator):
             destination.create_dataset('data', data=self.A.data, compression=compression_option, shuffle=True)
             destination.create_dataset('variant_indices', data=self.variant_indices, compression=compression_option, shuffle=True)
             destination.create_dataset('flip', data=self.flip, compression=compression_option, shuffle=True)
+            
             if self.nonunique_indices is not None:
                 destination.create_dataset('nonunique_indices', data=self.nonunique_indices, compression=compression_option, shuffle=True)
             if self.iids is not None and 'iids' not in f.keys():
                  str_iids = np.array(self.iids, dtype=h5py.string_dtype(encoding='utf-8'))
                  f.create_dataset('iids', data=str_iids, compression=compression_option, shuffle=True)
-
+            if self.n_individuals is not None:
+                destination.attrs['n_individuals'] = self.n_individuals
             if self.variants is not None:
                 for field in self.variants.req_fields:
                     if field == 'POS':
@@ -350,21 +378,28 @@ class LinearARG(LinearOperator):
             variant_indices = f['variant_indices'][:] 
             flip = f['flip'][:] 
             n_samples = f.attrs['n_samples'] 
+            n_individuals = f.attrs.get('n_individuals', None)
             nonunique_indices = f['nonunique_indices'][:] if 'nonunique_indices' in f else None
             iids_bytes = f.get('iids')
             iids = [s.decode('utf-8') for s in iids_bytes[:]] if iids_bytes is not None else None
             
-        return LinearARG(A, variant_indices, flip, n_samples, v_info, iids, nonunique_indices)
+        return LinearARG(A, variant_indices, flip, n_samples, n_individuals, v_info, iids, nonunique_indices)
 
 
     def calculate_nonunique_indices(self) -> None:
         """Calculates and stores non-unique indices to facilitate memory-efficient matmat and rmatmat operations."""
         if self.nonunique_indices is None:
+            if self.n_individuals is None:
+                individual_indices = None
+            else:
+                individual_indices = self.individual_indices
+            
             self.nonunique_indices = get_nonunique_indices_csc(
                 self.A.indices,
                 self.A.indptr,
                 self.sample_indices,
                 self.variant_indices,
+                individual_indices = individual_indices,
             )
             self.nonunique_indices = np.asarray(self.nonunique_indices)
             print(f"Non-unique indices: {self.num_nonunique_indices} vs. {self.A.shape[0]}")
@@ -374,6 +409,22 @@ class LinearARG(LinearOperator):
         if self.nonunique_indices is None:
             return None
         return np.max(self.nonunique_indices) + 1
+    
+    def add_individual_nodes(self, sex:npt.NDArray[np.uint] = None) -> "LinearARG":
+        """Creates a new LinearARG with indviduals added as nodes."""
+        A = self.A
+        variant_indices = self.variant_indices
+        sample_indices = self.sample_indices
+        flip = self.flip
+        var_info = self.variants
+        
+        A, individual_indices = add_individuals_to_graph(A, sample_indices, sex=sex) 
+        individuals_graph = DiGraph.from_csr(A) # edges are defined the other way around    
+        A = csc_matrix(linearize_brick_graph(individuals_graph))  
+        linarg = LinearARG(A, variant_indices, flip, len(sample_indices), len(individual_indices), var_info)  
+        linarg.calculate_nonunique_indices()
+            
+        return linarg
 
 def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
     """
@@ -414,6 +465,40 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
 
     return pl.DataFrame(block_data)
 
+
+def add_individuals_to_graph(A: csc_matrix, samples_idx: npt.NDArray[np.uint], sex:npt.NDArray[np.uint] = None) -> tuple:
+    """
+    Add individuals to the graph. Assumes that individuals are comprised of adjacent haplotypes in samples_idx. If sex is None, assumes that
+    all individuals are diploid. Otherwise will only assign males a single haplotype.
+    """    
+    A_csr = csr_matrix(A)
+    indices_list = []
+    indptr_list = [A_csr.indptr[-1]] 
+
+    if sex is None:
+        haplotype_counts = np.full(len(samples_idx) // 2, 2, dtype=int)
+    else:
+        haplotype_counts = np.array([1 if s == 1 else 2 for s in sex], dtype=int)
+
+    haplotype_offsets = np.concatenate(([0], np.cumsum(haplotype_counts)))
+
+    for i in range(len(haplotype_counts)):
+        start = haplotype_offsets[i]
+        end = haplotype_offsets[i + 1]
+        haps = samples_idx[start:end]
+        indices_list.append(haps)
+        indptr_list.append(indptr_list[-1] + len(haps))
+
+    indices = np.concatenate([A_csr.indices] + indices_list)
+    indptr = np.array(list(A_csr.indptr) + indptr_list[1:], dtype=np.int32)
+    data = np.ones(len(indices), dtype=np.int32)
+    
+    n_nodes = len(indptr) - 1
+    A_updated = csc_matrix(csr_matrix((data, indices, indptr), shape=(n_nodes, n_nodes)))
+    individual_indices = np.arange(A.shape[0], A_updated.shape[0], dtype=np.int32)    
+    return A_updated, individual_indices
+
+
 def remove_degree_zero_nodes(A: csc_matrix, variant_indices: npt.NDArray[np.uint], sample_indices: npt.NDArray[np.uint]) -> tuple:
     """
     Removes degree-zero recombination nodes from the graph, while ensuring all nodes
@@ -442,11 +527,9 @@ def make_triangular(A: csc_matrix, variant_indices: npt.NDArray[np.uint], sample
     new node ordering.
     """
     A_csr = csr_matrix(A)
-    order = np.asarray(topological_sort(A_csr, nodes_to_ignore=sample_indices))[:-len(sample_indices)]
-    print(f"order: {len(order)}; {np.max(order)}")
+    order = np.asarray(topological_sort(A_csr, nodes_to_ignore=set(sample_indices)))[:-len(sample_indices)]
     order = np.append(order, sample_indices[::-1])
     inv_order = np.argsort(order).astype(np.int32)
-    print(f"order: {len(order)}; {np.max(order)}")
 
     A_triangular = A[order, :][:, order]
     variant_indices_reordered = inv_order[variant_indices]

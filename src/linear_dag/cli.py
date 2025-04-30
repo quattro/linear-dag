@@ -7,7 +7,7 @@ import sys
 from importlib import metadata
 
 from .core.lineararg import LinearARG
-from .core.partition_merge import infer_brick_graph, make_genotype_matrix, merge, run_forward_backward, reduction_union_recom
+from .core.partition_merge import infer_brick_graph, make_genotype_matrix, merge, run_forward_backward, reduction_union_recom, add_individuals_to_linarg
 
 title = """                            @@@@
           @@@@@@            @@@@@
@@ -182,6 +182,15 @@ def _reduction_union_recom(args):
         reduction_union_recom(args.linarg_dir, args.load_dir, args.partition_identifier)
         
 
+def _add_individuals_to_linarg(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    if args.load_dir is None:
+        add_individuals_to_linarg(args.linarg_dir, "")
+    else:
+        add_individuals_to_linarg(args.linarg_dir, args.load_dir)
+        
+
 
 def _main(args):
     argp = argparse.ArgumentParser(
@@ -287,6 +296,20 @@ def _main(args):
         "--partition_identifier", type=str, help="Partition identifier in the form {paritition_number}_{region}"
     )
     reduction_union_recom_p.set_defaults(func=_reduction_union_recom)
+    
+    
+    add_individuals_p = subp.add_parser(
+        "add-individual-nodes", help="Step 4 (optional) of partition and merge pipeline. Adds individuals as nodes for fast computation of carrier counts."
+    )
+    add_individuals_p.add_argument(
+        "--linarg_dir", type=str, help="Directory to store linear ARG outputs (must be the same as directory for Steps 1-3)"
+    )
+    add_individuals_p.add_argument(
+        "--load_dir",
+        type=str,
+        help="Directory to load data.",
+    )
+    add_individuals_p.set_defaults(func=_add_individuals_to_linarg)
     
     
 

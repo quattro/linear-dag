@@ -8,7 +8,7 @@ import h5py
 
 from ..genotype import read_vcf
 from .brick_graph import BrickGraph, read_graph_from_disk, merge_brick_graphs
-from .lineararg import LinearARG, VariantInfo, make_triangular, remove_degree_zero_nodes
+from .lineararg import LinearARG, VariantInfo, make_triangular, remove_degree_zero_nodes, add_individuals_to_graph
 from .one_summed_cy import linearize_brick_graph
 from .recombination import Recombination
 
@@ -33,7 +33,7 @@ def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=
     
     logger.info("Reading vcf as sparse matrix")
     t1 = time.time()
-    genotypes, flip, v_info = read_vcf(vcf_path, phased=phased, region=region_formatted, flip_minor_alleles=flip_minor_alleles, whitelist=whitelist, maf_filter=maf_filter, remove_indels=remove_indels)
+    genotypes, flip, v_info, iids = read_vcf(vcf_path, phased=phased, region=region_formatted, flip_minor_alleles=flip_minor_alleles, whitelist=whitelist, maf_filter=maf_filter, remove_indels=remove_indels)
     if genotypes is None:
         logger.info(f"No variants found")
         return None
@@ -165,10 +165,8 @@ def merge(linarg_dir, load_dir):
     """
     Merged partitioned brick graphs, find recombinations, and linearize.
     """
-    print(linarg_dir)
     
     os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
-    os.makedirs(f"{linarg_dir}/", exist_ok=True)
     
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/merge.log")
     logger.info("Merging brick graphs")
@@ -200,13 +198,9 @@ def merge(linarg_dir, load_dir):
     df_list = [pl.read_csv(f"{load_dir}{linarg_dir}/variant_metadata/{f}", separator=" ") for f in files]
     df = pl.concat(df_list)
     var_info = VariantInfo(df)
-    files = os.listdir(f"{load_dir}{linarg_dir}/genotype_matrices/")
-    ind_arr = np.array([int(f.split("_")[0]) for f in files])
-    order = ind_arr.argsort()
-    files = np.array(files)[order].tolist()  # sort files by index
     flip = []
     for file in files:
-        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{file}", 'r') as f:
+        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{file[:-3]}h5", 'r') as f:
             flip_partition = list(f['flip'][:])
         flip += flip_partition    
     flip = np.array(flip)
@@ -214,7 +208,7 @@ def merge(linarg_dir, load_dir):
     logger.info("Triangularizing and computing nonunique indices")
     A_filt, variant_indices_reindexed, sample_indices_reindexed  = remove_degree_zero_nodes(A, variant_indices, sample_indices)
     A_tri, variant_indices_tri = make_triangular(A_filt, variant_indices_reindexed, sample_indices_reindexed)
-    linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), var_info)
+    linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), variants=var_info)
     linarg.calculate_nonunique_indices()
     logger.info("Saving linear ARG")
     linarg.write(f"{linarg_dir}/linear_arg")
@@ -228,7 +222,7 @@ def get_linarg_stats(linarg_dir, load_dir):
     """
     linarg = LinearARG.read(f"{linarg_dir}/linear_arg.h5")
     
-    linarg.flip = np.array([False for i in range(linarg.shape[1])])
+    linarg.flip = np.zeros(linarg.shape[1], dtype=bool)
 
     v = np.ones(linarg.shape[0])
     allele_count_from_linarg = v @ linarg
@@ -255,16 +249,12 @@ def get_linarg_stats(linarg_dir, load_dir):
         allele_counts.append(allele_count_from_genotypes)
     allele_counts_from_genotype = np.concatenate(allele_counts)
 
-    brick_graph_nnz = np.sum(linarg.A.data > 0)
-
     stats = [
         linarg.shape[0],
         linarg.shape[1],
         genotypes_nnz,
         linarg.nnz,
-        brick_graph_nnz,
         np.round(genotypes_nnz / linarg.nnz, 3),
-        np.round(genotypes_nnz / brick_graph_nnz, 3),
         all(allele_counts_from_genotype == allele_count_from_linarg),
     ]
     stats = [str(x) for x in stats]
@@ -276,12 +266,134 @@ def get_linarg_stats(linarg_dir, load_dir):
                     "m",
                     "genotypes_nnz",
                     "linarg_nnz",
-                    "brick_graph_nnz",
                     "linarg_nnz_ratio",
-                    "brick_graph_nnz_ratio",
                     "correct_allele_counts",
                 ]
             )
             + "\n"
         )
         file.write(" ".join(stats) + "\n")
+        
+
+def add_individuals_to_linarg(linarg_dir, load_dir):
+    
+    os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
+    logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/add_individual_nodes.log")
+    
+    logger.info("Loading linear ARG")
+    t1 = time.time()
+    temp = LinearARG.read(f"{linarg_dir}/linear_arg.h5", load_metadata=True)
+    t2 = time.time()
+    logger.info(f"Linear ARG loaded in {np.round(t2 - t1, 3)} seconds")
+    
+    logger.info("Adding individual nodes to the linear ARG")
+    t3 = time.time()
+    linarg = temp.add_individual_nodes()   
+    t4 = time.time() 
+    logger.info(f"Individual nodes added in {np.round(t4 - t3, 3)} seconds")
+        
+    logger.info("Saving linear ARG")
+    linarg.write(f"{linarg_dir}/linear_arg_individual")
+    
+    logger.info("Computing linear ARG stats")
+    get_linarg_individual_stats(linarg_dir, load_dir)
+    
+
+def get_linarg_individual_stats(linarg_dir, load_dir):
+    
+    linarg = LinearARG.read(f"{linarg_dir}/linear_arg_individual.h5", load_metadata=True)
+    
+    linarg.flip = np.zeros(linarg.shape[1], dtype=bool)
+    
+    v = np.ones(linarg.shape[0])
+    allele_count_from_linarg = v @ linarg
+
+    files = os.listdir(f"{load_dir}{linarg_dir}/genotype_matrices/")
+    ind_arr = np.array([int(f.split("_")[0]) for f in files])
+    order = ind_arr.argsort()
+    files = np.array(files)[order].tolist()  # sort files by index
+    genotypes_nnz = 0
+    allele_counts = []
+    carrier_counts = []
+    for f in files:
+        
+        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{f}", 'r') as f:
+            genotypes = sp.csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=f['shape'][:]) 
+        
+        genotypes_nnz += np.sum(
+            [
+                np.minimum(genotypes[:, i].nnz, genotypes.shape[0] - genotypes[:, i].nnz)
+                for i in range(genotypes.shape[1])
+            ]
+        )
+        
+        v_0 = np.ones(genotypes.shape[0])
+        allele_counts.append(v_0 @ genotypes)
+        carrier_counts.append(get_carrier_counts(genotypes, sex=linarg.sex))
+        
+    allele_counts_from_genotype = np.concatenate(allele_counts)
+    carrier_counts_from_genotype = np.concatenate(carrier_counts)
+
+    stats = [
+        linarg.shape[0],
+        linarg.shape[1],
+        genotypes_nnz,
+        linarg.nnz,
+        np.round(genotypes_nnz / linarg.nnz, 3),
+        all(allele_counts_from_genotype == allele_count_from_linarg),
+        all(carrier_counts_from_genotype == linarg.number_of_carriers),
+    ]
+    stats = [str(x) for x in stats]
+    with open(f"{linarg_dir}/linear_arg_individual_stats.txt", "w") as file:
+        file.write(
+            " ".join(
+                [
+                    "n",
+                    "m",
+                    "genotypes_nnz",
+                    "linarg_nnz",
+                    "linarg_nnz_ratio",
+                    "correct_allele_counts",
+                    "correct_carrier_counts",
+                ]
+            )
+            + "\n"
+        )
+        file.write(" ".join(stats) + "\n")
+        
+        
+        
+def get_carrier_counts(genotypes, sex = None):
+    n_haplotypes, n_variants = genotypes.shape
+
+    if sex is None:
+        assert n_haplotypes % 2 == 0, "Expected even number of haplotypes for diploid individuals"
+        sex = np.zeros(n_haplotypes // 2, dtype=np.uint8)  # Treat all as female (diploid)
+    
+    n_individuals = sex.shape[0]
+    row_indices = []
+    col_indices = []
+    data = []
+
+    haplo_idx = 0
+    for i in range(n_individuals):
+        if sex[i] == 0:
+            row_indices += [i, i]
+            col_indices += [haplo_idx, haplo_idx + 1]
+            data += [1, 1]
+            haplo_idx += 2
+        else:
+            row_indices.append(i)
+            col_indices.append(haplo_idx)
+            data.append(1)
+            haplo_idx += 1
+
+    P = sp.csc_matrix((data, (row_indices, col_indices)), shape=(n_individuals, n_haplotypes))
+    individual_genotypes = P @ genotypes
+    carriers = (individual_genotypes > 0).sum(axis=0).A1 
+
+    return carriers
+
+    
+    
+    

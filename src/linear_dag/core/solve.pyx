@@ -47,7 +47,7 @@ def spsolve_backward_triangular(A: "csc_matrix", b: np.ndarray) -> None:
                 b_view[node_idx] += b_view[indices[edge_idx]] * data[edge_idx]
 
 
-def spsolve_forward_triangular_matmat(A: "csc_matrix", b: np.ndarray, nonunique_indices: np.ndarray) -> None:
+def spsolve_forward_triangular_matmat(A: "csc_matrix", b: np.ndarray, nonunique_indices: np.ndarray, min_index_to_keep: int) -> None:
     """Solves (I-A)x' = b' in place, where A is a lower-triangular, zero-diagonal CSC matrix.
     Assumes that b is Fortran-contiguous. nonunique_indices is an array of length equal to A.shape[0] that
     maps each row/col of A (node) to a column of b. There can be multiple nodes mapped to the same column of b.
@@ -61,20 +61,21 @@ def spsolve_forward_triangular_matmat(A: "csc_matrix", b: np.ndarray, nonunique_
         b = b.reshape(1, -1)
 
     if b.dtype == np.float64:
-        _spsolve_forward_triangular_matmat_float64(A.indptr, A.indices, A.data, b, nonunique_indices)
+        _spsolve_forward_triangular_matmat_float64(A.indptr, A.indices, A.data, b, nonunique_indices, min_index_to_keep)
     elif b.dtype == np.float32:
-        _spsolve_forward_triangular_matmat_float32(A.indptr, A.indices, A.data, b, nonunique_indices)
+        _spsolve_forward_triangular_matmat_float32(A.indptr, A.indices, A.data, b, nonunique_indices, min_index_to_keep)
     else:
         # Fall back to float64
         b_copy = b.astype(np.float64)
-        _spsolve_forward_triangular_matmat_float64(A.indptr, A.indices, A.data, b_copy, nonunique_indices)
+        _spsolve_forward_triangular_matmat_float64(A.indptr, A.indices, A.data, b_copy, nonunique_indices, min_index_to_keep)
         b[:] = b_copy
 
 cdef void _spsolve_forward_triangular_matmat_float64(int[:] indptr, 
                                                     int[:] indices, 
                                                     int[:] data, 
                                                     double[:, :] b_view, 
-                                                    int[:] nonunique_indices
+                                                    int[:] nonunique_indices,
+                                                    int min_index_to_keep,
                                                     ) noexcept nogil:
     cdef int node_idx, edge_idx = 0
     cdef int num_nodes = len(indptr) - 1
@@ -106,13 +107,15 @@ cdef void _spsolve_forward_triangular_matmat_float64(int[:] indptr,
             edge_idx += 1
         
         # Zero out the source vector, which can now represent a new node
-        memset(source_ptr, 0, vector_bytes)
+        if node_idx < min_index_to_keep: # avoid zeroing out sample nodes, which can have individual nodes as children
+            memset(source_ptr, 0, vector_bytes)
 
 cdef void _spsolve_forward_triangular_matmat_float32(int[:] indptr, 
                                                     int[:] indices, 
                                                     int[:] data, 
                                                     float[:, :] b_view, 
-                                                    int[:] nonunique_indices
+                                                    int[:] nonunique_indices,
+                                                    int min_index_to_keep,
                                                     ) noexcept nogil:
     cdef int node_idx, edge_idx = 0
     cdef int neighbor_nonunique_index
@@ -144,9 +147,10 @@ cdef void _spsolve_forward_triangular_matmat_float32(int[:] indptr,
             edge_idx += 1
 
         # Zero out the source vector, which can now represent a new node
-        memset(source_ptr, 0, vector_bytes)
+        if node_idx < min_index_to_keep: # avoid zeroing out sample nodes, which can have individual nodes as children
+            memset(source_ptr, 0, vector_bytes)
 
-def spsolve_backward_triangular_matmat(A: "csc_matrix", b: np.ndarray, nonunique_indices: np.ndarray) -> None:
+def spsolve_backward_triangular_matmat(A: "csc_matrix", b: np.ndarray, nonunique_indices: np.ndarray, min_index_to_keep: int) -> None:
     """Solves (I-A)'x' = b' in place, where A is a lower-triangular, zero-diagonal CSR matrix.
     Assumes that b is Fortran-contiguous. nonunique_indices is an array of length equal to A.shape[0] that
     maps each row/col of A (node) to a column of b. There can be multiple nodes mapped to the same column of b.
@@ -159,13 +163,13 @@ def spsolve_backward_triangular_matmat(A: "csc_matrix", b: np.ndarray, nonunique
         b = b.reshape(1, -1)
     
     if b.dtype == np.float64:
-        _spsolve_backward_triangular_matmat_float64(A.indptr, A.indices, A.data, b, nonunique_indices)
+        _spsolve_backward_triangular_matmat_float64(A.indptr, A.indices, A.data, b, nonunique_indices, min_index_to_keep)
     elif b.dtype == np.float32:
-        _spsolve_backward_triangular_matmat_float32(A.indptr, A.indices, A.data, b, nonunique_indices)
+        _spsolve_backward_triangular_matmat_float32(A.indptr, A.indices, A.data, b, nonunique_indices, min_index_to_keep)
     else:
         # Fall back to float64
         b_copy = b.astype(np.float64)
-        _spsolve_backward_triangular_matmat_float64(A.indptr, A.indices, A.data, b_copy, nonunique_indices)
+        _spsolve_backward_triangular_matmat_float64(A.indptr, A.indices, A.data, b_copy, nonunique_indices, min_index_to_keep)
         b[:] = b_copy
 
 cdef void _spsolve_backward_triangular_matmat_float64(
@@ -174,6 +178,7 @@ cdef void _spsolve_backward_triangular_matmat_float64(
                                                     int[:] data,
                                                     double[:, :] b_view,
                                                     int[:] nonunique_indices,
+                                                    int min_index_to_keep
                                                     ) noexcept nogil:
     cdef int num_nodes = len(indptr) - 1
     cdef int node_idx
@@ -193,12 +198,13 @@ cdef void _spsolve_backward_triangular_matmat_float64(
 
     for node_idx in range(num_nodes - 1, -1, -1):
         if edge_idx == indptr[node_idx]:
-            continue # Avoids zeroing out the initial value assigned to nodes with no neighbors
+            continue # Avoids zeroing out the initial value assigned to nodes with no children
 
         destination_ptr = &b_view[0, nonunique_indices[node_idx]]
 
         # Zero out the destination vector; its old values were for a different node 
-        memset(destination_ptr, 0, vector_bytes)
+        if node_idx < min_index_to_keep: # avoid zeroing out sample nodes, which can have individual nodes as children
+            memset(destination_ptr, 0, vector_bytes)
             
         while edge_idx > indptr[node_idx]:
             edge_idx -= 1
@@ -216,6 +222,7 @@ cdef void _spsolve_backward_triangular_matmat_float32(
                                                     int[:] data,
                                                     float[:, :] b_view,
                                                     int[:] nonunique_indices,
+                                                    int min_index_to_keep
                                                     ) noexcept nogil:
     cdef int num_nodes = len(indptr) - 1
     cdef int node_idx
@@ -235,12 +242,13 @@ cdef void _spsolve_backward_triangular_matmat_float32(
 
     for node_idx in range(num_nodes - 1, -1, -1):
         if edge_idx == indptr[node_idx]:
-            continue # Avoids zeroing out the initial value assigned to nodes with no neighbors
+            continue # Avoids zeroing out the initial value assigned to nodes with no children
 
         destination_ptr = &b_view[0, nonunique_indices[node_idx]]
 
         # Zero out the destination vector; its old values were for a different node 
-        memset(destination_ptr, 0, vector_bytes)
+        if node_idx < min_index_to_keep: # avoid zeroing out sample nodes, which can have individual nodes as children
+            memset(destination_ptr, 0, vector_bytes)
 
         while edge_idx > indptr[node_idx]:
             edge_idx -= 1
@@ -322,6 +330,7 @@ def get_nonunique_indices_csc(
                         np.ndarray[int, ndim=1] indptr, 
                         np.ndarray[int, ndim=1] sample_indices, 
                         np.ndarray[int, ndim=1] variant_indices,
+                        np.ndarray[int, ndim=1] individual_indices = None,
                         ) -> np.ndarray[int]:
     """
     Obtains a non-unique index for each node, with the property that if two nodes i < j have the same 
@@ -336,15 +345,23 @@ def get_nonunique_indices_csc(
     cdef int[:] result = -np.ones(num_nodes, dtype=np.int32)
     cdef int num_samples = len(sample_indices)
     cdef int num_variants = len(variant_indices)
-
-    # Samples are assigned indices 0,...,len(sample_indices)-1
     cdef int i
-    for i in range(num_samples):
-        result[sample_indices[i]] = i
+
+    if individual_indices is not None:
+        num_individuals = len(individual_indices)
+        for i in range(num_individuals):
+            result[individual_indices[i]] = i
+        for i in range(num_samples):
+            result[sample_indices[i]] = num_individuals + i
+        num_sample_nodes = num_individuals + num_samples
+    else:
+        for i in range(num_samples):
+            result[sample_indices[i]] = i
+        num_sample_nodes = num_samples
     
     # One index is assigned per unique variant index (less than num_variants)
     cdef int node = -1
-    cdef int next_index = num_samples-1
+    cdef int next_index = num_sample_nodes - 1
     cdef long[:] variant_order = np.argsort(variant_indices)
     for i in variant_order:
         next_index += (variant_indices[i] != node)
@@ -467,7 +484,7 @@ def spinv_triangular(A: "csr_matrix") -> "csc_matrix":
     return csc_matrix((x_data[:next_x_indptr], x_indices[:next_x_indptr], x_indptr))
 
 
-def topological_sort(A: "csr_matrix", nodes_to_ignore: np.ndarray = None) -> np.ndarray:
+def topological_sort(A: "csr_matrix", nodes_to_ignore: "set" = None) -> np.ndarray:
     """
     The topological sort of a directed graph with adjacency matrix equal to A transpose. If A[i,j] != 0,
     then j will come before i in the ordering. The diagonal of A is ignored.
