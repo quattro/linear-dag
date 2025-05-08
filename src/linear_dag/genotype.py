@@ -14,7 +14,14 @@ from scipy.sparse import csc_matrix
 
 
 def read_vcf(
-    path: Union[str, PathLike], phased: bool = True, region: Optional[str] = None, flip_minor_alleles: bool = False, whitelist: list = None, maf_filter: float = None, remove_indels: bool = False
+    path: Union[str, PathLike],
+    phased: bool = True,
+    region: Optional[str] = None,
+    flip_minor_alleles: bool = False,
+    whitelist: list = None,
+    maf_filter: float = None,
+    remove_indels: bool = False,
+    sex: np.array = None,
 ):
     def _update_dict_from_vcf(
         var: cv.Variant, data: DefaultDict[str, list]
@@ -41,9 +48,17 @@ def read_vcf(
         read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2]) # noqa: E731
     else:
         read_gt = lambda var: var.gt_types # noqa: E731
+        
+    if sex is not None:
+        mask = 2 * np.where(sex==1)[0] + 1
+        indices_to_keep = np.array([i for i in range(2*len(vcf.samples)) if i not in mask])
 
     def final_read(var, flip_minor_alleles):
         gts = read_gt(var)
+        if sex is not None:
+            gts = gts[indices_to_keep]
+            assert np.all((gts == 0) | (gts == 1)), "Haplotype vector contains non 0 or 1 values. Check genotype data or sex vector."
+        
         if not flip_minor_alleles:
             return gts, False
         af = np.mean(gts) / ploidy

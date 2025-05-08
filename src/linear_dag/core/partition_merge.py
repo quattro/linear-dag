@@ -13,7 +13,17 @@ from .one_summed_cy import linearize_brick_graph
 from .recombination import Recombination
 
 
-def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=True, flip_minor_alleles=False, whitelist_path=None, maf_filter=None, remove_indels=False):
+def make_genotype_matrix(vcf_path,
+                         linarg_dir,
+                         region,
+                         partition_number,
+                         phased=True,
+                         flip_minor_alleles=False,
+                         whitelist_path=None,
+                         maf_filter=None,
+                         remove_indels=False,
+                         sex_path=None
+                         ):
     """
     From a vcf file, save the genotype matrix and variant metadata for the given region.
     """
@@ -30,10 +40,16 @@ def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=
     else:
         with open(whitelist_path, 'r') as f:
             whitelist = [line.strip() for line in f]
+            
+    if sex_path is None:
+        sex = None
+    else:
+        with open(sex_path, 'r') as f:
+            sex = np.array([int(line.strip()) for line in f])
     
     logger.info("Reading vcf as sparse matrix")
     t1 = time.time()
-    genotypes, flip, v_info, iids = read_vcf(vcf_path, phased=phased, region=region_formatted, flip_minor_alleles=flip_minor_alleles, whitelist=whitelist, maf_filter=maf_filter, remove_indels=remove_indels)
+    genotypes, flip, v_info, iids = read_vcf(vcf_path, phased=phased, region=region_formatted, flip_minor_alleles=flip_minor_alleles, whitelist=whitelist, maf_filter=maf_filter, remove_indels=remove_indels, sex=sex)
     if genotypes is None:
         logger.info(f"No variants found")
         return None
@@ -46,6 +62,8 @@ def make_genotype_matrix(vcf_path, linarg_dir, region, partition_number, phased=
         f.create_dataset('indices', data=genotypes.indices, compression='gzip', shuffle=True)
         f.create_dataset('data', data=genotypes.data, compression='gzip', shuffle=True)
         f.create_dataset('flip', data=flip, compression='gzip', shuffle=True)    
+        if sex_path is not None:
+            f.create_dataset('sex', data=sex, compression='gzip', shuffle=True)    
     v_info.write_csv(f"{linarg_dir}/variant_metadata/{partition_number}_{region}.txt", separator=" ")
 
 
@@ -199,16 +217,19 @@ def merge(linarg_dir, load_dir):
     df = pl.concat(df_list)
     var_info = VariantInfo(df)
     flip = []
+    sex = None
     for file in files:
         with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{file[:-3]}h5", 'r') as f:
             flip_partition = list(f['flip'][:])
+            if 'sex' in f and sex is not None:
+                sex = f['sex'][:]
         flip += flip_partition    
     flip = np.array(flip)
     
     logger.info("Triangularizing and computing nonunique indices")
     A_filt, variant_indices_reindexed, sample_indices_reindexed  = remove_degree_zero_nodes(A, variant_indices, sample_indices)
     A_tri, variant_indices_tri = make_triangular(A_filt, variant_indices_reindexed, sample_indices_reindexed)
-    linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), variants=var_info)
+    linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), variants=var_info, sex=sex)
     linarg.calculate_nonunique_indices()
     logger.info("Saving linear ARG")
     linarg.write(f"{linarg_dir}/linear_arg")
