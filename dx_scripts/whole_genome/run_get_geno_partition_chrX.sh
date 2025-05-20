@@ -26,4 +26,4 @@ kodama make-geno --vcf_path "$vcf_path" \
                  --phased \
                  --flip_minor_alleles \
                  --whitelist_path $whitelist_path \
-                 --maf_filter 0.01
+                 --sex_path $sex_path

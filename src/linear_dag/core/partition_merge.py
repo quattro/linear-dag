@@ -303,7 +303,7 @@ def add_individuals_to_linarg(linarg_dir, load_dir):
     
     logger.info("Loading linear ARG")
     t1 = time.time()
-    temp = LinearARG.read(f"{linarg_dir}/linear_arg.h5", load_metadata=True)
+    temp = LinearARG.read(f"{load_dir}{linarg_dir}/linear_arg.h5", load_metadata=True)
     t2 = time.time()
     logger.info(f"Linear ARG loaded in {np.round(t2 - t1, 3)} seconds")
     

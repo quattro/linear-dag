@@ -3,13 +3,13 @@ instance_type=$1
 
 load_dir='/mnt/project/'
 out="linear_args"
-data_identifier="ukb20279_maf_0.01"
+data_identifier="ukb20279"
 chroms=({1..22})
 
 for chrom in "${chroms[@]}"; do
 
     # test run
-    if [[ $chrom != 22 ]]; then
+    if [[ $chrom != 21 ]]; then
         continue 
     fi
 
@@ -19,20 +19,20 @@ for chrom in "${chroms[@]}"; do
     for dir in ${linarg_dir_list[@]}; do
         linarg_dir=${chrom_dir}/${dir}
         output_list=($(dx ls "${linarg_dir}"))
-        if [[ " ${output_list[@]} " =~ " linear_arg.npz " ]]; then # skip partitions that have already been inferred
-                echo "${linarg_dir} has already been merged."
+        if [[ " ${output_list[@]} " =~ " linear_arg_individual.h5 " ]]; then # skip partitions that have already been inferred
+                echo "${linarg_dir} already has individuals."
                 continue
         fi
 
         echo "${dir}, ${linarg_dir}, ${load_dir}"
 
         dx run app-swiss-army-knife \
-            -iin="/amber/scripts/run_merge_brick_graphs.sh" \
-            -icmd="bash run_merge_brick_graphs.sh $linarg_dir $load_dir" \
+            -iin="/amber/scripts/run_add_individual_nodes.sh" \
+            -icmd="bash run_add_individual_nodes.sh $linarg_dir $load_dir" \
             --destination "/" \
             --instance-type $instance_type \
             --priority high \
-            --name "linarg_merge_${dir}" \
+            --name "add_individuals_${dir}" \
             --brief \
             -y
     done

@@ -3,15 +3,14 @@ instance_type=$1
 
 load_dir='/mnt/project/'
 out="linear_args"
-data_identifier="ukb20279"
+data_identifier="ukb20279_maf_0.01"
 chroms=({1..22})
 
 for chrom in "${chroms[@]}"; do
 
-    # test run
-    # if [[ $chrom != 15 ]]; then
-    #     continue 
-    # fi
+    if [[ $chrom != 22 ]]; then
+        continue 
+    fi
 
     chrom_dir="${out}/${data_identifier}/chr${chrom}"
     linarg_dir_list=($(dx ls $chrom_dir))
@@ -24,8 +23,8 @@ for chrom in "${chroms[@]}"; do
 
         for f in "${mtx_list[@]}"; do
             partition_identifier=$(echo "$f" | awk -F. '{print $1}')
-            if [[ " ${brick_graph_list[@]} " =~ " ${partition_identifier}.npz " ]]; then # skip partitions that have already been inferred
-                echo "${partition_identifier}.npz already exists."
+            if [[ " ${brick_graph_list[@]} " =~ " ${partition_identifier}.h5 " ]]; then # skip partitions that have already been inferred
+                echo "${partition_identifier}.h5 already exists."
                 continue
             fi
 

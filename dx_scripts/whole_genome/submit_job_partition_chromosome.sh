@@ -8,4 +8,5 @@ dx run app-swiss-army-knife \
     --priority low \
     --name "partition_chromosome" \
     --brief \
+    --ignore-reuse \
     -y
