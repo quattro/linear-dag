@@ -316,8 +316,8 @@ def add_individuals_to_linarg(linarg_dir, load_dir):
     logger.info("Saving linear ARG")
     linarg.write(f"{linarg_dir}/linear_arg_individual")
     
-    logger.info("Computing linear ARG stats")
-    get_linarg_individual_stats(linarg_dir, load_dir)
+    # logger.info("Computing linear ARG stats")
+    # get_linarg_individual_stats(linarg_dir, load_dir)
     
 
 def get_linarg_individual_stats(linarg_dir, load_dir):
@@ -338,7 +338,7 @@ def get_linarg_individual_stats(linarg_dir, load_dir):
     carrier_counts = []
     for f in files:
         
-        with h5py.File(f"{linarg_dir}/genotype_matrices/{f}", 'r') as f:
+        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{f}", 'r') as f:
             genotypes = sp.csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=f['shape'][:]) 
         
         genotypes_nnz += np.sum(
