@@ -164,9 +164,12 @@ def get_gwas_beta_se(
         var_genotypes, carrier_counts = _get_genotype_variance(genotypes, allele_counts)
         denominator = (var_genotypes - var_explained + 1e-6) / two_n
     assert np.all(denominator > 0)
+    
+    var_resid = np.sum(y_resid ** 2, axis=0) / num_nonmissing
+    se = np.sqrt(var_resid.reshape(1, -1) / (denominator * num_nonmissing.reshape(1, -1)))
 
     return (numerator / denominator, 
-            1 / (np.sqrt(denominator * num_nonmissing.reshape(1,-1))),
+            se,
             num_nonmissing // 2,
             allele_counts,
             carrier_counts)
