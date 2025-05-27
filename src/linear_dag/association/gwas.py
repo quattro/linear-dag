@@ -1,4 +1,4 @@
-from linear_dag.core.operators import get_merge_operator
+from linear_dag.core.operators import get_merge_operator, get_inner_merge_operators
 from scipy.sparse.linalg import LinearOperator
 from scipy.stats import norm
 import numpy as np
@@ -95,7 +95,8 @@ def _impute_missing_with_mean(data: np.ndarray) -> np.ndarray:
 
 def get_gwas_beta_se(
                 genotypes: LinearOperator, 
-                merge_operator: LinearOperator, 
+                left_op: LinearOperator,
+                right_op: LinearOperator,
                 phenotypes: np.ndarray, 
                 covariates: np.ndarray,
                 assume_hwe: bool,
@@ -107,8 +108,8 @@ def get_gwas_beta_se(
 
     Args:
         genotypes: Unnormalized, phased genotypes as a linear operator (e.g. ParallelOperator or LinearARG)
-        merge_operator: Merge operator for matching genotypes and phenotypes; shape is
-            (phenotypes.shape[0], genotypes.shape[0])
+        left_op: Left merge operator for matching genotypes and phenotypes
+        right_op: Right merge operator for matching genotypes and phenotypes
         phenotypes: Phenotypes matrix
         covariates: Covariates matrix, which should include the all-ones annotation
         assume_hwe: Whether or not to assume HWE. If not, genotypes must be the ploidy linear ARG
@@ -124,22 +125,22 @@ def get_gwas_beta_se(
     if not np.allclose(covariates[:,0], 1):
         raise ValueError("First column of covariates should be all-ones")
 
-    cols_matched_per_row = merge_operator @ np.ones(merge_operator.shape[1])
+    cols_matched_per_row = left_op @ np.ones(left_op.shape[1])
     # Check if all *non-zero* counts are exactly 2
     if not np.all(cols_matched_per_row[cols_matched_per_row != 0] == 2):
         raise ValueError("Each row of the phenotype matrix should match zero or two rows of the genotype operator")
     
-    rows_matched_per_col = np.ones(merge_operator.shape[0]) @ merge_operator
+    rows_matched_per_col = np.ones(right_op.shape[0]) @ right_op
     # Check if all *non-zero* counts are exactly 1
     if not np.all(rows_matched_per_col[rows_matched_per_col != 0] == 1):
         raise ValueError("Each row of the genotype operator should match at most one row of the phenotype matrix")
 
     two_n = np.sum(rows_matched_per_col>0)
     assert two_n == 2 * np.sum(cols_matched_per_row>0)
-
-    covariates = merge_operator.T @ covariates
-    phenotypes = merge_operator.T @ phenotypes
     
+    covariates = left_op.T @ covariates
+    phenotypes = left_op.T @ phenotypes
+        
     # Handle missingness
     covariates = _impute_missing_with_mean(covariates)
     is_missing = np.isnan(phenotypes)
@@ -152,11 +153,11 @@ def get_gwas_beta_se(
     # y_resid /= np.sqrt(np.sum(y_resid**2, axis=0) / num_nonmissing) # ||y_resid||^2 == num_nonmissing
     # assert np.allclose(np.sum(y_resid**2, axis=0), num_nonmissing), "Non-unit mean squared residuals, indicating a numerical issue; check for collinearity"
     # assert np.allclose(np.mean(y_resid, axis=0), 0, rtol=1e-3), "Non-zero mean residuals, indicating a numerical issue; check for collinearity"
-    numerator = genotypes.T @ y_resid / num_nonmissing
+    numerator = (right_op @ genotypes).T @ y_resid / num_nonmissing
     
     # Get denominator, which is assumed equal across traits despite different missingness
     
-    var_explained, allele_counts = _get_genotype_variance_explained(genotypes, covariates)
+    var_explained, allele_counts = _get_genotype_variance_explained(right_op @ genotypes, covariates)
     if assume_hwe:
         denominator = (allele_counts - var_explained + 1e-6) / two_n
         carrier_counts = None
@@ -205,20 +206,12 @@ def run_gwas(
     
     if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
-    
-    # handle case when genotypes has iids not in data
-    data_iids = set(data.select('iid').collect().to_series())
-    genotypes_iids = set(genotypes.iids)
-    missing_iids = list(genotypes_iids - data_iids)
-    if len(missing_iids) != 0:
-        genotypes = genotypes.remove_samples(missing_iids)
 
-    merge_operator = get_merge_operator(data.select('iid').collect().to_series(), genotypes.iids)
-    print(merge_operator.shape)
+    left_op, right_op = get_inner_merge_operators(data.select('iid').collect().to_series(), genotypes.iids) # data iids to shared iids, shared iids to genotypes iids
     phenotypes = data.select(pheno_cols).collect().to_numpy()
     covariates = data.select(covar_cols).collect().to_numpy()
 
-    beta, se, sample_size, allele_counts, carrier_counts = get_gwas_beta_se(genotypes, merge_operator, phenotypes, covariates, assume_hwe)
+    beta, se, sample_size, allele_counts, carrier_counts = get_gwas_beta_se(genotypes, left_op, right_op, phenotypes, covariates, assume_hwe)
 
     m, num_traits = beta.shape
     if len(pheno_cols) != num_traits:
