@@ -2,13 +2,12 @@ from scipy.sparse.linalg import aslinearoperator, LinearOperator
 from scipy.sparse import csr_matrix, eye
 import polars as pl
 import numpy as np
-from typing import Optional
+from typing import Optional, Tuple
 
-def get_merge_operator(row_ids: pl.Series, col_ids: pl.Series) -> LinearOperator:
+def get_inner_merge_operators(row_ids: pl.Series, col_ids: pl.Series) -> Tuple[LinearOperator, LinearOperator]:
     """
-    Returns a LinearOperator representing the matrix of size (len(row_ids), len(col_ids))
-    with a one in entry (i,j) if row_ids[i] == col_ids[j] and a zero otherwise.
-    """ 
+    Returns a pair of LinearOperators that merge row_ids and col_ids into a shared space.
+    """
     if row_ids.dtype != col_ids.dtype:
         raise TypeError("Data types of row_ids and col_ids must match")
 
@@ -16,14 +15,28 @@ def get_merge_operator(row_ids: pl.Series, col_ids: pl.Series) -> LinearOperator
         .with_row_index('row_idx')
     col_df = pl.LazyFrame({'id': col_ids})\
         .with_row_index('col_idx')
-    merged_df = row_df.join(col_df, on='id', how='inner').collect()
-    matrix = csr_matrix(
+    merged_df = row_df.join(col_df, on='id', how='inner').with_row_index('merged_idx').collect()
+    row_matrix = csr_matrix(
         (np.ones(merged_df.shape[0], dtype=int),
             (merged_df.select('row_idx').to_numpy().flatten(),
-                merged_df.select('col_idx').to_numpy().flatten())),
-        shape=(row_ids.len(), col_ids.len())
+                merged_df.select('merged_idx').to_numpy().flatten())),
+        shape=(row_ids.len(), merged_df.height)
     )
-    return aslinearoperator(matrix)
+    col_matrix = csr_matrix(
+        (np.ones(merged_df.shape[0], dtype=int),
+            (merged_df.select('merged_idx').to_numpy().flatten(),
+                merged_df.select('col_idx').to_numpy().flatten())),
+        shape=(merged_df.height, col_ids.len())
+    )
+    return aslinearoperator(row_matrix), aslinearoperator(col_matrix)
+
+def get_merge_operator(row_ids: pl.Series, col_ids: pl.Series) -> LinearOperator:
+    """
+    Returns a LinearOperator representing the matrix of size (len(row_ids), len(col_ids))
+    with a one in entry (i,j) if row_ids[i] == col_ids[j] and a zero otherwise.
+    """ 
+    row_matrix, col_matrix = get_inner_merge_operators(row_ids, col_ids)
+    return row_matrix @ col_matrix
 
 def get_row_filter_operator(merge_operator: LinearOperator):
     """Given a merge operator, returns a LinearOperator that filters out
