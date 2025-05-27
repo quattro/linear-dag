@@ -47,7 +47,7 @@ def _get_genotype_variance_explained(
             covariates: Covariates matrix, which should include the all-ones annotation except for missing values
 
         Returns:
-            tuple: (total_var_explained, allele_fallele_countrequency)
+            tuple: (total_var_explained, allele_count)
                 total_var_explained: Total variance of genotypes explained by covariates
                 allele_count: Allele count of the genotypes, assuming first column of covariates is all-ones
                                 except for missing values
@@ -205,6 +205,13 @@ def run_gwas(
     
     if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
+    
+    # handle case when genotypes has iids not in data
+    data_iids = set(data.select('iid').collect().to_series())
+    genotypes_iids = set(genotypes.iids)
+    missing_iids = list(genotypes_iids - data_iids)
+    if len(missing_iids) != 0:
+        genotypes = genotypes.remove_samples(missing_iids)
 
     merge_operator = get_merge_operator(data.select('iid').collect().to_series(), genotypes.iids)
     print(merge_operator.shape)

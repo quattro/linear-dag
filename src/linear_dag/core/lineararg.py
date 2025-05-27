@@ -202,7 +202,37 @@ class LinearARG(LinearOperator):
         if np.any(self.flip):
             v[self.flip] = self.n_individuals - v[self.flip]
         return v.astype(np.int64)
+    
+    def remove_samples(self, iids_to_remove: npt.ArrayLike):
+        sample_mask = np.isin(self.iids, iids_to_remove)
+        sample_indices_to_remove = np.where(sample_mask)[0]
+        iids_to_keep = np.array(self.iids)[~sample_mask]
 
+        individual_mask = np.isin(list(dict.fromkeys(self.iids)), iids_to_remove) # deduplicate but keep order
+        individual_indices_to_remove = np.where(individual_mask)[0]
+
+        if self.n_individuals is not None:
+            nodes_to_remove = np.concatenate([self.sample_indices[sample_indices_to_remove], self.individual_indices[individual_indices_to_remove]])
+        else:
+            nodes_to_remove = self.sample_indices[sample_indices_to_remove]
+
+        A = self.A
+        nodes_to_keep = np.setdiff1d(np.arange(A.shape[0]), nodes_to_remove)
+        A = A.tocsr()
+        A = A[nodes_to_keep, :].tocsc()  # efficient row slice, then convert back to CSC
+        A = A[:, nodes_to_keep]
+
+        linarg_samples_removed = LinearARG(A, self.variant_indices, self.flip, len(iids_to_keep))
+        linarg_samples_removed.iids = pl.Series(iids_to_keep).cast(pl.Int64)
+
+        if self.n_individuals is not None:
+            linarg_samples_removed.n_individuals = self.n_individuals - len(iids_to_remove)
+        if self.variants is not None:
+            linarg_samples_removed.variants = self.variants
+        if self.sex is not None:
+            linarg_samples_removed.sex = self.sex[~individual_mask]
+        return linarg_samples_removed
+    
     def __str__(self):
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
 
