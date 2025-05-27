@@ -162,6 +162,14 @@ def get_gwas_beta_se(
         denominator = (allele_counts - var_explained + 1e-6) / two_n
         carrier_counts = None
     else:
+        
+        # handle case when genotypes has iids not in data
+        data_iids = set(data.select('iid').collect().to_series())
+        genotypes_iids = set(genotypes.iids)
+        missing_iids = list(genotypes_iids - data_iids)
+        if len(missing_iids) != 0:
+            genotypes = genotypes.remove_samples(missing_iids)
+        
         var_genotypes, carrier_counts = _get_genotype_variance(genotypes, allele_counts)
         denominator = (var_genotypes - var_explained + 1e-6) / two_n
     assert np.all(denominator > 0)
