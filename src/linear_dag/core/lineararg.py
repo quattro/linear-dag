@@ -191,12 +191,14 @@ class LinearARG(LinearOperator):
     def allele_frequencies(self):
         return (np.ones(self.shape[0], dtype=np.int32) @ self) / self.shape[0]
     
-    @cached_property
-    def number_of_carriers(self):
+    def number_of_carriers(self, individuals_to_include=None):
         if self.n_individuals is None:
             raise ValueError('The linear ARG does not have individual nodes. Try running add_individual_nodes first.')
         v = np.zeros(self.A.shape[0], dtype=np.float64)
-        v[self.individual_indices] = np.ones(self.n_individuals)
+        if individuals_to_include is None:
+            v[self.individual_indices] = np.ones(self.n_individuals)
+        else:
+            v[self.individual_indices[individuals_to_include]] = np.ones(len(individuals_to_include))
         spsolve_backward_triangular(self.A, v)
         v = v[self.variant_indices]
         if np.any(self.flip):

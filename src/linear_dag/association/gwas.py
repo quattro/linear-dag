@@ -65,20 +65,25 @@ def _get_genotype_variance_explained(
 
 def _get_genotype_variance(
                           genotypes: LinearOperator,
-                          allele_counts: np.ndarray
+                          allele_counts: np.ndarray,
+                          individuals_to_include: np.ndarray,
                         ) -> Tuple[np.int64, np.ndarray]:
     """ Get variance of genotypes without assuming HWE: diag(X^TX)
     
     Args:
         genotypes: Unnormalized, phased genotypes as a linear ARG with ploidy (i.e. individual nodes)
         allele_counts: Counts of each allele
+        individuals_to_keep: Non-missing individuals to include in carrier count
         
     Returns:
         tuple: (var_genotypes, num_homozygotes)
             var_genotypes: variance of genotypes
             carrier_counts: number of carriers per allele
     """
-    carrier_counts = genotypes.number_of_carriers.reshape(-1, 1)
+    print(f'carrier counts all: {genotypes.number_of_carriers()}')
+    print(f'individuals_to_include: {individuals_to_include}')
+    print(f'carrier counts subset: {genotypes.number_of_carriers(individuals_to_include)}')
+    carrier_counts = genotypes.number_of_carriers(individuals_to_include).reshape(-1, 1)
     var_genotypes = 3 * allele_counts - 2 * carrier_counts # 4 * num_homozygotes + num_heterozygotes
     return var_genotypes, carrier_counts
     
@@ -161,17 +166,18 @@ def get_gwas_beta_se(
     if assume_hwe:
         denominator = (allele_counts - var_explained + 1e-6) / two_n
         carrier_counts = None
-    else:
-        
-        # handle case when genotypes has iids not in data
-        data_iids = set(data.select('iid').collect().to_series())
-        genotypes_iids = set(genotypes.iids)
-        missing_iids = list(genotypes_iids - data_iids)
-        if len(missing_iids) != 0:
-            genotypes = genotypes.remove_samples(missing_iids)
-        
-        var_genotypes, carrier_counts = _get_genotype_variance(genotypes, allele_counts)
+    else:        
+        if genotypes.sex is not None:
+            raise NotImplementedError
+        individuals_to_include = np.where(rows_matched_per_col[::2]==1)[0] # non-missint individuals to include in carrier count
+        var_genotypes, carrier_counts = _get_genotype_variance(genotypes, allele_counts, individuals_to_include)
         denominator = (var_genotypes - var_explained + 1e-6) / two_n
+    print(f'two_n: {two_n}')
+    print(f'numerator: {numerator}')
+    print(f'denominator: {denominator}')
+    print(f'variance: {var_genotypes}')
+    print(f'variance explained: {var_explained}')
+    print(np.where(denominator <= 0)[0])
     assert np.all(denominator > 0)
     
     var_resid = np.sum(y_resid ** 2, axis=0) / num_nonmissing
@@ -216,6 +222,7 @@ def run_gwas(
         raise ValueError("First column of covar_cols should be '1'")
 
     left_op, right_op = get_inner_merge_operators(data.select('iid').collect().to_series(), genotypes.iids) # data iids to shared iids, shared iids to genotypes iids
+    print(left_op.shape, right_op.shape)
     phenotypes = data.select(pheno_cols).collect().to_numpy()
     covariates = data.select(covar_cols).collect().to_numpy()
 
