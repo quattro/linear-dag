@@ -284,5 +284,4 @@ def run_gwas(
     if variant_info is not None:
         results_df = results_df.join(variant_info.with_row_index('variant_index'), on='variant_index')
 
-    # return results_df
-    return allele_counts, carrier_counts, right_op
+    return results_df
