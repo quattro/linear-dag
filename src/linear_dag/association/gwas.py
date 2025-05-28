@@ -83,7 +83,11 @@ def _get_genotype_variance(
     print(f'carrier counts all: {genotypes.number_of_carriers()}')
     print(f'individuals_to_include: {individuals_to_include}')
     print(f'carrier counts subset: {genotypes.number_of_carriers(individuals_to_include)}')
+    print(f'allele counts subset: {allele_counts}')
     carrier_counts = genotypes.number_of_carriers(individuals_to_include).reshape(-1, 1)
+    diff = allele_counts - carrier_counts
+    print(np.where(diff<0)[0])
+    assert np.all(allele_counts - carrier_counts >= 0)
     var_genotypes = 3 * allele_counts - 2 * carrier_counts # 4 * num_homozygotes + num_heterozygotes
     return var_genotypes, carrier_counts
     
@@ -280,4 +284,5 @@ def run_gwas(
     if variant_info is not None:
         results_df = results_df.join(variant_info.with_row_index('variant_index'), on='variant_index')
 
-    return results_df
+    # return results_df
+    return allele_counts, carrier_counts, right_op

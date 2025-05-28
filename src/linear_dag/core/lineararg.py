@@ -84,8 +84,8 @@ class LinearARG(LinearOperator):
     def individual_indices(self):
         if self.n_individuals is None:
             raise ValueError('The linear ARG does not have individual nodes. Try running add_individual_nodes first.')
-        return np.arange(self.A.shape[0] - 1, self.A.shape[0] - self.n_individuals - 1, -1, dtype=np.int32)
-    
+        return np.arange(self.A.shape[0] - self.n_individuals, self.A.shape[0], dtype=np.int32)
+            
     @property
     def sample_indices(self):
         if self.n_individuals is None:
@@ -202,7 +202,10 @@ class LinearARG(LinearOperator):
         spsolve_backward_triangular(self.A, v)
         v = v[self.variant_indices]
         if np.any(self.flip):
-            v[self.flip] = self.n_individuals - v[self.flip]
+            if individuals_to_include is None:
+                v[self.flip] = self.n_individuals - v[self.flip]
+            else:
+                v[self.flip] = len(individuals_to_include) - v[self.flip]
         return v.astype(np.int64)
     
     def remove_samples(self, iids_to_remove: npt.ArrayLike):
