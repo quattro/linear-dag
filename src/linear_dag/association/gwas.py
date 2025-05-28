@@ -169,7 +169,7 @@ def get_gwas_beta_se(
     else:        
         if genotypes.sex is not None:
             raise NotImplementedError
-        individuals_to_include = np.where(rows_matched_per_col[::2]==1)[0] # non-missint individuals to include in carrier count
+        individuals_to_include = np.where(rows_matched_per_col[::2]==1)[0] # non-missing individuals to include in carrier count
         var_genotypes, carrier_counts = _get_genotype_variance(genotypes, allele_counts, individuals_to_include)
         denominator = (var_genotypes - var_explained + 1e-6) / two_n
     print(f'two_n: {two_n}')
@@ -177,7 +177,10 @@ def get_gwas_beta_se(
     print(f'denominator: {denominator}')
     print(f'variance: {var_genotypes}')
     print(f'variance explained: {var_explained}')
-    print(np.where(denominator <= 0)[0])
+    inds = np.where(denominator <= 0)[0]
+    print(inds)
+    print(len(inds))
+    print(f'denominator inds: {denominator[inds]}')
     assert np.all(denominator > 0)
     
     var_resid = np.sum(y_resid ** 2, axis=0) / num_nonmissing
