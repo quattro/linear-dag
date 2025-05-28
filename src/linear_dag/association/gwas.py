@@ -183,6 +183,8 @@ def get_gwas_beta_se(
     print(f'denominator inds: {denominator[inds]}')
     print(f'variance inds: {var_genotypes[inds]}')
     print(f'var_explained inds: {var_explained[inds]}')
+    print(f'allele_counts inds: {allele_counts[inds]}')
+    print(f'carrier_counts inds: {carrier_counts[inds]}')
     assert np.all(denominator > 0)
     
     var_resid = np.sum(y_resid ** 2, axis=0) / num_nonmissing
