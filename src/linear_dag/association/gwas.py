@@ -80,13 +80,7 @@ def _get_genotype_variance(
             var_genotypes: variance of genotypes
             carrier_counts: number of carriers per allele
     """
-    print(f'carrier counts all: {genotypes.number_of_carriers()}')
-    print(f'individuals_to_include: {individuals_to_include}')
-    print(f'carrier counts subset: {genotypes.number_of_carriers(individuals_to_include)}')
-    print(f'allele counts subset: {allele_counts}')
     carrier_counts = genotypes.number_of_carriers(individuals_to_include).reshape(-1, 1)
-    diff = allele_counts - carrier_counts
-    print(np.where(diff<0)[0])
     assert np.all(allele_counts - carrier_counts >= 0)
     var_genotypes = 3 * allele_counts - 2 * carrier_counts # 4 * num_homozygotes + num_heterozygotes
     return var_genotypes, carrier_counts
@@ -176,19 +170,6 @@ def get_gwas_beta_se(
         individuals_to_include = np.where(rows_matched_per_col[::2]==1)[0] # non-missing individuals to include in carrier count
         var_genotypes, carrier_counts = _get_genotype_variance(genotypes, allele_counts, individuals_to_include)
         denominator = (var_genotypes - var_explained + 1e-6) / two_n
-    print(f'two_n: {two_n}')
-    print(f'numerator: {numerator}')
-    print(f'denominator: {denominator}')
-    print(f'variance: {var_genotypes}')
-    print(f'variance explained: {var_explained}')
-    inds = np.where(denominator <= 0)[0]
-    print(inds)
-    print(len(inds))
-    print(f'denominator inds: {denominator[inds]}')
-    print(f'variance inds: {var_genotypes[inds]}')
-    print(f'var_explained inds: {var_explained[inds]}')
-    print(f'allele_counts inds: {allele_counts[inds]}')
-    print(f'carrier_counts inds: {carrier_counts[inds]}')
     assert np.all(denominator > 0)
     
     var_resid = np.sum(y_resid ** 2, axis=0) / num_nonmissing
@@ -233,7 +214,6 @@ def run_gwas(
         raise ValueError("First column of covar_cols should be '1'")
 
     left_op, right_op = get_inner_merge_operators(data.select('iid').collect().to_series(), genotypes.iids) # data iids to shared iids, shared iids to genotypes iids
-    print(left_op.shape, right_op.shape)
     phenotypes = data.select(pheno_cols).collect().to_numpy()
     covariates = data.select(covar_cols).collect().to_numpy()
 

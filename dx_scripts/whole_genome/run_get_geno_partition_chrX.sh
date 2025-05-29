@@ -4,6 +4,7 @@ linarg_dir=$2
 region=$3
 partition_number=$4
 whitelist_path=$5
+sex_path=$6
 
 set -euo pipefail
 

@@ -8,9 +8,9 @@ chroms=({1..22})
 
 for chrom in "${chroms[@]}"; do
 
-    if [[ $chrom != 22 ]]; then
-        continue 
-    fi
+    # if [[ $chrom != 22 ]]; then
+    #     continue 
+    # fi
 
     chrom_dir="${out}/${data_identifier}/chr${chrom}"
     linarg_dir_list=($(dx ls $chrom_dir))

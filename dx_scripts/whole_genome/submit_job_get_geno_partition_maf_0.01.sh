@@ -1,11 +1,11 @@
 #!/bin/bash
 # instance_type=$1
-instance_type="mem3_ssd1_v2_x2"
+instance_type="mem3_ssd1_v2_x4"
 
 out="linear_args"
 data_identifier="ukb20279_maf_0.01"
 whitelist_path="/mnt/project/sample_metadata/ukb20279/250129_whitelist.txt"
-chroms=({2..5})
+chroms=({1..22})
 
 for chrom in "${chroms[@]}"; do
 
