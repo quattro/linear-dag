@@ -16,5 +16,5 @@ pyenv install 3.10.13
 pyenv global 3.10.13 
 
 pip install h5py
-pip install git+https://github.com/quattro/linear-dag.git
+pip install git+https://github.com/quattro/linear-dag.git@save_as_hdf5
 kodama run-forward-backward --linarg_dir $linarg_dir --load_dir $load_dir --partition_identifier $partition_identifier

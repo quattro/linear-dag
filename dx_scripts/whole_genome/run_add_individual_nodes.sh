@@ -13,5 +13,5 @@ pyenv install 3.10.13
 pyenv global 3.10.13
 
 pip install h5py
-pip install git+https://github.com/quattro/linear-dag.git@save_as_hdf5
-kodama merge --linarg_dir $linarg_dir --load_dir $load_dir
+pip install git+https://github.com/quattro/linear-dag.git@debug_gwas
+kodama add-individual-nodes --linarg_dir $linarg_dir --load_dir $load_dir

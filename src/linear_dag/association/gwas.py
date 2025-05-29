@@ -1,4 +1,4 @@
-from linear_dag.core.operators import get_merge_operator
+from linear_dag.core.operators import get_merge_operator, get_inner_merge_operators
 from scipy.sparse.linalg import LinearOperator
 from scipy.stats import norm
 import numpy as np
@@ -36,7 +36,7 @@ def residualize_phenotypes(phenotypes: np.ndarray,
 
 def _get_genotype_variance_explained(
                                     genotypes: LinearOperator, 
-                                    covariates: np.ndarray
+                                    covariates: np.ndarray,
                                     ) -> Tuple[np.ndarray, np.ndarray]:
     """ Get variance of genotypes explained by covariates: 
                 diag(X'C(C'C)^-1C'X) / n
@@ -47,7 +47,7 @@ def _get_genotype_variance_explained(
             covariates: Covariates matrix, which should include the all-ones annotation except for missing values
 
         Returns:
-            tuple: (total_var_explained, allele_fallele_countrequency)
+            tuple: (total_var_explained, allele_count)
                 total_var_explained: Total variance of genotypes explained by covariates
                 allele_count: Allele count of the genotypes, assuming first column of covariates is all-ones
                                 except for missing values
@@ -61,6 +61,30 @@ def _get_genotype_variance_explained(
 
     allele_count = between_product[0,:].reshape(-1,1)
     return total_var_explained, allele_count
+
+
+def _get_genotype_variance(
+                          genotypes: LinearOperator,
+                          allele_counts: np.ndarray,
+                          individuals_to_include: np.ndarray,
+                        ) -> Tuple[np.int64, np.ndarray]:
+    """ Get variance of genotypes without assuming HWE: diag(X^TX)
+    
+    Args:
+        genotypes: Unnormalized, phased genotypes as a linear ARG with ploidy (i.e. individual nodes)
+        allele_counts: Counts of each allele
+        individuals_to_keep: Non-missing individuals to include in carrier count
+        
+    Returns:
+        tuple: (var_genotypes, num_homozygotes)
+            var_genotypes: variance of genotypes
+            carrier_counts: number of carriers per allele
+    """
+    carrier_counts = genotypes.number_of_carriers(individuals_to_include).reshape(-1, 1)
+    assert np.all(allele_counts - carrier_counts >= 0)
+    var_genotypes = 3 * allele_counts - 2 * carrier_counts # 4 * num_homozygotes + num_heterozygotes
+    return var_genotypes, carrier_counts
+    
     
 def _impute_missing_with_mean(data: np.ndarray) -> np.ndarray:
     """Impute missing values with the mean of the column in place."""
@@ -74,9 +98,11 @@ def _impute_missing_with_mean(data: np.ndarray) -> np.ndarray:
 
 def get_gwas_beta_se(
                 genotypes: LinearOperator, 
-                merge_operator: LinearOperator, 
+                left_op: LinearOperator,
+                right_op: LinearOperator,
                 phenotypes: np.ndarray, 
                 covariates: np.ndarray,
+                assume_hwe: bool,
                 variant_info: Optional[pl.LazyFrame] = None,
                 ) -> np.ndarray:
     """
@@ -85,36 +111,39 @@ def get_gwas_beta_se(
 
     Args:
         genotypes: Unnormalized, phased genotypes as a linear operator (e.g. ParallelOperator or LinearARG)
-        merge_operator: Merge operator for matching genotypes and phenotypes; shape is
-            (phenotypes.shape[0], genotypes.shape[0])
+        left_op: Left merge operator for matching genotypes and phenotypes
+        right_op: Right merge operator for matching genotypes and phenotypes
         phenotypes: Phenotypes matrix
         covariates: Covariates matrix, which should include the all-ones annotation
+        assume_hwe: Whether or not to assume HWE. If not, genotypes must be the ploidy linear ARG
 
     Returns:
-        tuple: (beta, se, sample_size)
+        tuple: (beta, se, sample_size, allele_counts, carrier_counts)
             beta: GWAS effect-size estimates in per-allele units
             se: Standard errors assuming Hardy-Weinberg equilibrium
             sample_size: Number of non-missing samples per trait
+            allele_counts: Number of haplotypes carrying each allele
+            carrier_counts: Number of individuals carrying each allele
     """
     if not np.allclose(covariates[:,0], 1):
         raise ValueError("First column of covariates should be all-ones")
 
-    cols_matched_per_row = merge_operator @ np.ones(merge_operator.shape[1])
+    cols_matched_per_row = left_op @ np.ones(left_op.shape[1])
     # Check if all *non-zero* counts are exactly 2
     if not np.all(cols_matched_per_row[cols_matched_per_row != 0] == 2):
         raise ValueError("Each row of the phenotype matrix should match zero or two rows of the genotype operator")
     
-    rows_matched_per_col = np.ones(merge_operator.shape[0]) @ merge_operator
+    rows_matched_per_col = np.ones(right_op.shape[0]) @ right_op
     # Check if all *non-zero* counts are exactly 1
     if not np.all(rows_matched_per_col[rows_matched_per_col != 0] == 1):
         raise ValueError("Each row of the genotype operator should match at most one row of the phenotype matrix")
 
     two_n = np.sum(rows_matched_per_col>0)
     assert two_n == 2 * np.sum(cols_matched_per_row>0)
-
-    covariates = merge_operator.T @ covariates
-    phenotypes = merge_operator.T @ phenotypes
     
+    covariates = left_op.T @ covariates
+    phenotypes = left_op.T @ phenotypes
+        
     # Handle missingness
     covariates = _impute_missing_with_mean(covariates)
     is_missing = np.isnan(phenotypes)
@@ -124,19 +153,33 @@ def get_gwas_beta_se(
 
     # Residualize phenotypes on covariates
     y_resid = residualize_phenotypes(phenotypes, covariates, is_missing)
-    y_resid /= np.sqrt(np.sum(y_resid**2, axis=0) / num_nonmissing) # ||y_resid||^2 == num_nonmissing
-    assert np.allclose(np.sum(y_resid**2, axis=0), num_nonmissing), "Non-unit mean squared residuals, indicating a numerical issue; check for collinearity"
-    assert np.allclose(np.mean(y_resid, axis=0), 0, rtol=1e-3), "Non-zero mean residuals, indicating a numerical issue; check for collinearity"
-    numerator = genotypes.T @ y_resid / num_nonmissing
+    # y_resid /= np.sqrt(np.sum(y_resid**2, axis=0) / num_nonmissing) # ||y_resid||^2 == num_nonmissing
+    # assert np.allclose(np.sum(y_resid**2, axis=0), num_nonmissing), "Non-unit mean squared residuals, indicating a numerical issue; check for collinearity"
+    # assert np.allclose(np.mean(y_resid, axis=0), 0, rtol=1e-3), "Non-zero mean residuals, indicating a numerical issue; check for collinearity"
+    numerator = (right_op @ genotypes).T @ y_resid / num_nonmissing
     
-     # Get denominator, which is assumed equal across traits despite different missingness
-    var_explained, allele_counts = _get_genotype_variance_explained(genotypes, covariates)
-    denominator = (allele_counts - var_explained + 1e-6) / two_n
+    # Get denominator, which is assumed equal across traits despite different missingness
+    
+    var_explained, allele_counts = _get_genotype_variance_explained(right_op @ genotypes, covariates)
+    if assume_hwe:
+        denominator = (allele_counts - var_explained + 1e-6) / two_n
+        carrier_counts = None
+    else:        
+        if genotypes.sex is not None:
+            raise NotImplementedError
+        individuals_to_include = np.where(rows_matched_per_col[::2]==1)[0] # non-missing individuals to include in carrier count
+        var_genotypes, carrier_counts = _get_genotype_variance(genotypes, allele_counts, individuals_to_include)
+        denominator = (var_genotypes - var_explained + 1e-6) / two_n
     assert np.all(denominator > 0)
+    
+    var_resid = np.sum(y_resid ** 2, axis=0) / num_nonmissing
+    se = np.sqrt(var_resid.reshape(1, -1) / (denominator * num_nonmissing.reshape(1, -1)))
 
     return (numerator / denominator, 
-            1 / (np.sqrt(denominator * num_nonmissing.reshape(1,-1))),
-            num_nonmissing // 2)
+            se,
+            num_nonmissing // 2,
+            allele_counts,
+            carrier_counts)
 
 def run_gwas(
             genotypes: LinearOperator, 
@@ -144,6 +187,7 @@ def run_gwas(
             pheno_cols: list[str], 
             covar_cols: list[str],
             variant_info: Optional[pl.LazyFrame] = None,
+            assume_hwe: bool = True,
             ) -> pl.LazyFrame:
     """
     Runs a linear regression association scan with covariates.
@@ -157,19 +201,23 @@ def run_gwas(
         covar_cols: List of columns in data containing covariates
         variant_info: Optional variant information to include in results,
             as a Polars LazyFrame of length equal to genotypes.shape[1]
+        assume_hwe: Whether or not to assume HWE. If not, the ploidy ARG
+            must be provided so number of carriers per variant can be computed.
 
     Returns:
         Polars LazyFrame containing GWAS results
     """
+    if not assume_hwe and not hasattr(genotypes, 'n_individuals'):
+        raise ValueError('If assume_hwe is False, genotypes must be a linear ARG with individual nodes.')
+    
     if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
 
-    merge_operator = get_merge_operator(data.select('iid').collect().to_series(), genotypes.iids)
-    print(merge_operator.shape)
+    left_op, right_op = get_inner_merge_operators(data.select('iid').collect().to_series(), genotypes.iids) # data iids to shared iids, shared iids to genotypes iids
     phenotypes = data.select(pheno_cols).collect().to_numpy()
     covariates = data.select(covar_cols).collect().to_numpy()
 
-    beta, se, sample_size = get_gwas_beta_se(genotypes, merge_operator, phenotypes, covariates)
+    beta, se, sample_size, allele_counts, carrier_counts = get_gwas_beta_se(genotypes, left_op, right_op, phenotypes, covariates, assume_hwe)
 
     m, num_traits = beta.shape
     if len(pheno_cols) != num_traits:
@@ -197,7 +245,8 @@ def run_gwas(
         "beta": beta.T.ravel(),
         "se": se.T.ravel(),
         "n": n_series,
-        "trait": trait_series
+        "trait": trait_series,
+        "allele_counts": allele_counts.T.ravel(),
         })\
         .with_row_index('variant_index')\
         .with_columns(
@@ -206,6 +255,11 @@ def run_gwas(
         .with_columns(
             pl.col('z').map_batches(chisq_pval).alias('pval')
         )
+        
+    if carrier_counts is not None:
+        results_df = results_df.collect().with_columns(
+            pl.Series("carrier_counts", carrier_counts.reshape(-1))
+        ).lazy()
 
     if variant_info is not None:
         results_df = results_df.join(variant_info.with_row_index('variant_index'), on='variant_index')

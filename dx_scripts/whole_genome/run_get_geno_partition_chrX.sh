@@ -4,6 +4,7 @@ linarg_dir=$2
 region=$3
 partition_number=$4
 whitelist_path=$5
+sex_path=$6
 
 set -euo pipefail
 
@@ -26,4 +27,4 @@ kodama make-geno --vcf_path "$vcf_path" \
                  --phased \
                  --flip_minor_alleles \
                  --whitelist_path $whitelist_path \
-                 --maf_filter 0.01
+                 --sex_path $sex_path
