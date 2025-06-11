@@ -245,8 +245,8 @@ def run_gwas(
         "beta": beta.T.ravel(),
         "se": se.T.ravel(),
         "n": n_series,
-        "trait": trait_series,
-        "allele_counts": allele_counts.T.ravel(),
+        "trait": trait_series,        
+        "allele_counts": np.tile(allele_counts.T.ravel(), len(pheno_cols)),
         })\
         .with_row_index('variant_index')\
         .with_columns(
@@ -258,7 +258,7 @@ def run_gwas(
         
     if carrier_counts is not None:
         results_df = results_df.collect().with_columns(
-            pl.Series("carrier_counts", carrier_counts.reshape(-1))
+            pl.Series("carrier_counts", np.tile(carrier_counts.reshape(-1), len(pheno_cols)))
         ).lazy()
 
     if variant_info is not None:
