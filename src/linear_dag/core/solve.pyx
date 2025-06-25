@@ -9,6 +9,7 @@ from libc.string cimport memset
 from scipy.sparse import csc_matrix, csr_matrix
 from .data_structures cimport Stack, InfiniteStack
 cimport scipy.linalg.cython_blas as blas
+from typing import Optional, Set
 
 def spsolve_forward_triangular(A: "csc_matrix", b: np.ndarray) -> None:
     """Solves the system (I-A)x = b in place, where A is a lower triangular zero-diagonal matrix."""
@@ -484,11 +485,16 @@ def spinv_triangular(A: "csr_matrix") -> "csc_matrix":
     return csc_matrix((x_data[:next_x_indptr], x_indices[:next_x_indptr], x_indptr))
 
 
-def topological_sort(A: "csr_matrix", nodes_to_ignore: "set" = None) -> np.ndarray:
+def topological_sort(A: "csr_matrix", nodes_to_ignore: Optional[Set] = None) -> np.ndarray:
     """
     The topological sort of a directed graph with adjacency matrix equal to A transpose. If A[i,j] != 0,
     then j will come before i in the ordering. The diagonal of A is ignored.
     """
+    cdef Set ignore_set
+    if nodes_to_ignore is None:
+        ignore_set = set()
+    else:
+        ignore_set = set(nodes_to_ignore)
 
     cdef int num_nodes = A.shape[0]
     if A.shape[1] != num_nodes:
@@ -512,7 +518,7 @@ def topological_sort(A: "csr_matrix", nodes_to_ignore: "set" = None) -> np.ndarr
     i = 0
     while nodes_to_visit.length > 0:
         node = nodes_to_visit.pop()
-        if (nodes_to_ignore is not None) and (node in nodes_to_ignore): # do not visit nodes in nodes_to_ignore
+        if node in ignore_set: # do not visit nodes in nodes_to_ignore
                 continue
         result[i] = node
 

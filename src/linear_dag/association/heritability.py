@@ -200,7 +200,7 @@ def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple
     return trace_grm, trace_grm_sq, {}
 
 
-def _xtrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
+def _xtrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler, estimate_diag: bool = False) -> tuple[float, float, dict]:
     # WIP
     raise NotImplementedError("xtrace estimator is not yet implemented")
     n, _ = GRM.shape
@@ -237,6 +237,9 @@ def _xtrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[f
     trace_grm = np.mean(estimates)
     trace_grm_sq = np.mean(estimates)  # TODO WRONG WRONG; just placeholder
     std_err = np.std(estimates) / np.sqrt(m)
+
+    if estimate_diag:
+        return estimates
 
     # TODO: WIP
     """

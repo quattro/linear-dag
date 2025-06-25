@@ -9,6 +9,7 @@ from .core import (
     linear_arg_from_genotypes as linear_arg_from_genotypes,
     LinearARG as LinearARG,
     list_blocks as list_blocks,
+    ParallelOperator as ParallelOperator,
 )
 from .genotype import (
     apply_maf_threshold as apply_maf_threshold,
