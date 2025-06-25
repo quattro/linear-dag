@@ -238,7 +238,8 @@ class ParallelOperator(LinearOperator):
     def from_hdf5(cls, 
                      hdf5_file: str,
                      num_processes: Optional[int] = None,
-                     max_num_traits: int = 10) -> "ParallelOperator":
+                     max_num_traits: int = 10,
+                     chrom: Optional[int] = None) -> "ParallelOperator":
         """Create a ParallelOperator from a metadata file.
         
         Args:
@@ -248,7 +249,7 @@ class ParallelOperator(LinearOperator):
         Returns:
             ParallelOperator instance
         """
-        return _ManagerFactory.create_parallel(hdf5_file, num_processes, max_num_traits)
+        return _ManagerFactory.create_parallel(hdf5_file, num_processes, max_num_traits, chrom)
 
 
 class _ManagerFactory:
@@ -342,6 +343,7 @@ class _ManagerFactory:
             hdf5_file: str,
             num_processes: Optional[int],
             max_num_traits: int,
+            chrom: Optional[str] = None,
             ) -> "ParallelOperator":
         """Create a ParallelOperator instance.
 
@@ -350,11 +352,22 @@ class _ManagerFactory:
             num_processes: Number of processes to use
             alpha: Alpha parameter
             max_num_traits: Maximum number of traits
+            chrom: chromosome number to restrict to
 
         Returns:
             ParallelOperator instance
         """
         block_metadata = list_blocks(hdf5_file)
+        if chrom is not None:
+            block_metadata = block_metadata.with_columns(
+                pl.Series("chrom", [b.split('_')[0] for b in list(block_metadata['block_name'])])
+            )
+            
+            block_metadata = block_metadata.with_columns(
+                pl.col("chrom").cast(pl.Int32)
+            ).filter(
+                pl.col("chrom") == chrom
+            )
         blocks = block_metadata['block_name']
 
         if num_processes is None:

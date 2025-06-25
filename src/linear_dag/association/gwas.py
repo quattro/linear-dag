@@ -188,7 +188,7 @@ def run_gwas(
             covar_cols: list[str],
             variant_info: Optional[pl.LazyFrame] = None,
             assume_hwe: bool = True,
-            ) -> pl.LazyFrame:
+            ) -> list:
     """
     Runs a linear regression association scan with covariates.
 
@@ -229,39 +229,48 @@ def run_gwas(
          else:
              raise ValueError(f"Unexpected shape for sample_size: {sample_size.shape}")
 
-    # Create repeated series for traits and sample sizes using extend_constant
-    Phenotype = pl.Enum(pheno_cols)
-    trait_series = pl.Series(dtype=Phenotype)
-    n_series = pl.Series(dtype=pl.Float32)
-
-    for i, pheno_name in enumerate(pheno_cols):
-        trait_series = trait_series.extend_constant(pheno_name, m)
-        n_series = n_series.extend_constant(sample_size[i], m)
-
-    def chisq_pval(z: pl.Series) -> pl.Series:
-        return pl.Series(2 * (1 - norm.cdf(z.abs().to_numpy())))
-
-    results_df = pl.LazyFrame({
-        "beta": beta.T.ravel(),
-        "se": se.T.ravel(),
-        "n": n_series,
-        "trait": trait_series,        
-        "allele_counts": np.tile(allele_counts.T.ravel(), len(pheno_cols)),
-        })\
-        .with_row_index('variant_index')\
-        .with_columns(
-            pl.col('variant_index') % m,
-            (pl.col('beta') / pl.col('se')).alias('z'))\
-        .with_columns(
-            pl.col('z').map_batches(chisq_pval).alias('pval')
-        )
-        
-    if carrier_counts is not None:
-        results_df = results_df.collect().with_columns(
-            pl.Series("carrier_counts", np.tile(carrier_counts.reshape(-1), len(pheno_cols)))
-        ).lazy()
-
+    def chisq_pval(z: np.ndarray) -> np.ndarray:
+        return 2 * (1 - norm.cdf(np.abs(z)))
+    
+    results = []
+    
+    cols = ["A1FREQ", "BETA", "SE", "CHISQ", "PVAL", "N"]
     if variant_info is not None:
-        results_df = results_df.join(variant_info.with_row_index('variant_index'), on='variant_index')
+        cols = cols + ["CHROM", "POS", "ID", "ALLELE0", "ALLELE1"]
+        variant_info = variant_info.rename({
+                "REF": "ALLELE0",
+                "ALT": "ALLELE1",
+            })
+        variant_info = variant_info.with_row_index("variant_index").with_columns(
+                pl.col("variant_index").cast(pl.Int32)
+            )
+    if carrier_counts is not None:
+        cols = cols + ["CARRIER_COUNTS"]
 
-    return results_df
+    for i in range(len(pheno_cols)):
+        z_scores = beta[:, i]/se[:, i]
+        frame_dict = {
+            "variant_index": pl.Series("variant_index", np.arange(m, dtype=np.int32), dtype=pl.Int32),
+            "BETA": beta[:, i],
+            "SE": se[:, i],
+            "CHISQ": z_scores**2,
+            "PVAL": chisq_pval(z_scores),
+            "A1FREQ": allele_counts.reshape(-1)/genotypes.shape[0],
+            "N": m*[genotypes.shape[0]//2]
+        }
+        if carrier_counts is not None:
+            frame_dict["CARRIER_COUNTS"] = carrier_counts.reshape(-1)
+
+        df = pl.LazyFrame(frame_dict)
+        
+        if variant_info is not None:
+            df = df.join(
+                variant_info,
+                on="variant_index",
+                how="left"
+            )
+            
+        df = df.select(cols)
+        results.append(df)
+
+    return results

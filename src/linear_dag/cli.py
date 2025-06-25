@@ -3,10 +3,15 @@ import argparse
 import logging
 import os
 import sys
+import h5py
+import polars as pl
+import gzip
 
 from importlib import metadata
 
-from .core.lineararg import LinearARG
+from .core.lineararg import LinearARG, load_all_metadata
+from .core.parallel_processing import ParallelOperator
+from .association.gwas import run_gwas
 from .core.partition_merge import infer_brick_graph, make_genotype_matrix, merge, run_forward_backward, reduction_union_recom, add_individuals_to_linarg
 
 title = """                            @@@@
@@ -135,8 +140,23 @@ def _make_dag(args):
 
 
 def _assoc_scan(args):
-    pass
-
+    linarg = ParallelOperator.from_hdf5(args.linarg_path) 
+    with h5py.File(args.linarg_path, "r") as f: # read iids from a single block, can probably make cleaner
+        first_key = next(iter(f.keys()))
+        group = f[first_key]
+        iids = group['iids'][:]
+    linarg.iids = pl.Series("iids", iids)
+    variant_info = load_all_metadata(args.linarg_path)
+    phenotypes = pl.read_csv(args.phenotypes_path)
+    with open(args.pheno_cols) as f:
+        pheno_cols = f.read().splitlines()
+    with open(args.covar_cols) as f:
+        covar_cols = f.read().splitlines()
+    results = run_gwas(linarg, phenotypes.lazy(), pheno_cols, covar_cols, variant_info=variant_info)
+    for res, pheno in zip(results, pheno_cols):
+        # with gzip.open(f'{args.out}.{pheno}.gz', "wt") as f:
+        #     res.collect().write_csv(f)
+        res.collect().write_csv(f'{args.out}.{pheno}.csv', separator='\t')
 
 def _make_geno(args):
     logger = MemoryLogger(__name__)
@@ -201,7 +221,7 @@ def _main(args):
     argp.add_argument("-o", "--output", default="lineardag")
 
     subp = argp.add_subparsers(dest="cmd", required=True, help="Subcommands for linear-dag")
-
+    
     make_dag_p = subp.add_parser("make-dag", help="Make a linear dag")
     file_group = make_dag_p.add_mutually_exclusive_group(required=True)
     file_group.add_argument("--vcf", type=str, help="Path to VCF file")
@@ -210,12 +230,13 @@ def _main(args):
     file_group.add_argument("--bgen", type=str, help="Path to BGEN file")
     make_dag_p.set_defaults(func=_make_dag)
 
-    assoc_p = subp.add_parser("assoc", help="Perform association scan using linear dag")
-    assoc_p.add_argument("dag-path", type=str, help="Path prefix for linear dag")
-    assoc_p.add_argument("--pheno", type=str, help="Phenotype file for individuals")
-    assoc_p.add_argument("--pheno-col", type=str, help="Phenotype column to use in existing sample info")
-    assoc_p.add_argument("--covar", type=str, help="Covariate file for individuals")
-    assoc_p.add_argument("--covar-cols", type=str, help="Covariate file for individuals")
+    assoc_p = subp.add_parser("assoc", help="Perform association scan using linear ARG")
+    assoc_p.add_argument("--linarg_path", type=str, help="Path to linear ARG (.h5 file)")
+    assoc_p.add_argument("--phenotypes_path", type=str, help="Phenotype file for individuals")
+    assoc_p.add_argument("--pheno_cols", type=str, help="Path to text file with phenotype columns")
+    assoc_p.add_argument("--covar_cols", type=str, help="Path to text file with covariate columns. First column must be 1s.")
+    assoc_p.add_argument("--chrom", type=str, help="Which chromosome to run the association on. Defaults to all chromosomes.")
+    assoc_p.add_argument("--out", type=str, help="Location to save result files.")
     assoc_p.set_defaults(func=_assoc_scan)
 
     make_geno_p = subp.add_parser(
