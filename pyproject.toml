@@ -44,6 +44,7 @@ dependencies = [
   "jupyter",
   "psutil",
   "h5py>=3.13.0",
+  "pytest>=8.4.1",
 ]
 
 [project.scripts]
@@ -184,3 +185,9 @@ exclude_lines = [
   "if __name__ == .__main__.:",
   "if TYPE_CHECKING:",
 ]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+]
+norecursedirs = ["tests/old"]
