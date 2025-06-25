@@ -118,7 +118,7 @@ class LinearARG(LinearOperator):
         )
         A_filt, variants_idx_reindexed, samples_idx_reindexed  = remove_degree_zero_nodes(A, variants_idx, samples_idx)
         A_tri, variants_idx_tri = make_triangular(A_filt, variants_idx_reindexed, samples_idx_reindexed)
-        linarg = LinearARG(A_tri, variants_idx_tri, flip, len(samples_idx), VariantInfo(variant_info), iids=pl.Series(iids))
+        linarg = LinearARG(A_tri, variants_idx_tri, flip, len(samples_idx), None, VariantInfo(variant_info), iids=pl.Series(iids))
         linarg.calculate_nonunique_indices()
         return linarg
         
