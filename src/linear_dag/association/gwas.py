@@ -1,6 +1,6 @@
 from linear_dag.core.operators import get_merge_operator, get_inner_merge_operators
 from scipy.sparse.linalg import LinearOperator
-from scipy.stats import norm
+from scipy.stats import chi2
 import numpy as np
 from typing import Optional, Union, Tuple
 import polars as pl
@@ -229,14 +229,15 @@ def run_gwas(
          else:
              raise ValueError(f"Unexpected shape for sample_size: {sample_size.shape}")
 
-    def chisq_pval(z: np.ndarray) -> np.ndarray:
-        return 2 * (1 - norm.cdf(np.abs(z)))
+    def log_chisq_pval(z: np.ndarray) -> np.ndarray:
+        # return -np.log10(1 - chi2(1).cdf(z ** 2))
+        return -chi2(1).logsf(z ** 2)
     
     results = []
     
-    cols = ["A1FREQ", "BETA", "SE", "CHISQ", "PVAL", "N"]
+    cols = ["A1FREQ", "BETA", "SE", "CHISQ", "LOG10P", "N"]
     if variant_info is not None:
-        cols = cols + ["CHROM", "POS", "ID", "ALLELE0", "ALLELE1"]
+        cols = ["CHROM", "POS", "ID", "ALLELE0", "ALLELE1"] + cols 
         variant_info = variant_info.rename({
                 "REF": "ALLELE0",
                 "ALT": "ALLELE1",
@@ -254,18 +255,18 @@ def run_gwas(
             "BETA": beta[:, i],
             "SE": se[:, i],
             "CHISQ": z_scores**2,
-            "PVAL": chisq_pval(z_scores),
+            "LOG10P": log_chisq_pval(z_scores),
             "A1FREQ": allele_counts.reshape(-1)/genotypes.shape[0],
             "N": m*[genotypes.shape[0]//2]
         }
         if carrier_counts is not None:
             frame_dict["CARRIER_COUNTS"] = carrier_counts.reshape(-1)
 
-        df = pl.LazyFrame(frame_dict)
+        df = pl.DataFrame(frame_dict)
         
         if variant_info is not None:
             df = df.join(
-                variant_info,
+                variant_info.collect(),
                 on="variant_index",
                 how="left"
             )

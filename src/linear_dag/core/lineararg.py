@@ -375,7 +375,7 @@ class LinearARG(LinearOperator):
             n_samples = f.attrs['n_samples'] 
             n_individuals = f.attrs.get('n_individuals', None)
             nonunique_indices = f['nonunique_indices'][:] if 'nonunique_indices' in f else None
-            iids = f['iids'][:]
+            iids = f.get('iids')
             # iids_bytes = f.get('iids')
             # iids = [s.decode('utf-8') for s in iids_bytes[:]] if iids_bytes is not None else None
             
@@ -444,13 +444,20 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
         (or 'root') and its attributes.
     """
     block_data = []
+    
+    def parse_block_name(block_name):
+        chrom, start, _ = block_name.split('_')
+        return (int(chrom), int(start))
+    
     with h5py.File(h5_fname, 'r') as f:
-        keys = list(f.keys())
-        # Case 1: No groups (keys), check root attributes
-        if not keys:
+        
+        block_names = list(f.keys())
+        block_names = sorted(block_names, key=parse_block_name)
+        
+        if not block_names:
             return None
         else:
-            for block_name in keys:
+            for block_name in block_names:
                 if not isinstance(f[block_name], h5py.Group):
                     continue
                 group = f[block_name]
@@ -470,10 +477,11 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
     return pl.DataFrame(block_data)
 
 
-def load_all_metadata(h5_fname):
+def load_block_metadata(h5_fname, block_metadata):
+    block_names = block_metadata.get_column("block_name").to_list()
     lazyframes = []
     with h5py.File(h5_fname, 'r') as f:
-        for block_name in f:
+        for block_name in block_names:
             block = f[block_name]
             v_dict = {field: block[field][:].astype(str) for field in ["CHROM", "POS", "ID", "REF", "ALT"]}
             v_info = pl.DataFrame(v_dict).with_columns([
