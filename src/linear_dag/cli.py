@@ -152,10 +152,8 @@ def _prs(args):
             pl.col("chrom") == args.chrom
         )
     with ParallelOperator.from_hdf5(args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata) as linarg:
-        with h5py.File(args.linarg_path, "r") as f: # read iids from a single block, can probably make cleaner
-            first_key = next(iter(f.keys()))
-            group = f[first_key]
-            iids = group['iids'][:]
+        with h5py.File(args.linarg_path, "r") as f:
+            iids = f['iids'][:]
         betas = pl.read_csv(args.betas_path, separator='\t')
         with open(args.score_cols) as f:
             score_cols = f.read().splitlines()
@@ -176,10 +174,8 @@ def _assoc_scan(args):
             pl.col("chrom") == args.chrom
         )
     with ParallelOperator.from_hdf5(args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata) as linarg:
-        with h5py.File(args.linarg_path, "r") as f: # read iids from a single block, can probably make cleaner
-            first_key = next(iter(f.keys()))
-            group = f[first_key]
-            iids = group['iids'][:]
+        with h5py.File(args.linarg_path, "r") as f:
+            iids = f['iids'][:]
         linarg.iids = pl.Series("iids", iids)
         variant_info = load_block_metadata(args.linarg_path, block_metadata)
         phenotypes = pl.read_csv(args.phenotypes_path, separator='\t')

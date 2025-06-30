@@ -451,15 +451,13 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
     
     with h5py.File(h5_fname, 'r') as f:
         
-        block_names = list(f.keys())
+        block_names = [b for b in list(f.keys()) if isinstance(f[b], h5py.Group) and b!='iids']
         block_names = sorted(block_names, key=parse_block_name)
         
         if not block_names:
             return None
         else:
             for block_name in block_names:
-                if not isinstance(f[block_name], h5py.Group):
-                    continue
                 group = f[block_name]
                 attrs = group.attrs
                 block_info = {
