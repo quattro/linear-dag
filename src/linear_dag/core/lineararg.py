@@ -148,7 +148,7 @@ class LinearARG(LinearOperator):
             iids = [iids[i] for i in include_samples]
 
         result = LinearARG.from_genotypes(genotypes, flip, v_info, iids=iids, verbosity=verbosity)
-        
+
         return (result, genotypes) if return_genotypes else result
 
     @property
@@ -310,7 +310,8 @@ class LinearARG(LinearOperator):
         
         x = x[self.variant_indices]
         if np.any(self.flip):
-            x[self.flip] = np.sum(other, axis=0) - x[self.flip]  # TODO what if other is a matrix?
+            raise NotImplementedError("_rmatmat_scipy not implemented for flipped variants")
+            # x[self.flip] = np.sum(other, axis=0) - x[self.flip]  # TODO
         return x
 
     def _matvec(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
@@ -355,7 +356,9 @@ class LinearARG(LinearOperator):
         """
 
         # write out DAG info
-        with h5py.File(prefix + ".h5", "a") as f:
+        if not str(prefix).endswith('.h5'):
+            prefix = str(prefix) + '.h5'
+        with h5py.File(prefix, "a") as f:
             if block_info:
                 block_name = f"{block_info['chrom']}_{block_info['start']}_{block_info['end']}"
                 destination = f.create_group(block_name)
@@ -399,9 +402,11 @@ class LinearARG(LinearOperator):
     ) -> "LinearARG":
         """Reads LinearARG data from provided PLINK2 formatted files.
 
-        :param matrix_fname: Filename for the .h5 file.
+        :param h5_fname: The base path and prefix of the PLINK files.
         :return: A LinearARG object.
         """
+        if not str(h5_fname).endswith('.h5'):
+            h5_fname = str(h5_fname) + '.h5'
         if load_metadata:
             v_info = VariantInfo.read(h5_fname)
         else:
@@ -415,8 +420,8 @@ class LinearARG(LinearOperator):
             n_samples = f.attrs['n_samples'] 
             n_individuals = f.attrs.get('n_individuals', None)
             nonunique_indices = f['nonunique_indices'][:] if 'nonunique_indices' in f else None
-            iids_bytes = f.get('iids')
-            iids = [s.decode('utf-8') for s in iids_bytes[:]] if iids_bytes is not None else None
+            iids_bytes = file.get('iids')
+            iids = pl.Series([s.decode('utf-8') for s in iids_bytes[:]]) if iids_bytes is not None else None
             
         return LinearARG(A, variant_indices, flip, n_samples, n_individuals, v_info, iids, nonunique_indices)
 
@@ -447,16 +452,20 @@ class LinearARG(LinearOperator):
     
     def add_individual_nodes(self, sex:npt.NDArray[np.uint] = None) -> "LinearARG":
         """Creates a new LinearARG with indviduals added as nodes."""
-        A = self.A
-        variant_indices = self.variant_indices
-        sample_indices = self.sample_indices
-        flip = self.flip
-        var_info = self.variants
-        
-        A, individual_indices = add_individuals_to_graph(A, sample_indices, sex=sex) 
+        A, individual_indices = add_individuals_to_graph(self.A, self.sample_indices, sex=sex) 
         individuals_graph = DiGraph.from_csr(A) # edges are defined the other way around    
         A = csc_matrix(linearize_brick_graph(individuals_graph))  
-        linarg = LinearARG(A, variant_indices, flip, len(sample_indices), len(individual_indices), var_info)  
+        linarg = LinearARG(
+            A,
+            self.variant_indices,
+            self.flip,
+            len(self.sample_indices),
+            len(individual_indices),
+            self.variants,
+            iids=self.iids,
+            nonunique_indices=None,
+            sex=self.sex,
+        )
         linarg.calculate_nonunique_indices()
             
         return linarg
@@ -474,6 +483,8 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
         or the root dataset in the HDF5 file. Columns include the block name
         (or 'root') and its attributes.
     """
+    if not str(h5_fname).endswith('.h5'):
+        h5_fname = str(h5_fname) + '.h5'
     block_data = []
     with h5py.File(h5_fname, 'r') as f:
         keys = list(f.keys())

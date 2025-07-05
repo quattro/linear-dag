@@ -34,7 +34,11 @@ def read_vcf(
 
         return data
 
-    vcf = cv.VCF(path, gts012=True, strict_gt=True, samples=whitelist)
+    samples_to_load = cv.VCF(path).samples
+    if whitelist:
+        samples_to_load = [samples_to_load[i] for i in whitelist]
+
+    vcf = cv.VCF(path, gts012=True, strict_gt=True, samples=samples_to_load)
     iids = vcf.samples
     data = []
     idxs = []

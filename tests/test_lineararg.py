@@ -6,6 +6,7 @@ from pathlib import Path
 from scipy.sparse import csc_matrix
 import numpy as np
 from linear_dag.core.parallel_processing import ParallelOperator
+from linear_dag.core.operators import get_diploid_operator
 
 TEST_DATA_DIR = Path(__file__).parent / "testdata"
 
@@ -62,10 +63,15 @@ def test_read_write_matmul(tmp_path):
 
     # 1. Save the linear arg to a temporary file
     temp_h5_path = str(tmp_path / "test_linarg")
+    linarg = linarg.add_individual_nodes()
     linarg.write(temp_h5_path)
 
     # 2. Read it from the temp file
-    loaded_linarg = LinearARG.read(temp_h5_path + ".h5")
+    loaded_linarg = LinearARG.read(temp_h5_path)
+    assert loaded_linarg.shape == linarg.shape
+    print(loaded_linarg.iids)
+    print(linarg.iids)
+    assert loaded_linarg.iids.len() == linarg.iids.len()
 
     # 3. Test multiplications
     np.random.seed(42)
@@ -102,6 +108,11 @@ def test_read_write_matmul(tmp_path):
     res_mat_genotypes_T = genotypes.T @ mat_left
     np.testing.assert_allclose(res_mat_original_T, res_mat_genotypes_T, rtol=1e-6)
     np.testing.assert_allclose(res_mat_loaded_T, res_mat_genotypes_T, rtol=1e-6)
+
+    # Number of carriers
+    diploid_genotypes = get_diploid_operator(genotypes) @ np.eye(genotypes.shape[1])
+    num_carriers = np.sum(diploid_genotypes > 0, axis=0)
+    assert np.all(num_carriers == loaded_linarg.number_of_carriers())
 
 
 def test_parallel_operator():
