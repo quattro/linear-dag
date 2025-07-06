@@ -6,17 +6,18 @@ import sys
 
 cdef class Recombination(DiGraph):
     """
-    Implements
+    Implements the find-recombinations algorithm. Usage:
+    recombination = Recombination.from_graph(brick_graph)
     """
-    cdef int[:] clique
+    cdef long[:] clique
     cdef LinkedListArray clique_rows
     cdef ModHeap clique_size_heap
-    cdef int num_cliques
+    cdef long num_cliques
 
 
-    def __init__(self, int num_nodes, int num_edges):
+    def __init__(self, long num_nodes, long num_edges):
         cnp.import_array()  # Necessary for initializing the C API
-        self.clique = -np.ones(2 * num_edges, dtype=np.intc) # TODO size needed?
+        self.clique = -np.ones(2 * num_edges, dtype=np.int64) # TODO size needed?
         self.clique_rows = LinkedListArray(2 * num_edges)
         self.clique_size_heap = None
         self.num_cliques = 0
@@ -50,7 +51,7 @@ cdef class Recombination(DiGraph):
     cpdef void compute_cliques(self):
         # cdef CountingArray right_parent_to_clique = CountingArray(self.number_of_nodes)
         cdef CountingArray right_parent_to_clique = CountingArray(self.maximum_number_of_nodes)
-        cdef int left_parent, right_parent, clique_idx
+        cdef long left_parent, right_parent, clique_idx
         cdef edge* out_edge
 
         # Find trios of the form (left_parent, right_parent, child)
@@ -81,15 +82,15 @@ cdef class Recombination(DiGraph):
             right_parent_to_clique.clear()
 
     cpdef void collect_cliques(self):
-        cdef int[:] what = np.where(np.asarray(self.clique) != -1)[0].astype(np.intc)
-        cdef int[:] where = np.arange(self.num_cliques, dtype=np.intc)
-        cdef int[:] which = np.take(self.clique, what)
+        cdef long[:] what = np.where(np.asarray(self.clique) != -1)[0].astype(np.int64)
+        cdef long[:] where = np.arange(self.num_cliques, dtype=np.int64)
+        cdef long[:] which = np.take(self.clique, what)
 
         self.clique_rows.assign(what, where, which)
-        self.clique_size_heap = ModHeap(self.clique_rows.length)
+        self.clique_size_heap = ModHeap(np.asarray(self.clique_rows.length, dtype=np.int64))
 
     cpdef void find_recombinations(self):
-        cdef int c = self.max_clique()
+        cdef long c = self.max_clique()
         while c >= 0: # -1 when none remain
             self.factor_clique(c)
             c = self.max_clique()
@@ -103,13 +104,13 @@ cdef class Recombination(DiGraph):
             return -1
 
     cpdef void factor_clique(self, int clique_index):
-        cdef int[:] clique_rows = self.clique_rows.extract(clique_index)
+        cdef long[:] clique_rows = self.clique_rows.extract(clique_index)
         if len(clique_rows) <= 1:
             return
         cdef node* new_node = self.add_node(-1)
 
         # Update neighboring trios
-        cdef int p
+        cdef long p
         for p in range(2):
             self.update_trios(p, clique_rows, new_node.index)
         assert self.clique_rows.length[clique_index] == len(clique_rows)
@@ -117,13 +118,13 @@ cdef class Recombination(DiGraph):
         # Replace clique with a star
         self.collapse_clique(clique_index, new_node.index, clique_rows)
 
-    cdef void update_trios(self, int p, int[:] edges, int new_node):
-        cdef int num_trios = len(edges)
+    cdef void update_trios(self, long p, long[:] edges, long new_node):
+        cdef long num_trios = len(edges)
 
-        cdef int[:] neighboring_trios = np.empty(num_trios, dtype=np.intc)
-        cdef int neighbor
-        cdef int num_neighbors = 0
-        cdef int i
+        cdef long[:] neighboring_trios = np.empty(num_trios, dtype=np.int64)
+        cdef long neighbor
+        cdef long num_neighbors = 0
+        cdef long i
         for i in range(num_trios):
             neighbor = self.neighboring_trio(edges[i], p)
             if neighbor >= 0:
@@ -132,7 +133,7 @@ cdef class Recombination(DiGraph):
         neighboring_trios = neighboring_trios[:num_neighbors]
 
         # Re-assign clique[neighboring_trios]
-        cdef int[:] affected_cliques = np.empty(num_neighbors, dtype=np.intc)
+        cdef long[:] affected_cliques = np.empty(num_neighbors, dtype=np.int64)
         cdef cnp.ndarray which_affected_cliques = np.empty(num_neighbors, dtype=np.int64)
         affected_cliques, which_affected_cliques = np.unique(
             np.take(self.clique, neighboring_trios),
@@ -140,26 +141,26 @@ cdef class Recombination(DiGraph):
         num_new_cliques = len(affected_cliques)
         for i in range(num_neighbors):
             self.clique[neighboring_trios[i]] = which_affected_cliques[i] + self.num_cliques
-        new_cliques = np.arange(self.num_cliques, self.num_cliques + num_new_cliques, dtype=np.intc)
+        new_cliques = np.arange(self.num_cliques, self.num_cliques + num_new_cliques, dtype=np.int64)
         self.num_cliques += num_new_cliques
 
         # Assign neighbors to cliqueRows[new cliques]
-        self.clique_rows.assign(neighboring_trios, new_cliques, which_affected_cliques.astype(np.intc))
+        self.clique_rows.assign(neighboring_trios, new_cliques, which_affected_cliques.astype(np.int64))
 
         # Update clique size heap
-        cdef int new_clique
+        cdef long new_clique
         for new_clique in new_cliques:
             self.clique_size_heap.push(new_clique, self.clique_rows.length[new_clique])
 
         # Remove them from cliqueRows[old cliques]
-        cdef int old_clique
+        cdef long old_clique
         for i in range(num_new_cliques):
             old_clique = affected_cliques[i]
             self.clique_rows.remove_difference(new_cliques[i], old_clique)
             self.clique_size_heap.push(old_clique, self.clique_rows.length[old_clique])
 
 
-    cdef int neighboring_trio(self, int edge_index, int p):
+    cdef long neighboring_trio(self, long edge_index, long p):
         cdef edge* e = self.edges[edge_index]
         assert e is not NULL
         assert e.next_in is not NULL
@@ -177,13 +178,13 @@ cdef class Recombination(DiGraph):
             return -1
         return e.index
 
-    cpdef collapse_clique(self, int c, int new_node, int[:] edge_indices):
-        cdef int i
+    cpdef collapse_clique(self, long c, long new_node, long[:] edge_indices):
+        cdef long i
         cdef edge* e = self.edges[edge_indices[0]]
 
         # Add edges from parents of the trio to the new node
-        cdef int left_parent = e.u.index
-        cdef int right_parent = e.next_in.u.index
+        cdef long left_parent = e.u.index
+        cdef long right_parent = e.next_in.u.index
         self.add_edge(left_parent, new_node)
         self.add_edge(right_parent, new_node)
 
