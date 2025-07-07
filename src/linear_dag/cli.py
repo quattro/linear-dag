@@ -133,14 +133,16 @@ def _make_dag(args):
         raise ValueError("No genotype file specified for constructing DAG")
 
     log.info("Finished constructing LinearARG")
-    log.info("Beginning writing LinearARG to %s", args.output)
-    ldag.write(args.output)
+    log.info("Beginning writing LinearARG to %s", args.out)
+    ldag.write(args.out)
     log.info("Finished writing LinearARG")
 
     return
 
 
 def _prs(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Getting blocks")
     block_metadata = list_blocks(args.linarg_path)
     if args.chrom is not None:
         block_metadata = block_metadata.with_columns(
@@ -151,18 +153,26 @@ def _prs(args):
         ).filter(
             pl.col("chrom") == args.chrom
         )
+    logger.info("Creating parallel operator")
     with ParallelOperator.from_hdf5(args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata) as linarg:
+        logger.info("Reading iids")
         with h5py.File(args.linarg_path, "r") as f:
             iids = f['iids'][:]
+        logger.info("Reading in weights")
         betas = pl.read_csv(args.betas_path, separator='\t')
         with open(args.score_cols) as f:
             score_cols = f.read().splitlines()
+        logger.info("Performing scoring")
         result = run_prs(linarg, betas.lazy(), score_cols, iids)
+        logger.info("Writing results")
         with gzip.open(f'{args.out}.tsv.gz', "wb") as f:
             result.write_csv(f, separator='\t')
+    logger.info("Done!")
     
 
 def _assoc_scan(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Getting blocks")
     block_metadata = list_blocks(args.linarg_path)
     if args.chrom is not None:
         block_metadata = block_metadata.with_columns(
@@ -173,20 +183,27 @@ def _assoc_scan(args):
         ).filter(
             pl.col("chrom") == args.chrom
         )
+    logger.info("Creating parallel operator")
     with ParallelOperator.from_hdf5(args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata) as linarg:
+        logger.info("Reading iids")
         with h5py.File(args.linarg_path, "r") as f:
             iids = f['iids'][:]
         linarg.iids = pl.Series("iids", iids)
+        logger.info("Loading variant metadata")
         variant_info = load_block_metadata(args.linarg_path, block_metadata)
+        logger.info("Loading phenotypes/covariates")
         phenotypes = pl.read_csv(args.phenotypes_path, separator='\t')
         with open(args.pheno_cols) as f:
             pheno_cols = f.read().splitlines()
         with open(args.covar_cols) as f:
             covar_cols = f.read().splitlines()
+        logger.info("Performing GWAS")
         results = run_gwas(linarg, phenotypes.lazy(), pheno_cols, covar_cols, variant_info=variant_info)
+        logger.info("Writing results")
         for res, pheno in zip(results, pheno_cols):
             with gzip.open(f'{args.out}.{pheno}.tsv.gz', "wb") as f:
                 res.write_csv(f, separator='\t')
+        logger.info("Done!")
 
 def _make_geno(args):
     logger = MemoryLogger(__name__)
@@ -248,7 +265,7 @@ def _main(args):
     )
     argp.add_argument("-v", "--verbose", action="store_true", default=False)
     argp.add_argument("-q", "--quiet", action="store_true", default=False)
-    argp.add_argument("-o", "--output", default="lineardag")
+    argp.add_argument("-o", "--out", default="lineardag")
 
     subp = argp.add_subparsers(dest="cmd", required=True, help="Subcommands for linear-dag")
     
@@ -391,7 +408,7 @@ def _main(args):
 
     # setup logging
     log = logging.getLogger(__name__)
-    log_format = "[%(asctime)s - %(levelname)s] %(message)s"
+    log_format = "[%(asctime)s - %(levelname)s - %(memory_usage).2f MB] %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
 
     if args.verbose:
@@ -410,7 +427,7 @@ def _main(args):
         log.addHandler(stdout_handler)
 
     # setup log file, but write PLINK-style command first
-    disk_log_stream = open(f"{args.output}.log", "w")
+    disk_log_stream = open(f"{args.out}.log", "w")
     disk_log_stream.write(masthead)
     disk_log_stream.write(cmd_str + os.linesep)
     disk_log_stream.write("Starting log..." + os.linesep)
@@ -422,7 +439,7 @@ def _main(args):
     # launch w/e task was selected
     if hasattr(args, "func"):
         args.func(args)
-        log.info("Done!")
+        # log.info("Done!")
     else:
         argp.print_help()
 

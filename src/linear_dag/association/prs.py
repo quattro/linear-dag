@@ -8,7 +8,7 @@ def run_prs(genotypes: LinearOperator,
             score_cols: list[str], 
             iids: list[str]
             ) -> pl.DataFrame:
-    
+        
     beta = np.array(data.collect()[score_cols])
     prs = genotypes @ beta
     frame_dict = {'iid': iids}
