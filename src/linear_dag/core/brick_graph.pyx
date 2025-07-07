@@ -654,11 +654,13 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
     for f in files:
 
         graph, samples, variants = read_brick_graph_h5(f'{brick_graph_dir}/{f}')
+        #number_of_nodes = adj_mat.shape[0]
+        number_of_nodes = graph.number_of_nodes
 
         # Get new node ids corresponding to the merged graph
         sample_counter = 0
-        new_node_ids = np.zeros(graph.number_of_nodes, dtype=np.int64)
-        for i in range(graph.number_of_nodes):
+        new_node_ids = np.zeros(number_of_nodes, dtype=np.int64)
+        for i in range(number_of_nodes):
             if i in samples:
                 new_node_ids[i] = sample_counter
                 sample_counter += 1
@@ -670,7 +672,7 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
         index_mapping.append(new_node_ids)
 
         # Add edges from graph to result while preserving the order of the parent nodes for each child node
-        for node_idx in range(graph.number_of_nodes):
+        for node_idx in range(number_of_nodes):
             if not graph.is_node[node_idx]:
                 continue
             add_neighbors(result, graph.nodes[node_idx], new_node_ids)

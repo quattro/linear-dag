@@ -1,19 +1,25 @@
+import warnings
+
 from functools import partial
 from typing import Callable, Optional, Union
 
 import numpy as np
+import polars as pl
 import scipy as sp
 
 from numpy.random import Generator
 from scipy.sparse import diags
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
-from ..core import LinearARG
+from ..core.operators import get_inner_merge_operators
+from .util import _get_genotype_variance_explained, _impute_missing_with_mean, residualize_phenotypes
 
 
 def randomized_haseman_elston(
-    linarg: LinearARG,
-    phenos: np.ndarray,
+    genotypes: LinearOperator,
+    data: pl.LazyFrame,
+    pheno_cols: list[str],
+    covar_cols: list[str],
     num_matvecs: int = 20,
     alpha: float = -1,
     trace_est: str = "hutchinson",
@@ -32,32 +38,44 @@ def randomized_haseman_elston(
     :return: the heritability estimate
     """
 
-    N, M = linarg.shape
-    if phenos.ndim == 1:
-        phenos = phenos.reshape(-1, 1)
+    if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
+        raise ValueError("First column of covar_cols should be '1'")
 
+    left_op, right_op = get_inner_merge_operators(data.select("iid").collect().to_series(), genotypes.iids)
+    phenotypes = data.select(pheno_cols).collect().to_numpy()
+    covariates = data.select(covar_cols).collect().to_numpy()
 
-    heterozygosity = linarg.allele_frequencies * (1 - linarg.allele_frequencies)
-    heterozygosity[heterozygosity == 0] = 1
+    # we've residualized y here already
+    yresid, covariates, gtg_diag = _prep_for_h2_estimation(
+        genotypes,
+        left_op,
+        right_op,
+        phenotypes,
+        covariates,
+    )
 
-    # Genetic relatedness matrix
-    sigmasq = heterozygosity ** (1 + alpha)
-    Z = linarg.normalized
-    K = Z @ aslinearoperator(diags(sigmasq / np.sum(sigmasq))) @ Z.T
+    sigmasq = (gtg_diag ** (1 + alpha)).flatten()
+    op = genotypes.normalized
+    K = op @ aslinearoperator(diags(sigmasq / np.sum(sigmasq))) @ op.T
 
     generator = np.random.default_rng(seed=seed)
-    sampler = _construct_sampler(sampler, generator)
     estimator = _construct_estimator(trace_est)
+    sampler = _construct_sampler(sampler, generator)
+
+    # wrap the sampler in a residualizer | TODO: shouldnt these be independent anyways? Do we need this?
+    def _resid_sampler(n, k):
+        omega = sampler(n, k)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            beta = np.linalg.lstsq(covariates, omega)[0]
+        return omega - covariates @ beta
 
     # se not used atm, but for some trace estimators (eg xtrace, xnystrace) we can compute it
-    grm_trace, grm_sq_trace, se = estimator(K, num_matvecs, sampler)
-
-    # center and standardize
-    phenos = phenos - np.mean(phenos, axis=0)
-    phenos = phenos / np.std(phenos, axis=0)
+    N = len(yresid)
+    grm_trace, grm_sq_trace, se = estimator(K, num_matvecs, _resid_sampler)
 
     # compute y_j' K y_j for each y_j \in y
-    C = np.sum(K.matmat(phenos) * phenos, axis=0)
+    C = np.sum(K.matmat(yresid) * yresid, axis=0)
 
     # construct linear equations to solve
     LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, N]])
@@ -68,8 +86,52 @@ def randomized_haseman_elston(
     heritability = solution[0, :] / (solution[0, :] + solution[1, :])
 
     # SE estimates?
-
     return heritability
+
+
+def _prep_for_h2_estimation(
+    genotypes: LinearOperator,
+    left_op: LinearOperator,
+    right_op: LinearOperator,
+    phenotypes: np.ndarray,
+    covariates: np.ndarray,
+) -> np.ndarray:
+    if not np.allclose(covariates[:, 0], 1):
+        raise ValueError("First column of covariates should be all-ones")
+
+    cols_matched_per_row = left_op @ np.ones(left_op.shape[1])
+    # Check if all *non-zero* counts are exactly 2
+    if not np.all(cols_matched_per_row[cols_matched_per_row != 0] == 2):
+        raise ValueError("Each row of the phenotype matrix should match zero or two rows of the genotype operator")
+
+    rows_matched_per_col = np.ones(right_op.shape[0]) @ right_op
+    # Check if all *non-zero* counts are exactly 1
+    if not np.all(rows_matched_per_col[rows_matched_per_col != 0] == 1):
+        raise ValueError("Each row of the genotype operator should match at most one row of the phenotype matrix")
+
+    two_n = np.sum(rows_matched_per_col > 0)
+    assert two_n == 2 * np.sum(cols_matched_per_row > 0)
+
+    covariates = left_op.T @ covariates
+    phenotypes = left_op.T @ phenotypes
+    if not np.allclose(covariates[:, 0], 1):
+        raise ValueError("First column of covariates should be all-ones")
+
+    # Handle missingness
+    covariates = _impute_missing_with_mean(covariates)
+    is_missing = np.isnan(phenotypes)
+    num_nonmissing = np.sum(~is_missing, axis=0)
+    print(f"num_nonmissing: {num_nonmissing}")
+    phenotypes.ravel()[is_missing.ravel()] = 0
+
+    # Residualize phenotypes on covariates
+    y_resid = residualize_phenotypes(phenotypes, covariates, is_missing)
+    y_resid /= np.sqrt(np.sum(y_resid**2, axis=0) / num_nonmissing)  # ||y_resid||^2 == num_nonmissing
+
+    var_explained, allele_counts = _get_genotype_variance_explained(right_op @ genotypes, covariates)
+    denominator = (allele_counts - var_explained + 1e-6) / two_n
+
+    return y_resid, covariates, denominator
 
 
 _Sampler = Callable[[int, int], np.ndarray]
@@ -200,7 +262,12 @@ def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple
     return trace_grm, trace_grm_sq, {}
 
 
-def _xtrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler, estimate_diag: bool = False) -> tuple[float, float, dict]:
+def _xtrace_estimator(
+    GRM: LinearOperator,
+    k: int,
+    sampler: _Sampler,
+    estimate_diag: bool = False,
+) -> tuple[float, float, dict]:
     # WIP
     raise NotImplementedError("xtrace estimator is not yet implemented")
     n, _ = GRM.shape
