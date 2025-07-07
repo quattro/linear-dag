@@ -32,50 +32,13 @@ from .solve import topological_sort, \
 
 
 @dataclass
-class VariantInfo:
-    """Metadata about variants represented in the linear dag.
-
-    **Attributes**
-    """
-
-    table: pl.DataFrame
-    req_fields: ClassVar[list[str]] = ["CHROM", "POS", "ID", "REF", "ALT"]
-
-    def __post_init__(self):
-        for req_col in self.req_fields:
-            if req_col not in self.table.columns:
-                raise ValueError(f"Required column {req_col} not found in variant table")
-
-    def copy(self):
-        return VariantInfo(self.table.clone())
-
-    def __getitem__(self, key):
-        return VariantInfo(self.table[key])
-
-    @classmethod
-    def read(cls, path: Union[str, PathLike]) -> "VariantInfo":
-        if path is None:
-            raise ValueError("path argument cannot be None")
-    
-        var_table = defaultdict(list)
-        with h5py.File(path, "r") as f:
-            for field in cls.req_fields:
-                if field == 'POS':
-                    var_table[field] = f[field][:].astype(int) # cast as int to save memory
-                else:
-                    var_table[field] = f[field][:].astype(str)
-        var_table = pl.DataFrame(var_table)
-        return cls(var_table) # return class instance
-
-
-@dataclass
 class LinearARG(LinearOperator):
     A: csc_matrix # samples must be in descending order starting from the final row/col
     variant_indices: npt.NDArray[np.int32]
     flip: npt.NDArray[np.bool_]
     n_samples: np.int32
     n_individuals: Optional[np.int32] = None
-    variants: Optional[VariantInfo] = None
+    variants: Optional[pl.LazyFrame] = None
     iids: Optional[pl.Series] = None
     nonunique_indices: Optional[npt.NDArray[np.int32]] = None
     sex: Optional[npt.NDArray[np.int32]] = None # determines how individual_indices are handled
@@ -118,7 +81,7 @@ class LinearARG(LinearOperator):
         )
         A_filt, variants_idx_reindexed, samples_idx_reindexed  = remove_degree_zero_nodes(A, variants_idx, samples_idx)
         A_tri, variants_idx_tri = make_triangular(A_filt, variants_idx_reindexed, samples_idx_reindexed)
-        linarg = LinearARG(A_tri, variants_idx_tri, flip, len(samples_idx), None, VariantInfo(variant_info), iids=pl.Series(iids))
+        linarg = LinearARG(A_tri, variants_idx_tri, flip, len(samples_idx), None, variant_info.lazy(), iids=pl.Series(iids))
         linarg.calculate_nonunique_indices()
         return linarg
         
@@ -387,11 +350,12 @@ class LinearARG(LinearOperator):
             if self.n_individuals is not None:
                 destination.attrs['n_individuals'] = self.n_individuals
             if self.variants is not None:
-                for field in self.variants.req_fields:
+                for field in ["CHROM", "POS", "ID", "REF", "ALT"]:
+                    variant_info = self.variants.collect()
                     if field == 'POS':
-                        destination.create_dataset(field, data=np.array(self.variants.table[field]).astype(int), compression=compression_option, shuffle=True)
+                        destination.create_dataset(field, data=np.array(variant_info[field]).astype(int), compression=compression_option, shuffle=True)
                     else:
-                        destination.create_dataset(field, data=np.array(self.variants.table[field]).astype('S'), compression=compression_option, shuffle=True)
+                        destination.create_dataset(field, data=np.array(variant_info[field]).astype('S'), compression=compression_option, shuffle=True)
         return
 
     @staticmethod
@@ -405,12 +369,6 @@ class LinearARG(LinearOperator):
         :param h5_fname: The base path and prefix of the PLINK files.
         :return: A LinearARG object.
         """
-        if not str(h5_fname).endswith('.h5'):
-            h5_fname = str(h5_fname) + '.h5'
-        if load_metadata:
-            v_info = VariantInfo.read(h5_fname)
-        else:
-            v_info = None
 
         with h5py.File(h5_fname, 'r') as file:
             f = file[block] if block else file
@@ -420,9 +378,18 @@ class LinearARG(LinearOperator):
             n_samples = f.attrs['n_samples'] 
             n_individuals = f.attrs.get('n_individuals', None)
             nonunique_indices = f['nonunique_indices'][:] if 'nonunique_indices' in f else None
-            iids_bytes = file.get('iids')
-            iids = pl.Series([s.decode('utf-8') for s in iids_bytes[:]]) if iids_bytes is not None else None
+            iids = f.get('iids')
+            # iids_bytes = f.get('iids')
+            # iids = [s.decode('utf-8') for s in iids_bytes[:]] if iids_bytes is not None else None
             
+            if load_metadata:
+                v_dict = {field: f[field][:].astype(str) for field in ["CHROM", "POS", "ID", "REF", "ALT"]}
+                v_info = pl.DataFrame(v_dict).with_columns([
+                    pl.col("POS").cast(pl.Int32),
+                ]).lazy()
+            else:
+                v_info = None
+               
         return LinearARG(A, variant_indices, flip, n_samples, n_individuals, v_info, iids, nonunique_indices)
 
 
@@ -486,15 +453,20 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
     if not str(h5_fname).endswith('.h5'):
         h5_fname = str(h5_fname) + '.h5'
     block_data = []
+    
+    def parse_block_name(block_name):
+        chrom, start, _ = block_name.split('_')
+        return (int(chrom), int(start))
+    
     with h5py.File(h5_fname, 'r') as f:
-        keys = list(f.keys())
-        # Case 1: No groups (keys), check root attributes
-        if not keys:
+        
+        block_names = [b for b in list(f.keys()) if isinstance(f[b], h5py.Group) and b!='iids']
+        block_names = sorted(block_names, key=parse_block_name)
+        
+        if not block_names:
             return None
         else:
-            for block_name in keys:
-                if not isinstance(f[block_name], h5py.Group):
-                    continue
+            for block_name in block_names:
                 group = f[block_name]
                 attrs = group.attrs
                 block_info = {
@@ -510,6 +482,20 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
                 block_data.append(block_info)
 
     return pl.DataFrame(block_data)
+
+
+def load_block_metadata(h5_fname, block_metadata):
+    block_names = block_metadata.get_column("block_name").to_list()
+    lazyframes = []
+    with h5py.File(h5_fname, 'r') as f:
+        for block_name in block_names:
+            block = f[block_name]
+            v_dict = {field: block[field][:].astype(str) for field in ["CHROM", "POS", "ID", "REF", "ALT"]}
+            v_info = pl.DataFrame(v_dict).with_columns([
+                pl.col("POS").cast(pl.Int32),
+            ]).lazy()
+            lazyframes.append(v_info)
+    return pl.concat(lazyframes)
 
 
 def add_individuals_to_graph(A: csc_matrix, samples_idx: npt.NDArray[np.uint], sex:npt.NDArray[np.uint] = None) -> tuple:

@@ -3,10 +3,16 @@ import argparse
 import logging
 import os
 import sys
+import h5py
+import polars as pl
+import gzip
 
 from importlib import metadata
 
-from .core.lineararg import LinearARG
+from .core.lineararg import LinearARG, list_blocks, load_block_metadata
+from .core.parallel_processing import ParallelOperator
+from .association.gwas import run_gwas
+from .association.prs import run_prs
 from .core.partition_merge import infer_brick_graph, make_genotype_matrix, merge, run_forward_backward, reduction_union_recom, add_individuals_to_linarg
 
 title = """                            @@@@
@@ -127,16 +133,77 @@ def _make_dag(args):
         raise ValueError("No genotype file specified for constructing DAG")
 
     log.info("Finished constructing LinearARG")
-    log.info("Beginning writing LinearARG to %s", args.output)
-    ldag.write(args.output)
+    log.info("Beginning writing LinearARG to %s", args.out)
+    ldag.write(args.out)
     log.info("Finished writing LinearARG")
 
     return
 
 
-def _assoc_scan(args):
-    pass
+def _prs(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Getting blocks")
+    block_metadata = list_blocks(args.linarg_path)
+    if args.chrom is not None:
+        block_metadata = block_metadata.with_columns(
+            pl.Series("chrom", [b.split('_')[0] for b in list(block_metadata['block_name'])])
+        )
+        block_metadata = block_metadata.with_columns(
+            pl.col("chrom").cast(pl.Int32)
+        ).filter(
+            pl.col("chrom") == args.chrom
+        )
+    logger.info("Creating parallel operator")
+    with ParallelOperator.from_hdf5(args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata) as linarg:
+        logger.info("Reading iids")
+        with h5py.File(args.linarg_path, "r") as f:
+            iids = f['iids'][:]
+        logger.info("Reading in weights")
+        betas = pl.read_csv(args.betas_path, separator='\t')
+        with open(args.score_cols) as f:
+            score_cols = f.read().splitlines()
+        logger.info("Performing scoring")
+        result = run_prs(linarg, betas.lazy(), score_cols, iids)
+        logger.info("Writing results")
+        with gzip.open(f'{args.out}.tsv.gz', "wb") as f:
+            result.write_csv(f, separator='\t')
+    logger.info("Done!")
+    
 
+def _assoc_scan(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Getting blocks")
+    block_metadata = list_blocks(args.linarg_path)
+    if args.chrom is not None:
+        block_metadata = block_metadata.with_columns(
+            pl.Series("chrom", [b.split('_')[0] for b in list(block_metadata['block_name'])])
+        )
+        block_metadata = block_metadata.with_columns(
+            pl.col("chrom").cast(pl.Int32)
+        ).filter(
+            pl.col("chrom") == args.chrom
+        )
+    logger.info("Creating parallel operator")
+    with ParallelOperator.from_hdf5(args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata) as linarg:
+        logger.info("Reading iids")
+        with h5py.File(args.linarg_path, "r") as f:
+            iids = f['iids'][:]
+        linarg.iids = pl.Series("iids", iids)
+        logger.info("Loading variant metadata")
+        variant_info = load_block_metadata(args.linarg_path, block_metadata)
+        logger.info("Loading phenotypes/covariates")
+        phenotypes = pl.read_csv(args.phenotypes_path, separator='\t')
+        with open(args.pheno_cols) as f:
+            pheno_cols = f.read().splitlines()
+        with open(args.covar_cols) as f:
+            covar_cols = f.read().splitlines()
+        logger.info("Performing GWAS")
+        results = run_gwas(linarg, phenotypes.lazy(), pheno_cols, covar_cols, variant_info=variant_info)
+        logger.info("Writing results")
+        for res, pheno in zip(results, pheno_cols):
+            with gzip.open(f'{args.out}.{pheno}.tsv.gz', "wb") as f:
+                res.write_csv(f, separator='\t')
+        logger.info("Done!")
 
 def _make_geno(args):
     logger = MemoryLogger(__name__)
@@ -198,10 +265,10 @@ def _main(args):
     )
     argp.add_argument("-v", "--verbose", action="store_true", default=False)
     argp.add_argument("-q", "--quiet", action="store_true", default=False)
-    argp.add_argument("-o", "--output", default="lineardag")
+    argp.add_argument("-o", "--out", default="lineardag")
 
     subp = argp.add_subparsers(dest="cmd", required=True, help="Subcommands for linear-dag")
-
+    
     make_dag_p = subp.add_parser("make-dag", help="Make a linear dag")
     file_group = make_dag_p.add_mutually_exclusive_group(required=True)
     file_group.add_argument("--vcf", type=str, help="Path to VCF file")
@@ -210,13 +277,24 @@ def _main(args):
     file_group.add_argument("--bgen", type=str, help="Path to BGEN file")
     make_dag_p.set_defaults(func=_make_dag)
 
-    assoc_p = subp.add_parser("assoc", help="Perform association scan using linear dag")
-    assoc_p.add_argument("dag-path", type=str, help="Path prefix for linear dag")
-    assoc_p.add_argument("--pheno", type=str, help="Phenotype file for individuals")
-    assoc_p.add_argument("--pheno-col", type=str, help="Phenotype column to use in existing sample info")
-    assoc_p.add_argument("--covar", type=str, help="Covariate file for individuals")
-    assoc_p.add_argument("--covar-cols", type=str, help="Covariate file for individuals")
+    assoc_p = subp.add_parser("assoc", help="Perform association scan using linear ARG")
+    assoc_p.add_argument("--linarg_path", type=str, help="Path to linear ARG (.h5 file)")
+    assoc_p.add_argument("--phenotypes_path", type=str, help="Path to phenotype file (tab-delimited).")
+    assoc_p.add_argument("--pheno_cols", type=str, help="Path to text file with phenotype columns")
+    assoc_p.add_argument("--covar_cols", type=str, help="Path to text file with covariate columns. First column must be 1s.")
+    assoc_p.add_argument("--chrom", type=int, help="Which chromosome to run the association on. Defaults to all chromosomes.")
+    assoc_p.add_argument("--num_processes", type=int, help="How many cores to uses. Defaults to all available cores.")
+    assoc_p.add_argument("--out", type=str, help="Location to save result files.")
     assoc_p.set_defaults(func=_assoc_scan)
+    
+    prs_p = subp.add_parser("score", help="Score individuals using linear ARG")
+    prs_p.add_argument("--linarg_path", type=str, help="Path to linear ARG (.h5 file)")
+    prs_p.add_argument("--betas_path", type=str, help="Path to file with betas (tab-delimited).")
+    prs_p.add_argument("--score_cols", type=str, help="Path to text file with score columns corresponding to betas_path")
+    prs_p.add_argument("--chrom", type=int, help="Which chromosome to run the association on. Defaults to all chromosomes.")
+    prs_p.add_argument("--num_processes", type=int, help="How many cores to uses. Defaults to all available cores.")
+    prs_p.add_argument("--out", type=str, help="Location to save result files.")
+    prs_p.set_defaults(func=_prs)
 
     make_geno_p = subp.add_parser(
         "make-geno", help="Step 1 of partition and merge pipeline. Makes sparse genotype matrices from VCF file."
@@ -330,7 +408,7 @@ def _main(args):
 
     # setup logging
     log = logging.getLogger(__name__)
-    log_format = "[%(asctime)s - %(levelname)s] %(message)s"
+    log_format = "[%(asctime)s - %(levelname)s - %(memory_usage).2f MB] %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
 
     if args.verbose:
@@ -349,7 +427,7 @@ def _main(args):
         log.addHandler(stdout_handler)
 
     # setup log file, but write PLINK-style command first
-    disk_log_stream = open(f"{args.output}.log", "w")
+    disk_log_stream = open(f"{args.out}.log", "w")
     disk_log_stream.write(masthead)
     disk_log_stream.write(cmd_str + os.linesep)
     disk_log_stream.write("Starting log..." + os.linesep)
@@ -361,7 +439,7 @@ def _main(args):
     # launch w/e task was selected
     if hasattr(args, "func"):
         args.func(args)
-        log.info("Done!")
+        # log.info("Done!")
     else:
         argp.print_help()
 

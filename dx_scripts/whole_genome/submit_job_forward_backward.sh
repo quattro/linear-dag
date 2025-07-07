@@ -4,11 +4,13 @@ instance_type=$1
 load_dir='/mnt/project/'
 out="linear_args"
 data_identifier="ukb20279_maf_0.01"
-chroms=({1..22})
+# data_identifier="ukb20279"
+# chroms=({1..22})
+chroms=(X)
 
 for chrom in "${chroms[@]}"; do
 
-    # if [[ $chrom != 22 ]]; then
+    # if [[ $chrom != 6 ]]; then
     #     continue 
     # fi
 

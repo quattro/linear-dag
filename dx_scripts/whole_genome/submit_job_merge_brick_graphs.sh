@@ -4,14 +4,16 @@ instance_type=$1
 load_dir='/mnt/project/'
 out="linear_args"
 data_identifier="ukb20279_maf_0.01"
-chroms=({1..22})
+# data_identifier="ukb20279"
+# chroms=({1..22})
+chroms=(X)
 
 for chrom in "${chroms[@]}"; do
 
     # test run
-    if [[ $chrom != 22 ]]; then
-        continue 
-    fi
+    # if [[ $chrom != 6 ]]; then
+    #     continue 
+    # fi
 
     chrom_dir="${out}/${data_identifier}/chr${chrom}"
     linarg_dir_list=($(dx ls $chrom_dir))
@@ -19,7 +21,7 @@ for chrom in "${chroms[@]}"; do
     for dir in ${linarg_dir_list[@]}; do
         linarg_dir=${chrom_dir}/${dir}
         output_list=($(dx ls "${linarg_dir}"))
-        if [[ " ${output_list[@]} " =~ " linear_arg.npz " ]]; then # skip partitions that have already been inferred
+        if [[ " ${output_list[@]} " =~ " linear_arg.h5 " ]]; then # skip partitions that have already been inferred
                 echo "${linarg_dir} has already been merged."
                 continue
         fi

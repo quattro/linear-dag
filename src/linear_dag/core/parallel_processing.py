@@ -238,7 +238,8 @@ class ParallelOperator(LinearOperator):
     def from_hdf5(cls, 
                      hdf5_file: str,
                      num_processes: Optional[int] = None,
-                     max_num_traits: int = 10) -> "ParallelOperator":
+                     max_num_traits: int = 10,
+                     block_metadata: Optional[pl.DataFrame] = None) -> "ParallelOperator":
         """Create a ParallelOperator from a metadata file.
         
         Args:
@@ -248,7 +249,7 @@ class ParallelOperator(LinearOperator):
         Returns:
             ParallelOperator instance
         """
-        return _ManagerFactory.create_parallel(hdf5_file, num_processes, max_num_traits)
+        return _ManagerFactory.create_parallel(hdf5_file, num_processes, max_num_traits, block_metadata)
 
 
 class _ManagerFactory:
@@ -342,6 +343,7 @@ class _ManagerFactory:
             hdf5_file: str,
             num_processes: Optional[int],
             max_num_traits: int,
+            block_metadata: Optional[pl.DataFrame] = None,
             ) -> "ParallelOperator":
         """Create a ParallelOperator instance.
 
@@ -350,11 +352,13 @@ class _ManagerFactory:
             num_processes: Number of processes to use
             alpha: Alpha parameter
             max_num_traits: Maximum number of traits
+            block_metadata: Blocks to load. If None, all blocks will be loaded.
 
         Returns:
             ParallelOperator instance
         """
-        block_metadata = list_blocks(hdf5_file)
+        if block_metadata is None:
+            block_metadata = list_blocks(hdf5_file)
         blocks = block_metadata['block_name']
 
         if num_processes is None:

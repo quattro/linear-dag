@@ -2,7 +2,7 @@
 instance_type=$1
 
 out="linear_args"
-data_identifier="ukb20279"
+data_identifier="ukb20279_maf_0.01"
 whitelist_path="/mnt/project/sample_metadata/ukb20279/250129_whitelist.txt"
 sex_path="/mnt/project/sample_metadata/ukb20279/250129_whitelist_sex.txt"
 chrom="X"
@@ -29,16 +29,16 @@ for dir in ${linarg_dir_list[@]}; do
 
         if [[ "$dir" == "0_chrX-60001-269952/" || "$dir" == "8_chrX-155701383-156030895/" ]]; then
             echo $partition_region
-            # dx run app-swiss-army-knife \
-            #     -iin="/amber/scripts/run_get_geno_partition.sh" \
-            #     -icmd="bash run_get_geno_partition.sh \"$vcf_path\" $linarg_dir $partition_region $partition_number $whitelist_path" \
-            #     --destination "/" \
-            #     --instance-type $instance_type \
-            #     --priority high \
-            #     --name "get_mat_${partition_region}" \
-            #     --brief \
-            #     --extra-args '{"executionPolicy": {"maxRestarts": 5}}' \
-            #     -y
+            dx run app-swiss-army-knife \
+                -iin="/amber/scripts/run_get_geno_partition_maf_0.01.sh" \
+                -icmd="bash run_get_geno_partition.sh \"$vcf_path\" $linarg_dir $partition_region $partition_number $whitelist_path" \
+                --destination "/" \
+                --instance-type $instance_type \
+                --priority high \
+                --name "get_mat_${partition_region}" \
+                --brief \
+                --extra-args '{"executionPolicy": {"maxRestarts": 5}}' \
+                -y
         else
             echo $partition_region
             dx run app-swiss-army-knife \

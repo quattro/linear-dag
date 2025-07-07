@@ -8,7 +8,7 @@ import h5py
 
 from ..genotype import read_vcf
 from .brick_graph import BrickGraph, read_graph_from_disk, merge_brick_graphs
-from .lineararg import LinearARG, VariantInfo, make_triangular, remove_degree_zero_nodes, add_individuals_to_graph
+from .lineararg import LinearARG, make_triangular, remove_degree_zero_nodes, add_individuals_to_graph
 from .one_summed_cy import linearize_brick_graph
 from .recombination import Recombination
 
@@ -215,7 +215,7 @@ def merge(linarg_dir, load_dir):
     files = np.array(files)[order].tolist()  # sort files by index
     df_list = [pl.read_csv(f"{load_dir}{linarg_dir}/variant_metadata/{f}", separator=" ") for f in files]
     df = pl.concat(df_list)
-    var_info = VariantInfo(df)
+    var_info = df.lazy()
     flip = []
     sex = None
     for file in files:
