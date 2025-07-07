@@ -16,14 +16,14 @@ cdef class BrickGraph:
     """
     cdef DiGraph graph
     cdef DiGraph tree
-    cdef int[:] clade_size
-    cdef int root
+    cdef long[:] clade_size
+    cdef long root
     cdef LinkedListArray subsequence
     cdef CountingArray times_visited
     cdef CountingArray times_revisited
-    cdef int num_samples
-    cdef int num_variants
-    cdef int direction
+    cdef long num_samples
+    cdef long num_variants
+    cdef long direction
     cdef bint save_to_disk
     cdef str out
     cdef object _add_edge_to_file  # Function to add edge to HDF5
@@ -48,15 +48,15 @@ cdef class BrickGraph:
         # Forward pass
         cdef BrickGraph forward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_forward_graph.h5')
         forward_pass.direction = 1
-        cdef int i
+        cdef long i
         for i in range(num_variants):
-            carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i + 1]]
+            carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i + 1]].astype(np.int64)
             forward_pass.intersect_clades(carriers, i)
 
         # Add samples
-        cdef int[:] sample_indices
+        cdef long[:] sample_indices
         if add_samples:
-            sample_indices =  np.arange(num_variants, num_variants+num_samples, dtype=np.intc)
+            sample_indices =  np.arange(num_variants, num_variants+num_samples, dtype=np.int64)
             for i in range(num_samples):
                 forward_pass.add_edges_from_subsequence(i, sample_indices[i])
                 forward_pass.subsequence.clear_list(i)
@@ -68,7 +68,7 @@ cdef class BrickGraph:
         cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_backward_graph.h5')
         backward_pass.direction = -1
         for i in reversed(range(num_variants)):
-            carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i+1]]
+            carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i+1]].astype(np.int64)
             backward_pass.intersect_clades(carriers, i)
         cdef DiGraph backward_graph = backward_pass.graph
 
@@ -84,7 +84,7 @@ cdef class BrickGraph:
     def combine_graphs(forward_graph: DiGraph, backward_graph: DiGraph, num_variants: int):
 
         # For variants i,j with paths i->j and also j->i, combine them into a single node
-        cdef int[:] variant_indices = combine_cliques(forward_graph, backward_graph)
+        cdef long[:] variant_indices = combine_cliques(forward_graph, backward_graph)
 
         # Transitive reduction of the union of the forward and reverse graphs
         cdef DiGraph brick_graph = reduction_union(forward_graph, backward_graph)
@@ -150,7 +150,7 @@ cdef class BrickGraph:
     cpdef void initialize_tree(self):
         self.tree = DiGraph(self.num_samples * 2, self.num_samples * 2 - 1)
         self.root = self.num_samples
-        self.clade_size = np.zeros(self.num_samples * 2, dtype=np.intc)
+        self.clade_size = np.zeros(self.num_samples * 2, dtype=np.int64)
         cdef list edges = [(self.root, i) for i in range(self.num_samples)]
         self.tree.add_edges_from(edges)
         for i in range(self.num_samples):
@@ -159,12 +159,12 @@ cdef class BrickGraph:
         self.subsequence = LinkedListArray(self.tree.maximum_number_of_nodes)
 
 
-    cpdef void intersect_clades(self, int[:] new_clade, int clade_index):
+    cpdef void intersect_clades(self, long[:] new_clade, long clade_index):
         """
         Adds a new clade to a rooted tree and splits existing clades if they intersect with the new clade. Returns the
         lowest common ancestor from the previous tree of nodes in the new clade.
         """
-        cdef int new_clade_size = len(new_clade)
+        cdef long new_clade_size = len(new_clade)
         if new_clade_size == 0:
             return
 
@@ -176,7 +176,7 @@ cdef class BrickGraph:
 
         cdef IntegerList traversal = IntegerList(2 * len(new_clade))
         self.times_revisited.clear()
-        cdef int i
+        cdef long i
         for i in new_clade:
             traversal.push(i)
             self.times_revisited.set_element(i, 1)
@@ -188,10 +188,10 @@ cdef class BrickGraph:
         cdef node* new_root
         cdef node* parent_of_v
         cdef node* v = NULL
-        cdef int node_idx
+        cdef long node_idx
         cdef bint v_is_root
         cdef Stack visited_children, unvisited_children
-        cdef int num_children_visited, num_children_unvisited, visits
+        cdef long num_children_visited, num_children_unvisited, visits
 
         while traversal.length > 0:
             node_idx = traversal.pop()
@@ -279,20 +279,20 @@ cdef class BrickGraph:
         self.subsequence.extend(lowest_common_ancestor.index, clade_index)
 
 
-    cdef node* partial_traversal(self, int[:] leaves):
+    cdef node* partial_traversal(self, long[:] leaves):
         """
         Finds the lowest common ancestor of an array of leaves in the tree. For all descendants of the LCA, counts
         the number of leaves that are descended from them.
         """
         self.times_visited.clear()
-        cdef int num_leaves = len(leaves)
+        cdef long num_leaves = len(leaves)
         if num_leaves == 0:
             return <node*> NULL
 
         # Bottom-up traversal from every leaf node to the root
-        cdef int i
+        cdef long i
         cdef node * v
-        cdef int num_visits
+        cdef long num_visits
         for i in leaves:
             v = self.tree.nodes[i]
             while True:
@@ -308,15 +308,15 @@ cdef class BrickGraph:
         cdef node * lowest_common_ancestor = v
         return lowest_common_ancestor
 
-    cdef void add_edges_from_subsequence(self, int subsequence_index, int node_index):
+    cdef void add_edges_from_subsequence(self, long subsequence_index, long node_index):
         """
         Adds edges in self.graph from every node u_k in a subsequence to a node, but only if for all succeeding
         nodes u_j, j>k, there is no path u_k->u_j.
         """
-        cdef int tree_node = subsequence_index
+        cdef long tree_node = subsequence_index
         cdef list_node * place_in_list
-        cdef int last_variant_found = -MAXINT * self.direction
-        cdef int variant_idx
+        cdef long last_variant_found = -MAXINT * self.direction
+        cdef long variant_idx
         while True:
             place_in_list = self.subsequence.head[tree_node]
             while place_in_list != NULL:
@@ -335,7 +335,7 @@ cdef class BrickGraph:
         """
         cdef Stack visited_children = Stack()
         cdef Stack unvisited_children = Stack()
-        cdef int child
+        cdef long child
         cdef edge* e = v.first_out
         while e is not NULL:
             child = e.v.index
@@ -346,16 +346,16 @@ cdef class BrickGraph:
                 unvisited_children.push(child)
         return visited_children, unvisited_children
 
-cpdef int[:] combine_cliques(DiGraph forward_graph, DiGraph backward_graph):
+cpdef long[:] combine_cliques(DiGraph forward_graph, DiGraph backward_graph):
     """
     Finds sequences u<v<...<w connected via edges (u,v),(v,...,w) in the forward graph and (w,...,v),(v,u) in the
     backward graph. Collapses these into a single node and returns an array of node assignments.
     """
-    cdef int num_nodes = backward_graph.maximum_number_of_nodes
-    cdef int[:] result = np.arange(num_nodes, dtype=np.intc)
-    cdef int node_index
-    cdef int neighbor_index
-    cdef int neighbor_of_neighbor
+    cdef long num_nodes = backward_graph.maximum_number_of_nodes
+    cdef long[:] result = np.arange(num_nodes, dtype=np.int64)
+    cdef long node_index
+    cdef long neighbor_index
+    cdef long neighbor_of_neighbor
     cdef IntegerSet neighbors = IntegerSet(forward_graph.maximum_number_of_nodes)
     cdef node * current_node
     cdef node * backward_node
@@ -466,16 +466,16 @@ cdef void contract_edge(edge* forward_edge,
     forward_graph.remove_node(forward_edge.u)
     backward_graph.remove_node(backward_edge.v)
 
-cdef edge* add_nontransitive_edge(DiGraph graph, int u_idx, int v_idx, int skip_node):
+cdef edge* add_nontransitive_edge(DiGraph graph, long u_idx, long v_idx, long skip_node):
     """
     Adds an edge between u and v if there is not already a path u, w_1,...,w_n, v with u < w_k < v or u > w_k > v.
     Skips over skip_node when searching.
     :return: the edge, or NULL if a path was found
     """
     # Search for descendants of u
-    cdef int direction = 1 if u_idx < v_idx else -1
+    cdef long direction = 1 if u_idx < v_idx else -1
     cdef edge * e
-    cdef int node
+    cdef long node
     cdef Stack nodes_to_visit = Stack()
     nodes_to_visit.push(u_idx)
     while nodes_to_visit.length > 0:
@@ -506,9 +506,9 @@ cpdef DiGraph reduction_union(DiGraph forward_reduction, DiGraph backward_reduct
     :param prune_loops: whether to prune edges (v,u) in backward_reduction if (u,v) is in forward_reduction
     :return: the transitive reduction of the partial ordering
     """
-    cdef int num_nodes = max(forward_reduction.maximum_number_of_nodes, backward_reduction.maximum_number_of_nodes)
+    cdef long num_nodes = max(forward_reduction.maximum_number_of_nodes, backward_reduction.maximum_number_of_nodes)
     cdef IntegerSet reachable_in_two_hops = IntegerSet(num_nodes)
-    cdef int node_index
+    cdef long node_index
     cdef node * current_node
     cdef edge * out_edge
     cdef DiGraph result = DiGraph(num_nodes, forward_reduction.number_of_edges + backward_reduction.number_of_edges)
@@ -532,7 +532,7 @@ cpdef DiGraph reduction_union(DiGraph forward_reduction, DiGraph backward_reduct
     return result
 
 # Subroutines of reduction_union
-cdef void search_two_hops(IntegerSet result, DiGraph first_graph, DiGraph second_graph, int starting_node_index):
+cdef void search_two_hops(IntegerSet result, DiGraph first_graph, DiGraph second_graph, long starting_node_index):
     """
     Searches from a starting node u to find nodes w such that for some v, (u,v) is an edge of first_graph and (v,w)
     is an edge of second_graph.
@@ -551,7 +551,7 @@ cdef void search_two_hops(IntegerSet result, DiGraph first_graph, DiGraph second
             second_hop = second_hop.next_out
         first_hop = first_hop.next_out
 
-cdef void search_two_hops_backward(IntegerSet result, DiGraph first_graph, DiGraph second_graph, int starting_node_index):
+cdef void search_two_hops_backward(IntegerSet result, DiGraph first_graph, DiGraph second_graph, long starting_node_index):
     """
     Searches from a starting node u to find nodes w such that for some v, (v,u) is an edge of first_graph and (w,v)
     is an edge of second_graph.
@@ -599,8 +599,8 @@ cpdef tuple get_graph_statistics(str brick_graph_dir):
     :param brick_graph_dir: location of brick graph partitions
     :return: num_samples, number_of_nodes, number_of_edges
     """
-    cdef int number_of_nodes = 0
-    cdef int number_of_edges = 0
+    cdef long number_of_nodes = 0
+    cdef long number_of_edges = 0
     cdef list files = os.listdir(brick_graph_dir)
     for f in files:
         with h5py.File(f, 'r') as f:
@@ -638,11 +638,11 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
     num_samples, number_of_nodes, number_of_edges = get_graph_statistics(brick_graph_dir) # get statistics to initialize DiGraph object
     cdef DiGraph result = DiGraph(number_of_nodes, number_of_edges)
     cdef DiGraph graph
-    cdef int i
-    cdef int u, v
-    cdef int non_sample_counter = num_samples
-    cdef int sample_counter
-    cdef int[:] new_node_ids
+    cdef long i
+    cdef long u, v
+    cdef long non_sample_counter = num_samples
+    cdef long sample_counter
+    cdef long[:] new_node_ids
     cdef list variant_indices = []
     cdef list index_mapping = []
     cdef list files = os.listdir(brick_graph_dir)
@@ -657,7 +657,7 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
 
         # Get new node ids corresponding to the merged graph
         sample_counter = 0
-        new_node_ids = np.zeros(graph.number_of_nodes, dtype=np.intc)
+        new_node_ids = np.zeros(graph.number_of_nodes, dtype=np.int64)
         for i in range(graph.number_of_nodes):
             if i in samples:
                 new_node_ids[i] = sample_counter

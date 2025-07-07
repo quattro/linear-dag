@@ -189,7 +189,7 @@ cdef class IntegerSet:
     # cdef int[:] last_cleared
     # cdef int times_cleared
 
-    def __init__(self, int length):
+    def __init__(self, long length):
         self.length = length
         self.last_cleared = np.zeros(length, dtype=np.intc)
         self.times_cleared = 1
@@ -220,7 +220,7 @@ cdef class CountingArray(IntegerSet):
     """Array that keeps track of the last time each element was modified, allowing it to be cleared in O(1) time"""
     # cdef int[:] count
 
-    def __init__(self, int length):
+    def __init__(self, long length):
         self.count = np.zeros(length, dtype=np.intc)
         super().__init__(length)
 
@@ -270,7 +270,7 @@ cdef class LinkedListArray:
         if not self.head or not self.tail:
             raise MemoryError("Could not allocate LinkedListArray.")
 
-        cdef int i
+        cdef long i
         for i in range(n):
             self.head[i] = NULL
             self.tail[i] = NULL
@@ -286,7 +286,7 @@ cdef class LinkedListArray:
         free(self.head)
         free(self.tail)
 
-    cdef void extend(self, int n, int value):
+    cdef void extend(self, long n, long value):
         if n < 0 or n >= self.n:
             raise ValueError("LinkedList index out of bounds.")
 
@@ -305,7 +305,7 @@ cdef class LinkedListArray:
 
         self.length[n] += 1
 
-    cdef void insert(self, int n, int value):
+    cdef void insert(self, long n, long value):
         """Insert a new element into a sorted list"""
         if n < 0 or n >= self.n:
             raise ValueError("LinkedList index out of bounds.")
@@ -334,7 +334,7 @@ cdef class LinkedListArray:
 
         self.length[n] += 1
 
-    cdef void remove(self, int n, list_node * node, list_node * predecessor):
+    cdef void remove(self, long n, list_node * node, list_node * predecessor):
         """Removes a given node from list n; requires knowing its predecessor, if any"""
         # Check if the node to remove is the first node in the list
         if predecessor == NULL:
@@ -352,19 +352,19 @@ cdef class LinkedListArray:
         self.length[n] -= 1
         free(node)
 
-    cdef void assign(self, int[:] what, int[:] where, int[:] which):
+    cdef void assign(self, long[:] what, long[:] where, long[:] which):
         """
         Assign values in 'what' to lists 'where' according to indices 'which'.
         """
         # Sort 'what' to keep linked lists sorted
-        cdef int[:] order = np.argsort(what).astype(np.int32)
+        cdef long[:] order = np.argsort(what).astype(np.int64)
 
         # Iterate over 'which' in sorted order and extend lists
-        cdef int i
+        cdef long i
         for i in range(len(order)):
             self.extend(where[which[order[i]]], what[order[i]])
 
-    cdef void remove_difference(self, int n, int m):
+    cdef void remove_difference(self, long n, long m):
         """Compute the intersection between two lists n and m and remove it from list m, assuming they are sorted."""
         if n == m:
             self.clear_list(n)
@@ -385,7 +385,7 @@ cdef class LinkedListArray:
                 self.remove(m, node_m, prev_m)
                 node_m = next_m
 
-    cdef void clear_list(self, int n):
+    cdef void clear_list(self, long n):
         cdef list_node * node = self.head[n]
         cdef list_node * next_node
         while node != NULL:
@@ -396,14 +396,14 @@ cdef class LinkedListArray:
         self.tail[n] = NULL
         self.length[n] = 0
 
-    cdef copy_list(self, int n, int m):
+    cdef copy_list(self, long n, long m):
         """Replaces the current list m with a copy of list n"""
         cdef list_node * node = self.head[n]
         while node is not NULL:
             self.extend(m, node.value)
             node = node.next
 
-    cpdef int[:] extract(self, int n):
+    cpdef long[:] extract(self, long n):
         """
         Returns list n as an array.
         """
@@ -412,17 +412,17 @@ cdef class LinkedListArray:
 
         # Check if the linked list at index n is empty
         if self.head[n] is NULL:
-            return np.array([], dtype=np.intc)  # Return an empty NumPy array for an empty list
+            return np.array([], dtype=np.int64)  # Return an empty NumPy array for an empty list
 
         # Calculate the length of the n-th linked list
-        cdef int list_length = self.length[n]
+        cdef long list_length = self.length[n]
 
         # Initialize a NumPy array of the appropriate length
-        cdef cnp.ndarray result = np.empty(list_length, dtype=np.intc)
+        cdef cnp.ndarray result = np.empty(list_length, dtype=np.int64)
 
         # Traverse the linked list and fill the NumPy array
         cdef list_node * current_node = self.head[n]
-        cdef int i = 0
+        cdef long i = 0
         while current_node is not NULL:
             result[i] = current_node.value
             current_node = current_node.next
@@ -480,7 +480,7 @@ cdef class DiGraph:
         self.available_nodes = Stack()
         self.available_edges = Stack()
 
-        cdef int i
+        cdef long i
         for i in reversed(range(number_of_nodes)):
             self.nodes[i] = <node*> self.available_nodes.push(i)
             self.is_node[i] = False
@@ -491,7 +491,7 @@ cdef class DiGraph:
         self.maximum_number_of_edges = number_of_edges
 
     def __dealloc__(self):
-        cdef int i
+        cdef long i
         for i in range(self.maximum_number_of_edges):
             if self.edges[i] is not NULL:
                 free(self.edges[i])
@@ -526,15 +526,15 @@ cdef class DiGraph:
             yield e.v.index
             e = e.next_out
 
-    cpdef bint has_node(self, int node_index):
+    cpdef bint has_node(self, long node_index):
         if node_index >= self.maximum_number_of_nodes or node_index < 0:
             return 0
         return self.is_node[node_index]
 
-    cpdef int some_parent(self, int node_index):
+    cpdef long some_parent(self, long node_index):
         return self.nodes[node_index].first_in.u.index
 
-    cpdef int some_child(self, int node_index):
+    cpdef long some_child(self, long node_index):
         return self.nodes[node_index].first_out.v.index
 
     def copy(self) -> Type[DiGraph]:
@@ -569,7 +569,7 @@ cdef class DiGraph:
         cdef int num_edges = np.sum(np.asarray(data) == 1)
         cdef int num_nodes = len(indptr) - 1
         cdef DiGraph G = cls(max_num_nodes, num_edges)
-        cdef int node_idx, neighbor_idx, edge_idx
+        cdef long node_idx, neighbor_idx, edge_idx
         cdef edge* e
 
         # Ensure nodes needed for now are initialized
@@ -598,7 +598,7 @@ cdef class DiGraph:
         Returns a list of edges.
         """
         edgelist = []
-        cdef int i
+        cdef long i
         cdef edge* e
         for i in range(self.maximum_number_of_edges):
             e = self.edges[i]
@@ -628,7 +628,7 @@ cdef class DiGraph:
         while self.available_nodes.length > 0:
             self.add_node(-1)
 
-    cdef node* add_node(self, int node_index):
+    cdef node* add_node(self, long node_index):
         """Adds a new node with the specified index, which should be smaller than maximum_number_of_nodes.
         If node_index is -1, a new node is created with an arbitrary index, even if must be greater than
         maximum_number_of_nodes."""
@@ -657,7 +657,7 @@ cdef class DiGraph:
         new_node.index = node_index
         return new_node
 
-    cdef edge* add_edge(self, int u_index, int v_index):
+    cdef edge* add_edge(self, long u_index, long v_index):
         if self.available_edges.length == 0:
             self.extend_edge_array(self.maximum_number_of_edges * 2)
         if u_index == v_index:
@@ -879,7 +879,7 @@ cdef class DiGraph:
         self.remove_node(u)
 
 
-    cdef int number_of_successors(self, node* u):
+    cdef long number_of_successors(self, node* u):
         """
         Counts successors of a node by iterating over its out-edges.
         """
@@ -890,7 +890,7 @@ cdef class DiGraph:
             counter += 1
         return counter
 
-    cdef int number_of_predecessors(self, node* u):
+    cdef long number_of_predecessors(self, node* u):
         """
         Counts predecessors of a node by iterating over its in-edges.
         """
@@ -918,11 +918,11 @@ cdef class DiGraph:
             yield e.u.index
             e = e.next_in
 
-    cpdef int[:] out_degree(self):
-        cdef int[:] result = np.zeros(self.maximum_number_of_nodes, dtype=np.intc)
+    cpdef long[:] out_degree(self):
+        cdef long[:] result = np.zeros(self.maximum_number_of_nodes, dtype=np.int64)
         cdef node* u
         cdef edge* e
-        cdef int i
+        cdef long i
         for i in range(self.maximum_number_of_edges):
             e = self.edges[i]
             if e is NULL:
@@ -931,11 +931,11 @@ cdef class DiGraph:
             result[u.index] += 1
         return result
 
-    cpdef int[:] in_degree(self):
-        cdef int[:] result = np.zeros(self.maximum_number_of_nodes, dtype=np.intc)
+    cpdef long[:] in_degree(self):
+        cdef long[:] result = np.zeros(self.maximum_number_of_nodes, dtype=np.int64)
         cdef node* v
         cdef edge* e
-        cdef int i
+        cdef long i
         for i in range(self.maximum_number_of_edges):
             e = self.edges[i]
             if e is NULL:
@@ -944,22 +944,22 @@ cdef class DiGraph:
             result[v.index] += 1
         return result
 
-    cpdef int[:] reverse_topological_sort(self):
+    cpdef long[:] reverse_topological_sort(self):
         """
         Returns an array of nodes, L, in order such that if L[i] is a descendant of L[j] then i < j
         """
-        cdef int num_nodes = self.number_of_nodes
+        cdef long num_nodes = self.number_of_nodes
         cdef cnp.ndarray num_unvisited_children = np.asarray(self.out_degree())
 
         # nodes_to_visit initialized with nodes having out-degree 0
         cdef Stack nodes_to_visit = Stack()
-        cdef int i
+        cdef long i
         for i in np.where(num_unvisited_children == 0)[0]:
             if self.is_node[i]:
                 nodes_to_visit.push(i)
 
-        cdef int[:] result = np.empty(num_nodes, dtype=np.intc)
-        cdef int node_idx, parent_index
+        cdef long[:] result = np.empty(num_nodes, dtype=np.int64)
+        cdef long node_idx, parent_index
         cdef edge* in_edge
         i = 0
         while nodes_to_visit.length > 0:
@@ -986,7 +986,7 @@ cdef class HeapNode:
     # cdef public int priority
     # cdef public int index
 
-    def __init__(self, int priority, int index):
+    def __init__(self, long priority, long index):
         self.priority = priority
         self.index = index
 
@@ -1003,16 +1003,16 @@ cdef class ModHeap:
     priority modified.
     """
     # cdef public list act_heap
-    # cdef int[:] priority
-    # cdef public int n
+    # cdef long[:] priority
+    # cdef public long n
 
-    def __init__(self, int[:] priority):
+    def __init__(self, long[:] priority):
         cnp.import_array()  # Necessary for initializing the C API
         self.n = len(priority)
-        self.priority = np.copy(priority).astype(np.intc) # Copies the input array
+        self.priority = np.copy(priority).astype(np.int64) # Copies the input array
         self.act_heap = self._create_heap(np.copy(self.priority))
-    cdef list _create_heap(self, int[:] priority):
-        cdef int i
+    cdef list _create_heap(self, long[:] priority):
+        cdef long i
         cdef list heap = []
         for i in range(self.n):
             # Allocate a new Node and append it to the heap list
@@ -1021,7 +1021,7 @@ cdef class ModHeap:
         heapq.heapify(heap)
         return heap
 
-    cpdef void push(self, int index, int priority):
+    cpdef void push(self, long index, long priority):
         """
         Either push a new node to the heap, or modify priority of an existing one
         """
@@ -1029,7 +1029,7 @@ cdef class ModHeap:
         heapq.heappush(self.act_heap, node)
         self.priority[index] = priority
 
-    cpdef int pop(self):
+    cpdef long pop(self):
         cdef HeapNode node
         while self.act_heap:
             node = heapq.heappop(self.act_heap)

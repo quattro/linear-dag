@@ -5,22 +5,22 @@ from .data_structures cimport DiGraph, LinkedListArray, CountingArray, Stack, In
 from scipy.sparse import csr_matrix
 cimport numpy as cnp
 
+cdef int REALLOC_FACTOR = 2
+
 def linearize_brick_graph(G: DiGraph) -> csr_matrix:
     G = G.copy()
-    # cdef int[:] edge_weights = np.ones(2 * G.maximum_number_of_edges, dtype=np.intc)
-    cdef int[:] edge_weights = np.ones(10 * G.maximum_number_of_edges, dtype=np.intc) # increase number of edges for individual nodes
+    cdef int[:] edge_weights = np.ones(REALLOC_FACTOR * G.maximum_number_of_edges, dtype=np.intc)
+    cdef long[:] order = G.reverse_topological_sort()
 
-    cdef int[:] order = G.reverse_topological_sort()
-
-    # # Weighted in-degree of each node in the subgraph of descendants of the current node
+    # Weighted in-degree of each node in the subgraph of descendants of the current node
     cdef CountingArray subgraph_indegree = CountingArray(G.maximum_number_of_nodes)
 
     cdef Stack nodes_to_visit = Stack()
-    cdef Stack nodes_to_visit_again = Stack() # TODO maybe consolidate with nodes_to_visit
+    cdef Stack nodes_to_visit_again = Stack()
     cdef edge* current_edge
     cdef edge* new_edge
-    cdef int starting_node_idx
-    cdef int visited_node_idx
+    cdef long starting_node_idx
+    cdef long visited_node_idx
     cdef int weighted_in_degree
 
     for starting_node_idx in order:
@@ -48,13 +48,17 @@ def linearize_brick_graph(G: DiGraph) -> csr_matrix:
             if weighted_in_degree == 1:
                 continue
             new_edge = G.add_edge(starting_node_idx, visited_node_idx)  # could be duplicate edges between u,v
-            assert new_edge.index < len(edge_weights)
+            while new_edge.index >= len(edge_weights):
+                old_len = len(edge_weights)
+                new_size = len(edge_weights) * REALLOC_FACTOR
+                edge_weights = np.resize(np.asarray(edge_weights), new_size)
+                edge_weights[old_len:] = 1
             edge_weights[new_edge.index] = 1 - weighted_in_degree
 
     cdef int[:] data = np.zeros(G.maximum_number_of_edges, dtype=np.intc)
-    cdef int[:] row_ind = np.empty(G.maximum_number_of_edges, dtype=np.intc)
-    cdef int[:] col_ind = np.empty(G.maximum_number_of_edges, dtype=np.intc)
-    cdef int i
+    cdef long[:] row_ind = np.empty(G.maximum_number_of_edges, dtype=np.int64)
+    cdef long[:] col_ind = np.empty(G.maximum_number_of_edges, dtype=np.int64)
+    cdef long i
     cdef counter = 0
     cdef edge * e
     for i in range(G.maximum_number_of_edges):
