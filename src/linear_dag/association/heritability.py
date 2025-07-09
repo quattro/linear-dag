@@ -121,7 +121,6 @@ def _prep_for_h2_estimation(
     covariates = _impute_missing_with_mean(covariates)
     is_missing = np.isnan(phenotypes)
     num_nonmissing = np.sum(~is_missing, axis=0)
-    print(f"num_nonmissing: {num_nonmissing}")
     phenotypes.ravel()[is_missing.ravel()] = 0
 
     # Residualize phenotypes on covariates
