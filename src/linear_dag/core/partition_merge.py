@@ -162,7 +162,7 @@ def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
     recom.find_recombinations()
     t4 = time.time()
     logger.info(f"Recombinations found in {np.round(t4 - t3, 3)} seconds")
-    adj_mat = recom.to_csc()
+    adj_mat = recom.to_csc_stable()
     
     logger.info("Saving brick graph")
     with h5py.File(f"{linarg_dir}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
