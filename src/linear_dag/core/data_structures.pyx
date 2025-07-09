@@ -620,6 +620,24 @@ cdef class DiGraph:
     def to_csc(self) -> csc_matrix:
         return csc_matrix(self.to_csr())
 
+    def to_csc_stable(self) -> csc_matrix:
+        """
+        Adds parent nodes in genomic order from right to left i.e. in the opposite order
+        edges were created.
+        """  
+        indices = []
+        indptr = [0]
+        for node_idx in range(self.maximum_number_of_nodes):
+            if not self.is_node[node_idx]:
+                indptr.append(indptr[-1])
+                continue
+            neighbor_counter = 0
+            for i in self.predecessors(node_idx):
+                neighbor_counter += 1
+                indices.append(i)
+            indptr.append(indptr[-1] + neighbor_counter)
+        return csc_matrix((np.ones(len(indices)), indices, indptr), shape=(len(indptr)-1, len(indptr)-1))
+
     def add_edges_from(self, list[tuple[int, int]] edges) -> None:
         for i, j in edges:
             self.add_edge(i, j)
@@ -909,6 +927,7 @@ cdef class DiGraph:
         while e is not NULL:
             yield e.v.index
             e = e.next_out
+
     def predecessors(self, v_idx: int):
         """
         Iterate over predecessors of a node

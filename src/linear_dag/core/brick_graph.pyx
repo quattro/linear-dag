@@ -590,8 +590,7 @@ cpdef tuple read_brick_graph_h5(filename):
         A = csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=(f.attrs['n'], f.attrs['n'])) 
         variant_indices = f['variant_indices'][:]   
         sample_indices = f['sample_indices'][:]   
-    graph = DiGraph.from_csc(A)
-    return graph, sample_indices, variant_indices
+    return A, sample_indices, variant_indices
 
 cpdef tuple get_graph_statistics(str brick_graph_dir):
     """
@@ -603,10 +602,10 @@ cpdef tuple get_graph_statistics(str brick_graph_dir):
     cdef long number_of_edges = 0
     cdef list files = os.listdir(brick_graph_dir)
     for f in files:
-        graph, sample_indices, variant_indices = read_brick_graph_h5(f'{brick_graph_dir}/{f}')
-        number_of_nodes += graph.number_of_nodes
-        number_of_edges += graph.number_of_edges
-    num_samples = len(sample_indices)
+        with h5py.File(f'{brick_graph_dir}/{f}', 'r') as f:
+            num_samples = f['sample_indices'].shape[0]
+            number_of_nodes += f.attrs['n']
+            number_of_edges += f['data'].shape[0]
     number_of_nodes -= num_samples * (len(files)-1)
     return num_samples, number_of_nodes, number_of_edges
 
@@ -644,7 +643,6 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
     cdef long sample_counter
     cdef long[:] new_node_ids
     cdef list variant_indices = []
-    cdef list index_mapping = []
     cdef list files = os.listdir(brick_graph_dir)
 
     ind_arr = np.array([int(f.split('_')[0]) for f in files])
@@ -653,12 +651,13 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
 
     for f in files:
 
-        graph, samples, variants = read_brick_graph_h5(f'{brick_graph_dir}/{f}')
+        A, samples, variants = read_brick_graph_h5(f'{brick_graph_dir}/{f}')
+        number_of_nodes = A.shape[0]
 
         # Get new node ids corresponding to the merged graph
         sample_counter = 0
-        new_node_ids = np.zeros(graph.number_of_nodes, dtype=np.int64)
-        for i in range(graph.number_of_nodes):
+        new_node_ids = np.zeros(number_of_nodes, dtype=np.int64)
+        for i in range(number_of_nodes):
             if i in samples:
                 new_node_ids[i] = sample_counter
                 sample_counter += 1
@@ -666,15 +665,13 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
                 new_node_ids[i] = non_sample_counter
                 non_sample_counter += 1
         variant_indices += [new_node_ids[var] for var in variants]
-        index_mapping.append(new_node_ids)
 
         # Add edges from graph to result while preserving the order of the parent nodes for each child node
-        for node_idx in range(graph.number_of_nodes):
-            if not graph.is_node[node_idx]:
-                continue
-            add_neighbors(result, graph.nodes[node_idx], new_node_ids)
+        for child in range(number_of_nodes):
+            for parent in A.indices[A.indptr[child] : A.indptr[child+1]]:
+                result.add_edge(new_node_ids[parent], new_node_ids[child])
 
-    return result, variant_indices, num_samples, index_mapping
+    return result, variant_indices, num_samples
 
 
 def build_sparse_matrix_with_hdf5(filename, n, batch_size=100000):
