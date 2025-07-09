@@ -184,6 +184,8 @@ def merge(linarg_dir, load_dir):
     Merged partitioned brick graphs, find recombinations, and linearize.
     """
     
+    print('using new merge')
+    
     os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
     
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/merge.log")
