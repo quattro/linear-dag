@@ -622,8 +622,7 @@ cdef class DiGraph:
 
     def to_csc_stable(self) -> csc_matrix:
         """
-        Adds parent nodes in genomic order from right to left i.e. in the opposite order
-        edges were created.
+        Adds parent nodes in genomic order from left to right.
         """  
         indices = []
         indptr = [0]
@@ -632,7 +631,7 @@ cdef class DiGraph:
                 indptr.append(indptr[-1])
                 continue
             neighbor_counter = 0
-            for i in self.predecessors(node_idx):
+            for i in reversed(list(self.predecessors(node_idx))):
                 neighbor_counter += 1
                 indices.append(i)
             indptr.append(indptr[-1] + neighbor_counter)

@@ -646,7 +646,7 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
     cdef list files = os.listdir(brick_graph_dir)
 
     ind_arr = np.array([int(f.split('_')[0]) for f in files])
-    order = (-ind_arr).argsort() # get indices in descending order so genome is travered from right to left
+    order = ind_arr.argsort()
     files = np.array(files)[order].tolist()
 
     for f in files:
