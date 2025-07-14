@@ -342,8 +342,7 @@ def _main(args):
     make_geno_p.set_defaults(func=_make_geno)
 
     infer_brick_graph_p = subp.add_parser(
-        "infer-brick-graph",
-        help="Step 2 of partition and merge pipeline. Infers the brick graph from sparse matrix."
+        "infer-brick-graph", help="Step 2 of partition and merge pipeline. Infers the brick graph from sparse matrix."
     )
     infer_brick_graph_p.add_argument(
         "--linarg_dir",

@@ -30,6 +30,7 @@ from .solve import (
     topological_sort,
 )
 
+
 @dataclass
 class LinearARG(LinearOperator):
     A: csc_matrix  # samples must be in descending order starting from the final row/col
@@ -392,7 +393,7 @@ class LinearARG(LinearOperator):
     def read(
         h5_fname: Union[str, PathLike],
         block: Optional[str] = None,
-        load_metadata:bool = False,
+        load_metadata: bool = False,
     ) -> "LinearARG":
         """Reads LinearARG data from provided PLINK2 formatted files.
 
@@ -411,9 +412,15 @@ class LinearARG(LinearOperator):
 
             if load_metadata:
                 v_dict = {field: f[field][:].astype(str) for field in ["CHROM", "POS", "ID", "REF", "ALT"]}
-                v_info = pl.DataFrame(v_dict).with_columns([
+                v_info = (
+                    pl.DataFrame(v_dict)
+                    .with_columns(
+                        [
                             pl.col("POS").cast(pl.Int32),
-                ]).lazy()
+                        ]
+                    )
+                    .lazy()
+                )
             else:
                 v_info = None
 
