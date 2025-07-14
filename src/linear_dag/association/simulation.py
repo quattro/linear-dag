@@ -1,21 +1,26 @@
-import numpy as np
 from typing import Optional
-from scipy.sparse.linalg import LinearOperator
-from numpy.random import Generator
 
-def simulate_phenotype(genotypes: LinearOperator, 
-                        heritability: float, 
-                        fraction_causal: float = 1, 
-                        num_traits: int = 1,
-                        return_genetic_component: bool = False,
-                        return_beta: bool = False,
-                        variant_effect_variance: Optional[np.ndarray] = None,
-                        seed: Optional[Generator] = None):
+import numpy as np
+
+from numpy.random import Generator
+from scipy.sparse.linalg import LinearOperator
+
+
+def simulate_phenotype(
+    genotypes: LinearOperator,
+    heritability: float,
+    fraction_causal: float = 1,
+    num_traits: int = 1,
+    return_genetic_component: bool = False,
+    return_beta: bool = False,
+    variant_effect_variance: Optional[np.ndarray] = None,
+    seed: Optional[Generator] = None,
+):
     """
     Simulates quantitative phenotypes
         y = X * beta + epsilon
     with specified heritability, AF-dependent architecture, and polygenicity
-    :param genotypes: linear operator for the genotype matrix, which 
+    :param genotypes: linear operator for the genotype matrix, which
         can be normalized (cols have unit variance) or not (0-1-2 or 0-1 valued).
     :param heritability: between 0 and 1
     :param fraction_causal: between 0 and 1
@@ -36,12 +41,12 @@ def simulate_phenotype(genotypes: LinearOperator,
 
     y_bar = genotypes @ beta
     y_bar -= np.mean(y_bar, axis=0)
-    
+
     # Standardize y_bar
     multiplier = np.sqrt(heritability) / np.std(y_bar, axis=0)
     if np.any(np.isinf(multiplier)):
         raise ValueError("Divide by zero error occurred, perhaps because no causal variants were sampled.")
-    multiplier[np.isnan(multiplier)] = 0 # heritability == 0
+    multiplier[np.isnan(multiplier)] = 0  # heritability == 0
     y_bar *= multiplier
     beta *= multiplier
 

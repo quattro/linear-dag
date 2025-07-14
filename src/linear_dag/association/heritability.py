@@ -36,7 +36,6 @@ def randomized_haseman_elston(
     if phenos.ndim == 1:
         phenos = phenos.reshape(-1, 1)
 
-
     heterozygosity = linarg.allele_frequencies * (1 - linarg.allele_frequencies)
     heterozygosity[heterozygosity == 0] = 1
 
@@ -200,7 +199,9 @@ def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple
     return trace_grm, trace_grm_sq, {}
 
 
-def _xtrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler, estimate_diag: bool = False) -> tuple[float, float, dict]:
+def _xtrace_estimator(
+    GRM: LinearOperator, k: int, sampler: _Sampler, estimate_diag: bool = False
+) -> tuple[float, float, dict]:
     # WIP
     raise NotImplementedError("xtrace estimator is not yet implemented")
     n, _ = GRM.shape

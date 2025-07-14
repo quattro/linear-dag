@@ -1,9 +1,12 @@
-from ..core import LinearARG
-import numpy as np
-import scipy.sparse as sp
-from scipy.sparse.linalg import LinearOperator, cg, aslinearoperator, gmres, spsolve_triangular
-from scipy.sparse import eye, diags, csc_matrix, csr_matrix
 from dataclasses import dataclass
+
+import numpy as np
+
+from scipy.sparse import csc_matrix, csr_matrix, diags, eye
+from scipy.sparse.linalg import aslinearoperator, cg, LinearOperator, spsolve_triangular
+
+from ..core import LinearARG
+
 
 @dataclass
 class triangular_solver(LinearOperator):
@@ -28,6 +31,7 @@ class triangular_solver(LinearOperator):
             other = other.reshape(1, -1)
 
         return spsolve_triangular(eye(self.A.shape[1]) - self.A.T, other.T, lower=False).T
+
 
 def blup(linarg: LinearARG, heritability: float, y: np.ndarray):
     """
@@ -65,7 +69,7 @@ def blup(linarg: LinearARG, heritability: float, y: np.ndarray):
     Om = aslinearoperator(diags(1 / SigmaTilde))
 
     ## Generate B
-    I = eye(k)
+    I = eye(k)  # noqa: E741
     I_minus_A = aslinearoperator(I - X.A)
     B = (I_minus_A.T @ Om) @ I_minus_A
 
@@ -89,6 +93,5 @@ def blup(linarg: LinearARG, heritability: float, y: np.ndarray):
     K = linarg @ aslinearoperator(Sigma) @ linarg.T
 
     blup = K @ (first_term - second_term_now)
-    
+
     return blup
-    

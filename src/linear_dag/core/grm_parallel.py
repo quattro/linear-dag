@@ -1,12 +1,14 @@
-from multiprocessing import Array, Process, Value, cpu_count, Lock
-from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Union, Any
+import time
+
+from dataclasses import dataclass
+from multiprocessing import Array, cpu_count, Process, Value
+from typing import Callable, List, Optional, Tuple
+
 import numpy as np
 import polars as pl
-from dataclasses import dataclass
-from scipy.sparse.linalg import LinearOperator, aslinearoperator
+
 from scipy.sparse import diags
-import time
+from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 from .lineararg import LinearARG, list_blocks
 
@@ -17,7 +19,8 @@ FLAGS = {
     "get_data": 1,
     "matmat": 2,
 }
-assert(len(np.unique([val for val in FLAGS.values()])) == len(FLAGS))
+assert len(np.unique([val for val in FLAGS.values()])) == len(FLAGS)
+
 
 class _ParallelManager:
     """Manager for coordinating parallel worker processes.
@@ -29,7 +32,7 @@ class _ParallelManager:
 
     def __init__(self, num_processes: int):
         self.num_processes = num_processes
-        self.flags = [Value('i', 0) for _ in range(num_processes)]
+        self.flags = [Value("i", 0) for _ in range(num_processes)]
         self.processes: List[Process] = []
 
     def __enter__(self):
@@ -66,7 +69,7 @@ class _ParallelManager:
         """Shutdown all worker processes."""
         for flag in self.flags:
             flag.value = FLAGS["shutdown"]
-        
+
         for process in self.processes:
             process.join()
 
@@ -77,11 +80,11 @@ class GRMOperator(LinearOperator):
 
     Represents the matrix X @ K @ X.T, where X is the normalized genotype
     matrix (zero mean/unit variance) and K is a diagonal matrix with entries
-    K_ii = (p_iq_i)^(1 + alpha) - that is, per-allele effect sizes are 
+    K_ii = (p_iq_i)^(1 + alpha) - that is, per-allele effect sizes are
     proportional to the heterozygosity raised to the power alpha.
 
     Supports matrix-matrix multiplication.
-    
+
     Attributes:
         _manager: ParallelManager instance that coordinates worker processes
         _shared_data: SharedData instance for inter-process communication
@@ -91,7 +94,7 @@ class GRMOperator(LinearOperator):
         max_num_traits: Maximum number of traits
         dtype: Data type
     """
-    
+
     _manager: _ParallelManager
     _shared_data: Array
     _num_traits: Value
@@ -118,12 +121,12 @@ class GRMOperator(LinearOperator):
     @alpha.setter
     def alpha(self, alpha: float):
         self._alpha.value = alpha
-    
+
     def _matmat(self, x: np.ndarray):
         if x.shape[0] != self.num_samples:
             raise ValueError("Input array must have same number of rows as number of samples")
-        
-        result = -x # computed value increments x
+
+        result = -x  # computed value increments x
 
         # Process max_num_traits columns at a time
         for i in range(0, x.shape[1], self.max_num_traits):
@@ -143,17 +146,15 @@ class GRMOperator(LinearOperator):
         return self._matmat(x.T).T
 
     @classmethod
-    def from_hdf5(cls, 
-                     hdf5_file: str,
-                     num_processes: Optional[int] = None,
-                     alpha: float = -1,
-                     max_num_traits: int = 10) -> "GRMOperator":
+    def from_hdf5(
+        cls, hdf5_file: str, num_processes: Optional[int] = None, alpha: float = -1, max_num_traits: int = 10
+    ) -> "GRMOperator":
         """Create a ParallelOperator from a metadata file.
-        
+
         Args:
             metadata_path: Path to metadata file
             num_processes: Number of processes to use; None -> use all available cores
-            
+
         Returns:
             ParallelOperator instance
         """
@@ -161,23 +162,23 @@ class GRMOperator(LinearOperator):
 
 
 class _ManagerFactory:
-
     @classmethod
-    def _worker(cls,
-               hdf5_file: str,
-               blocks: list,
-               flag: Value,
-               shared_data: Array,
-               num_traits: Value,
-               alpha: Value,
-               ) -> None:
+    def _worker(
+        cls,
+        hdf5_file: str,
+        blocks: list,
+        flag: Value,
+        shared_data: Array,
+        num_traits: Value,
+        alpha: Value,
+    ) -> None:
         """Worker process that loads LDGMs and processes blocks."""
         linargs = []
         assert blocks is not None
         for block in blocks:
             linarg = LinearARG.read(hdf5_file, block)
             linargs.append(linarg)
-        
+
         while True:
             while flag.value == FLAGS["wait"]:
                 time.sleep(0.01)
@@ -185,36 +186,36 @@ class _ManagerFactory:
             if flag.value == FLAGS["shutdown"]:
                 break
             elif flag.value == FLAGS["get_data"]:
-                y = np.array(shared_data[:linarg.shape[0] * num_traits.value]).reshape(-1, num_traits.value)
+                y = np.array(shared_data[: linarg.shape[0] * num_traits.value]).reshape(-1, num_traits.value)
             elif flag.value == FLAGS["matmat"]:
                 for linarg in linargs:
                     cls._matmat(linarg, y, shared_data, alpha.value)
             else:
                 flag.value = FLAGS["error"]
                 raise ValueError(f"Unexpected flag value: {flag.value}")
-            
+
             flag.value = FLAGS["wait"]
 
     @classmethod
-    def _matmat(cls,
-               linarg: LinearARG,
-               y: np.ndarray,
-               shared_data: Array,
-               alpha: float,
-               ) -> None:
+    def _matmat(
+        cls,
+        linarg: LinearARG,
+        y: np.ndarray,
+        shared_data: Array,
+        alpha: float,
+    ) -> None:
         pq = linarg.allele_frequencies * (1 - linarg.allele_frequencies)
         K = aslinearoperator(diags(pq ** (1 + alpha)))
         result = linarg.normalized @ K @ linarg.normalized.T @ y
         with shared_data.get_lock():
-            shared_data[:np.size(result)] += result.ravel()
+            shared_data[: np.size(result)] += result.ravel()
 
     @classmethod
-    def _split_blocks(cls,
-                metadata: pl.DataFrame,
-                num_processes: int
-                ) -> tuple[list[tuple[int, int]], list[int], list[int]]:
+    def _split_blocks(
+        cls, metadata: pl.DataFrame, num_processes: int
+    ) -> tuple[list[tuple[int, int]], list[int], list[int]]:
         # Use numIndices consistently for both splitting and offsets
-        size_array = metadata.get_column('n_entries').to_numpy()
+        size_array = metadata.get_column("n_entries").to_numpy()
         size_cumsum = np.insert(np.cumsum(size_array), 0, 0)
         chunk_size = size_cumsum[-1] / num_processes
 
@@ -233,12 +234,13 @@ class _ManagerFactory:
         return block_ranges
 
     @classmethod
-    def create_parallel(cls,
-            hdf5_file: str,
-            num_processes: Optional[int],
-            alpha: float,
-            max_num_traits: int,
-            ) -> "GRMOperator":
+    def create_parallel(
+        cls,
+        hdf5_file: str,
+        num_processes: Optional[int],
+        alpha: float,
+        max_num_traits: int,
+    ) -> "GRMOperator":
         """Create a ParallelOperator instance.
 
         Args:
@@ -252,23 +254,23 @@ class _ManagerFactory:
         """
 
         block_metadata = list_blocks(hdf5_file)
-        blocks = block_metadata['block_name']
+        blocks = block_metadata["block_name"]
 
         if num_processes is None:
             num_processes = min(len(block_metadata), cpu_count())
-       
+
         process_block_ranges = cls._split_blocks(block_metadata, num_processes)
         process_blocks = [blocks[start:end] for start, end in process_block_ranges]
         assert all([blocks is not None for blocks in process_blocks])
-        num_samples = block_metadata['n_samples'][0]
-        shared_data = Array('f', num_samples * max_num_traits, lock=True)
-        num_traits = Value('i', 0, lock=False) 
-        alpha_value = Value('f', alpha, lock=False)
+        num_samples = block_metadata["n_samples"][0]
+        shared_data = Array("f", num_samples * max_num_traits, lock=True)
+        num_traits = Value("i", 0, lock=False)
+        alpha_value = Value("f", alpha, lock=False)
         manager = _ParallelManager(num_processes)
         for i in range(num_processes):
             manager.add_process(
                 target=cls._worker,
-                args=(hdf5_file, process_blocks[i], manager.flags[i], shared_data, num_traits, alpha_value)
+                args=(hdf5_file, process_blocks[i], manager.flags[i], shared_data, num_traits, alpha_value),
             )
-        
+
         return GRMOperator(manager, shared_data, num_traits, alpha_value, (num_samples, num_samples), max_num_traits)

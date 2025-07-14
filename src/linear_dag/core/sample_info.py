@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from functools import cached_property
 from os import PathLike
-from typing import ClassVar, Optional, Union
+from typing import ClassVar, Union
 
 # import bed_reader as br
 import numpy as np

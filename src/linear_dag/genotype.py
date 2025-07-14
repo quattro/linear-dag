@@ -23,9 +23,7 @@ def read_vcf(
     remove_indels: bool = False,
     sex: np.array = None,
 ):
-    def _update_dict_from_vcf(
-        var: cv.Variant, data: DefaultDict[str, list]
-    ) -> DefaultDict[str, list]:
+    def _update_dict_from_vcf(var: cv.Variant, data: DefaultDict[str, list]) -> DefaultDict[str, list]:
         data["CHROM"].append(var.CHROM)
         data["POS"].append(var.POS)
         data["ID"].append(var.ID)
@@ -49,20 +47,22 @@ def read_vcf(
 
     # push most of the branching up here to define functions for fewer branch conditions during loop
     if phased:
-        read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2]) # noqa: E731
+        read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2])  # noqa: E731
     else:
-        read_gt = lambda var: var.gt_types # noqa: E731
-        
+        read_gt = lambda var: var.gt_types  # noqa: E731
+
     if sex is not None:
-        mask = 2 * np.where(sex==1)[0] + 1
-        indices_to_keep = np.array([i for i in range(2*len(vcf.samples)) if i not in mask])
+        mask = 2 * np.where(sex == 1)[0] + 1
+        indices_to_keep = np.array([i for i in range(2 * len(vcf.samples)) if i not in mask])
 
     def final_read(var, flip_minor_alleles):
         gts = read_gt(var)
         if sex is not None:
             gts = gts[indices_to_keep]
-            assert np.all((gts == 0) | (gts == 1)), "Haplotype vector contains non 0 or 1 values. Check genotype data or sex vector."
-        
+            assert np.all((gts == 0) | (gts == 1)), (
+                "Haplotype vector contains non 0 or 1 values. Check genotype data or sex vector."
+            )
+
         if not flip_minor_alleles:
             return gts, False
         af = np.mean(gts) / ploidy
@@ -73,28 +73,28 @@ def read_vcf(
 
     var_table = defaultdict(list)
     if region:
-        tmp = region.split(':')[1]
-        start = int(tmp.split('-')[0])
-        end = int(tmp.split('-')[1])
+        tmp = region.split(":")[1]
+        start = int(tmp.split("-")[0])
+        end = int(tmp.split("-")[1])
     else:
         tmp = None
         start = 0
         end = np.inf
-    
+
     # TODO: handle missing data
     for var in vcf(region):
-        
-        if (var.POS < start) or (var.POS > end): continue # ignore indels that are outside of region
-        
+        if (var.POS < start) or (var.POS > end):
+            continue  # ignore indels that are outside of region
+
         if remove_indels:
             if any(len(alt) != 1 for alt in var.ALT) or len(var.REF) != 1:
                 continue
-        
+
         gts, is_flipped = final_read(var, flip_minor_alleles)
-        
+
         if maf_filter is not None:
             af = np.mean(gts) / ploidy
-            if (af < maf_filter) or (1-af < maf_filter):
+            if (af < maf_filter) or (1 - af < maf_filter):
                 continue
 
         (idx,) = np.where(gts != 0)
@@ -105,14 +105,16 @@ def read_vcf(
         var_table = _update_dict_from_vcf(var, var_table)
 
     v_info = pl.DataFrame(var_table)
-    
+
     if len(data) == 0:
         return None, None, None, None
 
     data = np.concatenate(data)
     idxs = np.concatenate(idxs)
     ptrs = np.array(ptrs)
-    genotypes = csc_matrix((data, idxs, ptrs), shape=(gts.shape[0], len(ptrs) - 1)) # some samples may have no variants, so shape must be specified
+    genotypes = csc_matrix(
+        (data, idxs, ptrs), shape=(gts.shape[0], len(ptrs) - 1)
+    )  # some samples may have no variants, so shape must be specified
     flip = np.array(flip)
 
     return genotypes, flip, v_info, iids

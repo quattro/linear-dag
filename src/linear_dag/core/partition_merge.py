@@ -1,69 +1,81 @@
-from ..memory_logger import MemoryLogger
 import os
 import time
+
+import h5py
 import numpy as np
 import polars as pl
 import scipy.sparse as sp
-import h5py
 
 from ..genotype import read_vcf
-from .brick_graph import BrickGraph, read_graph_from_disk, merge_brick_graphs
-from .lineararg import LinearARG, make_triangular, remove_degree_zero_nodes, add_individuals_to_graph
+from ..memory_logger import MemoryLogger
+from .brick_graph import BrickGraph, merge_brick_graphs, read_graph_from_disk
+from .lineararg import LinearARG, make_triangular, remove_degree_zero_nodes
 from .one_summed_cy import linearize_brick_graph
 from .recombination import Recombination
 
 
-def make_genotype_matrix(vcf_path,
-                         linarg_dir,
-                         region,
-                         partition_number,
-                         phased=True,
-                         flip_minor_alleles=False,
-                         whitelist_path=None,
-                         maf_filter=None,
-                         remove_indels=False,
-                         sex_path=None
-                         ):
+def make_genotype_matrix(
+    vcf_path,
+    linarg_dir,
+    region,
+    partition_number,
+    phased=True,
+    flip_minor_alleles=False,
+    whitelist_path=None,
+    maf_filter=None,
+    remove_indels=False,
+    sex_path=None,
+):
     """
     From a vcf file, save the genotype matrix and variant metadata for the given region.
     """
     os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
     os.makedirs(f"{linarg_dir}/variant_metadata/", exist_ok=True)
     os.makedirs(f"{linarg_dir}/genotype_matrices/", exist_ok=True)
-    
+
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_number}_{region}_make_genotype_matrix.log")
-        
-    region_formatted = f'{region.split("-")[0]}:{region.split("-")[1]}-{region.split("-")[2]}'
-    
+
+    region_formatted = f"{region.split('-')[0]}:{region.split('-')[1]}-{region.split('-')[2]}"
+
     if whitelist_path is None:
         whitelist = None
     else:
-        with open(whitelist_path, 'r') as f:
+        with open(whitelist_path, "r") as f:
             whitelist = [line.strip() for line in f]
-            
+
     if sex_path is None:
         sex = None
     else:
-        with open(sex_path, 'r') as f:
+        with open(sex_path, "r") as f:
             sex = np.array([int(line.strip()) for line in f])
-    
+
     logger.info("Reading vcf as sparse matrix")
     t1 = time.time()
-    genotypes, flip, v_info, iids = read_vcf(vcf_path, phased=phased, region=region_formatted, flip_minor_alleles=flip_minor_alleles, whitelist=whitelist, maf_filter=maf_filter, remove_indels=remove_indels, sex=sex)
+    genotypes, flip, v_info, iids = read_vcf(
+        vcf_path,
+        phased=phased,
+        region=region_formatted,
+        flip_minor_alleles=flip_minor_alleles,
+        whitelist=whitelist,
+        maf_filter=maf_filter,
+        remove_indels=remove_indels,
+        sex=sex,
+    )
     if genotypes is None:
-        logger.info(f"No variants found")
+        logger.info("No variants found")
         return None
+
     t2 = time.time()
     logger.info(f"vcf to sparse matrix completed in {np.round(t2 - t1, 3)} seconds")
     logger.info("Saving genotype matrix and variant metadata")
     with h5py.File(f"{linarg_dir}/genotype_matrices/{partition_number}_{region}.h5", "w") as f:
-        f.create_dataset('shape', data=genotypes.shape, compression='gzip', shuffle=True)
-        f.create_dataset('indptr', data=genotypes.indptr, compression='gzip', shuffle=True)
-        f.create_dataset('indices', data=genotypes.indices, compression='gzip', shuffle=True)
-        f.create_dataset('data', data=genotypes.data, compression='gzip', shuffle=True)
-        f.create_dataset('flip', data=flip, compression='gzip', shuffle=True)    
+        f.create_dataset("shape", data=genotypes.shape, compression="gzip", shuffle=True)
+        f.create_dataset("indptr", data=genotypes.indptr, compression="gzip", shuffle=True)
+        f.create_dataset("indices", data=genotypes.indices, compression="gzip", shuffle=True)
+        f.create_dataset("data", data=genotypes.data, compression="gzip", shuffle=True)
+        f.create_dataset("flip", data=flip, compression="gzip", shuffle=True)
         if sex_path is not None:
-            f.create_dataset('sex', data=sex, compression='gzip', shuffle=True)    
+            f.create_dataset("sex", data=sex, compression="gzip", shuffle=True)
     v_info.write_csv(f"{linarg_dir}/variant_metadata/{partition_number}_{region}.txt", separator=" ")
 
 
@@ -73,48 +85,60 @@ def run_forward_backward(linarg_dir, load_dir, partition_identifier):
     """
     os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
     os.makedirs(f"{linarg_dir}/forward_backward_graphs/", exist_ok=True)
-    
+
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_identifier}_forward_backward.log")
     logger.info("Loading genotype matrix")
     t1 = time.time()
-    with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.h5", 'r') as f:
-        genotypes = sp.csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=f['shape'][:])    
+    with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.h5", "r") as f:
+        genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
     t2 = time.time()
     logger.info(f"Genotype matrix loaded in {np.round(t2 - t1, 3)} seconds")
     logger.info("Running forward and backward brick graph algorithms")
     t3 = time.time()
-    sample_indices = BrickGraph.forward_backward(genotypes, add_samples=True, save_to_disk=True, out=f"{linarg_dir}/forward_backward_graphs/{partition_identifier}")
+    sample_indices = BrickGraph.forward_backward(
+        genotypes,
+        add_samples=True,
+        save_to_disk=True,
+        out=f"{linarg_dir}/forward_backward_graphs/{partition_identifier}",
+    )
     np.savetxt(f"{linarg_dir}/forward_backward_graphs/{partition_identifier}_sample_indices.txt", sample_indices)
     t4 = time.time()
     logger.info(f"Forward and backward brick graph algorithms completed in {np.round(t4 - t3, 3)} seconds")
-    
+
 
 def reduction_union_recom(linarg_dir, load_dir, partition_identifier):
     """
-    Compute the transitive reduction of the union of the forward and backward graphs and find recombinations to obtain the brick graph.
+    Compute the transitive reduction of the union of the forward and backward graphs
+    and find recombinations to obtain the brick graph.
     """
     os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
     os.makedirs(f"{linarg_dir}/brick_graph_partitions/", exist_ok=True)
-    
+
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_identifier}_reduction_union_recom.log")
-    
+
     logger.info("Loading genotypes, forward and backward graphs, and sample indices")
     t1 = time.time()
-    with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.h5", 'r') as f:
-        genotypes = sp.csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=f['shape'][:]) 
+    with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.h5", "r") as f:
+        genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
     n, m = genotypes.shape
-    forward_graph = read_graph_from_disk(f"{load_dir}{linarg_dir}/forward_backward_graphs/{partition_identifier}_forward_graph.h5")
-    backward_graph = read_graph_from_disk(f"{load_dir}{linarg_dir}/forward_backward_graphs/{partition_identifier}_backward_graph.h5")
-    sample_indices = np.loadtxt(f"{load_dir}{linarg_dir}/forward_backward_graphs/{partition_identifier}_sample_indices.txt")
+    forward_graph = read_graph_from_disk(
+        f"{load_dir}{linarg_dir}/forward_backward_graphs/{partition_identifier}_forward_graph.h5"
+    )
+    backward_graph = read_graph_from_disk(
+        f"{load_dir}{linarg_dir}/forward_backward_graphs/{partition_identifier}_backward_graph.h5"
+    )
+    sample_indices = np.loadtxt(
+        f"{load_dir}{linarg_dir}/forward_backward_graphs/{partition_identifier}_sample_indices.txt"
+    )
     t2 = time.time()
     logger.info(f"Loaded in {np.round(t2 - t1, 3)} seconds")
-    
+
     logger.info("Combining nodes and computing reduction union")
     t3 = time.time()
     brick_graph, variant_indices = BrickGraph.combine_graphs(forward_graph, backward_graph, m)
     t4 = time.time()
     logger.info(f"Combined nodes and computed reduction union in {np.round(t4 - t3, 3)} seconds")
-    
+
     logger.info("Finding recombinations")
     t5 = time.time()
     recom = Recombination.from_graph(brick_graph)
@@ -122,21 +146,21 @@ def reduction_union_recom(linarg_dir, load_dir, partition_identifier):
     t6 = time.time()
     logger.info(f"Found recombinations in {np.round(t6 - t5, 3)} seconds")
     adj_mat = recom.to_csc()
-    
+
     logger.info("Saving brick graph")
     with h5py.File(f"{linarg_dir}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
-        f.attrs['n'] = adj_mat.shape[0]
-        f.create_dataset('indptr', data=adj_mat.indptr, compression='gzip', shuffle=True)
-        f.create_dataset('indices', data=adj_mat.indices, compression='gzip', shuffle=True)
-        f.create_dataset('data', data=adj_mat.data, compression='gzip', shuffle=True)
-        f.create_dataset('variant_indices', data=np.array(variant_indices), compression='gzip', shuffle=True)
-        f.create_dataset('sample_indices', data=np.array(sample_indices), compression='gzip', shuffle=True)
+        f.attrs["n"] = adj_mat.shape[0]
+        f.create_dataset("indptr", data=adj_mat.indptr, compression="gzip", shuffle=True)
+        f.create_dataset("indices", data=adj_mat.indices, compression="gzip", shuffle=True)
+        f.create_dataset("data", data=adj_mat.data, compression="gzip", shuffle=True)
+        f.create_dataset("variant_indices", data=np.array(variant_indices), compression="gzip", shuffle=True)
+        f.create_dataset("sample_indices", data=np.array(sample_indices), compression="gzip", shuffle=True)
 
     af = np.diff(genotypes.indptr) / n
     geno_nnz = np.sum(n * np.minimum(af, 1 - af))
     nnz_ratio = geno_nnz / adj_mat.nnz
     logger.info(f"Stats - n: {n}, m: {m}, geno_nnz: {geno_nnz}, brickgraph_nnz: {adj_mat.nnz}, nnz_ratio: {nnz_ratio}")
-        
+
 
 def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
     """
@@ -144,12 +168,12 @@ def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
     """
     os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
     os.makedirs(f"{linarg_dir}/brick_graph_partitions/", exist_ok=True)
-    
+
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_identifier}_infer_brick_graph.log")
     logger.info("Loading genotype matrix")
     t1 = time.time()
-    with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.h5", 'r') as f:
-        genotypes = sp.csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=f['shape'][:])   
+    with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.h5", "r") as f:
+        genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
     n, m = genotypes.shape
     t2 = time.time()
     logger.info(f"Genotype matrix loaded in {np.round(t2 - t1, 3)} seconds")
@@ -163,15 +187,15 @@ def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
     t4 = time.time()
     logger.info(f"Recombinations found in {np.round(t4 - t3, 3)} seconds")
     adj_mat = recom.to_csc()
-    
+
     logger.info("Saving brick graph")
     with h5py.File(f"{linarg_dir}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
-        f.attrs['n'] = adj_mat.shape[0]
-        f.create_dataset('indptr', data=adj_mat.indptr, compression='gzip', shuffle=True)
-        f.create_dataset('indices', data=adj_mat.indices, compression='gzip', shuffle=True)
-        f.create_dataset('data', data=adj_mat.data, compression='gzip', shuffle=True)
-        f.create_dataset('variant_indices', data=np.array(variant_indices), compression='gzip', shuffle=True)
-        f.create_dataset('sample_indices', data=np.array(sample_indices), compression='gzip', shuffle=True)
+        f.attrs["n"] = adj_mat.shape[0]
+        f.create_dataset("indptr", data=adj_mat.indptr, compression="gzip", shuffle=True)
+        f.create_dataset("indices", data=adj_mat.indices, compression="gzip", shuffle=True)
+        f.create_dataset("data", data=adj_mat.data, compression="gzip", shuffle=True)
+        f.create_dataset("variant_indices", data=np.array(variant_indices), compression="gzip", shuffle=True)
+        f.create_dataset("sample_indices", data=np.array(sample_indices), compression="gzip", shuffle=True)
 
     af = np.diff(genotypes.indptr) / n
     geno_nnz = np.sum(n * np.minimum(af, 1 - af))
@@ -183,9 +207,9 @@ def merge(linarg_dir, load_dir):
     """
     Merged partitioned brick graphs, find recombinations, and linearize.
     """
-    
+
     os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
-    
+
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/merge.log")
     logger.info("Merging brick graphs")
     t1 = time.time()
@@ -194,9 +218,9 @@ def merge(linarg_dir, load_dir):
     )
     t2 = time.time()
     logger.info(f"Brick graphs merged in {np.round(t2 - t1, 3)} seconds")
-    
+
     logger.info("Finding recombinations")
-    t3 = time.time()    
+    t3 = time.time()
     merged_graph_recom = Recombination.from_graph(merged_graph)
     merged_graph_recom.find_recombinations()
     t4 = time.time()
@@ -219,15 +243,17 @@ def merge(linarg_dir, load_dir):
     flip = []
     sex = None
     for file in files:
-        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{file[:-3]}h5", 'r') as f:
-            flip_partition = list(f['flip'][:])
-            if 'sex' in f and sex is not None:
-                sex = f['sex'][:]
-        flip += flip_partition    
+        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{file[:-3]}h5", "r") as f:
+            flip_partition = list(f["flip"][:])
+            if "sex" in f and sex is not None:
+                sex = f["sex"][:]
+        flip += flip_partition
     flip = np.array(flip)
-    
+
     logger.info("Triangularizing and computing nonunique indices")
-    A_filt, variant_indices_reindexed, sample_indices_reindexed  = remove_degree_zero_nodes(A, variant_indices, sample_indices)
+    A_filt, variant_indices_reindexed, sample_indices_reindexed = remove_degree_zero_nodes(
+        A, variant_indices, sample_indices
+    )
     A_tri, variant_indices_tri = make_triangular(A_filt, variant_indices_reindexed, sample_indices_reindexed)
     linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), variants=var_info, sex=sex)
     linarg.calculate_nonunique_indices()
@@ -242,7 +268,7 @@ def get_linarg_stats(linarg_dir, load_dir):
     Get stats from linear ARG.
     """
     linarg = LinearARG.read(f"{linarg_dir}/linear_arg.h5")
-    
+
     linarg.flip = np.zeros(linarg.shape[1], dtype=bool)
 
     v = np.ones(linarg.shape[0])
@@ -255,10 +281,9 @@ def get_linarg_stats(linarg_dir, load_dir):
     genotypes_nnz = 0
     allele_counts = []
     for f in files:
-        
-        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{f}", 'r') as f:
-            genotypes = sp.csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=f['shape'][:]) 
-        
+        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{f}", "r") as f:
+            genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
+
         genotypes_nnz += np.sum(
             [
                 np.minimum(genotypes[:, i].nnz, genotypes.shape[0] - genotypes[:, i].nnz)
@@ -294,38 +319,36 @@ def get_linarg_stats(linarg_dir, load_dir):
             + "\n"
         )
         file.write(" ".join(stats) + "\n")
-        
+
 
 def add_individuals_to_linarg(linarg_dir, load_dir):
-    
     os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/add_individual_nodes.log")
-    
+
     logger.info("Loading linear ARG")
     t1 = time.time()
     temp = LinearARG.read(f"{load_dir}{linarg_dir}/linear_arg.h5", load_metadata=True)
     t2 = time.time()
     logger.info(f"Linear ARG loaded in {np.round(t2 - t1, 3)} seconds")
-    
+
     logger.info("Adding individual nodes to the linear ARG")
     t3 = time.time()
-    linarg = temp.add_individual_nodes()   
-    t4 = time.time() 
+    linarg = temp.add_individual_nodes()
+    t4 = time.time()
     logger.info(f"Individual nodes added in {np.round(t4 - t3, 3)} seconds")
-        
+
     logger.info("Saving linear ARG")
     linarg.write(f"{linarg_dir}/linear_arg_individual")
-    
+
     # logger.info("Computing linear ARG stats")
     # get_linarg_individual_stats(linarg_dir, load_dir)
-    
+
 
 def get_linarg_individual_stats(linarg_dir, load_dir):
-    
     linarg = LinearARG.read(f"{linarg_dir}/linear_arg_individual.h5", load_metadata=True)
-    
+
     linarg.flip = np.zeros(linarg.shape[1], dtype=bool)
-    
+
     v = np.ones(linarg.shape[0])
     allele_count_from_linarg = v @ linarg
 
@@ -337,21 +360,20 @@ def get_linarg_individual_stats(linarg_dir, load_dir):
     allele_counts = []
     carrier_counts = []
     for f in files:
-        
-        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{f}", 'r') as f:
-            genotypes = sp.csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=f['shape'][:]) 
-        
+        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{f}", "r") as f:
+            genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
+
         genotypes_nnz += np.sum(
             [
                 np.minimum(genotypes[:, i].nnz, genotypes.shape[0] - genotypes[:, i].nnz)
                 for i in range(genotypes.shape[1])
             ]
         )
-        
+
         v_0 = np.ones(genotypes.shape[0])
         allele_counts.append(v_0 @ genotypes)
         carrier_counts.append(get_carrier_counts(genotypes, sex=linarg.sex))
-        
+
     allele_counts_from_genotype = np.concatenate(allele_counts)
     carrier_counts_from_genotype = np.concatenate(carrier_counts)
 
@@ -381,16 +403,15 @@ def get_linarg_individual_stats(linarg_dir, load_dir):
             + "\n"
         )
         file.write(" ".join(stats) + "\n")
-        
-        
-        
-def get_carrier_counts(genotypes, sex = None):
+
+
+def get_carrier_counts(genotypes, sex=None):
     n_haplotypes, n_variants = genotypes.shape
 
     if sex is None:
         assert n_haplotypes % 2 == 0, "Expected even number of haplotypes for diploid individuals"
         sex = np.zeros(n_haplotypes // 2, dtype=np.uint8)  # Treat all as female (diploid)
-    
+
     n_individuals = sex.shape[0]
     row_indices = []
     col_indices = []
@@ -411,10 +432,6 @@ def get_carrier_counts(genotypes, sex = None):
 
     P = sp.csc_matrix((data, (row_indices, col_indices)), shape=(n_individuals, n_haplotypes))
     individual_genotypes = P @ genotypes
-    carriers = (individual_genotypes > 0).sum(axis=0).A1 
+    carriers = (individual_genotypes > 0).sum(axis=0).A1
 
     return carriers
-
-    
-    
-    
