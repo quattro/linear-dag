@@ -3,7 +3,11 @@
 from dataclasses import dataclass
 from functools import cached_property
 from os import PathLike
+<<<<<<< HEAD
 from typing import Optional, Union
+=======
+from typing import ClassVar, Optional, Union
+>>>>>>> origin/rhe
 
 import h5py
 
@@ -29,7 +33,6 @@ from .solve import (
     spsolve_forward_triangular_matmat,
     topological_sort,
 )
-
 
 @dataclass
 class LinearARG(LinearOperator):
@@ -291,7 +294,10 @@ class LinearARG(LinearOperator):
     def _matvec(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
         if other.shape != (self.shape[1],) and other.shape != (self.shape[1], 1):
             raise ValueError(
-                f"Incorrect dimensions for matrix-vector multiplication. Inputs had size {self.shape} & {other.shape}."
+                (
+                    "Incorrect dimensions for matrix-vector multiplication.",
+                    f" Inputs had size {self.shape} and {other.shape}.",
+                )
             )
 
         v = np.zeros(self.A.shape[0], dtype=np.float64)
@@ -304,7 +310,10 @@ class LinearARG(LinearOperator):
     def _rmatvec(self, other: npt.ArrayLike, individual=False) -> npt.NDArray[np.number]:
         if other.shape != (self.shape[0],) and other.shape != (self.shape[0], 1):
             raise ValueError(
-                f"Incorrect dimensions for vector-matrix multiplication. Inputs had size {other.shape} & {self.shape}."
+                (
+                    "Incorrect dimensions for vector-matrix multiplication.",
+                    f" Inputs had size {other.shape} and {self.shape}.",
+                )
             )
         v = np.zeros(self.A.shape[0], dtype=np.float64)
         v[self.sample_indices] = other.ravel().astype(np.float64)
@@ -387,14 +396,13 @@ class LinearARG(LinearOperator):
     def read(
         h5_fname: Union[str, PathLike],
         block: Optional[str] = None,
-        load_metadata=False,
+        load_metadata:bool = False,
     ) -> "LinearARG":
         """Reads LinearARG data from provided PLINK2 formatted files.
 
         :param h5_fname: The base path and prefix of the PLINK files.
         :return: A LinearARG object.
         """
-
         with h5py.File(h5_fname, "r") as file:
             f = file[block] if block else file
             A = csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=(f.attrs["n"], f.attrs["n"]))
@@ -404,20 +412,12 @@ class LinearARG(LinearOperator):
             n_individuals = f.attrs.get("n_individuals", None)
             nonunique_indices = f["nonunique_indices"][:] if "nonunique_indices" in f else None
             iids = f.get("iids")
-            # iids_bytes = f.get('iids')
-            # iids = [s.decode('utf-8') for s in iids_bytes[:]] if iids_bytes is not None else None
 
             if load_metadata:
                 v_dict = {field: f[field][:].astype(str) for field in ["CHROM", "POS", "ID", "REF", "ALT"]}
-                v_info = (
-                    pl.DataFrame(v_dict)
-                    .with_columns(
-                        [
+                v_info = pl.DataFrame(v_dict).with_columns([
                             pl.col("POS").cast(pl.Int32),
-                        ]
-                    )
-                    .lazy()
-                )
+                ]).lazy()
             else:
                 v_info = None
 
@@ -535,12 +535,14 @@ def load_block_metadata(h5_fname, block_metadata):
 
 
 def add_individuals_to_graph(
-    A: csc_matrix, samples_idx: npt.NDArray[np.uint], sex: npt.NDArray[np.uint] = None
+    A: csc_matrix,
+    samples_idx: npt.NDArray[np.uint],
+    sex: npt.NDArray[np.uint] = None,
 ) -> tuple:
     """
-    Add individuals to the graph. Assumes that individuals are comprised of adjacent
-    haplotypes in samples_idx. If sex is None, assumes that all individuals are diploid.
-    Otherwise will only assign males a single haplotype.
+    Add individuals to the graph. Assumes that individuals are comprised of adjacent haplotypes in samples_idx.
+    If sex is None, assumes that
+    all individuals are diploid. Otherwise will only assign males a single haplotype.
     """
     A_csr = csr_matrix(A)
     indices_list = []
@@ -567,6 +569,7 @@ def add_individuals_to_graph(
     n_nodes = len(indptr) - 1
     A_updated = csc_matrix(csr_matrix((data, indices, indptr), shape=(n_nodes, n_nodes)))
     individual_indices = np.arange(A.shape[0], A_updated.shape[0], dtype=np.int32)
+
     return A_updated, individual_indices
 
 
@@ -597,10 +600,9 @@ def make_triangular(
     A: csc_matrix, variant_indices: npt.NDArray[np.uint], sample_indices: npt.NDArray[np.uint]
 ) -> tuple:
     """
-    Triangularizes A by putting nodes in topological order (parents before children)
-    such that sample/leaf nodes are in reverse order starting from the final row/column
-    of the returned csc_matrix. Additionally, variant_indices are reindexed with respect to this
-    new node ordering.
+    Triangularizes A by putting nodes in topological order (parents before children) such that
+    sample/leaf nodes are in reverse order starting from the final row/column of the returned csc_matrix.
+    Additionally, variant_indices are reindexed with respect to this new node ordering.
     """
     A_csr = csr_matrix(A)
     order = np.asarray(topological_sort(A_csr, nodes_to_ignore=set(sample_indices)))[: -len(sample_indices)]

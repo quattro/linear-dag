@@ -78,7 +78,7 @@ cdef class BrickGraph:
             del forward_graph # calls __dealloc__ to save to disk
             del backward_graph
             return sample_indices
-    
+
 
     @staticmethod
     def combine_graphs(forward_graph: DiGraph, backward_graph: DiGraph, num_variants: int):
@@ -106,13 +106,13 @@ cdef class BrickGraph:
 
 
     def __cinit__(self, int num_samples, int num_variants, bint save_to_disk=False, str out=None):
-        
+
         if save_to_disk:
             assert out is not None
             # Initialize HDF5 file and get helper functions
             self._add_edge_to_file, self._save_batch, self._cleanup, self._hdf5_file = build_sparse_matrix_with_hdf5(
-                out, 
-                num_variants + num_samples, 
+                out,
+                num_variants + num_samples,
                 batch_size=100000
             )
         else:
@@ -120,7 +120,7 @@ cdef class BrickGraph:
             self._save_batch = None
             self._cleanup = None
             self._hdf5_file = None
-        
+
         cnp.import_array()
         self.num_samples = num_samples
         self.num_variants = num_variants
@@ -134,11 +134,11 @@ cdef class BrickGraph:
         self.save_to_disk = save_to_disk
         self.out = out
 
-    
+
     def __dealloc__(self):
         if self.save_to_disk:
             self._cleanup()
-    
+
     cpdef void add_edge(self, variant_idx, node_idx):
 
         if self.save_to_disk:
@@ -587,9 +587,9 @@ cpdef tuple read_brick_graph_h5(filename):
     :return: graph (DiGraph), sample_indices, variant_indices
     """
     with h5py.File(filename, 'r') as f:
-        A = csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=(f.attrs['n'], f.attrs['n'])) 
-        variant_indices = f['variant_indices'][:]   
-        sample_indices = f['sample_indices'][:]   
+        A = csc_matrix((f['data'][:], f['indices'][:], f['indptr'][:]), shape=(f.attrs['n'], f.attrs['n']))
+        variant_indices = f['variant_indices'][:]
+        sample_indices = f['sample_indices'][:]
     graph = DiGraph.from_csc(A)
     return graph, sample_indices, variant_indices
 
@@ -603,10 +603,10 @@ cpdef tuple get_graph_statistics(str brick_graph_dir):
     cdef long number_of_edges = 0
     cdef list files = os.listdir(brick_graph_dir)
     for f in files:
-        graph, sample_indices, variant_indices = read_brick_graph_h5(f'{brick_graph_dir}/{f}')
-        number_of_nodes += graph.number_of_nodes
-        number_of_edges += graph.number_of_edges
-    num_samples = len(sample_indices)
+        with h5py.File(f, 'r') as f:
+            num_samples = f['sample_indices'].shape[0]
+            number_of_nodes += f.attrs['n']
+            number_of_edges += f['data'].shape[0]
     number_of_nodes -= num_samples * (len(files)-1)
     return num_samples, number_of_nodes, number_of_edges
 
@@ -654,22 +654,25 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
     for f in files:
 
         graph, samples, variants = read_brick_graph_h5(f'{brick_graph_dir}/{f}')
+        #number_of_nodes = adj_mat.shape[0]
+        number_of_nodes = graph.number_of_nodes
 
         # Get new node ids corresponding to the merged graph
         sample_counter = 0
-        new_node_ids = np.zeros(graph.number_of_nodes, dtype=np.int64)
-        for i in range(graph.number_of_nodes):
+        new_node_ids = np.zeros(number_of_nodes, dtype=np.int64)
+        for i in range(number_of_nodes):
             if i in samples:
                 new_node_ids[i] = sample_counter
                 sample_counter += 1
             else:
                 new_node_ids[i] = non_sample_counter
                 non_sample_counter += 1
-        variant_indices += [new_node_ids[var] for var in variants]
+        for var in variants:
+            variant_indices.append(new_node_ids[var])
         index_mapping.append(new_node_ids)
 
         # Add edges from graph to result while preserving the order of the parent nodes for each child node
-        for node_idx in range(graph.number_of_nodes):
+        for node_idx in range(number_of_nodes):
             if not graph.is_node[node_idx]:
                 continue
             add_neighbors(result, graph.nodes[node_idx], new_node_ids)
@@ -678,12 +681,12 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
 
 
 def build_sparse_matrix_with_hdf5(filename, n, batch_size=100000):
-    
+
     f = h5py.File(filename, 'w')
     f.attrs['n'] = n
     f.create_dataset('rows', (0,), maxshape=(None,), dtype=np.int32)
     f.create_dataset('cols', (0,), maxshape=(None,), dtype=np.int32)
-    
+
     rows, cols = [], []
 
     def add_edge_to_file(i, j):
@@ -694,23 +697,23 @@ def build_sparse_matrix_with_hdf5(filename, n, batch_size=100000):
             save_batch()
             rows.clear()
             cols.clear()
-    
+
     def save_batch():
         if not rows:
             return
-        
+
         current_size = f['rows'].shape[0]
         new_size = current_size + len(rows)
-        
+
         f['rows'].resize((new_size,))
         f['rows'][current_size:new_size] = rows
-        
+
         f['cols'].resize((new_size,))
         f['cols'][current_size:new_size] = cols
-    
+
     def cleanup():
-        save_batch() 
-        f.close()    
+        save_batch()
+        f.close()
 
     return add_edge_to_file, save_batch, cleanup, f
 
@@ -727,10 +730,9 @@ def read_graph_from_disk(file_path):
 
     digraph = DiGraph(n, len(rows))
     digraph.initialize_all_nodes()
-    
+
     # add edges in order they were stored
     for i in range(len(rows)):
         digraph.add_edge(rows[i], cols[i])
-        
-    return digraph
 
+    return digraph
