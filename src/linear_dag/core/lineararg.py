@@ -3,11 +3,7 @@
 from dataclasses import dataclass
 from functools import cached_property
 from os import PathLike
-<<<<<<< HEAD
 from typing import Optional, Union
-=======
-from typing import ClassVar, Optional, Union
->>>>>>> origin/rhe
 
 import h5py
 
