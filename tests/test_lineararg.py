@@ -49,7 +49,7 @@ def test_from_vcf():
     assert linarg.shape[0] == len(linarg.iids)
     assert linarg.shape[1] > 0
     assert linarg.variants is not None
-    assert not linarg.variants.table.is_empty()
+    assert linarg.variants.collect().height > 0
 
 
 def test_read_write_matmul(tmp_path):

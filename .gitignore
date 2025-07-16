@@ -2,7 +2,8 @@
 src/linear_dag/_version.py
 
 # just a symlink to treeseq data
-data
+data/
+old/
 clean
 
 *.cache
@@ -13,6 +14,7 @@ src/linear_dag/core/*.c
 src/linear_dag/core/*.o
 src/linear_dag/build/*.c
 src/linear_dag/build/*/*.o
+*.o
 
 
 # Temporary and binary files
@@ -87,3 +89,4 @@ MANIFEST
 luke/*
 MATLAB/luke/*
 MATLAB/old/*
+.windsurfrules

@@ -87,7 +87,7 @@ class LinearARG(LinearOperator):
         A_filt, variants_idx_reindexed, samples_idx_reindexed = remove_degree_zero_nodes(A, variants_idx, samples_idx)
         A_tri, variants_idx_tri = make_triangular(A_filt, variants_idx_reindexed, samples_idx_reindexed)
         linarg = LinearARG(
-            A_tri, variants_idx_tri, flip, len(samples_idx), None, variant_info.lazy(), iids=pl.Series(iids.astype(str))
+            A_tri, variants_idx_tri, flip, len(samples_idx), None, variant_info.lazy(), iids=pl.Series(iids).cast(pl.String)
         )
         linarg.calculate_nonunique_indices()
         return linarg
@@ -324,9 +324,9 @@ class LinearARG(LinearOperator):
         # return LinearARG(self.A.copy(), self.sample_indices.copy(), self.variants.copy())
         pass
 
-    def write(self, prefix: Union[str, PathLike], block_info: Optional[dict] = None, compression_option: str = "gzip"):
+    def write(self, h5_fname: Union[str, PathLike], block_info: Optional[dict] = None, compression_option: str = "gzip"):
         """Writes LinearARG to disk.
-        :param prefix: The base path and prefix used for output files.
+        :param h5_fname: The base path and prefix used for output files.
         :param block_info: Optional dictionary containing:
             - 'chrom': Chromosome number
             - 'start': Start position
@@ -335,10 +335,8 @@ class LinearARG(LinearOperator):
         :return: None
         """
 
-        # write out DAG info
-        if not str(prefix).endswith(".h5"):
-            prefix = str(prefix) + ".h5"
-        with h5py.File(prefix, "a") as f:
+        fname = h5_fname if str(h5_fname).endswith(".h5") else str(h5_fname) + ".h5"
+        with h5py.File(fname, "a") as f:
             if block_info:
                 block_name = f"{block_info['chrom']}_{block_info['start']}_{block_info['end']}"
                 destination = f.create_group(block_name)
@@ -366,7 +364,7 @@ class LinearARG(LinearOperator):
                     "nonunique_indices", data=self.nonunique_indices, compression=compression_option, shuffle=True
                 )
             if self.iids is not None and "iids" not in f.keys():
-                str_iids = np.array(self.iids, dtype=str)
+                str_iids = np.array(self.iids, dtype="S")
                 f.create_dataset("iids", data=str_iids, compression=compression_option, shuffle=True)
             if self.n_individuals is not None:
                 destination.attrs["n_individuals"] = self.n_individuals
@@ -400,7 +398,8 @@ class LinearARG(LinearOperator):
         :param h5_fname: The base path and prefix of the PLINK files.
         :return: A LinearARG object.
         """
-        with h5py.File(h5_fname, "r") as file:
+        fname = h5_fname if str(h5_fname).endswith(".h5") else str(h5_fname) + ".h5"
+        with h5py.File(fname, "r") as file:
             iids = pl.Series(file["iids"][:].astype(str))
             f = file[block] if block else file
             A = csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=(f.attrs["n"], f.attrs["n"]))
@@ -490,7 +489,7 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
 
     def parse_block_name(block_name):
         chrom, start, _ = block_name.split("_")
-        return (int(chrom), int(start))
+        return (int(chrom), int(float(start)))
 
     with h5py.File(h5_fname, "r") as f:
         block_names = [b for b in list(f.keys()) if isinstance(f[b], h5py.Group) and b != "iids"]

@@ -83,8 +83,8 @@ def read_vcf(
     var_table = defaultdict(list)
     if region:
         tmp = region.split(":")[1]
-        start = int(tmp.split("-")[0])
-        end = int(tmp.split("-")[1])
+        start = int(float(tmp.split("-")[0]))
+        end = int(float(tmp.split("-")[1]))
     else:
         tmp = None
         start = 0

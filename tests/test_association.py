@@ -33,7 +33,7 @@ def test_simulation_and_gwas():
 
         # Create phenotype DataFrame with covariates
         pheno_df = pl.DataFrame({
-            'iid': genotypes.iids.unique().to_list(),
+            'IID': genotypes.iids.unique().to_list(),
             'phenotype': y.flatten()
         }).with_columns(
             intercept=pl.lit(1),
@@ -48,10 +48,9 @@ def test_simulation_and_gwas():
             pheno_df.lazy(),
             pheno_cols=[pheno_col],
             covar_cols=covar_cols,
-        ).collect()
+        )[0]
 
         # 4. Assertions
         assert isinstance(gwas_results, pl.DataFrame)
         assert gwas_results.shape[0] == m
-        assert 'pval' in gwas_results.columns
-
+        assert 'LOG10P' in gwas_results.columns
