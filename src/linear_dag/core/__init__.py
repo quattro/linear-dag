@@ -4,7 +4,6 @@ from .lineararg import LinearARG as LinearARG, list_blocks as list_blocks
 from .online import reindex as reindex
 from .parallel_processing import ParallelOperator as ParallelOperator
 from .recombination import Recombination as Recombination
-from .sample_info import SampleInfo as SampleInfo
 from .solve import (
     spinv_triangular as spinv_triangular,
     spsolve_backward_triangular as spsolve_backward_triangular,

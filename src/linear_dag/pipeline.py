@@ -1,29 +1,33 @@
+import gzip
 import os
 import time
+
+from os import PathLike
+from typing import Optional, Union
 
 import h5py
 import numpy as np
 import polars as pl
 import scipy.sparse as sp
 
-from ..genotype import read_vcf
-from ..memory_logger import MemoryLogger
-from .brick_graph import BrickGraph, merge_brick_graphs, read_graph_from_disk
-from .lineararg import LinearARG, make_triangular, remove_degree_zero_nodes
-from .one_summed_cy import linearize_brick_graph
-from .recombination import Recombination
+from .genotype import read_vcf
+from .memory_logger import MemoryLogger
+from .core.brick_graph import BrickGraph, merge_brick_graphs, read_graph_from_disk
+from .core.lineararg import LinearARG, make_triangular, remove_degree_zero_nodes
+from .core.one_summed_cy import linearize_brick_graph
+from .core.recombination import Recombination
 
 
 def make_genotype_matrix(
-    vcf_path,
-    linarg_dir,
-    region,
-    partition_number,
-    phased=True,
-    flip_minor_alleles=False,
-    whitelist_path=None,
-    maf_filter=None,
-    remove_indels=False,
+    vcf_path: Union[str, PathLike],
+    linarg_dir: Union[str, PathLike],
+    region: str,
+    partition_number: int,
+    phased: bool = True,
+    flip_minor_alleles: bool = False,
+    samples_path: Optional[Union[str, PathLike]] = None,
+    maf_filter: Optional[float] = None,
+    remove_indels: bool = False,
     sex_path=None,
 ):
     """
@@ -35,13 +39,11 @@ def make_genotype_matrix(
 
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_number}_{region}_make_genotype_matrix.log")
 
-    region_formatted = f"{region.split('-')[0]}:{region.split('-')[1]}-{region.split('-')[2]}"
 
-    if whitelist_path is None:
-        whitelist = None
+    if samples_path is not None:
+        samples = load_sample_ids(samples_path)
     else:
-        with open(whitelist_path, "r") as f:
-            whitelist = [line.strip() for line in f]
+        samples = None
 
     if sex_path is None:
         sex = None
@@ -54,9 +56,9 @@ def make_genotype_matrix(
     genotypes, flip, v_info, iids = read_vcf(
         vcf_path,
         phased=phased,
-        region=region_formatted,
+        region=region,
         flip_minor_alleles=flip_minor_alleles,
-        whitelist=whitelist,
+        whitelist=samples,
         maf_filter=maf_filter,
         remove_indels=remove_indels,
         sex=sex,
@@ -435,3 +437,46 @@ def get_carrier_counts(genotypes, sex=None):
     carriers = (individual_genotypes > 0).sum(axis=0).A1
 
     return carriers
+
+def load_sample_ids(sample_path: Union[str, PathLike]) -> list[str]:
+    """
+    Helper function to load sample IDs from a path-like object. The file should be
+    whitespace delimited and either contain a column with a `IID` header, or no header.
+    If the file contains multiple columns `IID` header is required.
+    """
+    opener = gzip.open if str(sample_path).endswith(".gz") else open
+
+    sample_ids = []
+    with opener(sample_path, "rt") as f:
+        first_line = f.readline().rstrip("\n")
+        cols = first_line.split()
+        # check if "IID" is in the first row
+        if "IID" not in cols and "#IID" not in cols:
+            if len(cols) == 1:
+                # there is exactly 1 column, no header, first_line contains the first sample id
+                iid_idx = 0
+                sample_ids.append(first_line)
+            elif len(cols) > 1:
+                # we have multiple columns and none of them are denoted with `IID`
+                raise ValueError("Multi-column sample ID file does not contain `IID` column")
+            else:
+                # we have no columns
+                raise ValueError("Empty line in sample ID file")
+        else:
+            # Header mode: find the IID column index
+            if "IID" in cols:
+                iid_idx = cols.index("IID")
+            elif "#IID" in cols:
+                iid_idx = cols.index("#IID")
+
+        # read each line and extract the IID column
+        # iid_idx should be defined by here
+        for line in f:
+            parts = line.rstrip("\n").split()
+            if len(parts) > iid_idx:
+                sample_ids.append(parts[iid_idx])
+            else:
+                # malformed line
+                raise ValueError(f"Sample ID file contains misshaped row: {line}")
+
+    return sample_ids

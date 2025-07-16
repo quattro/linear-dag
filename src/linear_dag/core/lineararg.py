@@ -87,7 +87,7 @@ class LinearARG(LinearOperator):
         A_filt, variants_idx_reindexed, samples_idx_reindexed = remove_degree_zero_nodes(A, variants_idx, samples_idx)
         A_tri, variants_idx_tri = make_triangular(A_filt, variants_idx_reindexed, samples_idx_reindexed)
         linarg = LinearARG(
-            A_tri, variants_idx_tri, flip, len(samples_idx), None, variant_info.lazy(), iids=pl.Series(iids)
+            A_tri, variants_idx_tri, flip, len(samples_idx), None, variant_info.lazy(), iids=pl.Series(iids.astype(str))
         )
         linarg.calculate_nonunique_indices()
         return linarg
@@ -366,7 +366,7 @@ class LinearARG(LinearOperator):
                     "nonunique_indices", data=self.nonunique_indices, compression=compression_option, shuffle=True
                 )
             if self.iids is not None and "iids" not in f.keys():
-                str_iids = np.array(self.iids, dtype=h5py.string_dtype(encoding="utf-8"))
+                str_iids = np.array(self.iids, dtype=str)
                 f.create_dataset("iids", data=str_iids, compression=compression_option, shuffle=True)
             if self.n_individuals is not None:
                 destination.attrs["n_individuals"] = self.n_individuals
@@ -401,6 +401,7 @@ class LinearARG(LinearOperator):
         :return: A LinearARG object.
         """
         with h5py.File(h5_fname, "r") as file:
+            iids = pl.Series(file["iids"][:].astype(str))
             f = file[block] if block else file
             A = csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=(f.attrs["n"], f.attrs["n"]))
             variant_indices = f["variant_indices"][:]
@@ -408,7 +409,6 @@ class LinearARG(LinearOperator):
             n_samples = f.attrs["n_samples"]
             n_individuals = f.attrs.get("n_individuals", None)
             nonunique_indices = f["nonunique_indices"][:] if "nonunique_indices" in f else None
-            iids = f.get("iids")
 
             if load_metadata:
                 v_dict = {field: f[field][:].astype(str) for field in ["CHROM", "POS", "ID", "REF", "ALT"]}

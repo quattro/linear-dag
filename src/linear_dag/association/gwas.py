@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import polars as pl
@@ -6,102 +6,13 @@ import polars as pl
 from scipy.sparse.linalg import LinearOperator
 from scipy.stats import chi2
 
-from linear_dag.core.operators import get_inner_merge_operators
-
-
-def _backslash(A: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """MATLAB-style backslash"""
-    return np.linalg.solve(A.T @ A, A.T @ b)
-
-
-def _residualize_phenotypes_mar(
-    phenotypes: np.ndarray, covariates: np.ndarray, phenotypes_missing: np.ndarray
-) -> np.ndarray:
-    """Residualize phenotypes on covariates assuming missing at random (MAR),
-    i.e., covariance matrix of the covariates is the same for individuals with and without missing data.
-    Input phenotypes should be zero for missing values."""
-    beta = _backslash(covariates, phenotypes)
-    residuals = phenotypes - (covariates @ beta) / (1 - np.mean(phenotypes_missing, axis=0))
-    residuals.ravel()[phenotypes_missing.ravel()] = 0
-    return residuals
-
-
-def residualize_phenotypes(
-    phenotypes: np.ndarray, covariates: np.ndarray, phenotypes_missing: np.ndarray, missingness_threshold_mar: float = 0
-) -> np.ndarray:
-    """Residualize phenotypes on covariates. For phenotypes with missingness <=
-    `missingness_threshold_mar, assumes those phenotypes are missing at random
-    with respect to covariates."""
-    residuals = _residualize_phenotypes_mar(phenotypes, covariates, phenotypes_missing)
-    for i in range(phenotypes.shape[1]):
-        nonmissing = ~phenotypes_missing[:, i]
-        if np.mean(nonmissing) >= 1 - missingness_threshold_mar:
-            continue
-        beta = _backslash(covariates[nonmissing, :], phenotypes[nonmissing, i])
-        residuals[nonmissing, i] = phenotypes[nonmissing, i] - (covariates[nonmissing, :] @ beta)
-    return residuals
-
-
-def _get_genotype_variance_explained(
-    genotypes: LinearOperator,
-    covariates: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Get variance of genotypes explained by covariates:
-            diag(X'C(C'C)^-1C'X) / n
-    where X is the genotype operator, C is the covariate matrix, and diag() extracts the diagonal.
-
-    Args:
-        genotypes: Unnormalized, phased genotypes as a linear operator (e.g. ParallelOperator or LinearARG)
-        covariates: Covariates matrix, which should include the all-ones annotation except for missing values
-
-    Returns:
-        tuple: (total_var_explained, allele_count)
-            total_var_explained: Total variance of genotypes explained by covariates
-            allele_count: Allele count of the genotypes, assuming first column of covariates is all-ones
-                            except for missing values
-    """
-    covariate_inner = covariates.T @ covariates
-    between_product = covariates.T @ genotypes
-    covariates_backslash_genotypes = np.linalg.solve(covariate_inner, between_product)
-
-    # diag(A.T @ B) == sum(A * B)
-    total_var_explained = np.sum(between_product * covariates_backslash_genotypes, axis=0).reshape(-1, 1)
-
-    allele_count = between_product[0, :].reshape(-1, 1)
-    return total_var_explained, allele_count
-
-
-def _get_genotype_variance(
-    genotypes: LinearOperator,
-    allele_counts: np.ndarray,
-    individuals_to_include: np.ndarray,
-) -> Tuple[np.int64, np.ndarray]:
-    """Get variance of genotypes without assuming HWE: diag(X^TX)
-
-    Args:
-        genotypes: Unnormalized, phased genotypes as a linear ARG with ploidy (i.e. individual nodes)
-        allele_counts: Counts of each allele
-        individuals_to_keep: Non-missing individuals to include in carrier count
-
-    Returns:
-        tuple: (var_genotypes, num_homozygotes)
-            var_genotypes: variance of genotypes
-            carrier_counts: number of carriers per allele
-    """
-    carrier_counts = genotypes.number_of_carriers(individuals_to_include).reshape(-1, 1)
-    assert np.all(allele_counts - carrier_counts >= 0)
-    var_genotypes = 3 * allele_counts - 2 * carrier_counts  # 4 * num_homozygotes + num_heterozygotes
-    return var_genotypes, carrier_counts
-
-
-def _impute_missing_with_mean(data: np.ndarray) -> np.ndarray:
-    """Impute missing values with the mean of the column in place."""
-    data = data.copy()
-    for col in range(data.shape[1]):
-        is_missing = np.isnan(data[:, col])
-        col_mean = np.mean(data[~is_missing, col])
-        data[is_missing, col] = col_mean
-    return data
+from ..core.operators import get_inner_merge_operators
+from .util import (
+    _get_genotype_variance,
+    _get_genotype_variance_explained,
+    _impute_missing_with_mean,
+    residualize_phenotypes,
+)
 
 
 def get_gwas_beta_se(
@@ -163,7 +74,6 @@ def get_gwas_beta_se(
     numerator = (right_op @ genotypes).T @ y_resid / num_nonmissing
 
     # Get denominator, which is assumed equal across traits despite different missingness
-
     var_explained, allele_counts = _get_genotype_variance_explained(right_op @ genotypes, covariates)
     if assume_hwe:
         denominator = np.maximum(allele_counts - var_explained, 1e-6) / two_n
@@ -216,7 +126,7 @@ def run_gwas(
         raise ValueError("First column of covar_cols should be '1'")
 
     left_op, right_op = get_inner_merge_operators(
-        data.select("iid").collect().to_series(), genotypes.iids
+        data.select("IID").collect().to_series(), genotypes.iids
     )  # data iids to shared iids, shared iids to genotypes iids
     phenotypes = data.select(pheno_cols).collect().to_numpy()
     covariates = data.select(covar_cols).collect().to_numpy()

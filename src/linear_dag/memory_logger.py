@@ -1,8 +1,6 @@
 import logging
 import os
 
-
-# from functools import wraps
 from typing import Optional
 
 import psutil
@@ -41,40 +39,3 @@ class MemoryLogger:
     def info(self, message: str) -> None:
         """Log info message with memory usage"""
         self.logger.info(message, extra={"memory_usage": self._get_memory_usage()})
-
-    # def debug(self, message: str) -> None:
-    #     """Log debug message with memory usage"""
-    #     self.logger.debug(
-    #         message,
-    #         extra={'memory_usage': self._get_memory_usage()}
-    #     )
-
-    # def warning(self, message: str) -> None:
-    #     """Log warning message with memory usage"""
-    #     self.logger.warning(
-    #         message,
-    #         extra={'memory_usage': self._get_memory_usage()}
-    #     )
-
-    # def error(self, message: str) -> None:
-    #     """Log error message with memory usage"""
-    #     self.logger.error(
-    #         message,
-    #         extra={'memory_usage': self._get_memory_usage()}
-    #    )
-
-
-# def log_memory(logger: MemoryLogger):
-#     """Decorator to log memory usage before and after function execution"""
-#     def decorator(func):
-#         @wraps(func)
-#         def wrapper(*args, **kwargs):
-#             func_name = func.__name__
-#             logger.info(f"Entering {func_name}")
-
-#             result = func(*args, **kwargs)
-
-#             logger.info(f"Exiting {func_name}")
-#             return result
-#         return wrapper
-#     return decorator

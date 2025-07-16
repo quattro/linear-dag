@@ -13,12 +13,13 @@ from scipy.io import mmread
 from scipy.sparse import csc_matrix
 
 
+
 def read_vcf(
     path: Union[str, PathLike],
     phased: bool = True,
     region: Optional[str] = None,
     flip_minor_alleles: bool = False,
-    whitelist: list = None,
+    samples: Optional[list[str]] = None,
     maf_filter: float = None,
     remove_indels: bool = False,
     sex: np.array = None,
@@ -32,9 +33,18 @@ def read_vcf(
 
         return data
 
-    samples_to_load = cv.VCF(path).samples
-    if whitelist:
-        samples_to_load = [samples_to_load[i] for i in whitelist]
+    if samples is not None:
+        # we parse header twice; once to pull samples, and then again later on with subset of samples
+        vcf_samples = cv.VCF(path, lazy=True).samples
+        samples_to_load = list(set(samples) & set(vcf_samples))
+        if not samples_to_load:
+            raise ValueError("Samples specified but none found in VCF")
+
+        if len(samples_to_load) == len(vcf_samples):
+            # optimization to not bother when all samples were present
+            samples_to_load = None
+    else:
+        samples_to_load = None
 
     vcf = cv.VCF(path, gts012=True, strict_gt=True, samples=samples_to_load)
     iids = vcf.samples

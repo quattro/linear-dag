@@ -5,7 +5,7 @@ import numpy as np
 from scipy.sparse import csc_matrix, csr_matrix, diags, eye
 from scipy.sparse.linalg import aslinearoperator, cg, LinearOperator, spsolve_triangular
 
-from ..core import LinearARG
+from ..core.lineararg import LinearARG
 
 
 @dataclass
