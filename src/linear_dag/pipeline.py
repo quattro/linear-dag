@@ -10,12 +10,12 @@ import numpy as np
 import polars as pl
 import scipy.sparse as sp
 
-from .genotype import read_vcf
-from .memory_logger import MemoryLogger
 from .core.brick_graph import BrickGraph, merge_brick_graphs, read_graph_from_disk
 from .core.lineararg import LinearARG, make_triangular, remove_degree_zero_nodes
 from .core.one_summed_cy import linearize_brick_graph
 from .core.recombination import Recombination
+from .genotype import read_vcf
+from .memory_logger import MemoryLogger
 
 
 def make_genotype_matrix(
@@ -38,7 +38,6 @@ def make_genotype_matrix(
     os.makedirs(f"{linarg_dir}/genotype_matrices/", exist_ok=True)
 
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_number}_{region}_make_genotype_matrix.log")
-
 
     if samples_path is not None:
         samples = load_sample_ids(samples_path)
@@ -437,6 +436,7 @@ def get_carrier_counts(genotypes, sex=None):
     carriers = (individual_genotypes > 0).sum(axis=0).A1
 
     return carriers
+
 
 def load_sample_ids(sample_path: Union[str, PathLike]) -> list[str]:
     """

@@ -13,7 +13,6 @@ from scipy.io import mmread
 from scipy.sparse import csc_matrix
 
 
-
 def read_vcf(
     path: Union[str, PathLike],
     phased: bool = True,
@@ -69,9 +68,9 @@ def read_vcf(
         gts = read_gt(var)
         if sex is not None:
             gts = gts[indices_to_keep]
-            assert np.all((gts == 0) | (gts == 1)), (
-                "Haplotype vector contains non 0 or 1 values. Check genotype data or sex vector."
-            )
+            assert np.all(
+                (gts == 0) | (gts == 1)
+            ), "Haplotype vector contains non 0 or 1 values. Check genotype data or sex vector."
 
         if not flip_minor_alleles:
             return gts, False

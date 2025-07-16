@@ -12,11 +12,6 @@ from typing import Optional, Union
 import h5py
 import polars as pl
 
-from .association.gwas import run_gwas
-from .association.heritability import randomized_haseman_elston
-from .association.prs import run_prs
-from .core.lineararg import list_blocks, load_block_metadata
-from .core.parallel_processing import ParallelOperator
 from linear_dag.pipeline import (
     add_individuals_to_linarg,
     infer_brick_graph,
@@ -25,6 +20,12 @@ from linear_dag.pipeline import (
     reduction_union_recom,
     run_forward_backward,
 )
+
+from .association.gwas import run_gwas
+from .association.heritability import randomized_haseman_elston
+from .association.prs import run_prs
+from .core.lineararg import list_blocks, load_block_metadata
+from .core.parallel_processing import ParallelOperator
 from .memory_logger import MemoryLogger
 
 title = """                            @@@@
@@ -168,8 +169,8 @@ def _read_pheno_or_covar(
     if path_or_filename is None:
         raise ValueError("Must provide valid path or filename")
     if columns is not None:
-        all_str = all(type(x) is str for x in columns)
-        all_int = all(type(x) is int for x in columns)
+        all_str = all(isinstance(x, str) for x in columns)
+        all_int = all(isinstance(x, int) for x in columns)
         if not (all_str or all_int):
             raise ValueError("Columns supplied to read_pheno/read_covar must be all 'str' or all 'int'. Not mixture.")
         if all_str:
@@ -243,7 +244,6 @@ def _assoc_scan(args):
     with ParallelOperator.from_hdf5(
         args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata
     ) as linarg:
-
         logger.info("Loading variant metadata")
         variant_info = load_block_metadata(args.linarg_path, block_metadata)
 
@@ -297,6 +297,8 @@ def _estimate_h2g(args):
             args.sampler,
             args.seed,
         )
+        # TODO : write results out
+        print(results)
         logger.info("Finished. Writing results")
         logger.info("Done!")
 
@@ -524,7 +526,7 @@ def _main(args):
     infer_brick_graph_p = _create_common_build_parser(
         subp,
         "infer-brick-graph",
-        help = "Step 2 of partition and merge pipeline. Infers the brick graph from sparse matrix.",
+        help="Step 2 of partition and merge pipeline. Infers the brick graph from sparse matrix.",
         include_parition=True,
     )
     infer_brick_graph_p.set_defaults(func=_infer_brick_graph)
