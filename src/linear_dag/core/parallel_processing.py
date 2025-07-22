@@ -1,4 +1,5 @@
 import time
+import warnings
 
 from dataclasses import dataclass
 from functools import cached_property
@@ -79,6 +80,7 @@ class _ParallelManager:
         self.flags = [Value("i", 0) for _ in range(num_processes)]
         self.processes: List[Process] = []
         self.handles: Dict[str, _SharedArrayHandle] = {}
+
         for name, (shape, dtype) in object_specification.items():
             size = np.prod(shape) * np.dtype(dtype).itemsize
             # Create the raw SHM object
@@ -388,17 +390,20 @@ class _ManagerFactory:
                 "variant_data": ((num_variants, max_num_traits), np.float32),
             },
         )
-        for i in range(num_processes):
-            manager.add_process(
-                target=cls._worker,
-                args=(
-                    manager.flags[i],
-                    hdf5_file,
-                    process_blocks[i],
-                    block_offsets[i],
-                    num_traits,
-                ),
-            )
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            for i in range(num_processes):
+                manager.add_process(
+                    target=cls._worker,
+                    args=(
+                        manager.flags[i],
+                        hdf5_file,
+                        process_blocks[i],
+                        block_offsets[i],
+                        num_traits,
+                    ),
+                )
         manager.start_workers(FLAGS["wait"])
 
         # Get the actual handles from the manager to pass to the Operator instance

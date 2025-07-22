@@ -166,6 +166,9 @@ def _read_pheno_or_covar(
     Helper function to read in a phenotype or covariate file. Allows for an optional list of column names or column
     indices to be passed in, to parse only a subset of the data.
     """
+    iid_re = re.compile(r"^#?iid$", re.IGNORECASE)
+    fid_re = re.compile(r"^#?fid$", re.IGNORECASE)
+
     if path_or_filename is None:
         raise ValueError("Must provide valid path or filename")
     if columns is not None:
@@ -173,25 +176,33 @@ def _read_pheno_or_covar(
         all_int = all(isinstance(x, int) for x in columns)
         if not (all_str or all_int):
             raise ValueError("Columns supplied to read_pheno/read_covar must be all 'str' or all 'int'. Not mixture.")
-        if all_str:
-            if "IID" not in columns:
-                columns = ["IID"] + columns
-        elif all_int:
-            if any([x < 0 for x in columns]):
-                raise ValueError("Must supply valid column indices to read_pheno/read_covar")
-            if 0 not in columns:
-                columns = [0] + columns
+        if all_int and any([x < 0 for x in columns]):
+            raise ValueError("Must supply valid column indices to read_pheno/read_covar")
+
     df = pl.read_csv(path_or_filename, columns=columns, separator="\t")
 
     # check that IID is present, and drop FID if it is (we never use it)
-    if "IID" not in df.columns:
-        if "#IID" in df.columns:
-            df = df.rename({"#IID": "IID"})
+    iids = [c for c in df.columns if iid_re.match(c)]
+    if len(iids) == 0:
+        if columns is None:
+            raise ValueError("Pheno/covar file must contain IID-like column (e.g., `iid`, `IID`, `#iid`, etc)")
         else:
-            raise ValueError("Pheno/covar must contain 'IID' column")
+            msg = "User specified pheno/covar columns but no IID-like column found (e.g., `iid`, `IID`, `#iid`, etc)"
+            raise ValueError(msg)
+    elif len(iids) > 1:
+        if columns is None:
+            raise ValueError("Pheno/covar file contains multiple IID-like columns (e.g., `iid`, `IID`, `#iid`, etc)")
+        else:
+            msg = "User specified multiple IID-like pheno/covar columns (e.g., `iid`, `IID`, `#iid`, etc)"
+            raise ValueError(msg)
 
-    if "FID" in df.columns:
-        df = df.drop("FID")
+    # if we get here then we have a single match for what the IID-like column is
+    cname = iids[0]
+    df = df.rename({cname: "iid"})
+
+    # check if FID was supplied or found and drop; if not found, `fids` is empty and drop is noop.
+    fids = [c for c in df.columns if fid_re.match(c)]
+    df = df.drop(fids)
 
     return df
 
@@ -281,12 +292,6 @@ def _estimate_h2g(args):
     with ParallelOperator.from_hdf5(
         args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata
     ) as linarg:
-        # shouldn't this already be captured by the above operator?
-        logger.info("Reading iids")
-        with h5py.File(args.linarg_path, "r") as f:
-            iids = f["iids"][:].astype(str)
-        linarg.iids = pl.Series("iids", iids)
-
         logger.info("Estimating SNP heritability")
         results = randomized_haseman_elston(
             linarg,
@@ -336,7 +341,7 @@ def _prep_data(
     else:
         columns = None
     phenotypes = _read_pheno_or_covar(pheno, columns)
-    pheno_cols = [x for x in phenotypes.columns if x != "IID"]
+    pheno_cols = [x for x in phenotypes.columns if x != "iid"]
 
     if covar is not None:
         logger.info("Loading covariates")
@@ -347,15 +352,15 @@ def _prep_data(
         else:
             columns = None
         covars = _read_pheno_or_covar(covar, columns)
-        covar_cols = ["i0"] + [x for x in covars.columns if x != "IID"]
+        covar_cols = ["i0"] + [x for x in covars.columns if x != "iid"]
 
         # merge into single df for use in assoc
-        phenotypes = phenotypes.join(covars, on="IID")
+        phenotypes = phenotypes.join(covars, on="iid")
     else:
         covar_cols = ["i0"]
 
     # add an all-ones column
-    phenotypes = phenotypes.with_columns(i0=pl.lit(1))
+    phenotypes = phenotypes.with_columns(i0=pl.lit(1.0))
 
     return block_metadata, covar_cols, pheno_cols, phenotypes
 
@@ -434,7 +439,6 @@ def _main(args):
     )
     argp.add_argument("-v", "--verbose", action="store_true", default=False)
     argp.add_argument("-q", "--quiet", action="store_true", default=False)
-    argp.add_argument("-o", "--out", default="lineardag")
 
     subp = argp.add_subparsers(dest="cmd", required=True, help="Subcommands for linear-dag")
 
@@ -486,7 +490,7 @@ def _main(args):
         type=int,
         help="How many cores to uses. Defaults to all available cores.",
     )
-    prs_p.add_argument("--out", help="Location to save result files.")
+    prs_p.add_argument("--out", default="kodama", help="Location to save result files.")
     prs_p.set_defaults(func=_prs)
 
     make_geno_p = subp.add_parser(
@@ -650,7 +654,10 @@ def _create_common_build_parser(subp, name, help, include_parition: bool = False
 def _create_common_parser(subp, name, help):
     common_p = subp.add_parser(name, help=help)
     common_p.add_argument("linarg_path", help="Path to linear ARG (.h5 file)")
-    common_p.add_argument("pheno", help="Path to phenotype file (tab-delimited). Must contain `IID` column.")
+    common_p.add_argument(
+        "pheno",
+        help="Path to phenotype file (tab-delimited). Must contain IID-like column (e.g., `iid`, `IID`, `#iid`, etc.).",
+    )
     assoc_p_pgroup = common_p.add_mutually_exclusive_group(required=False)
     assoc_p_pgroup.add_argument(
         "--pheno-name",
@@ -662,9 +669,13 @@ def _create_common_parser(subp, name, help):
         "--pheno-col-nums",
         nargs="+",
         action=_SplitAction,
+        type=int,
         help="Phenotype column number or numbers (comma/space delimited)",
     )
-    common_p.add_argument("--covar", help="Path to covariate file (tab-delimited). Must contain `IID` column.")
+    common_p.add_argument(
+        "--covar",
+        help="Path to covariate file (tab-delimited). Must contain IID-like column (e.g., `iid`, `IID`, `#iid`, etc.).",
+    )
     assoc_p_cgroup = common_p.add_mutually_exclusive_group(required=False)
     assoc_p_cgroup.add_argument(
         "--covar-name",
@@ -676,6 +687,7 @@ def _create_common_parser(subp, name, help):
         "--covar-col-nums",
         nargs="+",
         action=_SplitAction,
+        type=int,
         help="Covariate column number or numbers (comma/space delimited)",
     )
     common_p.add_argument(
@@ -688,7 +700,7 @@ def _create_common_parser(subp, name, help):
         type=int,
         help="How many cores to uses. Defaults to all available cores.",
     )
-    common_p.add_argument("--out", help="Location to save result files.")
+    common_p.add_argument("--out", default="kodama", help="Location to save result files.")
     return common_p
 
 

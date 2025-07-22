@@ -126,7 +126,7 @@ def run_gwas(
         raise ValueError("First column of covar_cols should be '1'")
 
     left_op, right_op = get_inner_merge_operators(
-        data.select("IID").collect().to_series(), genotypes.iids
+        data.select("iid").collect().to_series(), genotypes.iids
     )  # data iids to shared iids, shared iids to genotypes iids
     phenotypes = data.select(pheno_cols).collect().to_numpy()
     covariates = data.select(covar_cols).collect().to_numpy()
