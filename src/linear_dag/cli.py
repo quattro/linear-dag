@@ -14,6 +14,7 @@ import polars as pl
 
 from linear_dag.pipeline import (
     add_individuals_to_linarg,
+    compress_vcf,
     infer_brick_graph,
     make_genotype_matrix,
     merge,
@@ -24,7 +25,7 @@ from linear_dag.pipeline import (
 from .association.gwas import run_gwas
 from .association.heritability import randomized_haseman_elston
 from .association.prs import run_prs
-from .core.lineararg import list_blocks, load_block_metadata
+from .core.lineararg import LinearARG, list_blocks, load_block_metadata
 from .core.parallel_processing import ParallelOperator
 from .memory_logger import MemoryLogger
 
@@ -423,9 +424,22 @@ def _reduction_union_recom(args):
 def _add_individuals_to_linarg(args):
     logger = MemoryLogger(__name__)
     logger.info("Starting main process")
-    add_individuals_to_linarg(args.linarg_dir, args.load_dir)
+    add_individuals_to_linarg(args.linarg_dir, args.add_dir)
 
     return
+
+
+def _compress(args):
+    compress_vcf(
+        input_vcf=args.input_vcf,
+        output_h5=args.output_h5,
+        region=args.region,
+        keep_path=args.keep,
+        flip_minor_alleles=args.flip_minor_alleles,
+        maf_filter=args.maf,
+        remove_indels=args.remove_indels,
+        add_individual_nodes=args.add_individual_nodes,
+    )
 
 
 def _main(args):
@@ -574,6 +588,23 @@ def _main(args):
         include_parition=False,
     )
     add_individuals_p.set_defaults(func=_add_individuals_to_linarg)
+
+    compress_p = subp.add_parser(
+        "compress",
+        help="Compress VCF to kodama format",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    compress_p.add_argument("input_vcf", help="Path to input VCF")
+    compress_p.add_argument("output_h5", help="Path to output HDF5 file")
+    compress_p.add_argument("--flip-minor-alleles", action="store_true", help="Should minor alleles be flipped?")
+    compress_p.add_argument("--keep", help="Path to file of IIDs to include in construction of the genotype matrix.")
+    compress_p.add_argument("--maf", type=float, help="Filter out variants with MAF less than maf")
+    compress_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
+    compress_p.add_argument("--add-individual-nodes", action="store_true", help="Add individual nodes for Hardy Weinberg calculations.")
+    compress_p.add_argument("--region", help="Genomic region of the form chrN:start-end")
+    compress_p.set_defaults(func=_compress)
+
+    prs_p = _create_common_parser(subp, "prs", help="Run PRS")
 
     # parse arguments
     args = argp.parse_args(args)
