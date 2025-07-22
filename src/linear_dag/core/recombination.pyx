@@ -9,10 +9,10 @@ cdef class Recombination(DiGraph):
     Implements the find-recombinations algorithm. Usage:
     recombination = Recombination.from_graph(brick_graph)
     """
-    cdef long[:] clique
-    cdef LinkedListArray clique_rows
-    cdef ModHeap clique_size_heap
-    cdef long num_cliques
+    # cdef long[:] clique
+    # cdef LinkedListArray clique_rows
+    # cdef ModHeap clique_size_heap
+    # cdef long num_cliques
 
 
     def __init__(self, long num_nodes, long num_edges):

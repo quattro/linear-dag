@@ -2,6 +2,7 @@
 import numpy as np
 from .data_structures cimport node, edge, list_node
 from .data_structures cimport DiGraph, LinkedListArray, CountingArray, Stack, IntegerList, IntegerSet
+from .recombination cimport Recombination
 cimport numpy as cnp
 from scipy.sparse import csr_matrix, csc_matrix, coo_matrix
 import os
@@ -635,8 +636,7 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
     :return: merged graph, variant indices, index mapping
     """
     num_samples, number_of_nodes, number_of_edges = get_graph_statistics(brick_graph_dir) # get statistics to initialize DiGraph object
-    cdef DiGraph result = DiGraph(number_of_nodes, number_of_edges)
-    cdef DiGraph graph
+    cdef Recombination result = Recombination(number_of_nodes, number_of_edges)
     cdef long i
     cdef long u, v
     cdef long non_sample_counter = num_samples
