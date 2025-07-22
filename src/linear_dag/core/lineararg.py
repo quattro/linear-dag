@@ -1,4 +1,5 @@
 # lineararg.py
+import os
 
 from dataclasses import dataclass
 from functools import cached_property
@@ -87,7 +88,13 @@ class LinearARG(LinearOperator):
         A_filt, variants_idx_reindexed, samples_idx_reindexed = remove_degree_zero_nodes(A, variants_idx, samples_idx)
         A_tri, variants_idx_tri = make_triangular(A_filt, variants_idx_reindexed, samples_idx_reindexed)
         linarg = LinearARG(
-            A_tri, variants_idx_tri, flip, len(samples_idx), None, variant_info.lazy(), iids=pl.Series(iids).cast(pl.String)
+            A_tri,
+            variants_idx_tri,
+            flip,
+            len(samples_idx),
+            None,
+            variant_info.lazy(),
+            iids=pl.Series(iids).cast(pl.String),
         )
         linarg.calculate_nonunique_indices()
         return linarg
@@ -324,7 +331,9 @@ class LinearARG(LinearOperator):
         # return LinearARG(self.A.copy(), self.sample_indices.copy(), self.variants.copy())
         pass
 
-    def write(self, h5_fname: Union[str, PathLike], block_info: Optional[dict] = None, compression_option: str = "gzip"):
+    def write(
+        self, h5_fname: Union[str, PathLike], block_info: Optional[dict] = None, compression_option: str = "gzip"
+    ):
         """Writes LinearARG to disk.
         :param h5_fname: The base path and prefix used for output files.
         :param block_info: Optional dictionary containing:
@@ -345,8 +354,10 @@ class LinearARG(LinearOperator):
                 destination.attrs["end"] = block_info["end"]
             else:
                 if os.path.exists(fname):
-                    raise FileExistsError(f"The file '{fname}' already exists."
-                    "To append a new linear ARG to an existing file, specify `block_info`.")
+                    raise FileExistsError(
+                        f"The file '{fname}' already exists."
+                        "To append a new linear ARG to an existing file, specify `block_info`."
+                    )
                 destination = f
 
             destination.attrs["n"] = self.A.shape[0]

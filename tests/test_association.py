@@ -1,15 +1,15 @@
-import pytest
-import numpy as np
-import polars as pl
 from pathlib import Path
 
-from linear_dag.core.lineararg import LinearARG
-from linear_dag.core.parallel_processing import ParallelOperator
+import numpy as np
+import polars as pl
+
 from linear_dag.association.gwas import run_gwas
 from linear_dag.association.simulation import simulate_phenotype
 from linear_dag.core.operators import get_diploid_operator
+from linear_dag.core.parallel_processing import ParallelOperator
 
 TEST_DATA_DIR = Path(__file__).parent / "testdata"
+
 
 def test_simulation_and_gwas():
     """
@@ -28,21 +28,17 @@ def test_simulation_and_gwas():
             get_diploid_operator(genotypes),
             heritability=heritability,
             fraction_causal=fraction_causal,
-            return_beta=True
+            return_beta=True,
         )
 
         # Create phenotype DataFrame with covariates
-        pheno_df = pl.DataFrame({
-            'IID': genotypes.iids.unique().to_list(),
-            'phenotype': y.flatten()
-        }).with_columns(
-            intercept=pl.lit(1),
-            covar1=pl.lit(np.random.rand(n//2))
+        pheno_df = pl.DataFrame({"iid": genotypes.iids.unique().to_list(), "phenotype": y.flatten()}).with_columns(
+            intercept=pl.lit(1), covar1=pl.lit(np.random.rand(n // 2))
         )
 
         # 3. GWAS
-        pheno_col = 'phenotype'
-        covar_cols = ['intercept', 'covar1']
+        pheno_col = "phenotype"
+        covar_cols = ["intercept", "covar1"]
         gwas_results = run_gwas(
             genotypes,
             pheno_df.lazy(),
@@ -53,4 +49,4 @@ def test_simulation_and_gwas():
         # 4. Assertions
         assert isinstance(gwas_results, pl.DataFrame)
         assert gwas_results.shape[0] == m
-        assert 'LOG10P' in gwas_results.columns
+        assert "LOG10P" in gwas_results.columns
