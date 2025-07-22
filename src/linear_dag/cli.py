@@ -221,7 +221,8 @@ def _prs(args):
     ) as linarg:
         logger.info("Reading iids")
         with h5py.File(args.linarg_path, "r") as f:
-            iids = f["iids"][:]
+            # iids = f["iids"][:]
+            iids = [iid.decode("utf-8") for iid in f['iids'][:]]
         logger.info("Reading in weights")
         betas = pl.read_csv(args.betas_path, separator="\t")
         with open(args.score_cols) as f:
