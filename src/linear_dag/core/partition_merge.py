@@ -122,7 +122,6 @@ def reduction_union_recom(linarg_dir, load_dir, partition_identifier):
     t6 = time.time()
     logger.info(f"Found recombinations in {np.round(t6 - t5, 3)} seconds")
     adj_mat = recom.to_csc_stable()
-    # adj_mat = recom.to_csc()
     
     logger.info("Saving brick graph")
     with h5py.File(f"{linarg_dir}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
@@ -200,7 +199,6 @@ def merge(linarg_dir, load_dir):
     
     logger.info("Finding recombinations")
     t3 = time.time()    
-    # merged_graph_recom = Recombination.from_graph(merged_graph)
     merged_graph.compute_cliques()
     merged_graph.collect_cliques()
     merged_graph.find_recombinations()
