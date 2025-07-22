@@ -344,6 +344,9 @@ class LinearARG(LinearOperator):
                 destination.attrs["start"] = block_info["start"]
                 destination.attrs["end"] = block_info["end"]
             else:
+                if os.path.exists(fname):
+                    raise FileExistsError(f"The file '{fname}' already exists."
+                    "To append a new linear ARG to an existing file, specify `block_info`.")
                 destination = f
 
             destination.attrs["n"] = self.A.shape[0]

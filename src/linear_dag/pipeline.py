@@ -18,6 +18,63 @@ from .genotype import read_vcf
 from .memory_logger import MemoryLogger
 
 
+def compress_vcf(
+    input_vcf: Union[str, PathLike],
+    output_h5: Union[str, PathLike],
+    region: Optional[str] = None,
+    keep_path: Optional[Union[str, PathLike]] = None,
+    flip_minor_alleles: bool = False,
+    maf_filter: Optional[float] = None,
+    remove_indels: bool = False,
+    add_individual_nodes: bool = False,
+):
+    """
+    Compress a VCF file into a LinearARG HDF5 file.
+    """
+    logger = MemoryLogger(__name__)
+    logger.info("Starting compression")
+
+    if keep_path is not None:
+        include_samples = load_sample_ids(keep_path)
+    else:
+        include_samples = None
+
+    linarg = LinearARG.from_vcf(
+        path=input_vcf,
+        region=region,
+        include_samples=include_samples,
+        flip_minor_alleles=flip_minor_alleles,
+        maf_filter=maf_filter,
+        snps_only=remove_indels,
+    )
+    logger.info(f"Number of variants: {linarg.shape[1]}")
+    logger.info(f"Number of samples: {linarg.shape[0]}")
+    logger.info(f"Number of nonzeros: {linarg.nnz}")
+    num_minor_alleles = linarg.shape[0] * np.sum(
+        np.minimum(linarg.allele_frequencies, 
+        1 - linarg.allele_frequencies)
+    )
+    logger.info(f"Number of minor alleles: {num_minor_alleles}")
+    logger.info(f"Compression ratio: {num_minor_alleles / linarg.nnz}")
+
+    if add_individual_nodes:
+        linarg = linarg.add_individual_nodes()
+    else:
+        linarg.calculate_nonunique_indices()
+
+    if region:
+        chrom, pos = region.split(":")
+        start, end = pos.split("-")
+        block_info = {"chrom": chrom.strip("chr"), "start": int(start), "end": int(end)}
+    else:
+        block_info = None
+
+    logger.info("Writing to disk")
+    linarg.write(output_h5, block_info=block_info)
+    logger.info("Done!")
+
+
+
 def make_genotype_matrix(
     vcf_path: Union[str, PathLike],
     linarg_dir: Union[str, PathLike],
