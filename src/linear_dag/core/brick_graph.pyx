@@ -645,6 +645,8 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
     cdef list variant_indices = []
     cdef list files = os.listdir(brick_graph_dir)
 
+    result.initialize_all_nodes()
+
     ind_arr = np.array([int(f.split('_')[0]) for f in files])
     order = ind_arr.argsort()
     files = np.array(files)[order].tolist()
