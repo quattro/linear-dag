@@ -51,10 +51,7 @@ def compress_vcf(
     logger.info(f"Number of variants: {linarg.shape[1]}")
     logger.info(f"Number of samples: {linarg.shape[0]}")
     logger.info(f"Number of nonzeros: {linarg.nnz}")
-    num_minor_alleles = linarg.shape[0] * np.sum(
-        np.minimum(linarg.allele_frequencies, 
-        1 - linarg.allele_frequencies)
-    )
+    num_minor_alleles = linarg.shape[0] * np.sum(np.minimum(linarg.allele_frequencies, 1 - linarg.allele_frequencies))
     logger.info(f"Number of minor alleles: {num_minor_alleles}")
     logger.info(f"Compression ratio: {num_minor_alleles / linarg.nnz}")
 
@@ -73,7 +70,6 @@ def compress_vcf(
     logger.info("Writing to disk")
     linarg.write(output_h5, block_info=block_info)
     logger.info("Done!")
-
 
 
 def make_genotype_matrix(

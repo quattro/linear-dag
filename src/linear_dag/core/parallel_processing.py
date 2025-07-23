@@ -1,8 +1,7 @@
-
 from dataclasses import dataclass, field
 from enum import auto, Enum
 from functools import cached_property
-from multiprocessing import cpu_count, Lock, get_context, Process, Queue, shared_memory, Value
+from multiprocessing import cpu_count, get_context, Lock, Process, Queue, shared_memory, Value
 from os import PathLike
 from typing import List, Optional, Tuple, Type, Union
 
@@ -100,7 +99,7 @@ class _SharedArrayHandle:
 
 
 class _Worker(Process):
-    """ Worker process that handles incoming tasks.
+    """Worker process that handles incoming tasks.
     While a ProcessExecutorPool can abstract this out for us, it doesn't have an efficient way to pre-load data
     per worker, w/o having to re-do that each time a task is spooled up. Using the worker abstract with
     producer/consumer queues let us get bets of both worlds. Using queues rather than spinning for new signals
@@ -151,7 +150,7 @@ class _Worker(Process):
                                 variant_data_block[:] = linarg.T @ sample_data_traits
                         self.send(Signal.DONE, f"Completed CMD: {cmd}", block=False)
                 else:
-                    self.send(Signal.ERROR,f"Unknown CMD: {cmd}", block=False)
+                    self.send(Signal.ERROR, f"Unknown CMD: {cmd}", block=False)
         finally:
             pass
 
@@ -240,7 +239,6 @@ class _ParallelManager:
             process.join()
 
         return
-
 
 
 @dataclass
