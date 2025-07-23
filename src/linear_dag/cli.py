@@ -18,6 +18,7 @@ from linear_dag.pipeline import (
     infer_brick_graph,
     make_genotype_matrix,
     merge,
+    read_pheno_or_covar,
     reduction_union_recom,
     run_forward_backward,
 )
@@ -25,7 +26,7 @@ from linear_dag.pipeline import (
 from .association.gwas import run_gwas
 from .association.heritability import randomized_haseman_elston
 from .association.prs import run_prs
-from .core.lineararg import LinearARG, list_blocks, load_block_metadata
+from .core.lineararg import list_blocks, load_block_metadata
 from .core.parallel_processing import ParallelOperator
 from .memory_logger import MemoryLogger
 
@@ -157,55 +158,6 @@ class _SplitAction(argparse.Action):
                 raise argparse.ArgumentError(self, f"invalid {self.cast.__name__!r} value: {it!r}")
 
         setattr(namespace, self.dest, final)
-
-
-def _read_pheno_or_covar(
-    path_or_filename: Union[str, PathLike],
-    columns: Optional[Union[list[str], list[int]]] = None,
-) -> pl.DataFrame:
-    """
-    Helper function to read in a phenotype or covariate file. Allows for an optional list of column names or column
-    indices to be passed in, to parse only a subset of the data.
-    """
-    iid_re = re.compile(r"^#?iid$", re.IGNORECASE)
-    fid_re = re.compile(r"^#?fid$", re.IGNORECASE)
-
-    if path_or_filename is None:
-        raise ValueError("Must provide valid path or filename")
-    if columns is not None:
-        all_str = all(isinstance(x, str) for x in columns)
-        all_int = all(isinstance(x, int) for x in columns)
-        if not (all_str or all_int):
-            raise ValueError("Columns supplied to read_pheno/read_covar must be all 'str' or all 'int'. Not mixture.")
-        if all_int and any([x < 0 for x in columns]):
-            raise ValueError("Must supply valid column indices to read_pheno/read_covar")
-
-    df = pl.read_csv(path_or_filename, columns=columns, separator="\t")
-
-    # check that IID is present, and drop FID if it is (we never use it)
-    iids = [c for c in df.columns if iid_re.match(c)]
-    if len(iids) == 0:
-        if columns is None:
-            raise ValueError("Pheno/covar file must contain IID-like column (e.g., `iid`, `IID`, `#iid`, etc)")
-        else:
-            msg = "User specified pheno/covar columns but no IID-like column found (e.g., `iid`, `IID`, `#iid`, etc)"
-            raise ValueError(msg)
-    elif len(iids) > 1:
-        if columns is None:
-            raise ValueError("Pheno/covar file contains multiple IID-like columns (e.g., `iid`, `IID`, `#iid`, etc)")
-        else:
-            msg = "User specified multiple IID-like pheno/covar columns (e.g., `iid`, `IID`, `#iid`, etc)"
-            raise ValueError(msg)
-
-    # if we get here then we have a single match for what the IID-like column is
-    cname = iids[0]
-    df = df.rename({cname: "iid"})
-
-    # check if FID was supplied or found and drop; if not found, `fids` is empty and drop is noop.
-    fids = [c for c in df.columns if fid_re.match(c)]
-    df = df.drop(fids)
-
-    return df
 
 
 def _prs(args):
@@ -341,7 +293,7 @@ def _prep_data(
         columns = pheno_col_nums
     else:
         columns = None
-    phenotypes = _read_pheno_or_covar(pheno, columns)
+    phenotypes = read_pheno_or_covar(pheno, columns)
     pheno_cols = [x for x in phenotypes.columns if x != "iid"]
 
     if covar is not None:
@@ -352,7 +304,7 @@ def _prep_data(
             columns = covar_col_nums
         else:
             columns = None
-        covars = _read_pheno_or_covar(covar, columns)
+        covars = read_pheno_or_covar(covar, columns)
         covar_cols = ["i0"] + [x for x in covars.columns if x != "iid"]
 
         # merge into single df for use in assoc
@@ -604,7 +556,11 @@ def _main(args):
     compress_p.add_argument("--keep", help="Path to file of IIDs to include in construction of the genotype matrix.")
     compress_p.add_argument("--maf", type=float, help="Filter out variants with MAF less than maf")
     compress_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
-    compress_p.add_argument("--add-individual-nodes", action="store_true", help="Add individual nodes for Hardy Weinberg calculations.")
+    compress_p.add_argument(
+        "--add-individual-nodes",
+        action="store_true",
+        help="Add individual nodes for Hardy Weinberg calculations.",
+    )
     compress_p.add_argument("--region", help="Genomic region of the form chrN:start-end")
     compress_p.set_defaults(func=_compress)
 

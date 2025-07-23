@@ -1,5 +1,6 @@
 import gzip
 import os
+import re
 import time
 
 from os import PathLike
@@ -11,10 +12,10 @@ import polars as pl
 import scipy.sparse as sp
 
 from .core.brick_graph import BrickGraph, merge_brick_graphs, read_graph_from_disk
+from .core.genotype import read_vcf
 from .core.lineararg import LinearARG, make_triangular, remove_degree_zero_nodes
 from .core.one_summed_cy import linearize_brick_graph
 from .core.recombination import Recombination
-from .genotype import read_vcf
 from .memory_logger import MemoryLogger
 
 
@@ -35,7 +36,7 @@ def compress_vcf(
     logger.info("Starting compression")
 
     if keep_path is not None:
-        include_samples = load_sample_ids(keep_path)
+        include_samples = _load_sample_ids(keep_path)
     else:
         include_samples = None
 
@@ -97,7 +98,7 @@ def make_genotype_matrix(
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_number}_{region}_make_genotype_matrix.log")
 
     if samples_path is not None:
-        samples = load_sample_ids(samples_path)
+        samples = _load_sample_ids(samples_path)
     else:
         samples = None
 
@@ -114,7 +115,7 @@ def make_genotype_matrix(
         phased=phased,
         region=region,
         flip_minor_alleles=flip_minor_alleles,
-        whitelist=samples,
+        samples=samples,
         maf_filter=maf_filter,
         remove_indels=remove_indels,
         sex=sex,
@@ -495,12 +496,13 @@ def get_carrier_counts(genotypes, sex=None):
     return carriers
 
 
-def load_sample_ids(sample_path: Union[str, PathLike]) -> list[str]:
+def _load_sample_ids(sample_path: Union[str, PathLike]) -> list[str]:
     """
     Helper function to load sample IDs from a path-like object. The file should be
     whitespace delimited and either contain a column with a `IID` header, or no header.
     If the file contains multiple columns `IID` header is required.
     """
+    iid_re = re.compile(r"^#?iid$", re.IGNORECASE)
     opener = gzip.open if str(sample_path).endswith(".gz") else open
 
     sample_ids = []
@@ -508,23 +510,23 @@ def load_sample_ids(sample_path: Union[str, PathLike]) -> list[str]:
         first_line = f.readline().rstrip("\n")
         cols = first_line.split()
         # check if "IID" is in the first row
-        if "IID" not in cols and "#IID" not in cols:
+        cnames = [c for c in cols if iid_re.match(c)]
+        if not cnames:
             if len(cols) == 1:
                 # there is exactly 1 column, no header, first_line contains the first sample id
                 iid_idx = 0
                 sample_ids.append(first_line)
             elif len(cols) > 1:
                 # we have multiple columns and none of them are denoted with `IID`
-                raise ValueError("Multi-column sample ID file does not contain `IID` column")
+                raise ValueError("Multi-column sample ID file does not contain IID-like column")
             else:
                 # we have no columns
                 raise ValueError("Empty line in sample ID file")
         else:
-            # Header mode: find the IID column index
-            if "IID" in cols:
-                iid_idx = cols.index("IID")
-            elif "#IID" in cols:
-                iid_idx = cols.index("#IID")
+            if len(cnames) == 1:
+                iid_idx = cols.index(cnames[0])
+            else:
+                raise ValueError("Sample ID file contains multiple IID-like columns")
 
         # read each line and extract the IID column
         # iid_idx should be defined by here
@@ -537,3 +539,52 @@ def load_sample_ids(sample_path: Union[str, PathLike]) -> list[str]:
                 raise ValueError(f"Sample ID file contains misshaped row: {line}")
 
     return sample_ids
+
+
+def read_pheno_or_covar(
+    path_or_filename: Union[str, PathLike],
+    columns: Optional[Union[list[str], list[int]]] = None,
+) -> pl.DataFrame:
+    """
+    Helper function to read in a phenotype or covariate file. Allows for an optional list of column names or column
+    indices to be passed in, to parse only a subset of the data.
+    """
+    iid_re = re.compile(r"^#?iid$", re.IGNORECASE)
+    fid_re = re.compile(r"^#?fid$", re.IGNORECASE)
+
+    if path_or_filename is None:
+        raise ValueError("Must provide valid path or filename")
+    if columns is not None:
+        all_str = all(isinstance(x, str) for x in columns)
+        all_int = all(isinstance(x, int) for x in columns)
+        if not (all_str or all_int):
+            raise ValueError("Columns supplied to read_pheno/read_covar must be all 'str' or all 'int'. Not mixture.")
+        if all_int and any([x < 0 for x in columns]):
+            raise ValueError("Must supply valid column indices to read_pheno/read_covar")
+
+    df = pl.read_csv(path_or_filename, columns=columns, separator="\t")
+
+    # check that IID is present, and drop FID if it is (we never use it)
+    iids = [c for c in df.columns if iid_re.match(c)]
+    if len(iids) == 0:
+        if columns is None:
+            raise ValueError("Pheno/covar file must contain IID-like column (e.g., `iid`, `IID`, `#iid`, etc)")
+        else:
+            msg = "User specified pheno/covar columns but no IID-like column found (e.g., `iid`, `IID`, `#iid`, etc)"
+            raise ValueError(msg)
+    elif len(iids) > 1:
+        if columns is None:
+            raise ValueError("Pheno/covar file contains multiple IID-like columns (e.g., `iid`, `IID`, `#iid`, etc)")
+        else:
+            msg = "User specified multiple IID-like pheno/covar columns (e.g., `iid`, `IID`, `#iid`, etc)"
+            raise ValueError(msg)
+
+    # if we get here then we have a single match for what the IID-like column is
+    cname = iids[0]
+    df = df.rename({cname: "iid"})
+
+    # check if FID was supplied or found and drop; if not found, `fids` is empty and drop is noop.
+    fids = [c for c in df.columns if fid_re.match(c)]
+    df = df.drop(fids)
+
+    return df

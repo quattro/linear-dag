@@ -1,11 +1,8 @@
 import numpy as np
 
-from scipy.sparse.linalg import (
-    eigs,
-    svds,
-)
+from scipy.sparse.linalg import eigs, svds
 
-from .. import LinearARG
+from ..core.lineararg import LinearARG
 
 
 def svd(linarg: LinearARG, k: int = 20) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

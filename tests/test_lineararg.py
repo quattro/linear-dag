@@ -1,6 +1,6 @@
 import pytest
 from linear_dag.core.lineararg import LinearARG, list_blocks
-from linear_dag.genotype import read_vcf
+from linear_dag.core.genotype import read_vcf
 import polars as pl
 from pathlib import Path
 from scipy.sparse import csc_matrix

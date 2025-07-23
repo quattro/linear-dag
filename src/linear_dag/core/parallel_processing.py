@@ -1,10 +1,10 @@
-import time
-import warnings
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import auto, Enum
 from functools import cached_property
-from multiprocessing import cpu_count, Lock, Process, shared_memory, Value
-from typing import Callable, Dict, List, Optional, Tuple, Type
+from multiprocessing import cpu_count, Lock, get_context, Process, Queue, shared_memory, Value
+from os import PathLike
+from typing import List, Optional, Tuple, Type, Union
 
 import h5py
 import numpy as np
@@ -14,6 +14,18 @@ from scipy.sparse import diags
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 from .lineararg import LinearARG, list_blocks
+
+
+class Cmd(Enum):
+    MATMAT = auto()
+    RMATMAT = auto()
+    STOP = auto()
+
+
+class Signal(Enum):
+    DONE = auto()
+    ERROR = auto()
+
 
 FLAGS = {
     "wait": 0,
@@ -31,20 +43,31 @@ class _SharedArrayHandle:
     """Encapsulates info needed to access a shared memory NumPy array."""
 
     name: str
-    lock: Lock
     shape: Tuple[int, ...]
     dtype: Type[np.generic]
-    _shm: shared_memory.SharedMemory = None  # Backing SHM object (only in creator)
-    _opened_shm: shared_memory.SharedMemory = None  # Handle in current process
+    _shm: shared_memory.SharedMemory = field(default=None, repr=False, init=False)
+    _opened_shm: shared_memory.SharedMemory = field(default=None, repr=False, init=False)
+
+    @classmethod
+    def create(cls, shape: Tuple[int, ...], dtype: Type[np.generic]):
+        # Create the raw SHM object; this is performed by main process
+        size = np.prod(shape) * np.dtype(dtype).itemsize
+        shm = shared_memory.SharedMemory(create=True, size=size)
+        obj = cls(shm.name, shape, dtype)
+        obj._shm = shm
+
+        return obj
 
     def access_as_array(self) -> np.ndarray:
         """Attach to the shared memory and return a NumPy array view."""
+        # this should be called from worker processes, who create a view using the shared buffer
         if self._opened_shm is None:
             self._opened_shm = shared_memory.SharedMemory(name=self.name)
         return np.ndarray(self.shape, dtype=self.dtype, buffer=self._opened_shm.buf)
 
     def close(self) -> None:
         """Close the handle to the shared memory for this process."""
+        # this should be called from worker processes, who created a view using the shared buffer
         if self._opened_shm is not None:
             self._opened_shm.close()
             self._opened_shm = None
@@ -66,28 +89,121 @@ class _SharedArrayHandle:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
 
+    def __getstate__(self):
+        return {"name": self.name, "shape": self.shape, "dtype": self.dtype}
+
+    def __setstate__(self, state):
+        # kind of hacky, but only we're using this thing...
+        self.__dict__.update(state)
+        self._shm = None
+        self._opened_shm = None
+
+
+class _Worker(Process):
+    """ Worker process that handles incoming tasks.
+    While a ProcessExecutorPool can abstract this out for us, it doesn't have an efficient way to pre-load data
+    per worker, w/o having to re-do that each time a task is spooled up. Using the worker abstract with
+    producer/consumer queues let us get bets of both worlds. Using queues rather than spinning for new signals
+    can be a bit more efficient, since it relies on the OS to wake up based on signally when a new task is submitted,
+    rather than spinning and sleeping.
+
+    Each worker has its own private command queue, and all workers (and primary process) share the same result queue.
+    """
+
+    def __init__(
+        self,
+        linarg_path: Union[str, PathLike],
+        blocks: list[str],
+        variant_offsets: list[int],
+        cmd_q: Queue,
+        res_q: Queue,
+        num_traits: Value,
+        lock: Lock,
+    ):
+        super().__init__()
+        self.linarg_path = linarg_path
+        self.blocks = blocks
+        self.variant_offsets = variant_offsets
+        self.cmd_q = cmd_q
+        self.res_q = res_q
+        self.num_traits = num_traits
+        self.lock = lock
+
+    def run(self):
+        try:
+            linargs = [LinearARG.read(self.linarg_path, block) for block in self.blocks]
+            while True:
+                # this is a bit more robust to sleep/wake cycling
+                cmd, (smpl_handle, var_handle) = self.cmd_q.get()
+                if cmd is Cmd.STOP:
+                    break
+                elif cmd is Cmd.MATMAT or Cmd.RMATMAT:
+                    with smpl_handle as sample_data, var_handle as variant_data:
+                        sample_data_traits = sample_data[: self.num_traits.value, :].T
+                        for linarg, offset in zip(linargs, self.variant_offsets):
+                            start, end = offset - linarg.shape[1], offset
+                            variant_data_block = variant_data[start:end, : self.num_traits.value]
+                            if cmd is Cmd.MATMAT:
+                                result = linarg @ variant_data_block
+                                with self.lock:
+                                    sample_data_traits += result
+                            elif cmd is Cmd.RMATMAT:
+                                variant_data_block[:] = linarg.T @ sample_data_traits
+                        self.send(Signal.DONE, f"Completed CMD: {cmd}", block=False)
+                else:
+                    self.send(Signal.ERROR,f"Unknown CMD: {cmd}", block=False)
+        finally:
+            pass
+
+    def put(
+        self,
+        cmd: Cmd,
+        sample_handle: _SharedArrayHandle,
+        variant_handle: _SharedArrayHandle,
+        block: bool = True,
+        timeout: Optional[int] = None,
+    ):
+        args = (sample_handle, variant_handle)
+        obj = (cmd, args)
+        self.cmd_q.put(obj, block, timeout)
+
+    def send(
+        self,
+        signal: Signal,
+        msg: str,
+        block: bool = True,
+        timeout: Optional[int] = None,
+    ):
+        obj = (signal, msg)
+        self.res_q.put(obj, block, timeout)
+
 
 class _ParallelManager:
     """Manager for coordinating parallel worker processes using shared memory."""
 
-    def __init__(self, num_processes: int, object_specification: Dict[str, Tuple[Tuple[int, ...], Type[np.generic]]]):
+    def __init__(
+        self,
+        linarg_path: Union[str, PathLike],
+        process_blocks,
+        variant_offsets: list[int],
+        num_traits: Value,
+        lock: Lock,
+        queue_context,
+    ):
         """
         Args:
             num_processes: Number of worker processes.
             object_specification: Dict mapping name to (shape, dtype) for shared arrays.
         """
-        self.num_processes = num_processes
-        self.flags = [Value("i", 0) for _ in range(num_processes)]
-        self.processes: List[Process] = []
-        self.handles: Dict[str, _SharedArrayHandle] = {}
+        self.processes: List[_Worker] = []
+        self.res_q: Queue = queue_context.Queue()
 
-        for name, (shape, dtype) in object_specification.items():
-            size = np.prod(shape) * np.dtype(dtype).itemsize
-            # Create the raw SHM object
-            shm = shared_memory.SharedMemory(create=True, size=size)
-            lock = Lock()
-            # Store the handle, including the raw SHM object for later unlinking
-            self.handles[name] = _SharedArrayHandle(name=shm.name, lock=lock, shape=shape, dtype=dtype, _shm=shm)
+        for block, offset in zip(process_blocks, variant_offsets):
+            cmd_q = queue_context.Queue()
+            w = _Worker(linarg_path, block, offset, cmd_q, self.res_q, num_traits, lock)
+            # this should spool up the worker, which then loads its respective linear arg blocks
+            w.start()
+            self.processes.append(w)
 
     def __enter__(self):
         return self
@@ -95,42 +211,36 @@ class _ParallelManager:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
-    def start_workers(self, flag: int = None) -> None:
+    def start_workers(
+        self,
+        cmd: Cmd,
+        sample_handle: Optional[_SharedArrayHandle] = None,
+        variant_handle: Optional[_SharedArrayHandle] = None,
+    ):
         """Signal workers to do something."""
-        for f in self.flags:
-            f.value = flag
+        for worker in self.processes:
+            worker.put(cmd, sample_handle, variant_handle)
+
+        return
 
     def await_workers(self) -> None:
         """Wait for all workers to finish current task."""
-        for f in self.flags:
-            while f.value != FLAGS["wait"]:
-                if f.value == FLAGS["error"]:
-                    raise RuntimeError("Worker process encountered an error")
-                time.sleep(0.001)
-
-    def add_process(self, target: Callable, args: Tuple) -> None:
-        """Add a worker process.
-
-        Args:
-            target: Function to run in process
-            args: Arguments to pass to target function
-        """
-        # Pass the dictionary of handles to the worker
-        process = Process(target=target, args=(self.handles, *args))
-        process.start()
-        self.processes.append(process)
+        for _ in self.processes:
+            signal, msg = self.res_q.get()
+            if signal is Signal.ERROR:
+                self.close()
+                raise RuntimeError(f"Worker process encountered an error: {msg}")
+        return
 
     def close(self) -> None:
         """Signal all workers to shut down and join processes."""
-        for flag in self.flags:
-            flag.value = FLAGS["shutdown"]
+        self.start_workers(Cmd.STOP)
 
         for process in self.processes:
             process.join()
 
-        # Unlink all shared memory segments using the handles
-        for handle in self.handles.values():
-            handle.unlink()  # Request OS to remove the segment
+        return
+
 
 
 @dataclass
@@ -164,7 +274,10 @@ class ParallelOperator(LinearOperator):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        return self._manager.__exit__(exc_type, exc_val, exc_tb)
+        self._manager.__exit__(exc_type, exc_val, exc_tb)
+        self._sample_data_handle.unlink()
+        self._variant_data_handle.unlink()
+        return
 
     @property
     def num_samples(self):
@@ -181,7 +294,7 @@ class ParallelOperator(LinearOperator):
             self._num_traits.value = end - start
             with self._sample_data_handle as sample_data:
                 sample_data[:] = np.zeros((self._max_num_traits, self.shape[0]), dtype=np.float32)
-            self._manager.start_workers(FLAGS["matmat"])
+            self._manager.start_workers(Cmd.MATMAT, self._sample_data_handle, self._variant_data_handle)
             self._manager.await_workers()
             with self._sample_data_handle as sample_data:
                 result[:, start:end] = sample_data[: end - start, :].T
@@ -196,14 +309,14 @@ class ParallelOperator(LinearOperator):
         result = np.empty((self.shape[1], x.shape[1]), dtype=np.float32)
 
         # Process max_num_traits columns at a time
-        # time.sleep(1)
         for start in range(0, x.shape[1], self._max_num_traits):
             end = min(start + self._max_num_traits, x.shape[1])
             self._num_traits.value = end - start
 
             with self._sample_data_handle as sample_data:
                 sample_data[: end - start, :] = x[:, start:end].astype(np.float32).T
-            self._manager.start_workers(FLAGS["rmatmat"])
+
+            self._manager.start_workers(Cmd.RMATMAT, self._sample_data_handle, self._variant_data_handle)
             self._manager.await_workers()
 
             with self._variant_data_handle as variant_data:
@@ -244,7 +357,7 @@ class ParallelOperator(LinearOperator):
     @classmethod
     def from_hdf5(
         cls,
-        hdf5_file: str,
+        hdf5_file: Union[str, PathLike],
         num_processes: Optional[int] = None,
         max_num_traits: int = 10,
         block_metadata: Optional[pl.DataFrame] = None,
@@ -258,116 +371,6 @@ class ParallelOperator(LinearOperator):
         Returns:
             ParallelOperator instance
         """
-        return _ManagerFactory.create_parallel(hdf5_file, num_processes, max_num_traits, block_metadata)
-
-
-class _ManagerFactory:
-    @classmethod
-    def _worker(
-        cls,
-        handles: Dict[str, _SharedArrayHandle],
-        flag: Value,
-        hdf5_file: str,
-        blocks: list,
-        variant_offsets: list,
-        num_traits: Value,
-    ) -> None:
-        """Worker process that loads LDGMs and processes blocks."""
-
-        linargs = []
-        assert blocks is not None
-        for block in blocks:
-            linarg = LinearARG.read(hdf5_file, block)
-            linargs.append(linarg)
-
-        while True:
-            while flag.value == FLAGS["wait"]:
-                time.sleep(0.001)
-
-            if flag.value == FLAGS["shutdown"]:
-                break
-            elif flag.value == FLAGS["matmat"]:
-                func = cls._matmat
-            elif flag.value == FLAGS["rmatmat"]:
-                func = cls._rmatmat
-            else:
-                flag.value = FLAGS["error"]
-                raise ValueError(f"Unexpected flag value: {flag.value}")
-            with handles["sample_data"] as sample_data, handles["variant_data"] as variant_data:
-                sample_data_traits = sample_data[: num_traits.value, :].T
-                sample_lock = handles["sample_data"].lock
-                for linarg, offset in zip(linargs, variant_offsets):
-                    start, end = offset - linarg.shape[1], offset
-                    variant_data_block = variant_data[start:end, : num_traits.value]
-
-                    func(linarg, sample_data_traits, variant_data_block, sample_lock)
-            flag.value = FLAGS["wait"]
-
-    @classmethod
-    def _matmat(
-        cls,
-        linarg: LinearARG,
-        sample_data: np.ndarray,
-        variant_data: np.ndarray,
-        sample_lock: Lock,
-    ) -> None:
-        result = linarg @ variant_data
-        with sample_lock:
-            sample_data += result
-
-    @classmethod
-    def _rmatmat(
-        cls,
-        linarg: LinearARG,
-        sample_data: np.ndarray,
-        variant_data: np.ndarray,
-        sample_lock: Lock,
-    ) -> None:
-        variant_data[:] = linarg.T @ sample_data
-
-    @classmethod
-    def _split_blocks(
-        cls, metadata: pl.DataFrame, num_processes: int
-    ) -> tuple[list[tuple[int, int]], list[int], list[int]]:
-        # Use numIndices consistently for both splitting and offsets
-        size_array = metadata.get_column("n_entries").to_numpy()
-        size_cumsum = np.insert(np.cumsum(size_array), 0, 0)
-        chunk_size = size_cumsum[-1] / num_processes
-
-        # Find indices where cumsum crosses multiples of chunk_size
-        block_indices = []
-        for i in range(1, num_processes):
-            target_sum = i * chunk_size
-            idx = np.searchsorted(size_cumsum, target_sum)
-            block_indices.append(idx)
-        block_indices.append(len(size_cumsum) - 1)  # Add last index
-
-        # Insert start index
-        block_indices = np.array([0] + block_indices)
-
-        block_ranges = [(start, end) for start, end in zip(block_indices[:-1], block_indices[1:], strict=False)]
-        return block_ranges
-
-    @classmethod
-    def create_parallel(
-        cls,
-        hdf5_file: str,
-        num_processes: Optional[int],
-        max_num_traits: int,
-        block_metadata: Optional[pl.DataFrame] = None,
-    ) -> "ParallelOperator":
-        """Create a ParallelOperator instance.
-
-        Args:
-            hdf5_file: Path to hdf5 file
-            num_processes: Number of processes to use
-            alpha: Alpha parameter
-            max_num_traits: Maximum number of traits
-            block_metadata: Blocks to load. If None, all blocks will be loaded.
-
-        Returns:
-            ParallelOperator instance
-        """
         if block_metadata is None:
             block_metadata = list_blocks(hdf5_file)
         blocks = block_metadata["block_name"]
@@ -375,40 +378,29 @@ class _ManagerFactory:
         if num_processes is None:
             num_processes = min(len(block_metadata), cpu_count())
 
-        process_block_ranges = cls._split_blocks(block_metadata, num_processes)
+        process_block_ranges = _split_blocks(block_metadata, num_processes)
         process_blocks = [blocks[start:end] for start, end in process_block_ranges]
         assert all([blocks is not None for blocks in process_blocks])
+
         num_samples = block_metadata["n_samples"][0]
         num_variants = block_metadata["n_variants"].sum()
         variant_offsets = np.cumsum(block_metadata["n_variants"].to_numpy()).astype(int)
         block_offsets = [variant_offsets[start:end] for start, end in process_block_ranges]
+        ctx = get_context("spawn")
+
+        # create manager to pass out commands to worker processes
         num_traits = Value("i", 0, lock=False)
         manager = _ParallelManager(
-            num_processes,
-            object_specification={
-                "sample_data": ((max_num_traits, num_samples), np.float32),
-                "variant_data": ((num_variants, max_num_traits), np.float32),
-            },
+            hdf5_file,
+            process_blocks,
+            block_offsets,
+            num_traits,
+            ctx.Lock(),
+            ctx,
         )
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=RuntimeWarning)
-            for i in range(num_processes):
-                manager.add_process(
-                    target=cls._worker,
-                    args=(
-                        manager.flags[i],
-                        hdf5_file,
-                        process_blocks[i],
-                        block_offsets[i],
-                        num_traits,
-                    ),
-                )
-        manager.start_workers(FLAGS["wait"])
-
-        # Get the actual handles from the manager to pass to the Operator instance
-        sample_data_handle = manager.handles["sample_data"]
-        variant_data_handle = manager.handles["variant_data"]
+        sample_data_handle = _SharedArrayHandle.create((max_num_traits, num_samples), np.float32)
+        variant_data_handle = _SharedArrayHandle.create((num_variants, max_num_traits), np.float32)
 
         iids = None
         with h5py.File(hdf5_file, "r") as h5f:
@@ -417,7 +409,7 @@ class _ManagerFactory:
                 iids = pl.Series("iids", iids_data.astype(str))
 
         # Create and return the ParallelOperator instance
-        return ParallelOperator(
+        return cls(
             manager,
             _sample_data_handle=sample_data_handle,
             _variant_data_handle=variant_data_handle,
@@ -427,3 +419,25 @@ class _ManagerFactory:
             dtype=np.float32,
             iids=iids,
         )
+
+
+def _split_blocks(metadata: pl.DataFrame, num_processes: int) -> tuple[list[tuple[int, int]], list[int], list[int]]:
+    # Use numIndices consistently for both splitting and offsets
+    size_array = metadata.get_column("n_entries").to_numpy()
+    size_cumsum = np.insert(np.cumsum(size_array), 0, 0)
+    chunk_size = size_cumsum[-1] / num_processes
+
+    # Find indices where cumsum crosses multiples of chunk_size
+    block_indices = []
+    for i in range(1, num_processes):
+        target_sum = i * chunk_size
+        idx = np.searchsorted(size_cumsum, target_sum)
+        block_indices.append(idx)
+    block_indices.append(len(size_cumsum) - 1)  # Add last index
+
+    # Insert start index
+    block_indices = np.array([0] + block_indices)
+
+    block_ranges = [(start, end) for start, end in zip(block_indices[:-1], block_indices[1:], strict=False)]
+
+    return block_ranges

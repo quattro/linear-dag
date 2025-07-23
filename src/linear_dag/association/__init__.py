@@ -11,3 +11,7 @@ from .heritability import (
 from .simulation import (
     simulate_phenotype as simulate_phenotype,
 )
+from .structure import (
+    pca as pca,
+    svd as svd,
+)

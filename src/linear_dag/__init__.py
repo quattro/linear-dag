@@ -1,5 +1,13 @@
 from importlib.metadata import PackageNotFoundError, version  # pragma: no cover
 
+from linear_dag.core.genotype import (
+    apply_maf_threshold as apply_maf_threshold,
+    binarize as binarize,
+    compute_af as compute_af,
+    flip_alleles as flip_alleles,
+    read_vcf as read_vcf,
+)
+
 # annoying 'as' notation to avoid warnings/errors about unused imports...
 from .association import (
     randomized_haseman_elston as randomized_haseman_elston,
@@ -10,17 +18,6 @@ from .core import (
     LinearARG as LinearARG,
     list_blocks as list_blocks,
     ParallelOperator as ParallelOperator,
-)
-from .genotype import (
-    apply_maf_threshold as apply_maf_threshold,
-    binarize as binarize,
-    compute_af as compute_af,
-    flip_alleles as flip_alleles,
-    read_vcf as read_vcf,
-)
-from .structure import (
-    pca as pca,
-    svd as svd,
 )
 
 try:

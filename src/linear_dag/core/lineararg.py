@@ -16,8 +16,8 @@ import polars as pl
 from scipy.sparse import csc_matrix, csr_matrix, diags, eye
 from scipy.sparse.linalg import aslinearoperator, LinearOperator, spsolve_triangular
 
+from linear_dag.core.genotype import read_vcf
 from linear_dag.core.solve import get_nonunique_indices_csc
-from linear_dag.genotype import read_vcf
 
 from .data_structures import DiGraph
 from .linear_arg_inference import linear_arg_from_genotypes
@@ -104,7 +104,7 @@ class LinearARG(LinearOperator):
         path: Union[str, PathLike],
         phased: bool = True,
         region: Optional[str] = None,
-        include_samples: Optional[list] = None,
+        include_samples: Optional[list[str]] = None,
         flip_minor_alleles: bool = False,
         return_genotypes: bool = False,
         verbosity: int = 0,
@@ -112,7 +112,13 @@ class LinearARG(LinearOperator):
         snps_only: bool = False,
     ) -> Union[tuple, "LinearARG"]:
         genotypes, flip, v_info, iids = read_vcf(
-            path, phased, region, flip_minor_alleles, maf_filter=maf_filter, remove_indels=snps_only
+            path,
+            phased=phased,
+            region=region,
+            flip_minor_alleles=flip_minor_alleles,
+            samples=include_samples,
+            maf_filter=maf_filter,
+            remove_indels=snps_only,
         )
         if genotypes is None:
             raise ValueError("No valid variants found in VCF")
