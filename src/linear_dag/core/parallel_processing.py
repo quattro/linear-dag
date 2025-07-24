@@ -31,17 +31,6 @@ class Signal(Enum):
     ERROR = auto()
 
 
-FLAGS = {
-    "wait": 0,
-    "shutdown": -1,
-    "error": -2,
-    "get_data": 1,
-    "matmat": 2,
-    "rmatmat": 3,
-}
-assert len(np.unique([val for val in FLAGS.values()])) == len(FLAGS)
-
-
 @dataclass
 class _SharedArrayHandle:
     """Encapsulates info needed to access a shared memory NumPy array."""
