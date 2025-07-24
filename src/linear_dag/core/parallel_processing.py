@@ -1,7 +1,9 @@
+import traceback as tb
+
 from dataclasses import dataclass, field
 from enum import auto, Enum
 from functools import cached_property
-from multiprocessing import cpu_count, get_context, Lock, Process, Queue, shared_memory, Value
+from multiprocessing import cpu_count, get_context, Lock, Queue, shared_memory, Value
 from os import PathLike
 from typing import List, Optional, Tuple, Type, Union
 
@@ -13,6 +15,9 @@ from scipy.sparse import diags
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 from .lineararg import LinearARG, list_blocks
+
+# we need to do this once, and also ensure our worker definitions use this as well
+ctx = get_context("spawn")
 
 
 class Cmd(Enum):
@@ -98,7 +103,7 @@ class _SharedArrayHandle:
         self._opened_shm = None
 
 
-class _Worker(Process):
+class _Worker(ctx.Process):
     """Worker process that handles incoming tasks.
     While a ProcessExecutorPool can abstract this out for us, it doesn't have an efficient way to pre-load data
     per worker, w/o having to re-do that each time a task is spooled up. Using the worker abstract with
@@ -129,14 +134,14 @@ class _Worker(Process):
         self.lock = lock
 
     def run(self):
-        try:
-            linargs = [LinearARG.read(self.linarg_path, block) for block in self.blocks]
-            while True:
-                # this is a bit more robust to sleep/wake cycling
-                cmd, (smpl_handle, var_handle) = self.cmd_q.get()
-                if cmd is Cmd.STOP:
-                    break
-                elif cmd is Cmd.MATMAT or Cmd.RMATMAT:
+        linargs = [LinearARG.read(self.linarg_path, block) for block in self.blocks]
+        while True:
+            # this is a bit more robust to sleep/wake cycling
+            cmd, (smpl_handle, var_handle) = self.cmd_q.get()
+            if cmd is Cmd.STOP:
+                break
+            elif cmd is Cmd.MATMAT or Cmd.RMATMAT:
+                try:
                     with smpl_handle as sample_data, var_handle as variant_data:
                         sample_data_traits = sample_data[: self.num_traits.value, :].T
                         for linarg, offset in zip(linargs, self.variant_offsets):
@@ -148,11 +153,14 @@ class _Worker(Process):
                                     sample_data_traits += result
                             elif cmd is Cmd.RMATMAT:
                                 variant_data_block[:] = linarg.T @ sample_data_traits
-                        self.send(Signal.DONE, f"Completed CMD: {cmd}", block=False)
-                else:
-                    self.send(Signal.ERROR, f"Unknown CMD: {cmd}", block=False)
-        finally:
-            pass
+                    self.send(Signal.DONE, f"Completed CMD: {cmd}", block=False)
+                except Exception:
+                    # catch any exception so that the main process won't wait forever if something went wrong
+                    msg = tb.format_exc()
+                    self.send(Signal.ERROR, msg, block=False)
+                    break
+            else:
+                self.send(Signal.ERROR, f"Unknown CMD: {cmd}", block=False)
 
     def put(
         self,
@@ -187,7 +195,6 @@ class _ParallelManager:
         variant_offsets: list[int],
         num_traits: Value,
         lock: Lock,
-        queue_context,
     ):
         """
         Args:
@@ -195,10 +202,10 @@ class _ParallelManager:
             object_specification: Dict mapping name to (shape, dtype) for shared arrays.
         """
         self.processes: List[_Worker] = []
-        self.res_q: Queue = queue_context.Queue()
+        self.res_q: Queue = ctx.Queue()
 
         for block, offset in zip(process_blocks, variant_offsets):
-            cmd_q = queue_context.Queue()
+            cmd_q = ctx.Queue()
             w = _Worker(linarg_path, block, offset, cmd_q, self.res_q, num_traits, lock)
             # this should spool up the worker, which then loads its respective linear arg blocks
             w.start()
@@ -384,7 +391,6 @@ class ParallelOperator(LinearOperator):
         num_variants = block_metadata["n_variants"].sum()
         variant_offsets = np.cumsum(block_metadata["n_variants"].to_numpy()).astype(int)
         block_offsets = [variant_offsets[start:end] for start, end in process_block_ranges]
-        ctx = get_context("spawn")
 
         # create manager to pass out commands to worker processes
         num_traits = Value("i", 0, lock=False)
@@ -394,7 +400,6 @@ class ParallelOperator(LinearOperator):
             block_offsets,
             num_traits,
             ctx.Lock(),
-            ctx,
         )
 
         sample_data_handle = _SharedArrayHandle.create((max_num_traits, num_samples), np.float32)
