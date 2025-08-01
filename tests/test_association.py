@@ -44,9 +44,9 @@ def test_simulation_and_gwas():
             pheno_df.lazy(),
             pheno_cols=[pheno_col],
             covar_cols=covar_cols,
-        )[0]
+        ).collect()
 
         # 4. Assertions
         assert isinstance(gwas_results, pl.DataFrame)
         assert gwas_results.shape[0] == m
-        assert "LOG10P" in gwas_results.columns
+        assert "phenotype_LOG10P" in gwas_results.columns
