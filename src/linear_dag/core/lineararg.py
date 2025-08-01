@@ -530,8 +530,8 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
     return pl.DataFrame(block_data)
 
 
-def load_block_metadata(h5_fname, block_metadata):
-    block_names = block_metadata.get_column("block_name").to_list()
+def load_variant_info(h5_fname: str, block_names: Union[list[str], None]):
+    block_names = block_names or list_blocks(h5_fname).get_column("block_name").to_list()
     lazyframes = []
     with h5py.File(h5_fname, "r") as f:
         for block_name in block_names:
@@ -547,7 +547,7 @@ def load_block_metadata(h5_fname, block_metadata):
                 .lazy()
             )
             lazyframes.append(v_info)
-    return pl.concat(lazyframes)
+    return pl.concat(lazyframes, how="vertical")
 
 
 def add_individuals_to_graph(

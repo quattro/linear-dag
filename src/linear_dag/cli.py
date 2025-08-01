@@ -11,6 +11,7 @@ from typing import Optional, Union
 
 import h5py
 import polars as pl
+from multiprocessing import Pool
 
 from linear_dag.pipeline import (
     add_individuals_to_linarg,
@@ -25,7 +26,7 @@ from linear_dag.pipeline import (
 from .association.gwas import run_gwas
 from .association.heritability import randomized_haseman_elston
 from .association.prs import run_prs
-from .core.lineararg import LinearARG, list_blocks, load_block_metadata
+from .core.lineararg import LinearARG, list_blocks, load_variant_info
 from .core.parallel_processing import ParallelOperator
 from .memory_logger import MemoryLogger
 
@@ -236,11 +237,53 @@ def _prs(args):
 
     return
 
+###############################
+# Multiprocessing helpers
+###############################
 
+_linarg_path: str | None = None
+_pheno_cols: list[str] | None = None
+_covar_cols: list[str] | None = None
+_phenotypes: pl.DataFrame | None = None
+_out_prefix: str | None = None
+
+
+def _init_pool(linarg_path_: str, pheno_cols_: list[str], covar_cols_: list[str],
+               phenotypes_: pl.DataFrame, out_prefix_: str):
+    """Initializer run once in every worker process.
+
+    Stores large, read-only objects in process-local globals so that subsequent
+    calls to the worker avoid re-pickling them for every task.
+    """
+    global _linarg_path, _pheno_cols, _covar_cols, _phenotypes, _out_prefix
+    _linarg_path = linarg_path_
+    _pheno_cols = pheno_cols_
+    _covar_cols = covar_cols_
+    _phenotypes = phenotypes_
+    _out_prefix = out_prefix_
+
+
+def _gwas_worker(block_name: str):
+    """Run GWAS for a single block and write its results."""
+    import gzip
+    # Read block-specific genotypes
+    operator = LinearARG.read(_linarg_path, block_name)
+    # Variant metadata for this block
+    variant_info = load_variant_info(_linarg_path, [block_name])
+
+    # Run GWAS and write out
+    df = run_gwas(operator, _phenotypes.lazy(), _pheno_cols, _covar_cols,
+                  variant_info=variant_info)
+
+    out_file = f"{_out_prefix}.{block_name}.tsv.gz"
+    with gzip.open(out_file, "wb") as f:
+        df.collect().write_csv(f, separator="\t")
+    
 def _assoc_scan(args):
     logger = MemoryLogger(__name__)
 
     # load data for assoc scan
+    logger.info("Loading phenotype data")
     block_metadata, covar_cols, pheno_cols, phenotypes = _prep_data(
         args.linarg_path,
         args.pheno,
@@ -253,23 +296,25 @@ def _assoc_scan(args):
         args.num_processes,
         logger,
     )
-    logger.info("Creating parallel operator")
-    with ParallelOperator.from_hdf5(
-        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata
-    ) as linarg:
-        logger.info("Loading variant metadata")
-        variant_info = load_block_metadata(args.linarg_path, block_metadata)
 
-        logger.info("Performing GWAS")
-        results = run_gwas(linarg, phenotypes.lazy(), pheno_cols, covar_cols, variant_info=variant_info)
-        logger.info("Finished GWAS. Writing results")
-        for res, pheno in zip(results, pheno_cols):
-            with gzip.open(f"{args.out}.{pheno}.tsv.gz", "wb") as f:
-                res.write_csv(f, separator="\t")
+    with Pool(
+        processes=args.num_processes,
+        initializer=_init_pool,
+        initargs=(
+            args.linarg_path,
+            pheno_cols,
+            covar_cols,
+            phenotypes,
+            args.out,
+        ),
+    ) as p:
+        logger.info(f"Started parallel pool with {p._processes} processes")
+        block_names = block_metadata.get_column("block_name").to_list()
+        p.map(_gwas_worker, block_names)
 
-        logger.info("Done!")
+    logger.info("Done!")
 
-        return
+    return
 
 
 def _estimate_h2g(args):

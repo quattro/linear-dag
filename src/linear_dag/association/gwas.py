@@ -22,7 +22,6 @@ def get_gwas_beta_se(
     phenotypes: np.ndarray,
     covariates: np.ndarray,
     assume_hwe: bool,
-    variant_info: Optional[pl.LazyFrame] = None,
 ) -> np.ndarray:
     """
     Gets GWAS effect-size estimates and standard errors in per-allele units.
@@ -65,6 +64,7 @@ def get_gwas_beta_se(
 
     # Handle missingness
     covariates = _impute_missing_with_mean(covariates)
+
     is_missing = np.isnan(phenotypes)
     num_nonmissing = np.sum(~is_missing, axis=0)
     phenotypes.ravel()[is_missing.ravel()] = 0
@@ -92,6 +92,26 @@ def get_gwas_beta_se(
 
     return (numerator / denominator, se, num_nonmissing // 2, allele_counts, carrier_counts)
 
+def _format_sumstats(
+    beta: np.ndarray,
+    se: np.ndarray,
+    variant_info: pl.LazyFrame,
+    pheno_cols: list[str],
+    ) -> pl.LazyFrame:
+
+    def log_chisq_pval(z: np.ndarray) -> np.ndarray:
+        return -chi2(1).logsf(z**2) / np.log(10)
+
+    data = np.hstack((beta, se, log_chisq_pval(beta / se)))
+    names = [f"{name}_{suffix}"  for suffix in ["BETA", "SE", "LOG10P"] for name in pheno_cols]
+    
+    names_in_order = variant_info.collect_schema().names() + \
+        [f"{name}_{suffix}" for name in pheno_cols for suffix in ["BETA", "SE", "LOG10P"]]
+
+    df = pl.LazyFrame(data, schema=names)
+    df = pl.concat([variant_info, df], how="horizontal").select(names_in_order)
+    return df
+
 
 def run_gwas(
     genotypes: LinearOperator,
@@ -100,7 +120,7 @@ def run_gwas(
     covar_cols: list[str],
     variant_info: Optional[pl.LazyFrame] = None,
     assume_hwe: bool = True,
-) -> list:
+) -> pl.LazyFrame:
     """
     Runs a linear regression association scan with covariates.
 
@@ -124,10 +144,13 @@ def run_gwas(
 
     if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
-
+    
     left_op, right_op = get_inner_merge_operators(
-        data.select("iid").collect().to_series(), genotypes.iids
+        data.select("iid").cast(pl.Utf8).collect().to_series(), genotypes.iids
     )  # data iids to shared iids, shared iids to genotypes iids
+    if left_op.shape[1] == 0:
+        raise ValueError("Merge failed between genotype and phenotype data")
+
     phenotypes = data.select(pheno_cols).collect().to_numpy()
     covariates = data.select(covar_cols).collect().to_numpy()
 
@@ -135,55 +158,10 @@ def run_gwas(
         genotypes, left_op, right_op, phenotypes, covariates, assume_hwe
     )
 
-    m, num_traits = beta.shape
-    if len(pheno_cols) != num_traits:
-        raise ValueError("Mismatch between number of pheno_cols and calculated traits.")
-    if sample_size.shape != (num_traits,):
-        # Adjust if sample_size comes out as (1, num_traits)
-        if sample_size.shape == (1, num_traits):
-            sample_size = sample_size.flatten()
-        else:
-            raise ValueError(f"Unexpected shape for sample_size: {sample_size.shape}")
+    if variant_info is None:
+        variant_info = pl.LazyFrame()
+    variant_info = variant_info.with_columns(
+        pl.Series("A1FREQ", allele_counts.ravel() / genotypes.shape[0]).cast(pl.Int64),
+    )
 
-    def log_chisq_pval(z: np.ndarray) -> np.ndarray:
-        # return -np.log10(1 - chi2(1).cdf(z ** 2))
-        return -chi2(1).logsf(z**2)
-
-    results = []
-
-    cols = ["A1FREQ", "BETA", "SE", "CHISQ", "LOG10P", "N"]
-    if variant_info is not None:
-        cols = ["CHROM", "POS", "ID", "ALLELE0", "ALLELE1"] + cols
-        variant_info = variant_info.rename(
-            {
-                "REF": "ALLELE0",
-                "ALT": "ALLELE1",
-            }
-        )
-        variant_info = variant_info.with_row_index("variant_index").with_columns(pl.col("variant_index").cast(pl.Int32))
-    if carrier_counts is not None:
-        cols = cols + ["CARRIER_COUNTS"]
-
-    for i in range(len(pheno_cols)):
-        z_scores = beta[:, i] / se[:, i]
-        frame_dict = {
-            "variant_index": pl.Series("variant_index", np.arange(m, dtype=np.int32), dtype=pl.Int32),
-            "BETA": beta[:, i],
-            "SE": se[:, i],
-            "CHISQ": z_scores**2,
-            "LOG10P": log_chisq_pval(z_scores),
-            "A1FREQ": allele_counts.reshape(-1) / genotypes.shape[0],
-            "N": m * [genotypes.shape[0] // 2],
-        }
-        if carrier_counts is not None:
-            frame_dict["CARRIER_COUNTS"] = carrier_counts.reshape(-1)
-
-        df = pl.DataFrame(frame_dict)
-
-        if variant_info is not None:
-            df = df.join(variant_info.collect(), on="variant_index", how="left")
-
-        df = df.select(cols)
-        results.append(df)
-
-    return results
+    return _format_sumstats(beta, se, variant_info, pheno_cols)
