@@ -482,7 +482,7 @@ def _add_individuals_to_linarg(args):
 
 def _compress(args):
     compress_vcf(
-        input_vcf=args.input_vcf,
+        input_vcf=args.vcf_path,
         output_h5=args.output_h5,
         region=args.region,
         keep_path=args.keep,
@@ -644,14 +644,15 @@ def _main(args):
         help="Compress VCF to kodama format",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    compress_p.add_argument("input_vcf", help="Path to input VCF")
-    compress_p.add_argument("output_h5", help="Path to output HDF5 file")
+    compress_p.add_argument("vcf_path", metavar="vcf-path", help="Path to input VCF")
+    compress_p.add_argument("output_h5", metavar="output-h5", help="Path to output HDF5 file")
     compress_p.add_argument("--flip-minor-alleles", action="store_true", help="Should minor alleles be flipped?")
     compress_p.add_argument("--keep", help="Path to file of IIDs to include in construction of the genotype matrix.")
     compress_p.add_argument("--maf", type=float, help="Filter out variants with MAF less than maf")
     compress_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
     compress_p.add_argument("--add-individual-nodes", action="store_true", help="Add individual nodes for Hardy Weinberg calculations.")
     compress_p.add_argument("--region", help="Genomic region of the form chrN:start-end")
+    compress_p.add_argument("--out", default="kodama", help="Location to save result files.")
     compress_p.set_defaults(func=_compress)
 
     prs_p = _create_common_parser(subp, "prs", help="Run PRS")
