@@ -726,6 +726,7 @@ def _create_common_build_parser(subp, name, help, include_parition: bool = False
             "--partition-identifier",
             help="Partition identifier in the form {paritition_number}_{region}",
         )
+    common_b_p.add_argument("--out", default="kodama", help="Location to save result files.")
     return common_b_p
 
 
