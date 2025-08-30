@@ -37,28 +37,33 @@ def get_gwas_beta_se(
     """
     if not np.allclose(covariates[:, 0], 1):
         raise ValueError("First column of covariates should be all-ones")
+    
     if num_nonmissing is None:
         num_nonmissing = y_resid.shape[0] * np.ones(y_resid.shape[1])
+
+    num_covariates = covariates.shape[1]
+    if any(num_nonmissing < num_covariates):
+        raise ValueError("num_nonmissing must be at least num_covariates for each trait")
 
     # Numerator uses pre-merged genotypes and pre-residualized phenotypes
     numerator = genotypes.T @ y_resid / num_nonmissing
 
     # Denominator, equal across traits despite different missingness
     var_explained, allele_counts = _get_genotype_variance_explained(genotypes, covariates)
-    if num_carriers is None:
-        denominator = allele_counts - var_explained
-    else:
+    denominator_hap = allele_counts - var_explained
+    denominator_hap = np.maximum(denominator_hap, 1e-6) / (2 * genotypes.shape[0])  # assumes diploid
+    denominator_dip = denominator_hap    
+    if num_carriers is not None:
         # assumes diploid
         num_homozygotes = (allele_counts - num_carriers.reshape(*allele_counts.shape)) // 2
         assert allele_counts.shape == num_homozygotes.shape
-        denominator = allele_counts + 2 * num_homozygotes - 2 * var_explained
-    # Clamp to avoid div-by-zero under extreme missingness/rare variants; assumes diploid in scaling.
-    denominator = np.maximum(denominator, 1e-6) / (2 * genotypes.shape[0])  # assumes diploid
-    
-    var_resid = np.sum(y_resid**2, axis=0) / num_nonmissing
-    se = np.sqrt(var_resid.reshape(1, -1) / (denominator * num_nonmissing.reshape(1, -1)))
+        denominator_dip += 2 * num_homozygotes - var_explained
+    beta = numerator / denominator_hap
+    var_resid = np.sum(y_resid**2, axis=0).reshape(1, -1)
+    se = np.sqrt(var_resid / (denominator_dip * (num_nonmissing - num_covariates).reshape(1, -1)))
 
-    return numerator / denominator, se, allele_counts
+    return beta, se, allele_counts
+
 
 
 def _format_sumstats(

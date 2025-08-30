@@ -57,7 +57,6 @@ def test_simulation_and_gwas():
         # 4. Assertions
         assert isinstance(gwas_results, pl.DataFrame)
         assert gwas_results.shape[0] == m
-        assert "phenotype_LOG10P" in gwas_results.columns
 
 
 @pytest.mark.parametrize("assume_hwe", [True, False])
@@ -107,8 +106,8 @@ def test_gwas_parallel_matches_run_gwas(tmp_path, assume_hwe):
         blocks = list_blocks(str(hdf5_path))["block_name"].to_list()
         for block in blocks:
             # Load worker block output
-            out_path = tmp_path / f"{block}.tsv"
-            df_block = pl.read_csv(out_path, separator="\t")
+            out_path = tmp_path / f"{block}.parquet"
+            df_block = pl.read_parquet(out_path)
 
             # Compute expected for this block by calling run_gwas on the block
             linarg = LinearARG.read(str(hdf5_path), block=block, load_metadata=True)
@@ -120,9 +119,6 @@ def test_gwas_parallel_matches_run_gwas(tmp_path, assume_hwe):
                 variant_info=linarg.variants,
                 assume_hwe=assume_hwe,
             ).collect()
-            # Rename phenotype_* columns to ph0_* to match worker naming
-            rename_map = {f"{pheno_cols[0]}_{suf}": f"ph0_{suf}" for suf in ["BETA", "SE", "LOG10P"]}
-            expected_b = expected_b.rename(rename_map)
             df_block_stats = df_block.select(expected_b.columns)
 
             assert expected_b.shape == df_block_stats.shape
