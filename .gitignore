@@ -90,3 +90,5 @@ luke/*
 MATLAB/luke/*
 MATLAB/old/*
 .windsurfrules
+setup_cython.py
+compile_cython.sh

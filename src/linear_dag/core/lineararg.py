@@ -426,13 +426,7 @@ class LinearARG(LinearOperator):
             if load_metadata:
                 v_dict = {field: f[field][:].astype(str) for field in ["CHROM", "POS", "ID", "REF", "ALT"]}
                 v_info = (
-                    pl.DataFrame(v_dict)
-                    .with_columns(
-                        [
-                            pl.col("POS").cast(pl.Int32),
-                        ]
-                    )
-                    .lazy()
+                    pl.LazyFrame(v_dict, schema=[("CHROM", pl.String), ("POS", pl.Int32), ("ID", pl.String), ("REF", pl.String), ("ALT", pl.String)])
                 )
             else:
                 v_info = None

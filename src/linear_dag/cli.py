@@ -23,7 +23,7 @@ from linear_dag.pipeline import (
     run_forward_backward,
 )
 
-from .association.gwas import run_gwas
+from .association.gwas import run_gwas, run_gwas_parallel
 from .association.heritability import randomized_haseman_elston
 from .association.prs import run_prs
 from .core.lineararg import LinearARG, list_blocks, load_variant_info
@@ -297,20 +297,19 @@ def _assoc_scan(args):
         logger,
     )
 
-    with Pool(
-        processes=args.num_processes,
-        initializer=_init_pool,
-        initargs=(
-            args.linarg_path,
-            pheno_cols,
-            covar_cols,
-            phenotypes,
-            args.out,
-        ),
-    ) as p:
-        logger.info(f"Started parallel pool with {p._processes} processes")
-        block_names = block_metadata.get_column("block_name").to_list()
-        p.map(_gwas_worker, block_names)
+    # Ensure output directory exists (args.out used as directory prefix)
+    os.makedirs(args.out, exist_ok=True)
+
+    # Run parallel GWAS; writes per-block parquet files under args.out
+    run_gwas_parallel(
+        args.linarg_path,
+        phenotypes.lazy(),
+        pheno_cols=pheno_cols,
+        covar_cols=covar_cols,
+        output_prefix=args.out,
+        assume_hwe=not args.no_hwe,
+        num_workers=args.num_processes,
+    )
 
     logger.info("Done!")
 
@@ -505,6 +504,11 @@ def _main(args):
     # build association scan parser from 'common' parser
     assoc_p = _create_common_parser(subp, "assoc", help="Perform an association scan using the linear ARG.")
     assoc_p.set_defaults(func=_assoc_scan)
+    assoc_p.add_argument(
+        "--no-hwe",
+        action="store_true",
+        help="Do not assume Hardy-Weinberg equilibrium (requires individual nodes in the ARG).",
+    )
 
     # build h2g estimation parser from 'common' parser, but add additional options for RHE
     rhe_p = _create_common_parser(subp, "rhe", help="Estimate SNP heritability using linear ARG")
