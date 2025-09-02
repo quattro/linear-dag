@@ -563,7 +563,7 @@ def _main(args):
     )
     make_geno_p.add_argument("vcf-path", help="Path to VCF file")
     make_geno_p.add_argument(
-        "linarg-dir",
+        "linarg_dir",
         help="Directory to store linear ARG outputs (must be the same for Steps 1-3)",
     )
     make_geno_p.add_argument("--region", help="Genomic region of the form chrN:start-end")
@@ -717,7 +717,7 @@ def _main(args):
 def _create_common_build_parser(subp, name, help, include_parition: bool = False):
     common_b_p = subp.add_parser(name, help=help)
     common_b_p.add_argument(
-        "linarg-dir",
+        "linarg_dir",
         help="Directory to store linear ARG outputs (must be the same for Steps 1-3)",
     )
     common_b_p.add_argument(
