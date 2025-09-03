@@ -25,7 +25,7 @@ from linear_dag.pipeline import (
 
 from .association.gwas import run_gwas, run_gwas_parallel
 from .association.heritability import randomized_haseman_elston
-from .association.prs import run_prs
+from .association.prs import run_prs_parallel
 from .core.lineararg import LinearARG, list_blocks, load_variant_info
 from .core.parallel_processing import ParallelOperator
 from .memory_logger import MemoryLogger
@@ -211,28 +211,10 @@ def _read_pheno_or_covar(
 
 def _prs(args):
     logger = MemoryLogger(__name__)
-    logger.info("Getting blocks")
-    block_metadata = list_blocks(args.linarg_path)
-    if args.chrom is not None:
-        block_metadata = _filter_blocks_by_chrom(block_metadata, args.chrom)
-
-    logger.info("Creating parallel operator")
-    with ParallelOperator.from_hdf5(
-        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata
-    ) as linarg:
-        logger.info("Reading iids")
-        with h5py.File(args.linarg_path, "r") as f:
-            # iids = f["iids"][:]
-            iids = [iid.decode("utf-8") for iid in f['iids'][:]]
-        logger.info("Reading in weights")
-        betas = pl.read_csv(args.betas_path, separator="\t")
-        with open(args.score_cols) as f:
-            score_cols = f.read().splitlines()
-        logger.info("Performing scoring")
-        result = run_prs(linarg, betas.lazy(), score_cols, iids)
-        logger.info("Writing results")
-        with gzip.open(f"{args.out}.tsv.gz", "wb") as f:
-            result.write_csv(f, separator="\t")
+    result = run_prs_parallel(args.linarg_path, args.beta_path, args.score_cols, num_workers=args.num_workers, blocks=args.blocks, chromosomes=args.chrom)
+    logger.info("Writing results")
+    with gzip.open(f"{args.out}.tsv.gz", "wb") as f:
+        result.write_csv(f, separator="\t")
     logger.info("Done!")
 
     return
@@ -539,18 +521,26 @@ def _main(args):
 
     prs_p = subp.add_parser("score", help="Score individuals using linear ARG")
     prs_p.add_argument("--linarg-path", help="Path to linear ARG (.h5 file)")
-    prs_p.add_argument("--betas-path", help="Path to file with betas (tab-delimited).")
+    prs_p.add_argument("--beta-path", help="Path to file with betas (tab-delimited).")
     prs_p.add_argument(
         "--score-cols",
-        help="Path to text file with score columns corresponding to betas_path",
+        nargs="+",
+        help="Which columns to perform the prs on in beta_path.",
     )
     prs_p.add_argument(
         "--chrom",
         type=int,
-        help="Which chromosome to run the association on. Defaults to all chromosomes.",
+        nargs="+",
+        help="Which chromosomes to run the PRS on. Defaults to all chromosomes.",
     )
     prs_p.add_argument(
-        "--num-processes",
+        "--blocks",
+        type=int,
+        nargs="+",
+        help="Which blocks to run the PRS on. Defaults to all blocks.",
+    )
+    prs_p.add_argument(
+        "--num-workers",
         type=int,
         help="How many cores to uses. Defaults to all available cores.",
     )
