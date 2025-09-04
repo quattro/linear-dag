@@ -99,13 +99,23 @@ def run_prs_parallel(hdf5_file, beta_path, score_cols, num_workers=None, blocks=
         )
         for row in blocks_meta.iter_rows(named=True)
     ]
+    if len(tasks) == 0:
+        shm.close()
+        shm.unlink()
+        raise ValueError(
+            "No tasks were generated. Check --chrom or --blocks"
+        )
     print(f"Step 5 (prepare tasks) took {time.time() - t0:.2f}s")
 
     # Step 6: Launch worker pool
     t0 = time.time()
+    
+    from multiprocessing import get_context
+    ctx = get_context("spawn")  # use 'spawn' to avoid fork-related issues
+    
     if num_workers is None:
         num_workers = cpu_count()
-    with Pool(
+    with ctx.Pool(
         min(num_workers, len(tasks)),
         initializer=_init_worker,
         initargs=(lock,),
