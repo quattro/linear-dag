@@ -529,13 +529,13 @@ def _main(args):
     )
     prs_p.add_argument(
         "--chrom",
-        type=int,
+        type=str,
         nargs="+",
         help="Which chromosomes to run the PRS on. Defaults to all chromosomes.",
     )
     prs_p.add_argument(
         "--blocks",
-        type=int,
+        type=str,
         nargs="+",
         help="Which blocks to run the PRS on. Defaults to all blocks.",
     )
