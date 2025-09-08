@@ -5,6 +5,7 @@ import h5py
 from scipy.sparse import coo_matrix
 from multiprocessing import Pool, shared_memory, Lock, cpu_count
 from linear_dag.core.lineararg import list_blocks, LinearARG
+import csv
 
 # global lock for workers
 _global_lock = None
@@ -13,23 +14,25 @@ def _init_worker(lock):
     global _global_lock
     _global_lock = lock
 
-def _prs_worker(hdf5_file, beta_path, block_name, beta_starting_index, n_variants, score_cols, shm_name, res_shape):
+def _prs_worker(hdf5_file, block_name, beta_starting_index, n_variants, score_cols, shm_name, res_shape):
     global _global_lock
     shm = shared_memory.SharedMemory(name=shm_name)
     prs = np.ndarray(res_shape, dtype=np.float64, buffer=shm.buf)
 
     # Load genotype block
+    print(f"{os.getpid()}: start block {block_name}", flush=True)
     linarg = LinearARG.read(hdf5_file, block=block_name)
+    print(f"{os.getpid()}: finished reading {block_name}", flush=True)
 
     # Load beta slice
     beta = (
-        pl.scan_csv(beta_path, separator='\t')
+        pl.scan_parquet('beta_tmp.parquet')
         .select(score_cols)
         .slice(beta_starting_index, n_variants)
         .collect()
         .to_numpy()
     )
-
+    
     # Compute partial PRS
     partial = linarg @ beta
 
@@ -41,6 +44,12 @@ def _prs_worker(hdf5_file, beta_path, block_name, beta_starting_index, n_variant
 
 def run_prs_parallel(hdf5_file, beta_path, score_cols, num_workers=None, blocks=None, chromosomes=None):
     start_total = time.time()
+    
+    # Step 0: Convert to parquet
+    t0 = time.time()
+    pl.scan_csv(beta_path, separator="\t").collect().write_parquet("beta_tmp.parquet", row_group_size=50_000)
+    print(f"Step 0 (convert to parquet) took {time.time() - t0:.2f}s")
+
 
     # Step 1: Get blocks
     t0 = time.time()
@@ -89,7 +98,6 @@ def run_prs_parallel(hdf5_file, beta_path, score_cols, num_workers=None, blocks=
     tasks = [
         (
             hdf5_file,
-            beta_path,
             row["block_name"],
             row["starting_index"],
             row["n_variants"],
@@ -131,7 +139,7 @@ def run_prs_parallel(hdf5_file, beta_path, score_cols, num_workers=None, blocks=
     col_indices = np.arange(num_cols)
     data = np.ones(num_cols, dtype=np.int8)
     S = coo_matrix((data, (row_indices, col_indices)), shape=(num_ids, num_cols)).tocsc()
-    prs_ind = S @ prs
+    prs_ind = S @ prs # sum haplotypes
     print(f"Step 7 (sparse matrix multiplication) took {time.time() - t0:.2f}s")
 
     # Step 8: Build Polars DataFrame
