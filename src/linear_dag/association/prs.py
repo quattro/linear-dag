@@ -26,31 +26,30 @@ def _prs_worker(hdf5_file, block_name, beta_starting_index, n_variants, score_co
     print(f"{os.getpid()}: finished reading {block_name}", flush=True)
 
     # Load beta slice
-    # beta = (
-    #     pl.scan_parquet('beta_tmp.parquet')
-    #     .select(score_cols)
-    #     .slice(beta_starting_index, n_variants)
-    #     .collect()
-    #     .to_numpy()
-    # )
-    
-    print(f"{os.getpid()}: start block {block_name} (before beta read)", flush=True)
-    t0 = time.time()
-    beta_lazy = pl.scan_parquet('beta_tmp.parquet').select(score_cols)
-    print(f"{os.getpid()}: lazy scan done {time.time() - t0:.2f}s", flush=True)
-    beta_slice = beta_lazy.slice(beta_starting_index, n_variants)
-    print(f"{os.getpid()}: slice done {time.time() - t0:.2f}s", flush=True)
-    beta = beta_slice.collect().to_numpy()
-    print(f"{os.getpid()}: collect done {time.time() - t0:.2f}s", flush=True)
+    print(f"{os.getpid()}: reading betas {block_name}", flush=True)
+    beta = (
+        pl.scan_parquet('beta_tmp.parquet')
+        .select(score_cols)
+        .slice(beta_starting_index, n_variants)
+        .collect()
+        .to_numpy()
+    )
+    print(f"{os.getpid()}: finished reading betas {block_name}", flush=True)
     
     # Compute partial PRS
+    print(f"{os.getpid()}: computing partial PRS {block_name}", flush=True)
     partial = linarg @ beta
+    print(f"{os.getpid()}: finished computing partial PRS {block_name}", flush=True)
 
     # Update shared memory safely
+    print(f"{os.getpid()}: updating shared memory {block_name}", flush=True)
     with _global_lock:
         prs[:, :] += partial
+    print(f"{os.getpid()}: finished updating shared memory {block_name}", flush=True)
 
+    print(f"{os.getpid()}: closing {block_name}", flush=True)
     shm.close()
+    print(f"{os.getpid()}: finished closing {block_name}", flush=True)
 
 def run_prs_parallel(hdf5_file, beta_path, score_cols, num_workers=None, blocks=None, chromosomes=None):
     start_total = time.time()
