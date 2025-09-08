@@ -9,9 +9,7 @@ from importlib import metadata
 from os import PathLike
 from typing import Optional, Union
 
-import h5py
 import polars as pl
-from multiprocessing import Pool
 
 from linear_dag.pipeline import (
     add_individuals_to_linarg,
@@ -211,13 +209,21 @@ def _read_pheno_or_covar(
 
 def _prs(args):
     logger = MemoryLogger(__name__)
-    result = run_prs_parallel(args.linarg_path, args.beta_path, args.score_cols, num_workers=args.num_workers, blocks=args.blocks, chromosomes=args.chrom)
+    result = run_prs_parallel(
+        args.linarg_path,
+        args.beta_path,
+        args.score_cols,
+        num_workers=args.num_workers,
+        blocks=args.blocks,
+        chromosomes=args.chrom,
+    )
     logger.info("Writing results")
     with gzip.open(f"{args.out}.tsv.gz", "wb") as f:
         result.write_csv(f, separator="\t")
     logger.info("Done!")
 
     return
+
 
 ###############################
 # Multiprocessing helpers
@@ -230,8 +236,9 @@ _phenotypes: pl.DataFrame | None = None
 _out_prefix: str | None = None
 
 
-def _init_pool(linarg_path_: str, pheno_cols_: list[str], covar_cols_: list[str],
-               phenotypes_: pl.DataFrame, out_prefix_: str):
+def _init_pool(
+    linarg_path_: str, pheno_cols_: list[str], covar_cols_: list[str], phenotypes_: pl.DataFrame, out_prefix_: str
+):
     """Initializer run once in every worker process.
 
     Stores large, read-only objects in process-local globals so that subsequent
@@ -248,19 +255,20 @@ def _init_pool(linarg_path_: str, pheno_cols_: list[str], covar_cols_: list[str]
 def _gwas_worker(block_name: str):
     """Run GWAS for a single block and write its results."""
     import gzip
+
     # Read block-specific genotypes
     operator = LinearARG.read(_linarg_path, block_name)
     # Variant metadata for this block
     variant_info = load_variant_info(_linarg_path, [block_name])
 
     # Run GWAS and write out
-    df = run_gwas(operator, _phenotypes.lazy(), _pheno_cols, _covar_cols,
-                  variant_info=variant_info)
+    df = run_gwas(operator, _phenotypes.lazy(), _pheno_cols, _covar_cols, variant_info=variant_info)
 
     out_file = f"{_out_prefix}.{block_name}.tsv.gz"
     with gzip.open(out_file, "wb") as f:
         df.collect().write_csv(f, separator="\t")
-    
+
+
 def _assoc_scan(args):
     logger = MemoryLogger(__name__)
 
@@ -553,7 +561,7 @@ def _main(args):
     )
     make_geno_p.add_argument("vcf-path", help="Path to VCF file")
     make_geno_p.add_argument(
-        "linarg_dir",
+        "linarg-dir",
         help="Directory to store linear ARG outputs (must be the same for Steps 1-3)",
     )
     make_geno_p.add_argument("--region", help="Genomic region of the form chrN:start-end")
@@ -578,6 +586,7 @@ def _main(args):
         "--sex-path",
         help="Path to .txt file sex data where males are encoded as 1 and females 0. Only use if running chrX.",
     )
+    make_geno_p.add_argument("--out", default="kodama", help="Location to save result files.")
     make_geno_p.set_defaults(func=_make_geno)
 
     # construct parser for inferring brick graph
@@ -644,7 +653,9 @@ def _main(args):
     compress_p.add_argument("--keep", help="Path to file of IIDs to include in construction of the genotype matrix.")
     compress_p.add_argument("--maf", type=float, help="Filter out variants with MAF less than maf")
     compress_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
-    compress_p.add_argument("--add-individual-nodes", action="store_true", help="Add individual nodes for Hardy Weinberg calculations.")
+    compress_p.add_argument(
+        "--add-individual-nodes", action="store_true", help="Add individual nodes for Hardy Weinberg calculations."
+    )
     compress_p.add_argument("--region", help="Genomic region of the form chrN:start-end")
     compress_p.add_argument("--out", default="kodama", help="Location to save result files.")
     compress_p.set_defaults(func=_compress)
