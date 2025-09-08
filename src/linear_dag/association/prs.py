@@ -26,13 +26,22 @@ def _prs_worker(hdf5_file, block_name, beta_starting_index, n_variants, score_co
     print(f"{os.getpid()}: finished reading {block_name}", flush=True)
 
     # Load beta slice
-    beta = (
-        pl.scan_parquet('beta_tmp.parquet')
-        .select(score_cols)
-        .slice(beta_starting_index, n_variants)
-        .collect()
-        .to_numpy()
-    )
+    # beta = (
+    #     pl.scan_parquet('beta_tmp.parquet')
+    #     .select(score_cols)
+    #     .slice(beta_starting_index, n_variants)
+    #     .collect()
+    #     .to_numpy()
+    # )
+    
+    print(f"{os.getpid()}: start block {block_name} (before beta read)", flush=True)
+    t0 = time.time()
+    beta_lazy = pl.scan_parquet('beta_tmp.parquet').select(score_cols)
+    print(f"{os.getpid()}: lazy scan done {time.time() - t0:.2f}s", flush=True)
+    beta_slice = beta_lazy.slice(beta_starting_index, n_variants)
+    print(f"{os.getpid()}: slice done {time.time() - t0:.2f}s", flush=True)
+    beta = beta_slice.collect().to_numpy()
+    print(f"{os.getpid()}: collect done {time.time() - t0:.2f}s", flush=True)
     
     # Compute partial PRS
     partial = linarg @ beta
