@@ -43,8 +43,8 @@ def _prs_worker(hdf5_file, block_name, beta_starting_index, n_variants, score_co
 
     # Update shared memory safely
     print(f"{os.getpid()}: updating shared memory {block_name}", flush=True)
-    with _global_lock:
-        prs[:, :] += partial
+    # with _global_lock:
+    prs[:, :] += partial
     print(f"{os.getpid()}: finished updating shared memory {block_name}", flush=True)
 
     print(f"{os.getpid()}: closing {block_name}", flush=True)
