@@ -25,7 +25,8 @@ from linear_dag.pipeline import (
 
 from .association.gwas import run_gwas, run_gwas_parallel
 from .association.heritability import randomized_haseman_elston
-from .association.prs import run_prs_parallel
+# from .association.prs import run_prs_parallel
+from .association.prs_shm import run_prs_parallel_shm
 from .core.lineararg import LinearARG, list_blocks, load_variant_info
 from .core.parallel_processing import ParallelOperator
 from .memory_logger import MemoryLogger
@@ -211,7 +212,7 @@ def _read_pheno_or_covar(
 
 def _prs(args):
     logger = MemoryLogger(__name__)
-    result = run_prs_parallel(args.linarg_path, args.beta_path, args.score_cols, num_workers=args.num_workers, blocks=args.blocks, chromosomes=args.chrom)
+    result = run_prs_parallel_shm(args.linarg_path, args.beta_path, args.score_cols, num_workers=args.num_workers, blocks=args.blocks, chromosomes=args.chrom)
     logger.info("Writing results")
     with gzip.open(f"{args.out}.tsv.gz", "wb") as f:
         result.write_csv(f, separator="\t")

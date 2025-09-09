@@ -43,8 +43,8 @@ def _prs_worker(hdf5_file, block_name, beta_starting_index, n_variants, score_co
 
     # Update shared memory safely
     print(f"{os.getpid()}: updating shared memory {block_name}", flush=True)
-    # with _global_lock:
-    prs[:, :] += partial
+    with _global_lock:
+        prs[:, :] += partial
     print(f"{os.getpid()}: finished updating shared memory {block_name}", flush=True)
 
     print(f"{os.getpid()}: closing {block_name}", flush=True)
@@ -95,11 +95,9 @@ def run_prs_parallel(hdf5_file, beta_path, score_cols, num_workers=None, blocks=
 
     # Step 4: Compute starting indices
     t0 = time.time()
-    starting_index = pl.Series(
-        "starting_index",
-        [0] + blocks_meta["n_variants"].to_list()[:-1]
-    )
-    blocks_meta = blocks_meta.with_columns(starting_index)
+    n_vars = blocks_meta["n_variants"].to_list()
+    offsets = np.cumsum([0] + n_vars[:-1])
+    blocks_meta = blocks_meta.with_columns(pl.Series("starting_index", offsets))
     print(f"Step 4 (starting indices) took {time.time() - t0:.2f}s")
 
     # Step 5: Prepare tasks
