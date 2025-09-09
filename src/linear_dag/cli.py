@@ -559,9 +559,9 @@ def _main(args):
         "make-geno",
         help="Step 1 of partition and merge pipeline. Makes sparse genotype matrices from VCF file.",
     )
-    make_geno_p.add_argument("vcf-path", help="Path to VCF file")
+    make_geno_p.add_argument("vcf_path", help="Path to VCF file")
     make_geno_p.add_argument(
-        "linarg-dir",
+        "linarg_dir",
         help="Directory to store linear ARG outputs (must be the same for Steps 1-3)",
     )
     make_geno_p.add_argument("--region", help="Genomic region of the form chrN:start-end")
