@@ -303,10 +303,13 @@ def _gwas_worker(
         iids = np.ndarray(iids_shape, dtype=np.dtype(iids_dtype_str), buffer=shm_iids.buf)
 
         # Load genotypes for this block (with variant metadata)
+        print(f"{os.getpid()}: loading linear ARG for {block_name}", flush=True)
         linarg = LinearARG.read(hdf5_file, block=block_name, load_metadata=True)
+        print(f"{os.getpid()}: finished loading linear ARG for {block_name}", flush=True)
         t_read = time.perf_counter()
 
         # Merge arrays to shared sample space (iids are in genotype order from run_gwas_parallel)
+        print(f"{os.getpid()}: merging genotypes and phenotypes for {block_name}", flush=True)
         left_op, right_op = get_inner_merge_operators(
             pl.Series(iids.ravel().astype(str)), linarg.iids
         )
@@ -321,6 +324,7 @@ def _gwas_worker(
         # Merge genotypes to shared space
         genotypes_m = right_op @ linarg
         t_merge_g = time.perf_counter()
+        print(f"{os.getpid()}: finished merging genotypes and phenotypes for {block_name}", flush=True)
         
         if assume_hwe:
             num_carriers = None
@@ -330,14 +334,17 @@ def _gwas_worker(
             num_carriers = linarg.number_of_carriers(individuals_to_include)
         t_car = time.perf_counter()
         
+        print(f"{os.getpid()}: computing stats for {block_name}", flush=True)
         beta, se, allele_counts = get_gwas_beta_se(
             genotypes_m, phenotypes_m, covariates_m,
             num_nonmissing=num_nonmissing,
             num_carriers=num_carriers,
         )
+        print(f"{os.getpid()}: finished computing stats for {block_name}", flush=True)
         t_stats = time.perf_counter()
 
         # Variant info and phenotype names
+        print(f"{os.getpid()}: writing results for {block_name}", flush=True)
         variant_info = linarg.variants if linarg.variants is not None else pl.LazyFrame()
         variant_info = variant_info.with_columns(
             pl.Series("A1FREQ", allele_counts.ravel() / genotypes_m.shape[0]).cast(pl.Float32)
@@ -350,6 +357,7 @@ def _gwas_worker(
         df = lf.collect()
         t_collect = time.perf_counter()
         df.write_parquet(out_path, compression="uncompressed")
+        print(f"{os.getpid()}: finished writing results for {block_name}", flush=True)
         t_write = time.perf_counter()
         return {
             "read": t_read - t0,
