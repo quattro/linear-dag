@@ -9,5 +9,6 @@ def run_prs(genotypes: LinearOperator, data: pl.LazyFrame, score_cols: list[str]
     prs = genotypes @ beta
     frame_dict = {"iid": iids}
     frame_dict.update({score: prs[:, i] for i, score in enumerate(score_cols)})
-    res = pl.DataFrame(frame_dict)
+    schema_overrides = {"iid": pl.Utf8} | {score: pl.Float64 for score in score_cols}
+    res = pl.DataFrame(frame_dict, schema_overrides=schema_overrides)
     return res
