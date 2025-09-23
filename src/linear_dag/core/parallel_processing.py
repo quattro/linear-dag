@@ -189,6 +189,7 @@ class ParallelOperator(LinearOperator):
         return result
 
     def _rmatmat(self, x: np.ndarray):
+        import time
         if x.shape[0] != self.shape[0]:
             raise ValueError(
                 f"Incorrect dimensions for matrix multiplication. Inputs had size {self.T.shape} and{x.shape}."
@@ -203,11 +204,16 @@ class ParallelOperator(LinearOperator):
 
             with self._sample_data_handle as sample_data:
                 sample_data[: end - start, :] = x[:, start:end].astype(np.float32).T
+
+            t = time.time()
             self._manager.start_workers(FLAGS["rmatmat"])
             self._manager.await_workers()
+            print(f"Time to await workers: {time.time() - t}")
 
+            t = time.time()
             with self._variant_data_handle as variant_data:
                 result[:, start:end] = variant_data[:, : end - start]
+            print(f"Time to access variant data: {time.time() - t}")
 
         return result
 
