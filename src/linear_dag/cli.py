@@ -202,18 +202,19 @@ def _prs(args):
     block_metadata = list_blocks(args.linarg_path)
     if args.chrom is not None:
         block_metadata = _filter_blocks_by_chrom(block_metadata, args.chrom)
+        
+    with open(args.score_cols) as f:
+        score_cols = f.read().splitlines()
 
     logger.info("Creating parallel operator")
     with ParallelOperator.from_hdf5(
-        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata
+        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=len(score_cols)
     ) as linarg:
         logger.info("Reading iids")
         with h5py.File(args.linarg_path, "r") as f:
             iids = f["iids"][:]
         logger.info("Reading in weights")
         betas = pl.read_csv(args.betas_path, separator="\t")
-        with open(args.score_cols) as f:
-            score_cols = f.read().splitlines()
         logger.info("Performing scoring")
         result = run_prs(linarg, betas.lazy(), score_cols, iids)
         logger.info("Writing results")
