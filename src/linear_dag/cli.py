@@ -216,7 +216,7 @@ def _prs(args):
         logger.info("Reading in weights")
         betas = pl.read_csv(args.betas_path, separator="\t")
         logger.info("Performing scoring")
-        result = run_prs(linarg, betas.lazy(), score_cols, iids)
+        result = run_prs(linarg, betas, score_cols, iids)
         logger.info("Writing results")
         with gzip.open(f"{args.out}.tsv.gz", "wb") as f:
             result.write_csv(f, separator="\t")
