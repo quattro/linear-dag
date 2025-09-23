@@ -23,7 +23,7 @@ from linear_dag.pipeline import (
 
 from .association.gwas import run_gwas, run_gwas_parallel
 from .association.heritability import randomized_haseman_elston
-from .association.prs import run_prs_parallel
+from .association.prs import run_prs
 from .core.lineararg import LinearARG, list_blocks, load_variant_info
 from .core.parallel_processing import ParallelOperator
 from .memory_logger import MemoryLogger
@@ -209,21 +209,45 @@ def _read_pheno_or_covar(
 
 def _prs(args):
     logger = MemoryLogger(__name__)
-    result = run_prs_parallel(
+    result = run_prs(
         args.linarg_path,
         args.beta_path,
+        args.block_name,
+        args.starting_index,
+        args.n_variants,
         args.score_cols,
-        num_workers=args.num_workers,
-        blocks=args.blocks,
-        chromosomes=args.chrom,
+        f'{args.out}.npy',
+        logger=logger
     )
-    logger.info("Writing results")
-    with gzip.open(f"{args.out}.tsv.gz", "wb") as f:
-        result.write_csv(f, separator="\t")
     logger.info("Done!")
-
     return
 
+
+def _get_block_metadata(args):
+    logger = MemoryLogger(__name__)
+    block_metadata = list_blocks(args.linarg_path)
+    
+    block_metadata = block_metadata.with_columns(
+        pl.col("chrom").cast(pl.Utf8)
+    )
+    
+    # filter block_metadata
+    if args.block_names is not None and args.chromosomes is not None:
+        raise ValueError("Specify either blocks or chromosomes, not both.")
+    if args.block_names is not None:
+        block_metadata = block_metadata.filter(pl.col("block_name").is_in(args.block_names))
+    if args.chromosomes is not None:
+        block_metadata = block_metadata.filter(pl.col("chrom").is_in(args.chromosomes))
+    
+    # compute starting index for PRS
+    starting_index = pl.Series(
+        "starting_index",
+        [0] + block_metadata["n_variants"].to_list()[:-1]
+    )
+    block_metadata = block_metadata.with_columns(starting_index)
+    
+    block_metadata.write_csv(f'{args.out}.tsv', separator="\t")
+    
 
 ###############################
 # Multiprocessing helpers
@@ -526,33 +550,47 @@ def _main(args):
         help="PRNG seed for reproducibility.",
     )
     rhe_p.set_defaults(func=_estimate_h2g)
+    
+    block_meta_p = subp.add_parser(
+        "get-block-metadata",
+        help="Extract and save block metadata from a linear ARG."
+    )
+    block_meta_p.add_argument(
+        "--linarg-path",
+        required=True,
+        help="Path to linear ARG (.h5 file)."
+    )
+    block_meta_p.add_argument(
+        "--chromosomes",
+        type=str,
+        nargs="+",
+        help="Which chromosomes to include. Defaults to all chromosomes."
+    )
+    block_meta_p.add_argument(
+        "--block_names",
+        type=str,
+        nargs="+",
+        help="Which blocks to include. Defaults to all blocks."
+    )
+    block_meta_p.add_argument(
+        "--out",
+        default="block_metadata",
+        help="Path to save the block metadata CSV."
+    )
+    block_meta_p.set_defaults(func=_get_block_metadata)
 
     prs_p = subp.add_parser("score", help="Score individuals using linear ARG")
     prs_p.add_argument("--linarg-path", help="Path to linear ARG (.h5 file)")
     prs_p.add_argument("--beta-path", help="Path to file with betas (tab-delimited).")
+    prs_p.add_argument("--block-name", help="Name of block to run PRS on.")
+    prs_p.add_argument("--starting-index", help="Starting index of betas in beta-path for block-name.", type=int)
+    prs_p.add_argument("--n-variants", help="Number of variants in block-name.", type=int)
     prs_p.add_argument(
         "--score-cols",
         nargs="+",
         help="Which columns to perform the prs on in beta_path.",
     )
-    prs_p.add_argument(
-        "--chrom",
-        type=str,
-        nargs="+",
-        help="Which chromosomes to run the PRS on. Defaults to all chromosomes.",
-    )
-    prs_p.add_argument(
-        "--blocks",
-        type=str,
-        nargs="+",
-        help="Which blocks to run the PRS on. Defaults to all blocks.",
-    )
-    prs_p.add_argument(
-        "--num-workers",
-        type=int,
-        help="How many cores to uses. Defaults to all available cores.",
-    )
-    prs_p.add_argument("--out", default="kodama", help="Location to save result files.")
+    prs_p.add_argument("--out", default="kodama_prs", help="Location to save result files. Will add the result to out if it already exists.")
     prs_p.set_defaults(func=_prs)
 
     make_geno_p = subp.add_parser(
