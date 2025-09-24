@@ -307,9 +307,8 @@ def _assoc_scan(args):
         logger.info("Performing GWAS")
         results = run_gwas(linarg, phenotypes.lazy(), pheno_cols, covar_cols, variant_info=variant_info)
         logger.info("Finished GWAS. Writing results")
-        for res, pheno in zip(results, pheno_cols):
-            with gzip.open(f"{args.out}.{pheno}.tsv.gz", "wb") as f:
-                res.write_csv(f, separator="\t")
+    for res, pheno in zip(results, pheno_cols):
+        res.write_csv(f"{args.out}.{pheno}.tsv.gz", separator="\t")
 
         logger.info("Done!")
 
