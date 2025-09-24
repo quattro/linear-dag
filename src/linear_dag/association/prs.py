@@ -40,10 +40,11 @@ def run_prs(genotypes: LinearOperator, data: pl.DataFrame, score_cols: list[str]
         "total": t_total,
     }
 
-    # human-friendly printout
     print("run_prs timings (seconds):")
     for name in ("beta_extraction", "matrix_multiply", "frame_dict_build", "schema_overrides", "dataframe_creation", "total"):
         print(f"  {name:20}: {timings[name]:.6f}")
+    
+    return res
     
     
     
