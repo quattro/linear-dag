@@ -24,7 +24,7 @@ from linear_dag.pipeline import (
 from .association.gwas import run_gwas
 from .association.heritability import randomized_haseman_elston
 from .association.prs import run_prs
-from .core.lineararg import LinearARG, list_blocks, load_variant_info
+from .core.lineararg import LinearARG, list_blocks, load_variant_info, load_block_metadata
 from .core.parallel_processing import ParallelOperator
 from .memory_logger import MemoryLogger
 
@@ -302,7 +302,7 @@ def _assoc_scan(args):
         args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=max(len(covar_cols), len(pheno_cols))
     ) as linarg:
         logger.info("Loading variant metadata")
-        variant_info = load_variant_info(args.linarg_path, block_metadata)
+        variant_info = load_block_metadata(args.linarg_path, block_metadata)
 
         logger.info("Performing GWAS")
         results = run_gwas(linarg, phenotypes.lazy(), pheno_cols, covar_cols, variant_info=variant_info)
