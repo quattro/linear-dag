@@ -305,14 +305,11 @@ def _assoc_scan(args):
         variant_info = load_block_metadata(args.linarg_path, block_metadata)
 
         logger.info("Performing GWAS")
-        results = run_gwas(linarg, phenotypes.lazy(), pheno_cols, covar_cols, variant_info=variant_info)
+        result = run_gwas(linarg, phenotypes.lazy(), pheno_cols, covar_cols, variant_info=variant_info)
         logger.info("Finished GWAS. Writing results")
-    for res, pheno in zip(results, pheno_cols):
-        res.write_csv(f"{args.out}.{pheno}.tsv.gz", separator="\t")
-
-        logger.info("Done!")
-
-        return
+    result.collect().write_csv(f"{args.out}.tsv.gz", separator="\t")
+    logger.info("Done!")
+    return
 
 
 def _estimate_h2g(args):
