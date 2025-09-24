@@ -217,9 +217,8 @@ def _prs(args):
         betas = pl.read_csv(args.betas_path, separator="\t")
         logger.info("Performing scoring")
         result = run_prs(linarg, betas, score_cols, iids)
-        logger.info("Writing results")
-        with gzip.open(f"{args.out}.tsv.gz", "wb") as f:
-            result.write_csv(f, separator="\t")
+    logger.info("Writing results")
+    result.write_csv(f"{args.out}.tsv.gz", separator="\t")
     logger.info("Done!")
 
     return
