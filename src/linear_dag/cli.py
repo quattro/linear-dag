@@ -299,7 +299,7 @@ def _assoc_scan(args):
 
     logger.info("Creating parallel operator")
     with ParallelOperator.from_hdf5(
-        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=np.max(len(covar_cols), len(pheno_cols))
+        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=max(len(covar_cols), len(pheno_cols))
     ) as linarg:
         logger.info("Loading variant metadata")
         variant_info = load_block_metadata(args.linarg_path, block_metadata)
