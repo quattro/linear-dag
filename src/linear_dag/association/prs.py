@@ -5,9 +5,19 @@ import h5py
 from scipy.sparse import coo_matrix
 from multiprocessing import Pool, shared_memory, Lock, cpu_count
 from linear_dag.core.lineararg import list_blocks, LinearARG
+from scipy.sparse.linalg import LinearOperator
 
 # global lock for workers
 _global_lock = None
+
+def run_prs(genotypes: LinearOperator, data: pl.DataFrame, score_cols: list[str], iids: list[str]) -> pl.DataFrame:
+    beta = np.array(data[score_cols])
+    prs = genotypes @ beta
+    frame_dict = {"iid": iids}
+    frame_dict.update({score: prs[:, i] for i, score in enumerate(score_cols)})
+    schema_overrides = {"iid": pl.Utf8} | {score: pl.Float32 for score in score_cols}
+    res = pl.DataFrame(frame_dict, schema_overrides=schema_overrides)
+    return res
 
 def _init_worker(lock):
     global _global_lock

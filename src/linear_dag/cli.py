@@ -21,9 +21,9 @@ from linear_dag.pipeline import (
     run_forward_backward,
 )
 
-from .association.gwas import run_gwas, run_gwas_parallel
+from .association.gwas import run_gwas
 from .association.heritability import randomized_haseman_elston
-from .association.prs import run_prs_parallel
+from .association.prs import run_prs
 from .core.lineararg import LinearARG, list_blocks, load_variant_info
 from .core.parallel_processing import ParallelOperator
 from .memory_logger import MemoryLogger
@@ -209,19 +209,26 @@ def _read_pheno_or_covar(
 
 def _prs(args):
     logger = MemoryLogger(__name__)
-    result = run_prs_parallel(
-        args.linarg_path,
-        args.beta_path,
-        args.score_cols,
-        num_workers=args.num_workers,
-        blocks=args.blocks,
-        chromosomes=args.chrom,
-    )
+    logger.info("Getting blocks")
+    block_metadata = list_blocks(args.linarg_path)
+    if args.chrom is not None:
+        block_metadata = _filter_blocks_by_chrom(block_metadata, args.chrom)
+    with open(args.score_cols) as f:
+        score_cols = f.read().splitlines()
+    logger.info("Creating parallel operator")
+    with ParallelOperator.from_hdf5(
+        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=len(score_cols)
+    ) as linarg:
+        logger.info("Reading iids")
+        with h5py.File(args.linarg_path, "r") as f:
+            iids = f["iids"][:]
+        logger.info("Reading in weights")
+        betas = pl.read_csv(args.betas_path, separator="\t")
+        logger.info("Performing scoring")
+        result = run_prs(linarg, betas, score_cols, iids)
     logger.info("Writing results")
-    with gzip.open(f"{args.out}.tsv.gz", "wb") as f:
-        result.write_csv(f, separator="\t")
+    result.write_csv(f"{args.out}.tsv.gz", separator="\t")
     logger.info("Done!")
-
     return
 
 
@@ -290,20 +297,23 @@ def _assoc_scan(args):
     # Ensure output directory exists (args.out used as directory prefix)
     os.makedirs(args.out, exist_ok=True)
 
-    # Run parallel GWAS; writes per-block parquet files under args.out
-    run_gwas_parallel(
-        args.linarg_path,
-        phenotypes.lazy(),
-        pheno_cols=pheno_cols,
-        covar_cols=covar_cols,
-        output_prefix=args.out,
-        assume_hwe=not args.no_hwe,
-        num_workers=args.num_processes,
-    )
+    logger.info("Creating parallel operator")
+    with ParallelOperator.from_hdf5(
+        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=np.max(len(covar_cols), len(pheno_cols))
+    ) as linarg:
+        logger.info("Loading variant metadata")
+        variant_info = load_block_metadata(args.linarg_path, block_metadata)
 
-    logger.info("Done!")
+        logger.info("Performing GWAS")
+        results = run_gwas(linarg, phenotypes.lazy(), pheno_cols, covar_cols, variant_info=variant_info)
+        logger.info("Finished GWAS. Writing results")
+        for res, pheno in zip(results, pheno_cols):
+            with gzip.open(f"{args.out}.{pheno}.tsv.gz", "wb") as f:
+                res.write_csv(f, separator="\t")
 
-    return
+        logger.info("Done!")
+
+        return
 
 
 def _estimate_h2g(args):
