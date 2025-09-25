@@ -33,7 +33,7 @@ def _worker_matmat(args):
 @click.option('--no-pool', is_flag=True, default=False, help='Do not run the pool bench')
 @click.option('--no-operator', is_flag=True, default=False, help='Do not run the ParallelOperator bench')
 @click.option('-p', '--num-processes', type=int, default=8, show_default=True)
-def main(linarg_path, num_traits, max_num_traits, no_series, no_pool, no_operator, num_processes):
+def main(linarg_path, num_traits, max_num_traits, no_series, no_pool, no_operator, num_processes, chromosome):
     # linarg_path = '/mnt/project/linear_args/ukb20279_chr1-22.h5'
     # linarg_path = '/mnt/project/final_linear_args/ukb20279_maf_0.01_chr1-22.h5'
     # linarg_path = '/mnt/project/linear_args/1kg_chromosomes.h5'
