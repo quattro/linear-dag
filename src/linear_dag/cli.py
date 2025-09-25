@@ -211,8 +211,7 @@ def _prs(args):
     logger = MemoryLogger(__name__)
     logger.info("Getting blocks")
     block_metadata = list_blocks(args.linarg_path)
-    if args.chrom is not None:
-        block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
+    block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
     with open(args.score_cols) as f:
         score_cols = f.read().splitlines()
     logger.info("Creating parallel operator")
@@ -373,8 +372,7 @@ def _prep_data(
 
     logger.info("Getting blocks")
     block_metadata = list_blocks(linarg_path)
-    if chrom is not None:
-        block_metadata = _filter_blocks(block_metadata, chromosomes=chromosomes, block_names=block_names)
+    block_metadata = _filter_blocks(block_metadata, chromosomes=chromosomes, block_names=block_names)
 
     if num_processes is not None and num_processes < 1:
         raise ValueError(f"num_processes must be greater than zero, got {num_processes}")
