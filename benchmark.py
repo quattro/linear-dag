@@ -25,6 +25,7 @@ def _worker_matmat(args):
     _ = linarg @ b
 
 @click.command()
+@click.option('-c', '--chromosome', default=None, show_default=True)
 @click.option('-l', '--linarg-path', default='/mnt/project/luke/1kg_chromosomes_n3202_blocks_common_lzf.h5', show_default=True)
 @click.option('-n', '--num-traits', type=int, default=1, show_default=True)
 @click.option('-m', '--max-num-traits', type=int, default=None)
@@ -41,6 +42,10 @@ def main(linarg_path, num_traits, max_num_traits, no_series, no_pool, no_operato
     print(f'num traits: {num_traits}')
         
     block_metadata = ld.list_blocks(linarg_path)
+    if chromosome is not None:
+        block_metadata = block_metadata.filter(
+            pl.col("chrom") == chromosome
+        )
     # block_metadata = block_metadata.with_columns(
     #     pl.Series("chrom", [b.split('_')[0] for b in list(block_metadata['block_name'])])
     # )
@@ -57,7 +62,7 @@ def main(linarg_path, num_traits, max_num_traits, no_series, no_pool, no_operato
         with ld.ParallelOperator.from_hdf5(linarg_path, max_num_traits=max_num_traits, num_processes=num_processes, block_metadata=block_metadata) as operator:
 
             print("Successfully started operator")
-            
+
             n, m = operator.shape
             print(f"LinearARG shape: {n, m}")
             y = np.arange(num_traits * n).reshape((-1, num_traits)).astype(np.float32)
