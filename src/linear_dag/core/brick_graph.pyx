@@ -603,7 +603,8 @@ cpdef tuple get_graph_statistics(str brick_graph_dir):
     cdef long number_of_edges = 0
     cdef list files = os.listdir(brick_graph_dir)
     for f in files:
-        with h5py.File(f, 'r') as f:
+        path = os.path.join(brick_graph_dir, f)
+        with h5py.File(path, 'r') as f:
             num_samples = f['sample_indices'].shape[0]
             number_of_nodes += f.attrs['n']
             number_of_edges += f['data'].shape[0]
