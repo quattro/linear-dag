@@ -55,6 +55,9 @@ def main(linarg_path, num_traits, max_num_traits, no_series, no_pool, no_operato
     # Operator benchmarks
     if not no_operator:
         with ld.ParallelOperator.from_hdf5(linarg_path, max_num_traits=max_num_traits, num_processes=num_processes, block_metadata=block_metadata) as operator:
+
+            print("Successfully started operator")
+            
             n, m = operator.shape
             print(f"LinearARG shape: {n, m}")
             y = np.arange(num_traits * n).reshape((-1, num_traits)).astype(np.float32)

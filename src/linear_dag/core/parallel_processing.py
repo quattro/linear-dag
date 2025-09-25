@@ -195,6 +195,7 @@ class ParallelOperator(LinearOperator):
                 f"Incorrect dimensions for matrix multiplication. Inputs had size {self.T.shape} and{x.shape}."
             )
         result = np.empty((self.shape[1], x.shape[1]), dtype=np.float32)
+        print("Successfully created result array")
 
         # Process max_num_traits columns at a time
         # time.sleep(1)
@@ -215,6 +216,8 @@ class ParallelOperator(LinearOperator):
                 result[:, start:end] = variant_data[:, : end - start]
             print(f"Time to access variant data: {time.time() - t}")
 
+        print("Successfully computed result")
+        
         return result
 
     def _matvec(self, x: np.ndarray) -> np.ndarray:
