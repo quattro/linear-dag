@@ -212,7 +212,7 @@ def _prs(args):
     logger.info("Getting blocks")
     block_metadata = list_blocks(args.linarg_path)
     if args.chrom is not None:
-        block_metadata = _filter_blocks_by_chrom(block_metadata, args.chrom)
+        block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
     with open(args.score_cols) as f:
         score_cols = f.read().splitlines()
     logger.info("Creating parallel operator")
@@ -289,23 +289,25 @@ def _assoc_scan(args):
         args.covar,
         args.covar_name,
         args.covar_col_nums,
-        args.chrom,
+        args.chromosomes,
+        args.block_names,
         args.num_processes,
         logger,
     )
 
     # Ensure output directory exists (args.out used as directory prefix)
     os.makedirs(args.out, exist_ok=True)
-
+    
+    assume_hwe = not args.no_hwe
     logger.info("Creating parallel operator")
     with ParallelOperator.from_hdf5(
-        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=max(len(covar_cols), len(pheno_cols))
+        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=max(len(covar_cols), len(pheno_cols)),
     ) as linarg:
         logger.info("Loading variant metadata")
         variant_info = load_block_metadata(args.linarg_path, block_metadata)
 
         logger.info("Performing GWAS")
-        result = run_gwas(linarg, phenotypes.lazy(), pheno_cols, covar_cols, variant_info=variant_info)
+        result = run_gwas(linarg, phenotypes.lazy(), pheno_cols, covar_cols, variant_info=variant_info, assume_hwe=assume_hwe)
         logger.info("Finished GWAS. Writing results")
     result.collect().write_csv(f"{args.out}.tsv.gz", separator="\t")
     logger.info("Done!")
@@ -326,7 +328,8 @@ def _estimate_h2g(args):
         args.covar,
         args.covar_names,
         args.covar_col_nums,
-        args.chrom,
+        args.chromosomes,
+        args.block_names,
         args.num_processes,
         logger,
     )
@@ -360,7 +363,8 @@ def _prep_data(
     covar: Optional[Union[str, PathLike]] = None,
     covar_names: Optional[list[str]] = None,
     covar_col_nums: Optional[list[int]] = None,
-    chrom: Optional[int] = None,
+    chromosomes: Optional[list[str]] = None,
+    block_names: Optional[list[str]] = None,
     num_processes: Optional[int] = None,
     logger: Optional[MemoryLogger] = None,
 ):
@@ -370,7 +374,7 @@ def _prep_data(
     logger.info("Getting blocks")
     block_metadata = list_blocks(linarg_path)
     if chrom is not None:
-        block_metadata = _filter_blocks_by_chrom(block_metadata, chrom)
+        block_metadata = _filter_blocks(block_metadata, chromosomes=chromosomes, block_names=block_names)
 
     if num_processes is not None and num_processes < 1:
         raise ValueError(f"num_processes must be greater than zero, got {num_processes}")
@@ -407,13 +411,20 @@ def _prep_data(
     return block_metadata, covar_cols, pheno_cols, phenotypes
 
 
-def _filter_blocks_by_chrom(block_metadata: pl.DataFrame, chrom: int):
-    """Helper to filter blocks by chromosome"""
-    block_metadata = block_metadata.with_columns(
-        pl.Series("chrom", [b.split("_")[0] for b in list(block_metadata["block_name"])])
-    )
-    block_metadata = block_metadata.with_columns(pl.col("chrom").cast(pl.Int32)).filter(pl.col("chrom") == chrom)
+def _filter_blocks(
+    block_metadata: pl.DataFrame, 
+    chromosomes: list | None = None, 
+    block_names: list | None = None
+) -> pl.DataFrame:
+    """Helper to filter blocks by a list of chromosomes or block names."""
+    if block_names is not None and chromosomes is not None:
+        raise ValueError("Specify either block_names or chromosomes, not both.")
+    if block_names is not None:
+        block_metadata = block_metadata.filter(pl.col("block_name").is_in(block_names))
+    if chromosomes is not None:
+        block_metadata = block_metadata.filter(pl.col("chrom").is_in(chromosomes))
     return block_metadata
+
 
 
 def _make_geno(args):
@@ -781,9 +792,16 @@ def _create_common_parser(subp, name, help):
         help="Covariate column number or numbers (comma/space delimited)",
     )
     common_p.add_argument(
-        "--chrom",
-        type=int,
-        help="Which chromosome to run the association on. Defaults to all chromosomes.",
+        "--chromosomes",
+        type=str,
+        nargs="+",
+        help="Which chromosomes to include. Defaults to all chromosomes."
+    )
+    common_p.add_argument(
+        "--block-names",
+        type=str,
+        nargs="+",
+        help="Which blocks to include. Defaults to all blocks."
     )
     common_p.add_argument(
         "--num-processes",
