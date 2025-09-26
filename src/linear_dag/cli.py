@@ -214,16 +214,15 @@ def _prs(args):
     block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
     with open(args.score_cols) as f:
         score_cols = f.read().splitlines()
-    logger.info("Creating parallel operator")
+    logger.info("Reading iids")
+    with h5py.File(args.linarg_path, "r") as f:
+        iids = f["iids"][:]
+    logger.info("Reading in weights")
+    betas = pl.read_csv(args.betas_path, separator="\t")
+    logger.info("Performing scoring")
     with ParallelOperator.from_hdf5(
         args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=len(score_cols)
     ) as linarg:
-        logger.info("Reading iids")
-        with h5py.File(args.linarg_path, "r") as f:
-            iids = f["iids"][:]
-        logger.info("Reading in weights")
-        betas = pl.read_csv(args.betas_path, separator="\t")
-        logger.info("Performing scoring")
         result = run_prs(linarg, betas, score_cols, iids)
     logger.info("Writing results")
     result.write_csv(f"{args.out}.tsv.gz", separator="\t")
@@ -299,15 +298,14 @@ def _assoc_scan(args):
     
     assume_hwe = not args.no_hwe
     logger.info("Creating parallel operator")
+    logger.info("Loading variant metadata")
+    variant_info = load_block_metadata(args.linarg_path, block_metadata)
+    logger.info("Performing GWAS")
     with ParallelOperator.from_hdf5(
         args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=max(len(covar_cols), len(pheno_cols)),
     ) as linarg:
-        logger.info("Loading variant metadata")
-        variant_info = load_block_metadata(args.linarg_path, block_metadata)
-
-        logger.info("Performing GWAS")
         result = run_gwas(linarg, phenotypes.lazy(), pheno_cols, covar_cols, variant_info=variant_info, assume_hwe=assume_hwe)
-        logger.info("Finished GWAS. Writing results")
+    logger.info("Finished GWAS. Writing results")
     result.collect().write_csv(f"{args.out}.tsv.gz", separator="\t")
     logger.info("Done!")
     return
