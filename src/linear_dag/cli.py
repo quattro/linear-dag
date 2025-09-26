@@ -214,15 +214,13 @@ def _prs(args):
     block_metadata = list_blocks(args.linarg_path)
     block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
     logger.info("Reading iids")
-    with h5py.File(args.linarg_path, "r") as f:
-        iids = f["iids"][:]
     logger.info("Reading in weights")
     betas = pl.read_csv(args.betas_path, separator="\t")
     logger.info("Performing scoring")
     with ParallelOperator.from_hdf5(
         args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=len(args.score_cols)
     ) as linarg:
-        prs = run_prs(linarg, betas, args.score_cols, iids)
+        prs = run_prs(linarg, betas, args.score_cols, linarg.iids)
        
     logger.info("Summing haplotype scores to individual scores")
     unique_ids, row_indices = np.unique(iids, return_inverse=True)
