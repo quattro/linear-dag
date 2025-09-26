@@ -10,14 +10,10 @@ from scipy.sparse.linalg import LinearOperator
 # global lock for workers
 _global_lock = None
 
-def run_prs(genotypes: LinearOperator, data: pl.DataFrame, score_cols: list[str], iids: list[str]) -> pl.DataFrame:
+def run_prs(genotypes: LinearOperator, data: pl.DataFrame, score_cols: list[str], iids: list[str]) -> np.ndarray:
     beta = np.array(data[score_cols])
     prs = genotypes @ beta
-    frame_dict = {"iid": iids}
-    frame_dict.update({score: prs[:, i] for i, score in enumerate(score_cols)})
-    schema_overrides = {"iid": pl.Utf8} | {score: pl.Float32 for score in score_cols}
-    res = pl.DataFrame(frame_dict, schema_overrides=schema_overrides)
-    return res
+    return prs
 
 def _init_worker(lock):
     global _global_lock

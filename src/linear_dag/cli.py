@@ -8,6 +8,7 @@ import sys
 from importlib import metadata
 from os import PathLike
 from typing import Optional, Union
+from scipy.sparse import coo_matrix
 
 import polars as pl
 
@@ -223,7 +224,22 @@ def _prs(args):
     with ParallelOperator.from_hdf5(
         args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=len(score_cols)
     ) as linarg:
-        result = run_prs(linarg, betas, score_cols, iids)
+        prs = run_prs(linarg, betas, score_cols, iids)
+       
+    logger.info("Summing haplotype scores to individual scores")
+    unique_ids, row_indices = np.unique(iids, return_inverse=True)
+    num_ids = len(unique_ids)
+    num_cols = len(iids)
+    col_indices = np.arange(num_cols)
+    data = np.ones(num_cols, dtype=np.int8)
+    S = coo_matrix((data, (row_indices, col_indices)), shape=(num_ids, num_cols)).tocsc()
+    prs_ind = S @ prs   
+    
+    frame_dict = {"iid": unique_ids}
+    for i, score in enumerate(score_cols):
+        frame_dict[score] = prs_ind[:, i]
+    res = pl.DataFrame(frame_dict)
+            
     logger.info("Writing results")
     result.write_csv(f"{args.out}.tsv", separator="\t")
     logger.info("Done!")
@@ -549,7 +565,7 @@ def _main(args):
         help="Which columns to perform the prs on in beta_path.",
     )
     prs_p.add_argument(
-        "--chrom",
+        "--chromosomes",
         type=str,
         nargs="+",
         help="Which chromosomes to run the PRS on. Defaults to all chromosomes.",
