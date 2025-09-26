@@ -214,7 +214,6 @@ def _prs(args):
     logger.info("Getting blocks")
     block_metadata = list_blocks(args.linarg_path)
     block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
-    logger.info("Reading iids")
     logger.info("Reading in weights")
     betas = pl.read_csv(args.beta_path, separator="\t")
     logger.info("Performing scoring")
