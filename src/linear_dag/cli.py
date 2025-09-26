@@ -236,7 +236,7 @@ def _prs(args):
     frame_dict = {"iid": unique_ids}
     for i, score in enumerate(args.score_cols):
         frame_dict[score] = prs_ind[:, i]
-    res = pl.DataFrame(frame_dict)
+    result = pl.DataFrame(frame_dict)
             
     logger.info("Writing results")
     result.write_csv(f"{args.out}.tsv", separator="\t")
