@@ -571,7 +571,7 @@ def _main(args):
         help="Which chromosomes to run the PRS on. Defaults to all chromosomes.",
     )
     prs_p.add_argument(
-        "--blocks",
+        "--block-names",
         type=str,
         nargs="+",
         help="Which blocks to run the PRS on. Defaults to all blocks.",
