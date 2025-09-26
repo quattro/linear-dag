@@ -10,6 +10,7 @@ from os import PathLike
 from typing import Optional, Union
 from scipy.sparse import coo_matrix
 
+import numpy as np
 import polars as pl
 
 from linear_dag.pipeline import (
