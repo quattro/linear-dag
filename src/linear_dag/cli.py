@@ -574,7 +574,7 @@ def _main(args):
         help="Which blocks to run the PRS on. Defaults to all blocks.",
     )
     prs_p.add_argument(
-        "--num-workers",
+        "--num-processes",
         type=int,
         help="How many cores to uses. Defaults to all available cores.",
     )
