@@ -276,7 +276,7 @@ def _assoc_scan(args):
                 variant_info=v_info,
                 assume_hwe=not args.no_hwe,
                 logger=logger,
-                in_place_op=False,
+                in_place_op=True,
             )
         
         result.sink_parquet(f"{args.out}.parquet") # streams to disk
