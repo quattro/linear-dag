@@ -213,8 +213,6 @@ def _prs(args):
     logger.info("Getting blocks")
     block_metadata = list_blocks(args.linarg_path)
     block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
-    with open(args.score_cols) as f:
-        score_cols = f.read().splitlines()
     logger.info("Reading iids")
     with h5py.File(args.linarg_path, "r") as f:
         iids = f["iids"][:]
@@ -222,9 +220,9 @@ def _prs(args):
     betas = pl.read_csv(args.betas_path, separator="\t")
     logger.info("Performing scoring")
     with ParallelOperator.from_hdf5(
-        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=len(score_cols)
+        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=len(args.score_cols)
     ) as linarg:
-        prs = run_prs(linarg, betas, score_cols, iids)
+        prs = run_prs(linarg, betas, args.score_cols, iids)
        
     logger.info("Summing haplotype scores to individual scores")
     unique_ids, row_indices = np.unique(iids, return_inverse=True)
@@ -236,7 +234,7 @@ def _prs(args):
     prs_ind = S @ prs   
     
     frame_dict = {"iid": unique_ids}
-    for i, score in enumerate(score_cols):
+    for i, score in enumerate(args.score_cols):
         frame_dict[score] = prs_ind[:, i]
     res = pl.DataFrame(frame_dict)
             
