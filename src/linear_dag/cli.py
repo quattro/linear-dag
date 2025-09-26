@@ -225,7 +225,7 @@ def _prs(args):
     ) as linarg:
         result = run_prs(linarg, betas, score_cols, iids)
     logger.info("Writing results")
-    result.write_csv(f"{args.out}.tsv.gz", separator="\t")
+    result.write_csv(f"{args.out}.tsv", separator="\t")
     logger.info("Done!")
     return
 
@@ -306,7 +306,7 @@ def _assoc_scan(args):
     ) as linarg:
         result = run_gwas(linarg, phenotypes.lazy(), pheno_cols, covar_cols, variant_info=variant_info, assume_hwe=assume_hwe)
     logger.info("Finished GWAS. Writing results")
-    result.collect().write_csv(f"{args.out}.tsv.gz", separator="\t")
+    result.collect().write_csv(f"{args.out}.tsv", separator="\t")
     logger.info("Done!")
     return
 
