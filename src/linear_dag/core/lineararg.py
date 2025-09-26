@@ -1,5 +1,6 @@
 # lineararg.py
 import os
+import time
 
 from dataclasses import dataclass
 from functools import cached_property
@@ -402,6 +403,25 @@ class LinearARG(LinearOperator):
         return
 
     @staticmethod
+    def read_variant_info(
+        h5_fname: Union[str, PathLike],
+        block: Optional[str] = None,
+    ) -> pl.LazyFrame:
+        """Reads variant info from provided HDF5 file.
+
+        :param h5_fname: The base path and prefix of the PLINK files.
+        :return: A DataFrame containing variant info.
+        """
+        fname = h5_fname if str(h5_fname).endswith(".h5") else str(h5_fname) + ".h5"
+        with h5py.File(fname, "r") as file:
+            f = file[block] if block else file
+            v_dict = {field: f[field][:].astype(str) for field in ["CHROM", "POS", "ID", "REF", "ALT"]}
+            v_info = (
+                pl.LazyFrame(v_dict, schema=[("CHROM", pl.String), ("POS", pl.Int32), ("ID", pl.String), ("REF", pl.String), ("ALT", pl.String)])
+            )
+        return v_info
+    
+    @staticmethod
     def read(
         h5_fname: Union[str, PathLike],
         block: Optional[str] = None,
@@ -424,10 +444,7 @@ class LinearARG(LinearOperator):
             nonunique_indices = f["nonunique_indices"][:] if "nonunique_indices" in f else None
 
             if load_metadata:
-                v_dict = {field: f[field][:].astype(str) for field in ["CHROM", "POS", "ID", "REF", "ALT"]}
-                v_info = (
-                    pl.LazyFrame(v_dict, schema=[("CHROM", pl.String), ("POS", pl.Int32), ("ID", pl.String), ("REF", pl.String), ("ALT", pl.String)])
-                )
+                v_info = LinearARG.read_variant_info(h5_fname, block).collect()
             else:
                 v_info = None
 
@@ -525,23 +542,75 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
 
 
 def load_variant_info(h5_fname: str, block_names: Union[list[str], None]):
-    block_names = block_names or list_blocks(h5_fname).get_column("block_name").to_list()
-    lazyframes = []
+    # Read all blocks from a single open file handle and build one DataFrame.
+    # Avoids per-block DataFrame construction and repeated file opens.
+    if not str(h5_fname).endswith(".h5"):
+        h5_fname = str(h5_fname) + ".h5"
+    blocks = block_names or list_blocks(h5_fname).get_column("block_name").to_list()
+
+    chrom_parts = []
+    pos_parts = []
+    id_parts = []
+    ref_parts = []
+    alt_parts = []
+
+    t0 = time.time()
     with h5py.File(h5_fname, "r") as f:
-        for block_name in block_names:
-            block = f[block_name]
-            v_dict = {field: block[field][:].astype(str) for field in ["CHROM", "POS", "ID", "REF", "ALT"]}
-            v_info = (
-                pl.DataFrame(v_dict)
-                .with_columns(
-                    [
-                        pl.col("POS").cast(pl.Int32),
-                    ]
-                )
-                .lazy()
-            )
-            lazyframes.append(v_info)
-    return pl.concat(lazyframes, how="vertical")
+        t_open = time.time()
+        for block in blocks:
+            g = f[block]
+            chrom_parts.append(g["CHROM"][:])
+            pos_parts.append(g["POS"][:])
+            id_parts.append(g["ID"][:])
+            ref_parts.append(g["REF"][:])
+            alt_parts.append(g["ALT"][:])
+    t_read = time.time()
+
+    # Concatenate once per column
+    chrom = np.concatenate(chrom_parts) if chrom_parts else np.array([], dtype="S1")
+    pos = np.concatenate(pos_parts) if pos_parts else np.array([], dtype=np.int32)
+    id_ = np.concatenate(id_parts) if id_parts else np.array([], dtype="S1")
+    ref = np.concatenate(ref_parts) if ref_parts else np.array([], dtype="S1")
+    alt = np.concatenate(alt_parts) if alt_parts else np.array([], dtype="S1")
+    t_concat = time.time()
+
+    # Keep as raw bytes to avoid decode cost; use Binary dtype. POS stays Int32.
+    pos = pos.astype(np.Int32, copy=False) if hasattr(np, "Int32") else pos.astype(np.int32, copy=False)
+    t_decode = time.time()
+
+    lf = pl.LazyFrame(
+        {
+            "CHROM": chrom,
+            "POS": pos,
+            "ID": id_,
+            "REF": ref,
+            "ALT": alt,
+        },
+        schema=[
+            ("CHROM", pl.Binary),
+            ("POS", pl.Int32),
+            ("ID", pl.Binary),
+            ("REF", pl.Binary),
+            ("ALT", pl.Binary),
+        ],
+    )
+    t_df = time.time()
+
+    # Timers (stdout): helps identify bottlenecks in large runs
+    print(
+        "\n".join(
+            [
+                f"load_variant_info timings (s):",
+                f"  open+iterate: {t_read - t0:.2f}",
+                f"  concatenate: {t_concat - t_read:.2f}",
+                f"  decode:      {t_decode - t_concat:.2f}",
+                f"  lazyframe:   {t_df - t_decode:.2f}",
+                f"  total:       {t_df - t0:.2f}",
+            ]
+        )
+    )
+
+    return lf
 
 
 def add_individuals_to_graph(

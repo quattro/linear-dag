@@ -1,7 +1,7 @@
 import time
 import warnings
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from multiprocessing import cpu_count, Lock, Process, shared_memory, Value
 from typing import Callable, Dict, List, Optional, Tuple, Type
@@ -22,6 +22,7 @@ FLAGS = {
     "get_data": 1,
     "matmat": 2,
     "rmatmat": 3,
+    "num_carriers": 4,
 }
 assert len(np.unique([val for val in FLAGS.values()])) == len(FLAGS)
 
@@ -102,11 +103,19 @@ class _ParallelManager:
 
     def await_workers(self) -> None:
         """Wait for all workers to finish current task."""
-        for f in self.flags:
-            while f.value != FLAGS["wait"]:
-                if f.value == FLAGS["error"]:
-                    raise RuntimeError("Worker process encountered an error")
-                time.sleep(0.001)
+        try:
+            for f in self.flags:
+                while f.value != FLAGS["wait"]:
+                    if f.value == FLAGS["error"]:
+                        raise RuntimeError("Worker process encountered an error")
+                    time.sleep(0.001)
+        except Exception as e:
+            # Gracefully shutdown workers and clean up shared memory
+            try:
+                self.close()
+            finally:
+                # Re-raise so upstream context managers can also handle it
+                raise e
 
     def add_process(self, target: Callable, args: Tuple) -> None:
         """Add a worker process.
@@ -158,26 +167,55 @@ class ParallelOperator(LinearOperator):
     shape: tuple[int, int]
     dtype: np.dtype = np.float32
     iids: Optional[pl.Series] = None
+    _variant_view_handles: List[_SharedArrayHandle] = field(default_factory=list)
 
     def __enter__(self):
         self._manager.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        # Close any borrowed variant-data handles before shutting down manager
+        for h in self._variant_view_handles:
+            h.close()
         return self._manager.__exit__(exc_type, exc_val, exc_tb)
 
     @property
     def num_samples(self):
         return self.shape[0]
 
-    def _matmat(self, x):
-        result = np.empty((self.shape[0], x.shape[1]), dtype=np.float32)
+    @property
+    def n_individuals(self):
+        return self.num_samples // 2
+
+    def borrow_variant_data_view(self) -> np.ndarray:
+        """Return a NumPy view into the shared variant_data without copying.
+
+        The returned array aliases the shared memory. It remains valid until
+        this operator exits its context manager (when handles are closed).
+        """
+        base = self._variant_data_handle
+        handle = _SharedArrayHandle(name=base.name, lock=base.lock, shape=base.shape, dtype=base.dtype)
+        self._variant_view_handles.append(handle)
+        return handle.access_as_array()
+
+    def _matmat(self, x, in_place: bool = False):
+        m, k = x.shape
+        if m != self.shape[1]:
+            raise ValueError(
+                f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and{x.shape}."
+            )
+        if in_place and k > self._max_num_traits:
+            raise ValueError(f"in_place=True requires x.shape[1] <= max_num_traits = {self._max_num_traits}")
+        result = np.empty((self.shape[0], k), dtype=np.float32)
 
         # Process max_num_traits columns at a time
-        for start in range(0, x.shape[1], self._max_num_traits):
-            end = min(start + self._max_num_traits, x.shape[1])
-            with self._variant_data_handle as variant_data:
-                variant_data[:, : end - start] = x[:, start:end].astype(np.float32)
+        for start in range(0, k, self._max_num_traits):
+            end = min(start + self._max_num_traits, k)
+
+            if not in_place:
+                with self._variant_data_handle as variant_data:
+                    variant_data[:, : end - start] = x[:, start:end].astype(np.float32)
+
             self._num_traits.value = end - start
             with self._sample_data_handle as sample_data:
                 sample_data[:] = np.zeros((self._max_num_traits, self.shape[0]), dtype=np.float32)
@@ -188,17 +226,23 @@ class ParallelOperator(LinearOperator):
 
         return result
 
-    def _rmatmat(self, x: np.ndarray):
-        if x.shape[0] != self.shape[0]:
+    def _rmatmat(self, x: np.ndarray, in_place: bool = False):
+        n, k = x.shape
+        if n != self.shape[0]:
             raise ValueError(
-                f"Incorrect dimensions for matrix multiplication. Inputs had size {self.T.shape} and{x.shape}."
+                f"Incorrect dimensions for matrix multiplication. Inputs had size {x.shape} and {self.shape}."
             )
-        result = np.empty((self.shape[1], x.shape[1]), dtype=np.float32)
+
+        if in_place:
+            if k > self._max_num_traits:
+                raise ValueError("in_place=True requires x.shape[1] <= max_num_traits")
+            result = self.borrow_variant_data_view()[:, :k]
+        else:
+            result = np.empty((self.shape[1], k), dtype=np.float32)
 
         # Process max_num_traits columns at a time
-        # time.sleep(1)
-        for start in range(0, x.shape[1], self._max_num_traits):
-            end = min(start + self._max_num_traits, x.shape[1])
+        for start in range(0, k, self._max_num_traits):
+            end = min(start + self._max_num_traits, k)
             self._num_traits.value = end - start
 
             with self._sample_data_handle as sample_data:
@@ -206,11 +250,39 @@ class ParallelOperator(LinearOperator):
             self._manager.start_workers(FLAGS["rmatmat"])
             self._manager.await_workers()
 
+            if not in_place:
+                with self._variant_data_handle as variant_data:
+                    result[:, start:end] = variant_data[:, : end - start]
+
+        return result
+
+    def number_of_carriers(self, individuals_to_include: Optional[np.ndarray] = None):
+        if individuals_to_include is None:
+            individuals_to_include = np.ones((self.n_individuals, 1), dtype=np.float32)
+        if individuals_to_include.ndim == 1:
+            individuals_to_include = individuals_to_include.copy().reshape(-1, 1)
+        if individuals_to_include.shape[0] != self.n_individuals:
+            raise ValueError(
+                f"individuals_to_include should have size {self.n_individuals} in dim 0."
+            )
+        result = np.empty((self.shape[1], individuals_to_include.shape[1]), dtype=np.float32)
+
+        # Process max_num_traits columns at a time
+        for start in range(0, individuals_to_include.shape[1], self._max_num_traits):
+            end = min(start + self._max_num_traits, individuals_to_include.shape[1])
+            self._num_traits.value = end - start
+
+            with self._sample_data_handle as sample_data:
+                sample_data[: end - start, :self.n_individuals] = individuals_to_include[:, start:end].astype(np.float32).T
+            self._manager.start_workers(FLAGS["num_carriers"])
+            self._manager.await_workers()
+
             with self._variant_data_handle as variant_data:
                 result[:, start:end] = variant_data[:, : end - start]
 
         return result
 
+        
     def _matvec(self, x: np.ndarray) -> np.ndarray:
         return self._matmat(x.reshape(-1, 1))
 
@@ -290,6 +362,11 @@ class _ManagerFactory:
                 func = cls._matmat
             elif flag.value == FLAGS["rmatmat"]:
                 func = cls._rmatmat
+            elif flag.value == FLAGS["num_carriers"]:
+                if any(linarg.n_individuals is None for linarg in linargs):
+                    raise ValueError("Cannot compute num_carriers:",
+                        "linear ARG lacks individual nodes. Run add_individual_nodes first.")
+                func = cls._num_carriers
             else:
                 flag.value = FLAGS["error"]
                 raise ValueError(f"Unexpected flag value: {flag.value}")
@@ -324,6 +401,23 @@ class _ManagerFactory:
         sample_lock: Lock,
     ) -> None:
         variant_data[:] = linarg.T @ sample_data
+
+    @classmethod
+    def _num_carriers(
+        cls,
+        linarg: LinearARG,
+        sample_data: np.ndarray,
+        variant_data: np.ndarray,
+        sample_lock: Lock,
+    ) -> None:
+        # sample_data: shape (num_samples, num_traits); use first n_individuals rows as include matrix
+        include = sample_data[: linarg.n_individuals, :]
+        # Compute per-trait carrier counts by converting include columns to index arrays
+        for t in range(include.shape[1]):
+            col = include[:, t]
+            idx = np.where(col != 0)[0]
+            counts = linarg.number_of_carriers(idx)
+            variant_data[:, t] = counts.astype(variant_data.dtype, copy=False)
 
     @classmethod
     def _split_blocks(

@@ -12,7 +12,7 @@ from scipy.sparse import diags
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 from ..core.operators import get_inner_merge_operators
-from .util import _get_genotype_variance_explained, _impute_missing_with_mean, residualize_phenotypes
+from .util import get_genotype_variance_explained, impute_missing_with_mean, residualize_phenotypes
 
 
 def randomized_haseman_elston(
@@ -118,7 +118,7 @@ def _prep_for_h2_estimation(
         raise ValueError("First column of covariates should be all-ones")
 
     # Handle missingness
-    covariates = _impute_missing_with_mean(covariates)
+    covariates = impute_missing_with_mean(covariates)
     is_missing = np.isnan(phenotypes)
     num_nonmissing = np.sum(~is_missing, axis=0)
     phenotypes.ravel()[is_missing.ravel()] = 0
@@ -127,7 +127,7 @@ def _prep_for_h2_estimation(
     y_resid = residualize_phenotypes(phenotypes, covariates, is_missing)
     y_resid /= np.sqrt(np.sum(y_resid**2, axis=0) / num_nonmissing)  # ||y_resid||^2 == num_nonmissing
 
-    var_explained, allele_counts = _get_genotype_variance_explained(right_op @ genotypes, covariates)
+    var_explained, allele_counts = get_genotype_variance_explained(right_op @ genotypes, covariates)
     denominator = (allele_counts - var_explained + 1e-6) / two_n
 
     return y_resid, covariates, denominator

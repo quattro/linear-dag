@@ -1,5 +1,5 @@
 import numpy as np
-
+import time
 from scipy.sparse.linalg import LinearOperator
 
 
@@ -39,17 +39,17 @@ def residualize_phenotypes(
     return residuals
 
 
-def _get_genotype_variance_explained(
-    genotypes: LinearOperator,
-    covariates: np.ndarray,
+def get_genotype_variance_explained(
+    XtC: np.ndarray,
+    C: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Get variance of genotypes explained by covariates:
             diag(X'C(C'C)^-1C'X) / n
     where X is the genotype operator, C is the covariate matrix, and diag() extracts the diagonal.
 
     Args:
-        genotypes: Unnormalized, phased genotypes as a linear operator (e.g. ParallelOperator or LinearARG)
-        covariates: Covariates matrix, which should include the all-ones annotation except for missing values
+        XtC: X'C
+        C: Covariates matrix, which should include the all-ones annotation except for missing values
 
     Returns:
         tuple: (total_var_explained, allele_count)
@@ -57,12 +57,18 @@ def _get_genotype_variance_explained(
             allele_count: Allele count of the genotypes, assuming first column of covariates is all-ones
                             except for missing values
     """
-    covariate_inner = covariates.T @ covariates
-    between_product = covariates.T @ genotypes
-    covariates_backslash_genotypes = np.linalg.solve(covariate_inner, between_product)
+    covariate_inner = C.T @ C
+    t = time.time()
+    between_product = XtC.T
+    print(f"Time to compute between product: {time.time() - t}")
+    t = time.time()
+    C_backslash_XtC = np.linalg.solve(covariate_inner, between_product)
+    print(f"Time to compute backslash: {time.time() - t}")
 
     # diag(A.T @ B) == sum(A * B)
-    total_var_explained = np.sum(between_product * covariates_backslash_genotypes, axis=0).reshape(-1, 1)
+    t = time.time()
+    total_var_explained = np.sum(between_product * C_backslash_XtC, axis=0).reshape(-1, 1)
+    print(f"Time to compute total variance explained: {time.time() - t}")
 
     allele_count = between_product[0, :].reshape(-1, 1)
     return total_var_explained, allele_count
@@ -91,7 +97,7 @@ def _get_genotype_variance(
     return var_genotypes, carrier_counts
 
 
-def _impute_missing_with_mean(data: np.ndarray) -> np.ndarray:
+def impute_missing_with_mean(data: np.ndarray) -> np.ndarray:
     """Impute missing values with the mean of the column in place."""
     data = data.copy()
     for col in range(data.shape[1]):

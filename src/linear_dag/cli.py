@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import sys
+import time
 
 from importlib import metadata
 from os import PathLike
@@ -21,7 +22,7 @@ from linear_dag.pipeline import (
     run_forward_backward,
 )
 
-from .association.gwas import run_gwas, run_gwas_parallel
+from .association.gwas import run_gwas
 from .association.heritability import randomized_haseman_elston
 from .association.prs import run_prs_parallel
 from .core.lineararg import LinearARG, list_blocks, load_variant_info
@@ -213,7 +214,7 @@ def _prs(args):
         args.linarg_path,
         args.beta_path,
         args.score_cols,
-        num_workers=args.num_workers,
+        num_workers=args.num_processes,
         blocks=args.blocks,
         chromosomes=args.chrom,
     )
@@ -234,39 +235,6 @@ _pheno_cols: list[str] | None = None
 _covar_cols: list[str] | None = None
 _phenotypes: pl.DataFrame | None = None
 _out_prefix: str | None = None
-
-
-def _init_pool(
-    linarg_path_: str, pheno_cols_: list[str], covar_cols_: list[str], phenotypes_: pl.DataFrame, out_prefix_: str
-):
-    """Initializer run once in every worker process.
-
-    Stores large, read-only objects in process-local globals so that subsequent
-    calls to the worker avoid re-pickling them for every task.
-    """
-    global _linarg_path, _pheno_cols, _covar_cols, _phenotypes, _out_prefix
-    _linarg_path = linarg_path_
-    _pheno_cols = pheno_cols_
-    _covar_cols = covar_cols_
-    _phenotypes = phenotypes_
-    _out_prefix = out_prefix_
-
-
-def _gwas_worker(block_name: str):
-    """Run GWAS for a single block and write its results."""
-    import gzip
-
-    # Read block-specific genotypes
-    operator = LinearARG.read(_linarg_path, block_name)
-    # Variant metadata for this block
-    variant_info = load_variant_info(_linarg_path, [block_name])
-
-    # Run GWAS and write out
-    df = run_gwas(operator, _phenotypes.lazy(), _pheno_cols, _covar_cols, variant_info=variant_info)
-
-    out_file = f"{_out_prefix}.{block_name}.tsv.gz"
-    with gzip.open(out_file, "wb") as f:
-        df.collect().write_csv(f, separator="\t")
 
 
 def _assoc_scan(args):
@@ -290,18 +258,30 @@ def _assoc_scan(args):
     # Ensure output directory exists (args.out used as directory prefix)
     os.makedirs(args.out, exist_ok=True)
 
-    # Run parallel GWAS; writes per-block parquet files under args.out
-    run_gwas_parallel(
-        args.linarg_path,
-        phenotypes.lazy(),
-        pheno_cols=pheno_cols,
-        covar_cols=covar_cols,
-        output_prefix=args.out,
-        assume_hwe=not args.no_hwe,
-        num_workers=args.num_processes,
-    )
+    t = time.time()
+    v_info = load_variant_info(args.linarg_path, block_metadata.get_column("block_name").to_list())
+    logger.info(f"Variant info loaded in {time.time() - t:.2f} seconds") # TODO check if this is still a bottleneck
 
-    logger.info("Done!")
+    # Run parallel GWAS
+    with ParallelOperator.from_hdf5(args.linarg_path, 
+                                    num_processes=args.num_processes,
+                                    block_metadata=block_metadata,
+                                    max_num_traits=len(pheno_cols) + len(covar_cols),
+                                    ) as genotypes:
+        result: pl.LazyFrame = run_gwas(
+                genotypes,
+                phenotypes.lazy(),
+                pheno_cols=pheno_cols,
+                covar_cols=covar_cols,
+                variant_info=v_info,
+                assume_hwe=not args.no_hwe,
+                logger=logger,
+                in_place_op=False,
+            )
+        
+        result.sink_parquet(f"{args.out}.parquet") # streams to disk
+
+    logger.info(f"Finished in {time.time() - t:.2f} seconds")
 
     return
 
@@ -343,7 +323,7 @@ def _estimate_h2g(args):
         logger.info("Finished. Writing results")
         logger.info("Done!")
 
-        return
+    return
 
 
 def _prep_data(
