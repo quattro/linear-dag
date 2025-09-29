@@ -540,6 +540,26 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
 
     return pl.DataFrame(block_data)
 
+def load_block_metadata(h5_fname, block_metadata):
+    block_names = block_metadata.get_column("block_name").to_list()
+    lazyframes = []
+    with h5py.File(h5_fname, "r") as f:
+        for block_name in block_names:
+            block = f[block_name]
+            v_dict = {field: block[field][:].astype(str) for field in ["CHROM", "POS", "ID", "REF", "ALT"]}
+            v_info = (
+                pl.DataFrame(v_dict)
+                .with_columns(
+                    [
+                        pl.col("POS").cast(pl.Int32),
+                    ]
+                )
+                .lazy()
+            )
+            lazyframes.append(v_info)
+    return pl.concat(lazyframes)
+
+
 
 def load_variant_info(h5_fname: str, block_names: Union[list[str], None]):
     # Read all blocks from a single open file handle and build one DataFrame.

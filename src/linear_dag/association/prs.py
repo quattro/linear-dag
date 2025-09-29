@@ -5,9 +5,15 @@ import h5py
 from scipy.sparse import coo_matrix
 from multiprocessing import Pool, shared_memory, Lock, cpu_count
 from linear_dag.core.lineararg import list_blocks, LinearARG
+from scipy.sparse.linalg import LinearOperator
 
 # global lock for workers
 _global_lock = None
+
+def run_prs(genotypes: LinearOperator, data: pl.DataFrame, score_cols: list[str], iids: list[str]) -> np.ndarray:
+    beta = np.array(data[score_cols])
+    prs = genotypes @ beta
+    return prs
 
 def _init_worker(lock):
     global _global_lock

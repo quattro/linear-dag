@@ -45,6 +45,8 @@ dependencies = [
   "psutil",
   "h5py>=3.13.0",
   "pytest>=8.4.1",
+  "h5py",
+  "memory_profiler",
 ]
 
 [project.scripts]
