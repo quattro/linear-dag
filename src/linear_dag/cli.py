@@ -4,11 +4,14 @@ import logging
 import os
 import re
 import sys
+import time
 
 from importlib import metadata
 from os import PathLike
 from typing import Optional, Union
+from scipy.sparse import coo_matrix
 
+import numpy as np
 import polars as pl
 
 from linear_dag.pipeline import (
@@ -21,10 +24,10 @@ from linear_dag.pipeline import (
     run_forward_backward,
 )
 
-from .association.gwas import run_gwas, run_gwas_parallel
+from .association.gwas import run_gwas
 from .association.heritability import randomized_haseman_elston
-from .association.prs import run_prs_parallel
-from .core.lineararg import LinearARG, list_blocks, load_variant_info
+from .association.prs import run_prs
+from .core.lineararg import LinearARG, list_blocks, load_variant_info, load_block_metadata
 from .core.parallel_processing import ParallelOperator
 from .memory_logger import MemoryLogger
 
@@ -209,19 +212,35 @@ def _read_pheno_or_covar(
 
 def _prs(args):
     logger = MemoryLogger(__name__)
-    result = run_prs_parallel(
-        args.linarg_path,
-        args.beta_path,
-        args.score_cols,
-        num_workers=args.num_workers,
-        blocks=args.blocks,
-        chromosomes=args.chrom,
-    )
+    logger.info("Getting blocks")
+    block_metadata = list_blocks(args.linarg_path)
+    block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
+    logger.info("Reading in weights")
+    betas = pl.read_csv(args.beta_path, separator="\t")
+    logger.info("Performing scoring")
+    with ParallelOperator.from_hdf5(
+        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=len(args.score_cols)
+    ) as linarg:
+        iids = linarg.iids
+        prs = run_prs(linarg, betas, args.score_cols, iids)
+       
+    logger.info("Summing haplotype scores to individual scores")
+    unique_ids, row_indices = np.unique(iids, return_inverse=True)
+    num_ids = len(unique_ids)
+    num_cols = len(iids)
+    col_indices = np.arange(num_cols)
+    data = np.ones(num_cols, dtype=np.int8)
+    S = coo_matrix((data, (row_indices, col_indices)), shape=(num_ids, num_cols)).tocsc()
+    prs_ind = S @ prs   
+    
+    frame_dict = {"iid": unique_ids}
+    for i, score in enumerate(args.score_cols):
+        frame_dict[score] = prs_ind[:, i]
+    result = pl.DataFrame(frame_dict)
+            
     logger.info("Writing results")
-    with gzip.open(f"{args.out}.tsv.gz", "wb") as f:
-        result.write_csv(f, separator="\t")
+    result.write_csv(f"{args.out}.tsv", separator="\t")
     logger.info("Done!")
-
     return
 
 
@@ -234,39 +253,6 @@ _pheno_cols: list[str] | None = None
 _covar_cols: list[str] | None = None
 _phenotypes: pl.DataFrame | None = None
 _out_prefix: str | None = None
-
-
-def _init_pool(
-    linarg_path_: str, pheno_cols_: list[str], covar_cols_: list[str], phenotypes_: pl.DataFrame, out_prefix_: str
-):
-    """Initializer run once in every worker process.
-
-    Stores large, read-only objects in process-local globals so that subsequent
-    calls to the worker avoid re-pickling them for every task.
-    """
-    global _linarg_path, _pheno_cols, _covar_cols, _phenotypes, _out_prefix
-    _linarg_path = linarg_path_
-    _pheno_cols = pheno_cols_
-    _covar_cols = covar_cols_
-    _phenotypes = phenotypes_
-    _out_prefix = out_prefix_
-
-
-def _gwas_worker(block_name: str):
-    """Run GWAS for a single block and write its results."""
-    import gzip
-
-    # Read block-specific genotypes
-    operator = LinearARG.read(_linarg_path, block_name)
-    # Variant metadata for this block
-    variant_info = load_variant_info(_linarg_path, [block_name])
-
-    # Run GWAS and write out
-    df = run_gwas(operator, _phenotypes.lazy(), _pheno_cols, _covar_cols, variant_info=variant_info)
-
-    out_file = f"{_out_prefix}.{block_name}.tsv.gz"
-    with gzip.open(out_file, "wb") as f:
-        df.collect().write_csv(f, separator="\t")
 
 
 def _assoc_scan(args):
@@ -282,7 +268,8 @@ def _assoc_scan(args):
         args.covar,
         args.covar_name,
         args.covar_col_nums,
-        args.chrom,
+        args.chromosomes,
+        args.block_names,
         args.num_processes,
         logger,
     )
@@ -290,18 +277,30 @@ def _assoc_scan(args):
     # Ensure output directory exists (args.out used as directory prefix)
     os.makedirs(args.out, exist_ok=True)
 
-    # Run parallel GWAS; writes per-block parquet files under args.out
-    run_gwas_parallel(
-        args.linarg_path,
-        phenotypes.lazy(),
-        pheno_cols=pheno_cols,
-        covar_cols=covar_cols,
-        output_prefix=args.out,
-        assume_hwe=not args.no_hwe,
-        num_workers=args.num_processes,
-    )
+    t = time.time()
+    v_info = load_variant_info(args.linarg_path, block_metadata.get_column("block_name").to_list())
+    logger.info(f"Variant info loaded in {time.time() - t:.2f} seconds") # TODO check if this is still a bottleneck
 
-    logger.info("Done!")
+    # Run parallel GWAS
+    with ParallelOperator.from_hdf5(args.linarg_path, 
+                                    num_processes=args.num_processes,
+                                    block_metadata=block_metadata,
+                                    max_num_traits=len(pheno_cols) + len(covar_cols),
+                                    ) as genotypes:
+        result: pl.LazyFrame = run_gwas(
+                genotypes,
+                phenotypes.lazy(),
+                pheno_cols=pheno_cols,
+                covar_cols=covar_cols,
+                variant_info=v_info,
+                assume_hwe=not args.no_hwe,
+                logger=logger,
+                in_place_op=True,
+            )
+        
+        result.sink_parquet(f"{args.out}.parquet") # streams to disk
+
+    logger.info(f"Finished in {time.time() - t:.2f} seconds")
 
     return
 
@@ -320,7 +319,8 @@ def _estimate_h2g(args):
         args.covar,
         args.covar_names,
         args.covar_col_nums,
-        args.chrom,
+        args.chromosomes,
+        args.block_names,
         args.num_processes,
         logger,
     )
@@ -343,7 +343,7 @@ def _estimate_h2g(args):
         logger.info("Finished. Writing results")
         logger.info("Done!")
 
-        return
+    return
 
 
 def _prep_data(
@@ -354,7 +354,8 @@ def _prep_data(
     covar: Optional[Union[str, PathLike]] = None,
     covar_names: Optional[list[str]] = None,
     covar_col_nums: Optional[list[int]] = None,
-    chrom: Optional[int] = None,
+    chromosomes: Optional[list[str]] = None,
+    block_names: Optional[list[str]] = None,
     num_processes: Optional[int] = None,
     logger: Optional[MemoryLogger] = None,
 ):
@@ -363,8 +364,7 @@ def _prep_data(
 
     logger.info("Getting blocks")
     block_metadata = list_blocks(linarg_path)
-    if chrom is not None:
-        block_metadata = _filter_blocks_by_chrom(block_metadata, chrom)
+    block_metadata = _filter_blocks(block_metadata, chromosomes=chromosomes, block_names=block_names)
 
     if num_processes is not None and num_processes < 1:
         raise ValueError(f"num_processes must be greater than zero, got {num_processes}")
@@ -401,13 +401,20 @@ def _prep_data(
     return block_metadata, covar_cols, pheno_cols, phenotypes
 
 
-def _filter_blocks_by_chrom(block_metadata: pl.DataFrame, chrom: int):
-    """Helper to filter blocks by chromosome"""
-    block_metadata = block_metadata.with_columns(
-        pl.Series("chrom", [b.split("_")[0] for b in list(block_metadata["block_name"])])
-    )
-    block_metadata = block_metadata.with_columns(pl.col("chrom").cast(pl.Int32)).filter(pl.col("chrom") == chrom)
+def _filter_blocks(
+    block_metadata: pl.DataFrame, 
+    chromosomes: list | None = None, 
+    block_names: list | None = None
+) -> pl.DataFrame:
+    """Helper to filter blocks by a list of chromosomes or block names."""
+    if block_names is not None and chromosomes is not None:
+        raise ValueError("Specify either block_names or chromosomes, not both.")
+    if block_names is not None:
+        block_metadata = block_metadata.filter(pl.col("block_name").is_in(block_names))
+    if chromosomes is not None:
+        block_metadata = block_metadata.filter(pl.col("chrom").is_in(chromosomes))
     return block_metadata
+
 
 
 def _make_geno(args):
@@ -536,19 +543,19 @@ def _main(args):
         help="Which columns to perform the prs on in beta_path.",
     )
     prs_p.add_argument(
-        "--chrom",
+        "--chromosomes",
         type=str,
         nargs="+",
         help="Which chromosomes to run the PRS on. Defaults to all chromosomes.",
     )
     prs_p.add_argument(
-        "--blocks",
+        "--block-names",
         type=str,
         nargs="+",
         help="Which blocks to run the PRS on. Defaults to all blocks.",
     )
     prs_p.add_argument(
-        "--num-workers",
+        "--num-processes",
         type=int,
         help="How many cores to uses. Defaults to all available cores.",
     )
@@ -775,9 +782,16 @@ def _create_common_parser(subp, name, help):
         help="Covariate column number or numbers (comma/space delimited)",
     )
     common_p.add_argument(
-        "--chrom",
-        type=int,
-        help="Which chromosome to run the association on. Defaults to all chromosomes.",
+        "--chromosomes",
+        type=str,
+        nargs="+",
+        help="Which chromosomes to include. Defaults to all chromosomes."
+    )
+    common_p.add_argument(
+        "--block-names",
+        type=str,
+        nargs="+",
+        help="Which blocks to include. Defaults to all blocks."
     )
     common_p.add_argument(
         "--num-processes",

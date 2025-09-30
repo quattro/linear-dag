@@ -135,6 +135,39 @@ gwas_results_parallel_lf = run_gwas(
 )
 ```
 
+#### Advanced: in-place shared-memory views (ParallelOperator)
+
+`ParallelOperator` supports avoiding large buffer copies by exposing a NumPy view into its internal shared-memory buffer that workers use for intermediate results. The user should be careful to avoid a use-after-free by ensuring that when the `with`-context is exited, the view is no longer in use.
+
+- `borrow_variant_data_view()` returns a NumPy array that aliases the internal `variant_data` shared memory. This view is only valid while the operator is inside its `with`-context. After exit, the shared memory is closed and accessing the view will segfault.
+- `par._rmatmat(Y, in_place=True)` computes `par.T @ Y` and returns a view into `variant_data[:, :k]` where `k = Y.shape[1]`. No copy is made. This requires `k <= max_num_traits`. After exit, the shared memory is closed and accessing the view will segfault.
+- `par._matmat(X, in_place=True)` uses `X.shape[1]` as `k` and assumes you have already populated `variant_data[:, :k]` (e.g., via `borrow_variant_data_view()`), then runs workers and returns the result without copying the input into shared memory. The values inside of `X` are ignored; if you have not already populated the shared memory with desired values, the result will be incorrect.
+
+Minimal example:
+
+```python
+from linear_dag.core import ParallelOperator
+import numpy as np
+
+with ParallelOperator.from_hdf5("merged_linarg.h5", max_num_traits=8) as par:
+    # In-place rmatmat: returns a view into shared memory
+    Y = np.random.randn(par.shape[0], 3).astype(np.float32)
+    Z_view = par._rmatmat(Y, in_place=True)   # Z_view aliases internal buffer
+    use_now = Z_view.copy()                    # copy if you need it after the block
+
+    # In-place matmat: pre-populate shared buffer, then compute
+    k = 3
+    X = np.random.randn(par.shape[1], k).astype(np.float32)
+    buf = par.borrow_variant_data_view()
+    buf[:, :k] = X
+    Y2 = par._matmat(np.empty((par.shape[1], k), dtype=np.float32), in_place=True)
+```
+
+Notes:
+
+- The returned in-place view will be overwritten by subsequent operations and becomes invalid after leaving the `with` block.
+- In-place paths require the number of columns `k` to be `<= max_num_traits`.
+
 ## Command-line interface
 
 The package provides a command-line tool `kodama` with two alternative approaches for constructing linear ARGs:

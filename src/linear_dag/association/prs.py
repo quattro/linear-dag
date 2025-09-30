@@ -7,11 +7,18 @@ import numpy as np
 import polars as pl
 
 from scipy.sparse import coo_matrix
+from scipy.sparse.linalg import LinearOperator
 
 from linear_dag.core.lineararg import LinearARG, list_blocks
 
 # global lock for workers
 _global_lock = None
+
+
+def run_prs(genotypes: LinearOperator, data: pl.DataFrame, score_cols: list[str], iids: list[str]) -> np.ndarray:
+    beta = np.array(data[score_cols])
+    prs = genotypes @ beta
+    return prs
 
 
 def _init_worker(lock):

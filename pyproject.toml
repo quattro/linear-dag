@@ -7,7 +7,7 @@ name = "linear-dag"
 dynamic = ["version"]
 description = ''
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 license = { text = "MIT" }
 keywords = [
   "statistics",
@@ -45,6 +45,8 @@ dependencies = [
   "psutil",
   "h5py>=3.13.0",
   "pytest>=8.4.1",
+  "h5py",
+  "memory_profiler",
 ]
 
 [project.scripts]
@@ -113,7 +115,7 @@ cov = [
 ]
 
 [[tool.hatch.envs.all.matrix]]
-python = ["3.9", "3.10", "3.11", "3.12"]
+python = ["3.12"]
 
 [tool.hatch.envs.lint]
 detached = true
