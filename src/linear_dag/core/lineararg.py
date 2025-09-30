@@ -345,6 +345,11 @@ class LinearARG(LinearOperator):
         """
 
         fname = h5_fname if str(h5_fname).endswith(".h5") else str(h5_fname) + ".h5"
+        if os.path.exists(fname) and not block_info:
+            raise FileExistsError(
+                f"The file '{fname}' already exists."
+                "To append a new linear ARG to an existing file, specify `block_info`."
+            )
         with h5py.File(fname, "a") as f:
             if block_info:
                 block_name = f"{block_info['chrom']}_{block_info['start']}_{block_info['end']}"
@@ -353,11 +358,6 @@ class LinearARG(LinearOperator):
                 destination.attrs["start"] = block_info["start"]
                 destination.attrs["end"] = block_info["end"]
             else:
-                if os.path.exists(fname):
-                    raise FileExistsError(
-                        f"The file '{fname}' already exists."
-                        "To append a new linear ARG to an existing file, specify `block_info`."
-                    )
                 destination = f
 
             destination.attrs["n"] = self.A.shape[0]
@@ -425,8 +425,15 @@ class LinearARG(LinearOperator):
 
             if load_metadata:
                 v_dict = {field: f[field][:].astype(str) for field in ["CHROM", "POS", "ID", "REF", "ALT"]}
-                v_info = (
-                    pl.LazyFrame(v_dict, schema=[("CHROM", pl.String), ("POS", pl.Int32), ("ID", pl.String), ("REF", pl.String), ("ALT", pl.String)])
+                v_info = pl.LazyFrame(
+                    v_dict,
+                    schema=[
+                        ("CHROM", pl.String),
+                        ("POS", pl.Int32),
+                        ("ID", pl.String),
+                        ("REF", pl.String),
+                        ("ALT", pl.String),
+                    ],
                 )
             else:
                 v_info = None

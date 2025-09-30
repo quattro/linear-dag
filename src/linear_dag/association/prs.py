@@ -1,17 +1,23 @@
 import time
+
+from multiprocessing import cpu_count, Lock, Pool, shared_memory
+
+import h5py
 import numpy as np
 import polars as pl
-import h5py
+
 from scipy.sparse import coo_matrix
-from multiprocessing import Pool, shared_memory, Lock, cpu_count
-from linear_dag.core.lineararg import list_blocks, LinearARG
+
+from linear_dag.core.lineararg import LinearARG, list_blocks
 
 # global lock for workers
 _global_lock = None
 
+
 def _init_worker(lock):
     global _global_lock
     _global_lock = lock
+
 
 def _prs_worker(hdf5_file, beta_path, block_name, beta_starting_index, n_variants, score_cols, shm_name, res_shape):
     global _global_lock
@@ -23,7 +29,7 @@ def _prs_worker(hdf5_file, beta_path, block_name, beta_starting_index, n_variant
 
     # Load beta slice
     beta = (
-        pl.scan_csv(beta_path, separator='\t')
+        pl.scan_csv(beta_path, separator="\t")
         .select(score_cols)
         .slice(beta_starting_index, n_variants)
         .collect()
@@ -38,6 +44,7 @@ def _prs_worker(hdf5_file, beta_path, block_name, beta_starting_index, n_variant
         prs[:, :] += partial
 
     shm.close()
+
 
 def run_prs_parallel(hdf5_file, beta_path, score_cols, num_workers=None, blocks=None, chromosomes=None):
     start_total = time.time()
@@ -77,10 +84,7 @@ def run_prs_parallel(hdf5_file, beta_path, score_cols, num_workers=None, blocks=
 
     # Step 4: Compute starting indices
     t0 = time.time()
-    starting_index = pl.Series(
-        "starting_index",
-        [0] + blocks_meta["n_variants"].to_list()[:-1]
-    )
+    starting_index = pl.Series("starting_index", [0] + blocks_meta["n_variants"].to_list()[:-1])
     blocks_meta = blocks_meta.with_columns(starting_index)
     print(f"Step 4 (starting indices) took {time.time() - t0:.2f}s")
 

@@ -1,20 +1,20 @@
-from typing import Optional
-
-import numpy as np
-import polars as pl
-import h5py
-from multiprocessing import Pool, shared_memory, cpu_count
 import os
 import time
+
+from multiprocessing import cpu_count, Pool, shared_memory
+from typing import Optional
+
+import h5py
+import numpy as np
+import polars as pl
 
 from scipy.sparse.linalg import LinearOperator
 from scipy.stats import chi2
 
-from linear_dag.core.lineararg import list_blocks, LinearARG
+from linear_dag.core.lineararg import LinearARG, list_blocks
 
 from ..core.operators import get_inner_merge_operators
 from .util import (
-    _get_genotype_variance,
     _get_genotype_variance_explained,
     _impute_missing_with_mean,
     residualize_phenotypes,
@@ -37,7 +37,7 @@ def get_gwas_beta_se(
     """
     if not np.allclose(covariates[:, 0], 1):
         raise ValueError("First column of covariates should be all-ones")
-    
+
     if num_nonmissing is None:
         num_nonmissing = y_resid.shape[0] * np.ones(y_resid.shape[1])
 
@@ -52,7 +52,7 @@ def get_gwas_beta_se(
     var_explained, allele_counts = _get_genotype_variance_explained(genotypes, covariates)
     denominator_hap = allele_counts - var_explained
     denominator_hap = np.maximum(denominator_hap, 1e-6) / (2 * genotypes.shape[0])  # assumes diploid
-    denominator_dip = denominator_hap    
+    denominator_dip = denominator_hap
     if num_carriers is not None:
         # assumes diploid
         num_homozygotes = (allele_counts - num_carriers.reshape(*allele_counts.shape)) // 2
@@ -63,7 +63,6 @@ def get_gwas_beta_se(
     se = np.sqrt(var_resid / (denominator_dip * (num_nonmissing - num_covariates).reshape(1, -1)))
 
     return beta, se, allele_counts
-
 
 
 def _format_sumstats(
@@ -77,6 +76,7 @@ def _format_sumstats(
     Columns produced per phenotype:
     - <pheno>_BETA, <pheno>_SE (and optional LOG10P). Floats are downcast to Float32.
     """
+
     def log_chisq_pval(z: np.ndarray) -> np.ndarray:
         return -chi2(1).logsf(z**2) / np.log(10)
 
@@ -112,19 +112,20 @@ def run_gwas(
 
     if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
-    
+
     left_op, right_op = get_inner_merge_operators(
         data.select("iid").cast(pl.Utf8).collect().to_series(), genotypes.iids
     )  # data iids to shared iids, shared iids to genotypes iids
     if left_op.shape[1] == 0:
         raise ValueError("Merge failed between genotype and phenotype data")
-    
+
     if assume_hwe:
         num_carriers = None
     else:
         # assumes diploid
-        individuals_to_include = np.where(np.isin(genotypes.iids[::2], 
-            data.select("iid").collect().to_numpy().astype(str)))[0]
+        individuals_to_include = np.where(
+            np.isin(genotypes.iids[::2], data.select("iid").collect().to_numpy().astype(str))
+        )[0]
         num_carriers = genotypes.number_of_carriers(individuals_to_include)
 
     phenotypes = data.select(pheno_cols).collect().to_numpy()
@@ -185,28 +186,22 @@ def run_gwas_parallel(
     with h5py.File(hdf5_file, "r") as h5f:
         if not assume_hwe:
             has_individuals = any(
-                isinstance(h5f[k], h5py.Group) and ("n_individuals" in h5f[k].attrs)
-                for k in h5f.keys()
+                isinstance(h5f[k], h5py.Group) and ("n_individuals" in h5f[k].attrs) for k in h5f.keys()
             )
             if not has_individuals:
-                raise ValueError(
-                    "If assume_hwe is False, the HDF5 must include individual nodes (n_individuals)."
-                )
+                raise ValueError("If assume_hwe is False, the HDF5 must include individual nodes (n_individuals).")
         iids = h5f["iids"][:].astype(str)
 
     # Get rows that are present in the genotype data
     iid_df = pl.LazyFrame({"iid": pl.Series(iids).unique(maintain_order=True)})
-    merged = (
-        data.with_columns(pl.col("iid").cast(pl.Utf8))
-        .join(iid_df, on="iid", how="inner", maintain_order="right")
-    )
+    merged = data.with_columns(pl.col("iid").cast(pl.Utf8)).join(iid_df, on="iid", how="inner", maintain_order="right")
 
     phenotypes = merged.select(pheno_cols).collect().to_numpy().copy()
     covariates = merged.select(covar_cols).collect().to_numpy()
     iids = merged.select("iid").collect().to_numpy().astype(str)
 
     is_missing = np.isnan(phenotypes)
-    num_nonmissing = 2 * np.sum(~is_missing, axis=0) # assumes diploid
+    num_nonmissing = 2 * np.sum(~is_missing, axis=0)  # assumes diploid
     phenotypes.ravel()[is_missing.ravel()] = 0
     covariates = _impute_missing_with_mean(covariates)
     phenotypes = residualize_phenotypes(phenotypes, covariates, is_missing)
@@ -232,7 +227,6 @@ def run_gwas_parallel(
     cv_desc = (shm_cv.name, cv_shape, cv_dtype.str)
     iids_desc = (shm_iids.name, iids_shape, iids_dtype.str)
 
-
     blocks = list_blocks(hdf5_file)["block_name"].to_list()
 
     if num_workers is None:
@@ -250,29 +244,37 @@ def run_gwas_parallel(
             worker_times = p.starmap(
                 _gwas_worker,
                 [
-                    (ph_desc, cv_desc, iids_desc, pheno_cols, num_nonmissing, hdf5_file, block, output_prefix, assume_hwe)
+                    (
+                        ph_desc,
+                        cv_desc,
+                        iids_desc,
+                        pheno_cols,
+                        num_nonmissing,
+                        hdf5_file,
+                        block,
+                        output_prefix,
+                        assume_hwe,
+                    )
                     for block in blocks
                 ],
             )
             if verbose:
                 # Sum timing categories across workers and print a compact summary
-                keys = [
-                    "read", "merge_yc", "geno", "carriers", "stats", "format", "collect", "write"
-                ]
+                keys = ["read", "merge_yc", "geno", "carriers", "stats", "format", "collect", "write"]
                 totals = {k: 0.0 for k in keys}
                 for w in worker_times:
                     for k in keys:
                         totals[k] += w.get(k, 0.0)
-                print(
-                    "timings(sum): "
-                    + " ".join([f"{k}={totals[k]:.3f}s" for k in keys])
-                )
+                print("timings(sum): " + " ".join([f"{k}={totals[k]:.3f}s" for k in keys]))
     finally:
         # Clean up shared memory
         ph_view = cv_view = iids_view = None
-        shm_ph.close(); shm_ph.unlink()
-        shm_cv.close(); shm_cv.unlink()
-        shm_iids.close(); shm_iids.unlink()
+        shm_ph.close()
+        shm_ph.unlink()
+        shm_cv.close()
+        shm_cv.unlink()
+        shm_iids.close()
+        shm_iids.unlink()
 
 
 def _gwas_worker(
@@ -307,9 +309,7 @@ def _gwas_worker(
         t_read = time.perf_counter()
 
         # Merge arrays to shared sample space (iids are in genotype order from run_gwas_parallel)
-        left_op, right_op = get_inner_merge_operators(
-            pl.Series(iids.ravel().astype(str)), linarg.iids
-        )
+        left_op, right_op = get_inner_merge_operators(pl.Series(iids.ravel().astype(str)), linarg.iids)
         if left_op.shape[1] == 0:
             raise ValueError("Merge failed between genotype and phenotype data in worker")
 
@@ -321,17 +321,19 @@ def _gwas_worker(
         # Merge genotypes to shared space
         genotypes_m = right_op @ linarg
         t_merge_g = time.perf_counter()
-        
+
         if assume_hwe:
             num_carriers = None
         else:
             flat_iids = iids.ravel().astype(str)
-            individuals_to_include = np.where(np.isin(linarg.iids[::2], flat_iids))[0] # assumes diploid
+            individuals_to_include = np.where(np.isin(linarg.iids[::2], flat_iids))[0]  # assumes diploid
             num_carriers = linarg.number_of_carriers(individuals_to_include)
         t_car = time.perf_counter()
-        
+
         beta, se, allele_counts = get_gwas_beta_se(
-            genotypes_m, phenotypes_m, covariates_m,
+            genotypes_m,
+            phenotypes_m,
+            covariates_m,
             num_nonmissing=num_nonmissing,
             num_carriers=num_carriers,
         )

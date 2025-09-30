@@ -267,6 +267,11 @@ def merge(linarg_dir, load_dir):
     logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/merge.log")
     logger.info("Merging brick graphs")
     t1 = time.time()
+    if not os.path.exists(f"{load_dir}{linarg_dir}/brick_graph_partitions"):
+        raise ValueError(
+            f"Path '{load_dir}{linarg_dir}/brick_graph_partitions' does not exist! Please provide valid path."
+        )
+
     merged_graph, variant_indices, num_samples, index_mapping = merge_brick_graphs(
         f"{load_dir}{linarg_dir}/brick_graph_partitions"
     )
@@ -312,7 +317,20 @@ def merge(linarg_dir, load_dir):
     linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), variants=var_info, sex=sex)
     linarg.calculate_nonunique_indices()
     logger.info("Saving linear ARG")
-    linarg.write(f"{linarg_dir}/linear_arg")
+
+    # pull block info before saving
+    block = (
+        var_info.select(
+            [
+                pl.col("CHR").first().alias("chrom"),
+                pl.col("POS").min().alias("start"),
+                pl.col("POS").max().alias("end"),
+            ]
+        )
+        .collect()
+        .to_dicts()[0]
+    )
+    linarg.write(f"{linarg_dir}/linear_arg", block_info=block)
     logger.info("Computing linear ARG stats")
     get_linarg_stats(linarg_dir, load_dir)
 
