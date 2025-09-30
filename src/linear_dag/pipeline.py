@@ -322,7 +322,7 @@ def merge(linarg_dir, load_dir):
     block = (
         var_info.select(
             [
-                pl.col("CHR").first().alias("chrom"),
+                pl.col("CHROM").first().alias("chrom"),
                 pl.col("POS").min().alias("start"),
                 pl.col("POS").max().alias("end"),
             ]
