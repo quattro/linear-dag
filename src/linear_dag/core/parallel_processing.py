@@ -35,6 +35,7 @@ class _SharedArrayHandle:
     lock: Lock
     shape: Tuple[int, ...]
     dtype: Type[np.generic]
+    _np_args: dict # extra args when accessing as an array
     _shm: shared_memory.SharedMemory = None  # Backing SHM object (only in creator)
     _opened_shm: shared_memory.SharedMemory = None  # Handle in current process
 
@@ -42,7 +43,10 @@ class _SharedArrayHandle:
         """Attach to the shared memory and return a NumPy array view."""
         if self._opened_shm is None:
             self._opened_shm = shared_memory.SharedMemory(name=self.name)
-        return np.ndarray(self.shape, dtype=self.dtype, buffer=self._opened_shm.buf)
+        return np.ndarray(self.shape, dtype=self.dtype, buffer=self._opened_shm.buf, **self._np_args)
+
+    def copy(self) -> "_SharedArrayHandle":
+        return _SharedArrayHandle(name=self.name, lock=self.lock, shape=self.shape, dtype=self.dtype, _np_args=self._np_args)
 
     def close(self) -> None:
         """Close the handle to the shared memory for this process."""
@@ -88,7 +92,7 @@ class _ParallelManager:
             shm = shared_memory.SharedMemory(create=True, size=size)
             lock = Lock()
             # Store the handle, including the raw SHM object for later unlinking
-            self.handles[name] = _SharedArrayHandle(name=shm.name, lock=lock, shape=shape, dtype=dtype, _shm=shm)
+            self.handles[name] = _SharedArrayHandle(name=shm.name, lock=lock, shape=shape, dtype=dtype, _shm=shm, _np_args={'order': 'F'})
 
     def __enter__(self):
         return self
@@ -128,6 +132,13 @@ class _ParallelManager:
         process = Process(target=target, args=(self.handles, *args))
         process.start()
         self.processes.append(process)
+
+    def shutdown_workers(self) -> None:
+        """Shut down worker processes without unlinking shared memory."""
+        for flag in self.flags:
+            flag.value = FLAGS["shutdown"]
+        for process in self.processes:
+            process.join()
 
     def close(self) -> None:
         """Signal all workers to shut down and join processes."""
@@ -179,6 +190,12 @@ class ParallelOperator(LinearOperator):
             h.close()
         return self._manager.__exit__(exc_type, exc_val, exc_tb)
 
+    def shutdown(self) -> None:
+        """Shut down workers without deleting shared memory arrays."""
+        for h in self._variant_view_handles:
+            h.close()
+        self._manager.shutdown_workers()
+
     @property
     def num_samples(self):
         return self.shape[0]
@@ -193,8 +210,7 @@ class ParallelOperator(LinearOperator):
         The returned array aliases the shared memory. It remains valid until
         this operator exits its context manager (when handles are closed).
         """
-        base = self._variant_data_handle
-        handle = _SharedArrayHandle(name=base.name, lock=base.lock, shape=base.shape, dtype=base.dtype)
+        handle = self._variant_data_handle.copy()
         self._variant_view_handles.append(handle)
         return handle.access_as_array()
 

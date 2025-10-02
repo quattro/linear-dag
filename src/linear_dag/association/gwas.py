@@ -1,4 +1,5 @@
 import logging
+from operator import concat
 import time
 
 from typing import Optional
@@ -46,10 +47,11 @@ def get_gwas_beta_se(
         num_nonmissing = y_resid.shape[0] * np.ones(y_resid.shape[1])
 
     num_covariates = covariates.shape[1]
+    num_traits = y_resid.shape[1]
     if any(num_nonmissing < num_covariates):
         raise ValueError("num_nonmissing must be at least num_covariates for each trait")
 
-    y_concat = np.concatenate((y_resid, covariates), axis=1)
+    y_concat = np.concatenate((y_resid, covariates), axis=1, dtype=np.float32)
     if in_place_op:
         if not isinstance(genotypes, ParallelOperator):
             raise ValueError("in_place_op=True requires genotypes to be a ParallelOperator")
@@ -61,13 +63,13 @@ def get_gwas_beta_se(
         logger.info(f"Xty shape={Xty.shape}")
 
     # Operate in place on possibly large array
-    beta = Xty[:, : y_resid.shape[1]]
+    beta = Xty[:, :num_traits]
     beta /= num_nonmissing
 
     # Denominator, equal across traits despite different missingness
-    var_explained, allele_counts = get_genotype_variance_explained(Xty[:, y_resid.shape[1] :], covariates)
-    denominator_hap = allele_counts - var_explained
-    denominator_hap = np.maximum(denominator_hap, 1e-6) / (2 * right_op.shape[0])  # assumes diploid
+    var_explained, allele_counts = get_genotype_variance_explained(Xty[:, num_traits:], covariates)
+    denominator_hap = (allele_counts - var_explained).astype(np.float32)
+    denominator_hap = np.maximum(denominator_hap, 1e-6) / np.float32(2 * right_op.shape[0])  # assumes diploid
 
     beta /= denominator_hap
 
@@ -78,7 +80,9 @@ def get_gwas_beta_se(
         num_homozygotes = (allele_counts - num_carriers.reshape(*allele_counts.shape)) // 2
         assert allele_counts.shape == num_homozygotes.shape
         var_denominator += 2 * num_homozygotes - var_explained
-    var_numerator = np.sum(y_resid**2, axis=0) / (num_nonmissing - num_covariates)
+    var_numerator = np.sum(y_concat[:, :num_traits]**2, axis=0) / (num_nonmissing - num_covariates).astype(np.float32)
+    assert y_concat.dtype == np.float32
+    assert var_numerator.dtype == np.float32
     # se = np.sqrt(var_numerator / var_denominator)
 
     return beta, var_numerator, var_denominator, allele_counts
@@ -97,41 +101,37 @@ def _format_sumstats(
     - store BETA and VAR_DENOMINATOR as columns
     - compute SE lazily from expressions
     """
+    if not beta.flags.f_contiguous:
+        raise ValueError("`beta` should be a Fortran-contiguous (column-major) array")
+        
     # Start from variant_info and add columns lazily; avoid concatenation
-    variant_info = variant_info.lazy()
-    df = variant_info.with_columns(
-        [
-            pl.Series("VAR_DENOMINATOR", var_denominator.astype(np.float32).ravel()),
-        ]
-        + [pl.Series(f"{name}_BETA", beta[:, k].astype(np.float32)) for k, name in enumerate(pheno_cols)]
-    )
+    df = pl.LazyFrame(
+        beta,
+        schema={f"{name}_BETA": pl.Float32 for name in pheno_cols},
+        orient="row",
+    ).with_columns(VAR_DENOMINATOR=pl.lit(var_denominator.ravel()))
+    # df = pl.concat([variant_info, betalf], how="horizontal")
+
     if logger:
-        logger.info("Finished creating LazyFrame")
+        logger.info("Finished creating lazy frame")
 
     # Add SE lazily; uses beta and var terms, no materialization
     exprs = []
     for k, name in enumerate(pheno_cols):
-        # beta_name = f"{name}_BETA"
         se_name = f"{name}_SE"
         exprs.append(
             (pl.lit(float(var_numerator[k])) / pl.col("VAR_DENOMINATOR")).sqrt().cast(pl.Float32).alias(se_name)
         )
-    if logger:
-        logger.info("Finished adding SE")
     df = df.with_columns(exprs)
-    if logger:
-        logger.info("Finished adding SE")
 
     # Order columns grouped by phenotype (variant_info first). Do not include LOG10P by default.
     names_in_order = variant_info.collect_schema().names()
     for name in pheno_cols:
         names_in_order.append(f"{name}_BETA")
         names_in_order.append(f"{name}_SE")
+    # df = df.select(names_in_order)
     if logger:
-        logger.info("Finished ordering columns")
-    df = df.select(names_in_order)
-    if logger:
-        logger.info("Finished ordering columns")
+        logger.info("Finished formatting sumstats")
     return df
 
 
@@ -205,12 +205,15 @@ def run_gwas(
     )
     if logger:
         logger.info(f"GWAS computation finished in {time.time() - t:.3f}s")
+    assert beta.dtype == np.float32
+    assert var_numerator.dtype == np.float32
+    assert var_denominator.dtype == np.float32
 
     if variant_info is None:
         variant_info = pl.LazyFrame()
-    variant_info = variant_info.with_columns(
-        pl.Series("A1FREQ", allele_counts.ravel() / genotypes.shape[0]).cast(pl.Float32),
-    )
+    # variant_info = variant_info.with_columns(
+    #     pl.Series("A1FREQ", allele_counts.ravel() / genotypes.shape[0]).cast(pl.Float32),
+    # )
     if num_carriers is not None:
         variant_info = variant_info.with_columns(
             pl.Series("A1_CARRIER_FREQ", num_carriers.astype(np.float32).ravel() * 2 / genotypes.shape[0]).cast(
@@ -220,7 +223,7 @@ def run_gwas(
     if logger:
         logger.info(f"variant_info columns={len(variant_info.collect_schema().names())} pheno_cols={len(pheno_cols)}")
 
-    result = _format_sumstats(beta, var_numerator, var_denominator, variant_info, pheno_cols)
+    result = _format_sumstats(beta, var_numerator, var_denominator, variant_info, pheno_cols, logger=logger)
     if logger:
         logger.info("Finished formatting GWAS results")
     return result

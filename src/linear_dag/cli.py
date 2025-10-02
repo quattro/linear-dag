@@ -6,6 +6,7 @@ import re
 import sys
 import time
 
+from concurrent.futures import ThreadPoolExecutor
 from importlib import metadata
 from os import PathLike
 from typing import Optional, Union
@@ -278,8 +279,19 @@ def _assoc_scan(args):
     os.makedirs(args.out, exist_ok=True)
 
     t = time.time()
-    v_info = load_variant_info(args.linarg_path, block_metadata.get_column("block_name").to_list())
-    logger.info(f"Variant info loaded in {time.time() - t:.2f} seconds") # TODO check if this is still a bottleneck
+    # Start loading variant info asynchronously; only await when needed later
+    block_names = block_metadata.get_column("block_name").to_list()
+    vinfo_future = None
+    _vinfo_executor = None
+    if not getattr(args, "no_variant_info", False):
+        _vinfo_executor = ThreadPoolExecutor(max_workers=1)
+        t_vinfo = time.time()
+        columns_mode = "all" if getattr(args, "all_variant_info", False) else "id_only"
+        vinfo_future = _vinfo_executor.submit(
+            load_variant_info, args.linarg_path, block_names, columns=columns_mode
+        )
+        logger.info(f"Started loading variant info")
+        
 
     # Run parallel GWAS
     with ParallelOperator.from_hdf5(args.linarg_path, 
@@ -292,13 +304,24 @@ def _assoc_scan(args):
                 phenotypes.lazy(),
                 pheno_cols=pheno_cols,
                 covar_cols=covar_cols,
-                variant_info=v_info,
+                variant_info=None,
                 assume_hwe=not args.no_hwe,
                 logger=logger,
                 in_place_op=True,
             )
+        genotypes.shutdown()
+        logger.info("Shut down parallel operator")
+
+        # If variant info was requested, await its loading
+        if vinfo_future is not None:
+            v_info = vinfo_future.result()
+            logger.info(f"Variant info loaded after {time.time() - t_vinfo:.2f} seconds")
+            result = pl.concat([v_info, result], how="horizontal")
+            if _vinfo_executor is not None:
+                _vinfo_executor.shutdown(wait=False)
         
-        result.sink_parquet(f"{args.out}.parquet") # streams to disk
+        result.sink_parquet(f"{args.out}.parquet", compression="lz4") # TODO: this still causes a memory usage spike
+        logger.info(f"Results written to {args.out}.parquet")
 
     logger.info(f"Finished in {time.time() - t:.2f} seconds")
 
@@ -505,6 +528,16 @@ def _main(args):
         "--no-hwe",
         action="store_true",
         help="Do not assume Hardy-Weinberg equilibrium (requires individual nodes in the ARG).",
+    )
+    assoc_p.add_argument(
+        "--no-variant-info",
+        action="store_true",
+        help="Do not include variant metadata columns (CHROM, POS, ID, REF, ALT) in output.",
+    )
+    assoc_p.add_argument(
+        "--all-variant-info",
+        action="store_true",
+        help="Include all variant metadata columns (CHROM, POS, ID, REF, ALT) in output. Default is ID only.",
     )
 
     # build h2g estimation parser from 'common' parser, but add additional options for RHE

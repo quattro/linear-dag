@@ -568,75 +568,79 @@ def load_block_metadata(h5_fname, block_metadata):
     return pl.concat(lazyframes)
 
 
-def load_variant_info(h5_fname: str, block_names: Union[list[str], None]):
+def load_variant_info(
+    h5_fname: str,
+    block_names: Union[list[str], None] = None,
+    columns: str = "id_only",  # one of {"all", "id_only", "no_id"}
+):
     # Read all blocks from a single open file handle and build one DataFrame.
     # Avoids per-block DataFrame construction and repeated file opens.
+    
+    
     if not str(h5_fname).endswith(".h5"):
         h5_fname = str(h5_fname) + ".h5"
-    blocks = block_names or list_blocks(h5_fname).get_column("block_name").to_list()
+    # Determine which blocks to read and total number of variants for preallocation
+    blocks_df = list_blocks(h5_fname)
+    blocks = block_names or blocks_df.get_column("block_name").to_list()
+    if block_names is not None:
+        blocks_df = blocks_df.filter(pl.col("block_name").is_in(block_names))
+    total_m = int(blocks_df.get_column("n_variants").sum())
 
-    chrom_parts = []
-    pos_parts = []
-    id_parts = []
-    ref_parts = []
-    alt_parts = []
+    # Use Python object arrays for byte strings; fastest LazyFrame build in practice
+    chrom_dtype = object
+    id_dtype = object
+    ref_dtype = object
+    alt_dtype = object
 
-    t0 = time.time()
+    # Preallocate arrays according to requested columns
+    pos = None
+    chrom = None
+    id_ = None
+    ref = None
+    alt = None
+    if columns in ("all", "no_id"):
+        pos = np.empty(total_m, dtype=np.int32)
+        chrom = np.empty(total_m, dtype=chrom_dtype)
+        ref = np.empty(total_m, dtype=ref_dtype)
+        alt = np.empty(total_m, dtype=alt_dtype)
+    if columns in ("all", "id_only"):
+        id_ = np.empty(total_m, dtype=id_dtype)
+
     with h5py.File(h5_fname, "r") as f:
-        # t_open = time.time()
+        offset = 0
         for block in blocks:
             g = f[block]
-            chrom_parts.append(g["CHROM"][:])
-            pos_parts.append(g["POS"][:])
-            id_parts.append(g["ID"][:])
-            ref_parts.append(g["REF"][:])
-            alt_parts.append(g["ALT"][:])
-    t_read = time.time()
+            n = g["POS"].shape[0]
+            if columns in ("all", "no_id"):
+                chrom[offset : offset + n] = g["CHROM"][:]
+                pos[offset : offset + n] = g["POS"][:]
+                ref[offset : offset + n] = g["REF"][:]
+                alt[offset : offset + n] = g["ALT"][:]
+            if columns in ("all", "id_only"):
+                id_[offset : offset + n] = g["ID"][:]
+            offset += n
 
-    # Concatenate once per column
-    chrom = np.concatenate(chrom_parts) if chrom_parts else np.array([], dtype="S1")
-    pos = np.concatenate(pos_parts) if pos_parts else np.array([], dtype=np.int32)
-    id_ = np.concatenate(id_parts) if id_parts else np.array([], dtype="S1")
-    ref = np.concatenate(ref_parts) if ref_parts else np.array([], dtype="S1")
-    alt = np.concatenate(alt_parts) if alt_parts else np.array([], dtype="S1")
-    t_concat = time.time()
-
-    # Keep as raw bytes to avoid decode cost; use Binary dtype. POS stays Int32.
-    pos = pos.astype(np.Int32, copy=False) if hasattr(np, "Int32") else pos.astype(np.int32, copy=False)
-    t_decode = time.time()
-
-    lf = pl.LazyFrame(
-        {
+    # Build LazyFrame with requested columns
+    data_dict = {}
+    schema_list = []
+    if columns in ("all", "no_id"):
+        data_dict.update({
             "CHROM": chrom,
             "POS": pos,
-            "ID": id_,
             "REF": ref,
             "ALT": alt,
-        },
-        schema=[
+        })
+        schema_list.extend([
             ("CHROM", pl.Binary),
             ("POS", pl.Int32),
-            ("ID", pl.Binary),
             ("REF", pl.Binary),
             ("ALT", pl.Binary),
-        ],
-    )
-    t_df = time.time()
+        ])
+    if columns in ("all", "id_only"):
+        data_dict["ID"] = id_
+        schema_list.append(("ID", pl.Binary))
 
-    # Timers (stdout): helps identify bottlenecks in large runs
-    print(
-        "\n".join(
-            [
-                "load_variant_info timings (s):",
-                f"  open+iterate: {t_read - t0:.2f}",
-                f"  concatenate: {t_concat - t_read:.2f}",
-                f"  decode:      {t_decode - t_concat:.2f}",
-                f"  lazyframe:   {t_df - t_decode:.2f}",
-                f"  total:       {t_df - t0:.2f}",
-            ]
-        )
-    )
-
+    lf = pl.LazyFrame(data_dict, schema=schema_list)
     return lf
 
 
