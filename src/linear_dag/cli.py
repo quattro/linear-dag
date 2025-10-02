@@ -183,7 +183,7 @@ def _read_pheno_or_covar(
         if all_int and any([x < 0 for x in columns]):
             raise ValueError("Must supply valid column indices to read_pheno/read_covar")
 
-    df = pl.read_csv(path_or_filename, columns=columns, separator="\t")
+    df = pl.read_csv(path_or_filename, columns=columns, separator="\t", null_values=["NA", "", "NULL" , "NaN"])
 
     # check that IID is present, and drop FID if it is (we never use it)
     iids = [c for c in df.columns if iid_re.match(c)]
@@ -212,6 +212,9 @@ def _read_pheno_or_covar(
 
 
 def _prs(args):
+    
+    t = time.time()
+    
     logger = MemoryLogger(__name__)
     logger.info("Getting blocks")
     block_metadata = list_blocks(args.linarg_path)
@@ -242,6 +245,9 @@ def _prs(args):
     logger.info("Writing results")
     result.write_csv(f"{args.out}.tsv", separator="\t")
     logger.info("Done!")
+    
+    logger.info(f"Finished in {time.time() - t:.2f} seconds")
+    
     return
 
 
