@@ -228,7 +228,7 @@ def parquet_to_numpy(parquet_path: str, score_cols: str, dtype=np.float32):
     row_offset = 0
     for rg_idx in range(n_row_groups):
         table = parq.read_row_group(rg_idx)
-        chunk_arr = table.to_pandas()[score_cols].to_numpy(dtype=dtype)
+        chunk_arr = np.column_stack([col.to_numpy() for col in table.itercolumns()]).astype(dtype)
         n_rows_chunk = chunk_arr.shape[0]
         arr[row_offset:row_offset + n_rows_chunk] = chunk_arr
         row_offset += n_rows_chunk
