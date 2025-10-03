@@ -189,7 +189,6 @@ def _read_pheno_or_covar(
         columns=columns,
         separator="\t",
         null_values=["NA", "", "NULL", "NaN"],
-        dtypes={col: pl.Float64 for col in columns if col != "iid"}
     )
 
     # check that IID is present, and drop FID if it is (we never use it)
