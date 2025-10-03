@@ -217,19 +217,20 @@ def _read_pheno_or_covar(
     return df
 
 
-def parquet_to_numpy(parquet_path: str, dtype=np.float32):
+def parquet_to_numpy(parquet_path: str, score_cols: str, dtype=np.float32):
     parq = pq.ParquetFile(parquet_path)
     n_rows = parq.metadata.num_rows
-    n_cols = parq.metadata.schema.num_columns
+    n_cols = len(score_cols)
     n_row_groups = parq.num_row_groups
 
     arr = np.zeros((n_rows, n_cols), dtype=dtype)
 
     row_offset = 0
     for rg_idx in range(n_row_groups):
-        chunk_df = pl.read_parquet(parquet_path, row_groups=[rg_idx])
-        n_rows_chunk = chunk_df.height
-        arr[row_offset:row_offset + n_rows_chunk] = chunk_df.to_numpy()
+        table = parq.read_row_group(rg_idx)
+        chunk_arr = table.to_pandas()[score_cols].to_numpy(dtype=dtype)
+        n_rows_chunk = chunk_arr.shape[0]
+        arr[row_offset:row_offset + n_rows_chunk] = chunk_arr
         row_offset += n_rows_chunk
 
     return arr
@@ -243,7 +244,7 @@ def _prs(args):
     block_metadata = list_blocks(args.linarg_path)
     block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
     logger.info("Reading in weights")
-    betas = parquet_to_numpy(args.beta_path) # read in betas without storing intermediate dataframe
+    betas = parquet_to_numpy(args.beta_path, args.score_cols) # read in betas without storing intermediate dataframe
     logger.info("Performing scoring")
     with ParallelOperator.from_hdf5(
         args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=len(args.score_cols)
