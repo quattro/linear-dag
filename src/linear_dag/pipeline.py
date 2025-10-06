@@ -332,14 +332,17 @@ def merge(linarg_dir, load_dir):
     )
     linarg.write(f"{linarg_dir}/linear_arg", block_info=block)
     logger.info("Computing linear ARG stats")
-    get_linarg_stats(linarg_dir, load_dir)
+    get_linarg_stats(linarg_dir, load_dir, linarg)
+
+    return
 
 
-def get_linarg_stats(linarg_dir, load_dir):
+def get_linarg_stats(linarg_dir, load_dir, linarg=None):
     """
     Get stats from linear ARG.
     """
-    linarg = LinearARG.read(f"{linarg_dir}/linear_arg.h5")
+    if linarg is None:
+        linarg = LinearARG.read(f"{linarg_dir}/linear_arg.h5")
 
     linarg.flip = np.zeros(linarg.shape[1], dtype=bool)
 
@@ -391,6 +394,8 @@ def get_linarg_stats(linarg_dir, load_dir):
             + "\n"
         )
         file.write(" ".join(stats) + "\n")
+
+    return
 
 
 def add_individuals_to_linarg(linarg_dir, load_dir):
