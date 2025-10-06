@@ -218,7 +218,7 @@ def _read_pheno_or_covar(
 
 
 
-def parquet_to_numpy(destination: np.ndarray, parquet_path: str, score_cols: List[str], dtype=np.float32):
+def parquet_to_numpy(destination: np.ndarray, parquet_path: str, score_cols: list, dtype=np.float32):
     parq = pq.ParquetFile(parquet_path)
     row_offset = 0
 
