@@ -341,8 +341,8 @@ def _assoc_scan(args):
                 logger=logger,
                 in_place_op=True,
             )
-        # genotypes.shutdown()
-        # logger.info("Shut down parallel operator")
+        genotypes.shutdown()
+        logger.info("Shut down parallel operator")
 
         # If variant info was requested, await its loading
         if vinfo_future is not None:
