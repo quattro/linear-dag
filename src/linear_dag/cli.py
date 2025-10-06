@@ -217,23 +217,21 @@ def _read_pheno_or_covar(
     return df
 
 
-def parquet_to_numpy(destination, parquet_path: str, score_cols: str, dtype=np.float32):
+
+def parquet_to_numpy(destination: np.ndarray, parquet_path: str, score_cols: List[str], dtype=np.float32):
     parq = pq.ParquetFile(parquet_path)
-    n_rows = parq.metadata.num_rows
-    n_cols = len(score_cols)
-    n_row_groups = parq.num_row_groups
-
-    arr = np.zeros((n_rows, n_cols), dtype=dtype)
-
     row_offset = 0
-    for rg_idx in range(n_row_groups):
-        table = parq.read_row_group(rg_idx)
-        chunk_arr = np.column_stack([table[col].to_numpy() for col in score_cols])
+
+    for rg_idx in range(parq.num_row_groups):
+        table = parq.read_row_group(rg_idx, columns=score_cols)
+        chunk_cols = [
+            table[col].to_numpy(zero_copy_only=False).astype(dtype, copy=False)
+            for col in score_cols
+        ]
+        chunk_arr = np.stack(chunk_cols, axis=1) 
         n_rows_chunk = chunk_arr.shape[0]
-        arr[row_offset:row_offset + n_rows_chunk] = chunk_arr.astype(dtype)
+        destination[row_offset:row_offset + n_rows_chunk] = chunk_arr
         row_offset += n_rows_chunk
-        
-    np.copyto(destination, arr)
 
 
 def _prs(args):
@@ -251,10 +249,10 @@ def _prs(args):
         
         logger.info("Copying betas to shared memory")
         shm_array = linarg.borrow_variant_data_view()
-        betas = parquet_to_numpy(shm_array, args.beta_path, args.score_cols)
+        parquet_to_numpy(shm_array, args.beta_path, args.score_cols)
         iids = linarg.iids
         logger.info("Performing scoring")
-        prs = run_prs(linarg, betas, args.score_cols, iids)
+        prs = run_prs(linarg, shm_array, args.score_cols, iids)
        
     logger.info("Summing haplotype scores to individual scores")
     unique_ids, row_indices = np.unique(iids, return_inverse=True)
