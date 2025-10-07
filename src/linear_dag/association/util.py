@@ -58,19 +58,10 @@ def get_genotype_variance_explained(
                             except for missing values
     """
     covariate_inner = C.T @ C
-    t = time.time()
-    between_product = XtC.T
-    print(f"Time to compute between product: {time.time() - t}")
-    t = time.time()
-    C_backslash_XtC = np.linalg.solve(covariate_inner, between_product)
-    print(f"Time to compute backslash: {time.time() - t}")
+    C_backslash_XtC = np.linalg.solve(covariate_inner, XtC.T)
+    total_var_explained = np.sum(XtC.T * C_backslash_XtC, axis=0).reshape(-1, 1)
 
-    # diag(A.T @ B) == sum(A * B)
-    t = time.time()
-    total_var_explained = np.sum(between_product * C_backslash_XtC, axis=0).reshape(-1, 1)
-    print(f"Time to compute total variance explained: {time.time() - t}")
-
-    allele_count = between_product[0, :].reshape(-1, 1)
+    allele_count = XtC[:, 0].reshape(-1, 1)
     return total_var_explained, allele_count
 
 
