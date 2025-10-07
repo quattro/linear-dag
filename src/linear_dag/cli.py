@@ -500,7 +500,7 @@ def _reduction_union_recom(args):
 def _add_individuals_to_linarg(args):
     logger = MemoryLogger(__name__)
     logger.info("Starting main process")
-    add_individuals_to_linarg(args.linarg_dir, args.add_dir)
+    add_individuals_to_linarg(args.linarg_dir, args.load_dir)
 
     return
 
