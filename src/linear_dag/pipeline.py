@@ -323,7 +323,7 @@ def merge(linarg_dir, load_dir):
     )
     A_tri, variant_indices_tri = make_triangular(A_filt, variant_indices_reindexed, sample_indices_reindexed)
     linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), variants=var_info, sex=sex, iids=iids)
-    linarg = linarg.calculate_nonunique_indices()
+    linarg.calculate_nonunique_indices()
     logger.info("Saving linear ARG")
 
     # pull block info before saving
