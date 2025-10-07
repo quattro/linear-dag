@@ -192,8 +192,6 @@ class ParallelOperator(LinearOperator):
 
     def shutdown(self) -> None:
         """Shut down workers without deleting shared memory arrays."""
-        for h in self._variant_view_handles:
-            h.close()
         self._manager.shutdown_workers()
 
     @property

@@ -59,33 +59,33 @@ def get_gwas_beta_se(
     else:
         genotypes = right_op @ genotypes
         Xty = genotypes.T @ y_concat
+    
     if logger:
         logger.info(f"Xty shape={Xty.shape}")
 
     # Operate in place on possibly large array
     beta = Xty[:, :num_traits]
-    beta /= num_nonmissing
+    beta *= (right_op.shape[0]/num_nonmissing)
+    if logger:
+        logger.info(f"beta shape={beta.shape}")
+    
 
     # Denominator, equal across traits despite different missingness
     var_explained, allele_counts = get_genotype_variance_explained(Xty[:, num_traits:], covariates)
-    denominator_hap = (allele_counts - var_explained).astype(np.float32)
-    denominator_hap = np.maximum(denominator_hap, 1e-6) / np.float32(2 * right_op.shape[0])  # assumes diploid
+    denominator = allele_counts - var_explained
+    denominator = np.maximum(denominator.astype(np.float32), 1e-12)
+    beta /= denominator
 
-    beta /= denominator_hap
-
-    # standard error (but not beta) depends on HWE
-    var_denominator = denominator_hap
     if num_carriers is not None:  # else assume HWE
         # assumes diploid
-        num_homozygotes = (allele_counts - num_carriers.reshape(*allele_counts.shape)) // 2
-        assert allele_counts.shape == num_homozygotes.shape
-        var_denominator += 2 * num_homozygotes - var_explained
+        num_homozygotes = (allele_counts - num_carriers.reshape(*allele_counts.shape))
+        denominator = denominator + 2*num_homozygotes - var_explained
+
     var_numerator = np.sum(y_concat[:, :num_traits]**2, axis=0) / (num_nonmissing - num_covariates).astype(np.float32)
     assert y_concat.dtype == np.float32
     assert var_numerator.dtype == np.float32
-    # se = np.sqrt(var_numerator / var_denominator)
 
-    return beta, var_numerator, var_denominator, allele_counts
+    return beta, var_numerator, denominator, allele_counts
 
 
 def _format_sumstats(
@@ -132,6 +132,7 @@ def _format_sumstats(
     # df = df.select(names_in_order)
     if logger:
         logger.info("Finished formatting sumstats")
+        
     return df
 
 
@@ -207,7 +208,7 @@ def run_gwas(
         logger.info(f"GWAS computation finished in {time.time() - t:.3f}s")
     assert beta.dtype == np.float32
     assert var_numerator.dtype == np.float32
-    assert var_denominator.dtype == np.float32
+    # assert var_denominator.dtype == np.float32
 
     if variant_info is None:
         variant_info = pl.LazyFrame()
@@ -227,3 +228,37 @@ def run_gwas(
     if logger:
         logger.info("Finished formatting GWAS results")
     return result
+
+
+def simple_gwas(genotypes: np.ndarray, phenotypes: np.ndarray, covariates: np.ndarray) -> np.ndarray:
+    # Residualize X and y on covariates C using projection M = I - C(C'C)^{-1}C'
+    
+    nan_rows = np.isnan(phenotypes).ravel()
+    genotypes = genotypes[~nan_rows, :]
+    phenotypes = phenotypes[~nan_rows]
+    covariates = covariates[~nan_rows, :]
+
+    C = covariates
+    CtC_inv = np.linalg.inv(C.T @ C)
+    P = C @ CtC_inv @ C.T
+    M = np.eye(C.shape[0], dtype=C.dtype) - P
+
+    Xr = M @ genotypes
+    yr = M @ phenotypes
+
+    # beta = (X' y) / (X' X), computed column-wise for X and per-trait for y
+    XtY = Xr.T @ yr  # shape: [m_variants, n_traits]
+    XtY_sum = np.sum(XtY, axis=0)
+
+    XtX = np.sum(Xr * Xr, axis=0)  # shape: [m_variants]
+    XtX = np.maximum(XtX, 1e-12)
+    AC = np.sum(genotypes,axis=0)
+
+    beta = XtY / XtX[:, None]
+
+    # Standard errors via OLS: se = sqrt(sigma^2 / (X'X)), with sigma^2 estimated from residuals
+    # Using FWL: residuals of full model equal residuals of (yr - Xr*beta)
+    s_yy = np.sum(yr * yr, axis=0) / (yr.shape[0] - C.shape[1]) # shape: [n_traits]
+    se = np.sqrt(s_yy / XtX[:, None])
+
+    return beta, se
