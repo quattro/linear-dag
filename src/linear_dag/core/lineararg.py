@@ -1,6 +1,5 @@
 # lineararg.py
 import os
-import time
 
 from dataclasses import dataclass
 from functools import cached_property
@@ -384,8 +383,8 @@ class LinearARG(LinearOperator):
             if self.n_individuals is not None:
                 destination.attrs["n_individuals"] = self.n_individuals
             if self.variants is not None:
+                variant_info = self.variants.collect()
                 for field in ["CHROM", "POS", "ID", "REF", "ALT"]:
-                    variant_info = self.variants.collect()
                     if field == "POS":
                         destination.create_dataset(
                             field,
@@ -575,8 +574,7 @@ def load_variant_info(
 ):
     # Read all blocks from a single open file handle and build one DataFrame.
     # Avoids per-block DataFrame construction and repeated file opens.
-    
-    
+
     if not str(h5_fname).endswith(".h5"):
         h5_fname = str(h5_fname) + ".h5"
     # Determine which blocks to read and total number of variants for preallocation
@@ -624,18 +622,22 @@ def load_variant_info(
     data_dict = {}
     schema_list = []
     if columns in ("all", "no_id"):
-        data_dict.update({
-            "CHROM": chrom,
-            "POS": pos,
-            "REF": ref,
-            "ALT": alt,
-        })
-        schema_list.extend([
-            ("CHROM", pl.Binary),
-            ("POS", pl.Int32),
-            ("REF", pl.Binary),
-            ("ALT", pl.Binary),
-        ])
+        data_dict.update(
+            {
+                "CHROM": chrom,
+                "POS": pos,
+                "REF": ref,
+                "ALT": alt,
+            }
+        )
+        schema_list.extend(
+            [
+                ("CHROM", pl.Binary),
+                ("POS", pl.Int32),
+                ("REF", pl.Binary),
+                ("ALT", pl.Binary),
+            ]
+        )
     if columns in ("all", "id_only"):
         data_dict["ID"] = id_
         schema_list.append(("ID", pl.Binary))

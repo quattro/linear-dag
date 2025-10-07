@@ -128,6 +128,7 @@ def make_genotype_matrix(
         f.create_dataset("indices", data=genotypes.indices, compression="gzip", shuffle=True)
         f.create_dataset("data", data=genotypes.data, compression="gzip", shuffle=True)
         f.create_dataset("flip", data=flip, compression="gzip", shuffle=True)
+        f.create_dataset("iids", data=iids, compression="gzip", shuffle=True)
         if sex_path is not None:
             f.create_dataset("sex", data=sex, compression="gzip", shuffle=True)
     v_info.write_csv(f"{linarg_dir}/variant_metadata/{partition_number}_{region}.txt", separator=" ")
@@ -304,17 +305,19 @@ def merge(linarg_dir, load_dir):
     for file in files:
         with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{file[:-3]}h5", "r") as f:
             flip_partition = list(f["flip"][:])
+            iids = [iid.decode('utf-8') for iid in list(f["iids"][:])]
             if "sex" in f and sex is not None:
                 sex = f["sex"][:]
         flip += flip_partition
     flip = np.array(flip)
+    iids = pl.Series("iids", iids)
 
     logger.info("Triangularizing and computing nonunique indices")
     A_filt, variant_indices_reindexed, sample_indices_reindexed = remove_degree_zero_nodes(
         A, variant_indices, sample_indices
     )
     A_tri, variant_indices_tri = make_triangular(A_filt, variant_indices_reindexed, sample_indices_reindexed)
-    linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), variants=var_info, sex=sex)
+    linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), variants=var_info, sex=sex, iids=iids)
     linarg.calculate_nonunique_indices()
     logger.info("Saving linear ARG")
 
@@ -332,14 +335,17 @@ def merge(linarg_dir, load_dir):
     )
     linarg.write(f"{linarg_dir}/linear_arg", block_info=block)
     logger.info("Computing linear ARG stats")
-    get_linarg_stats(linarg_dir, load_dir)
+    get_linarg_stats(linarg_dir, load_dir, linarg)
+
+    return
 
 
-def get_linarg_stats(linarg_dir, load_dir):
+def get_linarg_stats(linarg_dir, load_dir, linarg=None):
     """
     Get stats from linear ARG.
     """
-    linarg = LinearARG.read(f"{linarg_dir}/linear_arg.h5")
+    if linarg is None:
+        linarg = LinearARG.read(f"{linarg_dir}/linear_arg.h5")
 
     linarg.flip = np.zeros(linarg.shape[1], dtype=bool)
 
@@ -391,6 +397,8 @@ def get_linarg_stats(linarg_dir, load_dir):
             + "\n"
         )
         file.write(" ".join(stats) + "\n")
+
+    return
 
 
 def add_individuals_to_linarg(linarg_dir, load_dir):
