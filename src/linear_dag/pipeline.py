@@ -301,18 +301,15 @@ def merge(linarg_dir, load_dir):
     df = pl.concat(df_list)
     var_info = df.lazy()
     flip = []
-    iids = []
     sex = None
     for file in files:
         with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{file[:-3]}h5", "r") as f:
             flip_partition = list(f["flip"][:])
-            iids_partition = [iid.decode('utf-8') for iid in list(f["iids"][:])]
+            iids = [iid.decode('utf-8') for iid in list(f["iids"][:])]
             if "sex" in f and sex is not None:
                 sex = f["sex"][:]
         flip += flip_partition
-        iids += iids_partition
     flip = np.array(flip)
-    print(f'linarg iids: {iids}')
     iids = pl.Series("iids", iids)
 
     logger.info("Triangularizing and computing nonunique indices")
@@ -321,7 +318,6 @@ def merge(linarg_dir, load_dir):
     )
     A_tri, variant_indices_tri = make_triangular(A_filt, variant_indices_reindexed, sample_indices_reindexed)
     linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), variants=var_info, sex=sex, iids=iids)
-    print(f'linarg iids: {linarg.iids}')
     linarg.calculate_nonunique_indices()
     logger.info("Saving linear ARG")
 
