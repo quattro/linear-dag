@@ -218,19 +218,39 @@ def _read_pheno_or_covar(
 
 
 
+# def parquet_to_numpy(destination: np.ndarray, parquet_path: str, score_cols: list, dtype=np.float32):
+#     parq = pq.ParquetFile(parquet_path)
+#     row_offset = 0
+
+#     for rg_idx in range(parq.num_row_groups):
+#         table = parq.read_row_group(rg_idx, columns=score_cols)
+#         chunk_cols = [
+#             table[col].to_numpy(zero_copy_only=True).astype(dtype, copy=False)
+#             for col in score_cols
+#         ]
+#         chunk_arr = np.stack(chunk_cols, axis=1) 
+#         n_rows_chunk = chunk_arr.shape[0]
+#         destination[row_offset:row_offset + n_rows_chunk] = chunk_arr
+#         row_offset += n_rows_chunk
+
+
 def parquet_to_numpy(destination: np.ndarray, parquet_path: str, score_cols: list, dtype=np.float32):
     parq = pq.ParquetFile(parquet_path)
     row_offset = 0
 
     for rg_idx in range(parq.num_row_groups):
         table = parq.read_row_group(rg_idx, columns=score_cols)
-        chunk_cols = [
-            table[col].to_numpy(zero_copy_only=False).astype(dtype, copy=False)
-            for col in score_cols
-        ]
-        chunk_arr = np.stack(chunk_cols, axis=1) 
-        n_rows_chunk = chunk_arr.shape[0]
-        destination[row_offset:row_offset + n_rows_chunk] = chunk_arr
+        n_rows_chunk = table.num_rows
+        
+        for col_idx, col_name in enumerate(score_cols):
+            try:
+                arr = table[col_name].to_numpy(zero_copy_only=True)
+            except:
+                arr = table[col_name].to_numpy(zero_copy_only=False)
+            if arr.dtype != dtype:
+                arr = arr.astype(dtype, copy=False)
+            destination[row_offset:row_offset + n_rows_chunk, col_idx] = arr
+        
         row_offset += n_rows_chunk
 
 
