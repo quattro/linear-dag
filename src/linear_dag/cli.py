@@ -14,6 +14,7 @@ from scipy.sparse import coo_matrix
 
 import numpy as np
 import polars as pl
+import pyarrow.parquet as pq
 
 from linear_dag.pipeline import (
     add_individuals_to_linarg,
@@ -183,7 +184,12 @@ def _read_pheno_or_covar(
         if all_int and any([x < 0 for x in columns]):
             raise ValueError("Must supply valid column indices to read_pheno/read_covar")
 
-    df = pl.read_csv(path_or_filename, columns=columns, separator="\t", null_values=["NA", "", "NULL" , "NaN"])
+    df = pl.read_csv(
+        path_or_filename,
+        columns=columns,
+        separator="\t",
+        null_values=["NA", "", "NULL", "NaN"],
+    )
 
     # check that IID is present, and drop FID if it is (we never use it)
     iids = [c for c in df.columns if iid_re.match(c)]
@@ -211,6 +217,43 @@ def _read_pheno_or_covar(
     return df
 
 
+
+# def parquet_to_numpy(destination: np.ndarray, parquet_path: str, score_cols: list, dtype=np.float32):
+#     parq = pq.ParquetFile(parquet_path)
+#     row_offset = 0
+
+#     for rg_idx in range(parq.num_row_groups):
+#         table = parq.read_row_group(rg_idx, columns=score_cols)
+#         chunk_cols = [
+#             table[col].to_numpy(zero_copy_only=True).astype(dtype, copy=False)
+#             for col in score_cols
+#         ]
+#         chunk_arr = np.stack(chunk_cols, axis=1) 
+#         n_rows_chunk = chunk_arr.shape[0]
+#         destination[row_offset:row_offset + n_rows_chunk] = chunk_arr
+#         row_offset += n_rows_chunk
+
+
+def parquet_to_numpy(destination: np.ndarray, parquet_path: str, score_cols: list, dtype=np.float32):
+    parq = pq.ParquetFile(parquet_path)
+    row_offset = 0
+
+    for rg_idx in range(parq.num_row_groups):
+        table = parq.read_row_group(rg_idx, columns=score_cols)
+        n_rows_chunk = table.num_rows
+        
+        for col_idx, col_name in enumerate(score_cols):
+            try:
+                arr = table[col_name].to_numpy(zero_copy_only=True)
+            except:
+                arr = table[col_name].to_numpy(zero_copy_only=False)
+            if arr.dtype != dtype:
+                arr = arr.astype(dtype, copy=False)
+            destination[row_offset:row_offset + n_rows_chunk, col_idx] = arr
+        
+        row_offset += n_rows_chunk
+
+
 def _prs(args):
     
     t = time.time()
@@ -220,13 +263,16 @@ def _prs(args):
     block_metadata = list_blocks(args.linarg_path)
     block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
     logger.info("Reading in weights")
-    betas = pl.read_csv(args.beta_path, separator="\t")
-    logger.info("Performing scoring")
     with ParallelOperator.from_hdf5(
         args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=len(args.score_cols)
     ) as linarg:
+        
+        logger.info("Copying betas to shared memory")
+        shm_array = linarg.borrow_variant_data_view()
+        parquet_to_numpy(shm_array, args.beta_path, args.score_cols)
         iids = linarg.iids
-        prs = run_prs(linarg, betas, args.score_cols, iids)
+        logger.info("Performing scoring")
+        prs = run_prs(linarg, shm_array, args.score_cols, iids)
        
     logger.info("Summing haplotype scores to individual scores")
     unique_ids, row_indices = np.unique(iids, return_inverse=True)
@@ -243,9 +289,7 @@ def _prs(args):
     result = pl.DataFrame(frame_dict)
             
     logger.info("Writing results")
-    result.write_csv(f"{args.out}.tsv", separator="\t")
-    logger.info("Done!")
-    
+    result.write_csv(f"{args.out}.tsv", separator="\t")    
     logger.info(f"Finished in {time.time() - t:.2f} seconds")
     
     return
@@ -407,7 +451,12 @@ def _prep_data(
         columns = None
     phenotypes = _read_pheno_or_covar(pheno, columns)
     pheno_cols = [x for x in phenotypes.columns if x != "iid"]
-
+    
+    # filter out phenotypes that are all missing
+    phenotypes = phenotypes.filter(
+        pl.any_horizontal([pl.col(c).is_not_null() for c in pheno_cols])
+    )    
+    
     if covar is not None:
         logger.info("Loading covariates")
         if covar_names is not None:

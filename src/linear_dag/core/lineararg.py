@@ -170,23 +170,33 @@ class LinearARG(LinearOperator):
     def allele_frequencies(self):
         return (np.ones(self.shape[0], dtype=np.int32) @ self) / self.shape[0]
 
-    def number_of_carriers(self, individuals_to_include=None):
+    def number_of_carriers(self):
         if self.n_individuals is None:
             raise ValueError("The linear ARG does not have individual nodes. Try running add_individual_nodes first.")
-        v = np.zeros(self.A.shape[0], dtype=np.float64)
-        if individuals_to_include is None:
-            v[self.individual_indices] = np.ones(self.n_individuals)
-        else:
-            v[self.individual_indices[individuals_to_include]] = np.ones(len(individuals_to_include))
-        spsolve_backward_triangular(self.A, v)
-        v = v[self.variant_indices]
-        if np.any(self.flip):
-            if individuals_to_include is None:
-                v[self.flip] = self.n_individuals - v[self.flip]
-            else:
-                v[self.flip] = len(individuals_to_include) - v[self.flip]
-        return v.astype(np.int64)
+        
+        # n1 + n2
+        vi = np.zeros(self.A.shape[0], dtype=np.float64)
+        vi[self.individual_indices] = 1
+        spsolve_backward_triangular(self.A, vi)
+        alt_carriers = vi[self.variant_indices]
+        
+        if not np.any(self.flip):
+            return alt_carriers.astype(np.int32)
+        
+        # n1 + 2*n2
+        vh = np.zeros(self.A.shape[0], dtype=np.float64)
+        vh[self.sample_indices] = 1
+        spsolve_backward_triangular(self.A, vh)
+        hap_counts = vh[self.variant_indices]
 
+        # handle flipped variants
+        hom_alt = hap_counts - alt_carriers
+        ref_carriers = self.n_individuals - hom_alt
+        num_carriers = alt_carriers.copy()
+        num_carriers[self.flip] = ref_carriers[self.flip]
+        
+        return num_carriers.astype(np.int32)
+    
     def remove_samples(self, iids_to_remove: npt.ArrayLike):
         sample_mask = np.isin(self.iids, iids_to_remove)
         sample_indices_to_remove = np.where(sample_mask)[0]
@@ -345,7 +355,13 @@ class LinearARG(LinearOperator):
         """
 
         fname = h5_fname if str(h5_fname).endswith(".h5") else str(h5_fname) + ".h5"
-        with h5py.File(fname, "a") as f:
+        mode = "a" if block_info else "w"
+        if (not block_info) and os.path.exists(fname):
+            raise FileExistsError(
+                f"The file '{fname}' already exists."
+                "To append a new linear ARG to an existing file, specify `block_info`."
+            )
+        with h5py.File(fname, mode) as f:
             if block_info:
                 block_name = f"{block_info['chrom']}_{block_info['start']}_{block_info['end']}"
                 destination = f.create_group(block_name)
@@ -353,11 +369,6 @@ class LinearARG(LinearOperator):
                 destination.attrs["start"] = block_info["start"]
                 destination.attrs["end"] = block_info["end"]
             else:
-                if os.path.exists(fname):
-                    raise FileExistsError(
-                        f"The file '{fname}' already exists."
-                        "To append a new linear ARG to an existing file, specify `block_info`."
-                    )
                 destination = f
 
             destination.attrs["n"] = self.A.shape[0]
@@ -450,7 +461,7 @@ class LinearARG(LinearOperator):
             nonunique_indices = f["nonunique_indices"][:] if "nonunique_indices" in f else None
 
             if load_metadata:
-                v_info = LinearARG.read_variant_info(h5_fname, block).collect()
+                v_info = LinearARG.read_variant_info(h5_fname, block)
             else:
                 v_info = None
 

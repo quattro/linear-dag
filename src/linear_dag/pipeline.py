@@ -118,6 +118,9 @@ def make_genotype_matrix(
     if genotypes is None:
         logger.info("No variants found")
         return None
+    
+    if phased:
+        iids = [id_ for id_ in iids for _ in range(2)]
 
     t2 = time.time()
     logger.info(f"vcf to sparse matrix completed in {np.round(t2 - t1, 3)} seconds")
@@ -301,12 +304,14 @@ def merge(linarg_dir, load_dir):
     df = pl.concat(df_list)
     var_info = df.lazy()
     flip = []
+    iids = None
     sex = None
     for file in files:
         with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{file[:-3]}h5", "r") as f:
             flip_partition = list(f["flip"][:])
-            iids = [iid.decode('utf-8') for iid in list(f["iids"][:])]
-            if "sex" in f and sex is not None:
+            if iids is None:
+                iids = [iid.decode('utf-8') for iid in list(f["iids"][:])]
+            if "sex" in f and sex is None:
                 sex = f["sex"][:]
         flip += flip_partition
     flip = np.array(flip)
@@ -407,7 +412,9 @@ def add_individuals_to_linarg(linarg_dir, load_dir):
 
     logger.info("Loading linear ARG")
     t1 = time.time()
-    temp = LinearARG.read(f"{load_dir}{linarg_dir}/linear_arg.h5", load_metadata=True)
+    with h5py.File(str(f"{load_dir}{linarg_dir}/linear_arg.h5"), "r") as f:
+        block_name = list(f.keys())[0]
+    temp = LinearARG.read(f"{load_dir}{linarg_dir}/linear_arg.h5", block=block_name)
     t2 = time.time()
     logger.info(f"Linear ARG loaded in {np.round(t2 - t1, 3)} seconds")
 
@@ -418,7 +425,12 @@ def add_individuals_to_linarg(linarg_dir, load_dir):
     logger.info(f"Individual nodes added in {np.round(t4 - t3, 3)} seconds")
 
     logger.info("Saving linear ARG")
-    linarg.write(f"{linarg_dir}/linear_arg_individual")
+    block_info = {
+        "chrom": block_name.split("_")[0],
+        "start": block_name.split("_")[1],
+        "end": block_name.split("_")[2],
+    }
+    linarg.write(f"{linarg_dir}/linear_arg_individual", block_info=block_info)
 
     # logger.info("Computing linear ARG stats")
     # get_linarg_individual_stats(linarg_dir, load_dir)
