@@ -412,7 +412,9 @@ def add_individuals_to_linarg(linarg_dir, load_dir):
 
     logger.info("Loading linear ARG")
     t1 = time.time()
-    temp = LinearARG.read(f"{load_dir}{linarg_dir}/linear_arg.h5", load_metadata=True)
+    with h5py.File(str(f"{load_dir}{linarg_dir}/linear_arg.h5"), "r") as f:
+        block_name = list(f.keys())[0]
+    temp = LinearARG.read(f"{load_dir}{linarg_dir}/linear_arg.h5", block=block_name)
     t2 = time.time()
     logger.info(f"Linear ARG loaded in {np.round(t2 - t1, 3)} seconds")
 
@@ -423,7 +425,12 @@ def add_individuals_to_linarg(linarg_dir, load_dir):
     logger.info(f"Individual nodes added in {np.round(t4 - t3, 3)} seconds")
 
     logger.info("Saving linear ARG")
-    linarg.write(f"{linarg_dir}/linear_arg_individual")
+    block_info = {
+        "chrom": block_name.split("_")[0],
+        "start": block_name.split("_")[1],
+        "end": block_name.split("_")[2],
+    }
+    linarg.write(f"{linarg_dir}/linear_arg_individual", block_info=block_info)
 
     # logger.info("Computing linear ARG stats")
     # get_linarg_individual_stats(linarg_dir, load_dir)
