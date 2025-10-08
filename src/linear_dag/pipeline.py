@@ -309,9 +309,9 @@ def merge(linarg_dir, load_dir):
     for file in files:
         with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{file[:-3]}h5", "r") as f:
             flip_partition = list(f["flip"][:])
-            if iids is not None:
+            if iids is None:
                 iids = [iid.decode('utf-8') for iid in list(f["iids"][:])]
-            if "sex" in f and sex is not None:
+            if "sex" in f and sex is None:
                 sex = f["sex"][:]
         flip += flip_partition
     flip = np.array(flip)
