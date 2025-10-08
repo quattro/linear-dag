@@ -433,8 +433,7 @@ class _ManagerFactory:
         # Compute per-trait carrier counts by converting include columns to index arrays
         for t in range(include.shape[1]):
             col = include[:, t]
-            idx = np.where(col != 0)[0]
-            counts = linarg.number_of_carriers(idx)
+            counts = linarg.number_of_carriers(col.astype(np.bool_))
             variant_data[:, t] = counts.astype(variant_data.dtype, copy=False)
 
     @classmethod
