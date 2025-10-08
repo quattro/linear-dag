@@ -82,7 +82,7 @@ def get_gwas_beta_se(
     denominator = np.maximum(denominator.astype(np.float32), 1e-6)
     beta /= denominator
     
-    var_numerator = np.sum(y_concat[:, :num_traits]**2, axis=0) / (num_nonmissing - num_covariates).astype(np.float32)
+    var_numerator = np.sum(y_concat[:, :num_traits]**2, axis=0) / (num_nonmissing - 2*num_covariates).astype(np.float32)
     assert y_concat.dtype == np.float32
     assert var_numerator.dtype == np.float32
 
@@ -229,10 +229,21 @@ def run_gwas(
     return result
 
 
-def simple_gwas(genotypes: np.ndarray, phenotypes: np.ndarray, covariates: np.ndarray) -> np.ndarray:
-    # Residualize X and y on covariates C using projection M = I - C(C'C)^{-1}C'
+def simple_gwas(genotypes: np.ndarray, 
+                phenotypes: np.ndarray, 
+                covariates: np.ndarray, 
+                ploidy: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Simple GWAS implementation for testing purposes.
+    Regresses phenotypes on genotypes residualized on covariates,
+    and calculates beta and standard error for each variant. Genotypes
+    can be either diploid or haploid. If genotypes are haploid but the
+    chromosome is diploid, ploidy should be 2, and d.f. for the standard
+    error will be n - p, where p is the number of covariates, instead of 
+    (2n - p) / 2.
+    """
     
-    nan_rows = np.isnan(phenotypes).ravel()
+    nan_rows = np.isnan(phenotypes[:,0]).ravel()
     genotypes = genotypes[~nan_rows, :]
     phenotypes = phenotypes[~nan_rows]
     covariates = covariates[~nan_rows, :]
@@ -245,12 +256,12 @@ def simple_gwas(genotypes: np.ndarray, phenotypes: np.ndarray, covariates: np.nd
     Xr = M @ genotypes
     yr = M @ phenotypes
 
-    XtY = Xr.T @ yr  # shape: [m_variants, n_traits]
-    XtX = np.sum(Xr * Xr, axis=0)  # shape: [m_variants]
+    XtY = Xr.T @ yr 
+    XtX = np.sum(Xr * Xr, axis=0) 
     XtX = np.maximum(XtX, 1e-6)
     beta = XtY / XtX[:, None]
 
-    s_yy = np.sum(yr * yr, axis=0) / (yr.shape[0] - C.shape[1]) # shape: [n_traits]
+    s_yy = np.sum(yr * yr, axis=0) / (yr.shape[0] - ploidy*C.shape[1]) 
     se = np.sqrt(s_yy / XtX[:, None])
 
     return beta, se

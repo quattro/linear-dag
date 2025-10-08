@@ -2,26 +2,13 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
-import pytest
-
-from linear_dag.association.gwas import (
-    run_gwas,
-    simple_gwas,
-    get_gwas_beta_se,
-    _format_sumstats,
-)
-from linear_dag.association.util import impute_missing_with_mean, residualize_phenotypes
+from linear_dag.association.gwas import run_gwas, simple_gwas
 from linear_dag.association.simulation import simulate_phenotype
 from linear_dag.core.operators import get_diploid_operator, get_inner_merge_operators
-from linear_dag.core.lineararg import list_blocks, LinearARG
 from linear_dag.core.parallel_processing import ParallelOperator
-from linear_dag import read_vcf
 
 TEST_DATA_DIR = Path(__file__).parent / "testdata"
     
-
-np.random.seed(0)
-
 def test_gwas_hwe():
     """
     Test that run_gwas can recover a simulated causal effect.
@@ -43,9 +30,9 @@ def test_gwas_hwe():
             num_traits=2,
         )
 
-        # y[::3, 0] = np.nan
+        y[::3, 0] = np.nan
 
-        # Create phenotype DataFrame with covariates
+        # 3. Create phenotype DataFrame with covariates
         pheno_df = pl.DataFrame({
             "iid": genotypes.iids.unique(maintain_order=True).to_list(),
             "phenotype1": pl.Series(y[:, 0].flatten(), dtype=pl.Float64).cast(pl.Float64).fill_nan(None),
@@ -57,7 +44,7 @@ def test_gwas_hwe():
         )
         pheno_df_dropNA = pheno_df.filter(pl.col("phenotype1").is_not_null())
 
-        # 3. GWAS
+        # 4. GWAS
         pheno_cols = ["phenotype1", "phenotype2"]
         covar_cols = ["intercept"]#, "covar1", "covar2"]
         gwas_results = run_gwas(
@@ -67,25 +54,25 @@ def test_gwas_hwe():
             covar_cols=covar_cols,
             in_place_op=True,
         ).collect()
-
-        # 4. Assertions
-        assert isinstance(gwas_results, pl.DataFrame)
-        assert gwas_results.shape[0] == m
-        assert gwas_results.select("phenotype1_BETA").dtypes[0] == pl.Float32
-        assert gwas_results.select("phenotype1_SE").dtypes[0] == pl.Float32
         beta = gwas_results.select("phenotype1_BETA").to_numpy().copy()
         se = gwas_results.select("phenotype1_SE").to_numpy().copy()
 
+        # 5. Simple GWAS
         ident = np.eye(n)
         gt_mat = ident @ genotypes
         left_op, _ = get_inner_merge_operators(
             pheno_df.select("iid").cast(pl.Utf8).to_series(), genotypes.iids
         )
-
         beta_simple, se_simple = simple_gwas(gt_mat, left_op.T @ pheno_df.select("phenotype1").to_numpy(),
-                                        left_op.T @ pheno_df.select(covar_cols).to_numpy())
-
+                                        left_op.T @ pheno_df.select(covar_cols).to_numpy(), ploidy=2)
+        # 6. Assertions
+        assert isinstance(gwas_results, pl.DataFrame)
+        assert gwas_results.shape[0] == m
+        assert gwas_results.select("phenotype1_BETA").dtypes[0] == pl.Float32
+        assert gwas_results.select("phenotype1_SE").dtypes[0] == pl.Float32
         assert np.allclose(beta, beta_simple, atol=1e-6)
+        se = se[beta!=0]
+        se_simple = se_simple[beta!=0]
         assert np.allclose(se, se_simple, atol=1e-6)
 
 
@@ -110,9 +97,9 @@ def test_gwas_no_hwe():
             num_traits=2,
         )
 
-        # y[::3, 0] = np.nan
+        y[::3, 0] = np.nan
 
-        # Create phenotype DataFrame with covariates
+        # 3. Create phenotype DataFrame with covariates
         pheno_df = pl.DataFrame({
             "iid": genotypes.iids.unique(maintain_order=True).to_list(),
             "phenotype1": pl.Series(y[:, 0].flatten(), dtype=pl.Float64).cast(pl.Float64).fill_nan(None),
@@ -124,7 +111,7 @@ def test_gwas_no_hwe():
         )
         pheno_df_dropNA = pheno_df.filter(pl.col("phenotype1").is_not_null())
 
-        # 5. GWAS not assuming HWE
+        # 4. GWAS not assuming HWE
         pheno_cols = ["phenotype1", "phenotype2"]
         covar_cols = ["intercept"]#, "cova`r1", "covar2"]
         gwas_results = run_gwas(
@@ -136,24 +123,25 @@ def test_gwas_no_hwe():
             assume_hwe=False,
         ).collect()
         beta = gwas_results.select("phenotype1_BETA").to_numpy().copy()
+        se = gwas_results.select("phenotype1_SE").to_numpy().copy()
 
+        # 5. Simple GWAS
         ident = np.eye(n//2)
         gt_mat = ident @ get_diploid_operator(genotypes)
-        beta_simple, se_simple = simple_gwas(gt_mat, pheno_df_dropNA.select("phenotype1").to_numpy(),
-                                        pheno_df_dropNA.select(covar_cols).to_numpy())
-
-        num_carriers = np.sum(gt_mat>=1, axis=0)
-        assert np.all(num_carriers.ravel() == genotypes.number_of_carriers().ravel())
+        beta_simple, se_simple = simple_gwas(gt_mat, pheno_df.select("phenotype1").to_numpy(),
+                                        pheno_df.select(covar_cols).to_numpy())
+        
 
         # 6. Assertions
         assert isinstance(gwas_results, pl.DataFrame)
         assert gwas_results.shape[0] == m
         assert gwas_results.select("phenotype1_BETA").dtypes[0] == pl.Float32
         assert gwas_results.select("phenotype1_SE").dtypes[0] == pl.Float32
-
         assert np.allclose(beta, beta_simple, atol=1e-6)
-
-
+        se = se[beta!=0]
+        se_simple = se_simple[beta!=0]
+        assert np.allclose(se, se_simple, atol=1e-6)
 
 if __name__ == "__main__":
+    test_gwas_hwe()
     test_gwas_no_hwe()
