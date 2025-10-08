@@ -11,9 +11,11 @@ from linear_dag.pipeline import (
     reduction_union_recom,
     infer_brick_graph,
     merge,
-)
+    add_individuals_to_linarg,)
 from linear_dag.genotype import read_vcf
 from linear_dag.core.lineararg import LinearARG
+from linear_dag.core.operators import get_diploid_operator
+from scipy.sparse import csc_matrix
 
 
 TEST_DATA_DIR = Path(__file__).parent / "testdata"
@@ -94,7 +96,7 @@ def test_partition_merge_with_infer(tmp_path: Path):
         region=full_region,
         flip_minor_alleles=False, # compare with the original unflipped genotype matrix
     )
-    
+        
     # Check that allele counts from LinearARG match the allele counts from the genotype matrix
     v = np.ones(linarg.shape[0])
     allele_count_from_linarg = v @ linarg
@@ -106,6 +108,15 @@ def test_partition_merge_with_infer(tmp_path: Path):
     
     # Check that the number of nonunique indices is less than the shape of A
     assert len(np.unique(linarg.nonunique_indices)) < linarg.A.shape[0]
+    
+    # Add individual nodes
+    add_individuals_to_linarg(linarg_dir=linarg_dir_str, load_dir="")
+    
+    # Check that number of carriers is correct
+    linarg_individual = LinearARG.read(str(linarg_dir / "linear_arg_individual.h5"), block=block_name)    
+    diploid_genotypes = get_diploid_operator(genotypes) @ np.eye(genotypes.shape[1])
+    num_carriers = np.sum(diploid_genotypes > 0, axis=0)
+    np.testing.assert_array_equal(linarg_individual.number_of_carriers(), num_carriers)    
 
 
 def test_partition_merge_with_split_step2(tmp_path: Path):
@@ -197,3 +208,12 @@ def test_partition_merge_with_split_step2(tmp_path: Path):
     
     # Check that the number of nonunique indices is less than the shape of A
     assert len(np.unique(linarg.nonunique_indices)) < linarg.A.shape[0]
+    
+    # Add individual nodes
+    add_individuals_to_linarg(linarg_dir=linarg_dir_str, load_dir="")
+    
+    # Check that number of carriers is correct
+    linarg_individual = LinearARG.read(str(linarg_dir / "linear_arg_individual.h5"), block=block_name)
+    diploid_genotypes = get_diploid_operator(genotypes) @ np.eye(genotypes.shape[1])
+    num_carriers = np.sum(diploid_genotypes > 0, axis=0)
+    assert np.all(linarg_individual.number_of_carriers() == num_carriers)

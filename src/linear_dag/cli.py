@@ -452,8 +452,11 @@ def _prep_data(
     phenotypes = _read_pheno_or_covar(pheno, columns)
     pheno_cols = [x for x in phenotypes.columns if x != "iid"]
     
-    # TODO: filter out all individuals that have all missing phenotypes
-
+    # filter out phenotypes that are all missing
+    phenotypes = phenotypes.filter(
+        pl.any_horizontal([pl.col(c).is_not_null() for c in pheno_cols])
+    )    
+    
     if covar is not None:
         logger.info("Loading covariates")
         if covar_names is not None:
