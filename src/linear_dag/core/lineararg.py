@@ -170,13 +170,16 @@ class LinearARG(LinearOperator):
     def allele_frequencies(self):
         return (np.ones(self.shape[0], dtype=np.int32) @ self) / self.shape[0]
 
-    def number_of_carriers(self):
+    def number_of_carriers(self, indiv_to_include: np.ndarray|None=None):
         if self.n_individuals is None:
             raise ValueError("The linear ARG does not have individual nodes. Try running add_individual_nodes first.")
-        
+        if indiv_to_include is None:
+            indiv_to_include = np.ones(self.n_individuals, dtype=np.bool_)
+        if indiv_to_include.dtype != np.bool_:
+            raise ValueError("indiv_to_include must be a boolean array")
         # n1 + n2
         vi = np.zeros(self.A.shape[0], dtype=np.float64)
-        vi[self.individual_indices] = 1
+        vi[self.individual_indices[indiv_to_include]] = 1
         spsolve_backward_triangular(self.A, vi)
         alt_carriers = vi[self.variant_indices]
         
@@ -185,13 +188,13 @@ class LinearARG(LinearOperator):
         
         # n1 + 2*n2
         vh = np.zeros(self.A.shape[0], dtype=np.float64)
-        vh[self.sample_indices] = 1
+        vh[self.sample_indices[indiv_to_include]] = 1
         spsolve_backward_triangular(self.A, vh)
         hap_counts = vh[self.variant_indices]
 
         # handle flipped variants
         hom_alt = hap_counts - alt_carriers
-        ref_carriers = self.n_individuals - hom_alt
+        ref_carriers = np.sum(indiv_to_include) - hom_alt
         num_carriers = alt_carriers.copy()
         num_carriers[self.flip] = ref_carriers[self.flip]
         
