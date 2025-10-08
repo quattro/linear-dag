@@ -272,12 +272,16 @@ class ParallelOperator(LinearOperator):
 
     def number_of_carriers(self, individuals_to_include: Optional[np.ndarray] = None):
         if individuals_to_include is None:
-            individuals_to_include = np.ones((self.n_individuals, 1), dtype=np.float32)
+            individuals_to_include = np.ones((self.n_individuals, 1), dtype=np.bool_)
         if individuals_to_include.ndim == 1:
             individuals_to_include = individuals_to_include.copy().reshape(-1, 1)
         if individuals_to_include.shape[0] != self.n_individuals:
             raise ValueError(
                 f"individuals_to_include should have size {self.n_individuals} in dim 0."
+            )
+        if individuals_to_include.dtype != np.bool_:
+            raise TypeError(
+                f"individuals_to_include should be of type bool, not {individuals_to_include.dtype}."
             )
         result = np.empty((self.shape[1], individuals_to_include.shape[1]), dtype=np.float32)
 

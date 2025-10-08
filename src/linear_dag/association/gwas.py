@@ -59,7 +59,7 @@ def get_gwas_beta_se(
     else:
         genotypes = right_op @ genotypes
         Xty = genotypes.T @ y_concat
-    
+
     if logger:
         logger.info(f"Xty shape={Xty.shape}")
 
@@ -73,14 +73,15 @@ def get_gwas_beta_se(
     # Denominator, equal across traits despite different missingness
     var_explained, allele_counts = get_genotype_variance_explained(Xty[:, num_traits:], covariates)
     denominator = allele_counts - var_explained
-    denominator = np.maximum(denominator.astype(np.float32), 1e-12)
-    beta /= denominator
 
     if num_carriers is not None:  # else assume HWE
         # assumes diploid
-        num_homozygotes = (allele_counts - num_carriers.reshape(*allele_counts.shape))
+        num_homozygotes = allele_counts - num_carriers.reshape(*allele_counts.shape)
         denominator = denominator + 2*num_homozygotes - var_explained
-
+    beta[denominator.ravel() < 1e-6, :] = 0 # avoid numerical issues for variants with no variance
+    denominator = np.maximum(denominator.astype(np.float32), 1e-6)
+    beta /= denominator
+    
     var_numerator = np.sum(y_concat[:, :num_traits]**2, axis=0) / (num_nonmissing - num_covariates).astype(np.float32)
     assert y_concat.dtype == np.float32
     assert var_numerator.dtype == np.float32
@@ -169,10 +170,8 @@ def run_gwas(
     if assume_hwe:
         num_carriers = None
     else:
-        # assumes diploid
-        individuals_to_include = np.where(
-            np.isin(genotypes.iids[::2], data.select("iid").collect().to_numpy().astype(str))
-        )[0]
+        # assumes diploid``
+        individuals_to_include = np.isin(genotypes.iids[::2], data.select("iid").collect().to_numpy().astype(str))
         num_carriers = genotypes.number_of_carriers(individuals_to_include)
     if logger:
         logger.info(f"carrier handling: {'HWE assumed' if assume_hwe else 'using explicit num_carriers'}")
@@ -246,18 +245,11 @@ def simple_gwas(genotypes: np.ndarray, phenotypes: np.ndarray, covariates: np.nd
     Xr = M @ genotypes
     yr = M @ phenotypes
 
-    # beta = (X' y) / (X' X), computed column-wise for X and per-trait for y
     XtY = Xr.T @ yr  # shape: [m_variants, n_traits]
-    XtY_sum = np.sum(XtY, axis=0)
-
     XtX = np.sum(Xr * Xr, axis=0)  # shape: [m_variants]
-    XtX = np.maximum(XtX, 1e-12)
-    AC = np.sum(genotypes,axis=0)
-
+    XtX = np.maximum(XtX, 1e-6)
     beta = XtY / XtX[:, None]
 
-    # Standard errors via OLS: se = sqrt(sigma^2 / (X'X)), with sigma^2 estimated from residuals
-    # Using FWL: residuals of full model equal residuals of (yr - Xr*beta)
     s_yy = np.sum(yr * yr, axis=0) / (yr.shape[0] - C.shape[1]) # shape: [n_traits]
     se = np.sqrt(s_yy / XtX[:, None])
 
