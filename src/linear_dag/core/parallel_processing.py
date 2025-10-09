@@ -22,7 +22,7 @@ FLAGS = {
     "get_data": 1,
     "matmat": 2,
     "rmatmat": 3,
-    "num_carriers": 4,
+    "num_heterozygotes": 4,
 }
 assert len(np.unique([val for val in FLAGS.values()])) == len(FLAGS)
 
@@ -270,7 +270,7 @@ class ParallelOperator(LinearOperator):
 
         return result
 
-    def number_of_carriers(self, individuals_to_include: Optional[np.ndarray] = None):
+    def number_of_heterozygotes(self, individuals_to_include: Optional[np.ndarray] = None):
         if individuals_to_include is None:
             individuals_to_include = np.ones((self.n_individuals, 1), dtype=np.bool_)
         if individuals_to_include.ndim == 1:
@@ -283,7 +283,7 @@ class ParallelOperator(LinearOperator):
             raise TypeError(
                 f"individuals_to_include should be of type bool, not {individuals_to_include.dtype}."
             )
-        result = np.empty((self.shape[1], individuals_to_include.shape[1]), dtype=np.float32)
+        result = np.empty((self.shape[1], individuals_to_include.shape[1]), dtype=np.int32)
 
         # Process max_num_traits columns at a time
         for start in range(0, individuals_to_include.shape[1], self._max_num_traits):
@@ -292,7 +292,7 @@ class ParallelOperator(LinearOperator):
 
             with self._sample_data_handle as sample_data:
                 sample_data[: end - start, :self.n_individuals] = individuals_to_include[:, start:end].astype(np.float32).T
-            self._manager.start_workers(FLAGS["num_carriers"])
+            self._manager.start_workers(FLAGS["num_heterozygotes"])
             self._manager.await_workers()
 
             with self._variant_data_handle as variant_data:
@@ -380,11 +380,11 @@ class _ManagerFactory:
                 func = cls._matmat
             elif flag.value == FLAGS["rmatmat"]:
                 func = cls._rmatmat
-            elif flag.value == FLAGS["num_carriers"]:
+            elif flag.value == FLAGS["num_heterozygotes"]:
                 if any(linarg.n_individuals is None for linarg in linargs):
-                    raise ValueError("Cannot compute num_carriers:",
+                    raise ValueError("Cannot compute num_heterozygotes:",
                         "linear ARG lacks individual nodes. Run add_individual_nodes first.")
-                func = cls._num_carriers
+                func = cls._num_heterozygotes
             else:
                 flag.value = FLAGS["error"]
                 raise ValueError(f"Unexpected flag value: {flag.value}")
@@ -421,19 +421,17 @@ class _ManagerFactory:
         variant_data[:] = linarg.T @ sample_data
 
     @classmethod
-    def _num_carriers(
+    def _num_heterozygotes(
         cls,
         linarg: LinearARG,
         sample_data: np.ndarray,
         variant_data: np.ndarray,
         sample_lock: Lock,
     ) -> None:
-        # sample_data: shape (num_samples, num_traits); use first n_individuals rows as include matrix
         include = sample_data[: linarg.n_individuals, :]
-        # Compute per-trait carrier counts by converting include columns to index arrays
         for t in range(include.shape[1]):
             col = include[:, t]
-            counts = linarg.number_of_carriers(col.astype(np.bool_))
+            counts = linarg.number_of_heterozygotes(col.astype(np.bool_))
             variant_data[:, t] = counts.astype(variant_data.dtype, copy=False)
 
     @classmethod

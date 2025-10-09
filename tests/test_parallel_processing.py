@@ -67,12 +67,12 @@ def test_number_of_carriers_matches_serial():
 
     with ParallelOperator.from_hdf5(hdf5_path, num_processes=2) as par:
         # Parallel: default includes all individuals
-        carriers_par = par.number_of_carriers()
+        carriers_par = par.number_of_heterozygotes()
 
     # Serial: concatenate per-block results
     carriers_parts = []
     for la in linargs:
-        carriers_parts.append(la.number_of_carriers().reshape(-1, 1))
+        carriers_parts.append(la.number_of_heterozygotes().reshape(-1, 1))
     carriers_ser = np.vstack(carriers_parts)
 
     # Cast and compare

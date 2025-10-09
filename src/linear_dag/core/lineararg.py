@@ -170,6 +170,21 @@ class LinearARG(LinearOperator):
     def allele_frequencies(self):
         return (np.ones(self.shape[0], dtype=np.int32) @ self) / self.shape[0]
 
+    def number_of_heterozygotes(self, indiv_to_include: np.ndarray|None=None):
+        if self.n_individuals is None:
+            raise ValueError("The linear ARG does not have individual nodes. Try running add_individual_nodes first.")
+        if indiv_to_include is None:
+            indiv_to_include = np.ones(self.n_individuals, dtype=np.bool_)
+        if indiv_to_include.dtype != np.bool_:
+            raise ValueError("indiv_to_include must be a boolean array")
+        
+        # num_het = 2 * num_carriers - num_alleles
+        vi = np.zeros(self.A.shape[0], dtype=np.float64)
+        vi[self.individual_indices[indiv_to_include]] = 2
+        vi[self.sample_indices[np.repeat(indiv_to_include, 2)]] = -1
+        spsolve_backward_triangular(self.A, vi)
+        return vi[self.variant_indices].astype(np.int32)
+
     def number_of_carriers(self, indiv_to_include: np.ndarray|None=None):
         if self.n_individuals is None:
             raise ValueError("The linear ARG does not have individual nodes. Try running add_individual_nodes first.")
@@ -188,7 +203,7 @@ class LinearARG(LinearOperator):
         
         # n1 + 2*n2
         vh = np.zeros(self.A.shape[0], dtype=np.float64)
-        vh[self.sample_indices[indiv_to_include]] = 1
+        vh[self.sample_indices[np.repeat(indiv_to_include, 2)]] = 1
         spsolve_backward_triangular(self.A, vh)
         hap_counts = vh[self.variant_indices]
 

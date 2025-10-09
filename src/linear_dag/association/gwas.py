@@ -25,14 +25,14 @@ def get_gwas_beta_se(
     y_resid: np.ndarray,
     covariates: np.ndarray,
     num_nonmissing: np.ndarray | None = None,
-    num_carriers: np.ndarray | None = None,
+    num_heterozygotes: np.ndarray | None = None,
     in_place_op: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute GWAS effect sizes and SEs in per-allele units.
     - Assumes the first column of `covariates` is all-ones.
-    - If `num_carriers` is None, assumes HWE for the denominator.
+    - If `num_heterozygotes` is None, assumes HWE for the denominator.
 
     Returns (beta, se, allele_counts).
     """
@@ -74,9 +74,9 @@ def get_gwas_beta_se(
     var_explained, allele_counts = get_genotype_variance_explained(Xty[:, num_traits:], covariates)
     denominator = allele_counts - var_explained
 
-    if num_carriers is not None:  # else assume HWE
+    if num_heterozygotes is not None:  # else assume HWE
         # assumes diploid
-        num_homozygotes = allele_counts - num_carriers.reshape(*allele_counts.shape)
+        num_homozygotes = (allele_counts - num_heterozygotes.reshape(*allele_counts.shape)) / 2
         denominator = denominator + 2*num_homozygotes - var_explained
     beta[denominator.ravel() < 1e-6, :] = 0 # avoid numerical issues for variants with no variance
     denominator = np.maximum(denominator.astype(np.float32), 1e-6)
@@ -168,13 +168,13 @@ def run_gwas(
         raise ValueError("Merge failed between genotype and phenotype data")
 
     if assume_hwe:
-        num_carriers = None
+        num_heterozygotes = None
     else:
         # assumes diploid``
         individuals_to_include = np.isin(genotypes.iids[::2], data.select("iid").collect().to_numpy().astype(str))
-        num_carriers = genotypes.number_of_carriers(individuals_to_include)
+        num_heterozygotes = genotypes.number_of_heterozygotes(individuals_to_include)
     if logger:
-        logger.info(f"carrier handling: {'HWE assumed' if assume_hwe else 'using explicit num_carriers'}")
+        logger.info(f"carrier handling: {'HWE assumed' if assume_hwe else 'using explicit num_heterozygotes'}")
 
     phenotypes = data.select(pheno_cols).cast(pl.Float32).collect().to_numpy()
     covariates = data.select(covar_cols).cast(pl.Float32).collect().to_numpy()
@@ -199,7 +199,7 @@ def run_gwas(
         y_resid,
         covariates,
         num_nonmissing,
-        num_carriers=num_carriers,
+        num_heterozygotes=num_heterozygotes,
         in_place_op=in_place_op,
         logger=logger,
     )
@@ -214,9 +214,9 @@ def run_gwas(
     # variant_info = variant_info.with_columns(
     #     pl.Series("A1FREQ", allele_counts.ravel() / genotypes.shape[0]).cast(pl.Float32),
     # )
-    if num_carriers is not None:
+    if num_heterozygotes is not None:
         variant_info = variant_info.with_columns(
-            pl.Series("A1_CARRIER_FREQ", num_carriers.astype(np.float32).ravel() * 2 / genotypes.shape[0]).cast(
+            pl.Series("A1_CARRIER_FREQ", num_heterozygotes.astype(np.float32).ravel() * 2 / genotypes.shape[0]).cast(
                 pl.Float32
             )
         )
