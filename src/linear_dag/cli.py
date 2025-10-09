@@ -369,8 +369,8 @@ def _assoc_scan(args):
             result = pl.concat([v_info, result], how="horizontal")
             if _vinfo_executor is not None:
                 _vinfo_executor.shutdown(wait=False)
-        
-        result.sink_parquet(f"{args.out}.parquet", compression="lz4") # TODO: this still causes a memory usage spike
+        logger.info("Starting to write results")
+        result.collect().write_parquet(f"{args.out}.parquet", compression="lz4") # TODO: this still causes a memory usage spike
         logger.info(f"Results written to {args.out}.parquet")
 
     logger.info(f"Finished in {time.time() - t:.2f} seconds")

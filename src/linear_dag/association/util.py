@@ -42,6 +42,7 @@ def residualize_phenotypes(
 def get_genotype_variance_explained(
     XtC: np.ndarray,
     C: np.ndarray,
+    batch_size: int = 100_000,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Get variance of genotypes explained by covariates:
             diag(X'C(C'C)^-1C'X) / n
@@ -50,6 +51,7 @@ def get_genotype_variance_explained(
     Args:
         XtC: X'C
         C: Covariates matrix, which should include the all-ones annotation except for missing values
+        batch_size: Number of SNPs to process at once to reduce memory usage
 
     Returns:
         tuple: (total_var_explained, allele_count)
@@ -58,8 +60,17 @@ def get_genotype_variance_explained(
                             except for missing values
     """
     covariate_inner = C.T @ C
-    C_backslash_XtC = np.linalg.solve(covariate_inner, XtC.T)
-    total_var_explained = np.sum(XtC.T * C_backslash_XtC, axis=0).reshape(-1, 1)
+    
+    num_snps = XtC.shape[0]
+    total_var_explained = np.zeros((num_snps, 1), dtype=np.float32)
+    
+    for start_idx in range(0, num_snps, batch_size):
+        end_idx = min(start_idx + batch_size, num_snps)
+        XtC_batch = XtC[start_idx:end_idx, :]
+        C_backslash_XtC_batch = np.linalg.solve(covariate_inner, XtC_batch.T).astype(np.float32)
+        total_var_explained[start_idx:end_idx] = np.sum(
+            XtC_batch.T * C_backslash_XtC_batch, axis=0
+        ).reshape(-1, 1)
 
     allele_count = XtC[:, 0].reshape(-1, 1)
     return total_var_explained, allele_count

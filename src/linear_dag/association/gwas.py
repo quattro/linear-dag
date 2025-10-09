@@ -66,26 +66,28 @@ def get_gwas_beta_se(
     # Operate in place on possibly large array
     beta = Xty[:, :num_traits]
     beta *= (right_op.shape[0]/num_nonmissing)
+    assert np.shares_memory(beta, Xty)
     if logger:
         logger.info(f"beta shape={beta.shape}")
-    
 
     # Denominator, equal across traits despite different missingness
     var_explained, allele_counts = get_genotype_variance_explained(Xty[:, num_traits:], covariates)
     denominator = allele_counts - var_explained
-
     if num_heterozygotes is not None:  # else assume HWE
         # assumes diploid
         num_homozygotes = (allele_counts - num_heterozygotes.reshape(*allele_counts.shape)) / 2
         denominator = denominator + 2*num_homozygotes - var_explained
     beta[denominator.ravel() < 1e-6, :] = 0 # avoid numerical issues for variants with no variance
-    denominator = np.maximum(denominator.astype(np.float32), 1e-6)
+    denominator[denominator < 1e-6] = 1e-6
     beta /= denominator
+    if logger:
+        logger.info(f"got beta")
     
     var_numerator = np.sum(y_concat[:, :num_traits]**2, axis=0) / (num_nonmissing - 2*num_covariates).astype(np.float32)
     assert y_concat.dtype == np.float32
     assert var_numerator.dtype == np.float32
-
+    if logger:
+        logger.info(f"got var numerator")
     return beta, var_numerator, denominator, allele_counts
 
 
@@ -111,7 +113,7 @@ def _format_sumstats(
         schema={f"{name}_BETA": pl.Float32 for name in pheno_cols},
         orient="row",
     ).with_columns(VAR_DENOMINATOR=pl.lit(var_denominator.ravel()))
-    # df = pl.concat([variant_info, betalf], how="horizontal")
+    df = pl.concat([variant_info, df], how="horizontal")
 
     if logger:
         logger.info("Finished creating lazy frame")
