@@ -344,34 +344,76 @@ def _assoc_scan(args):
         
 
     # Run parallel GWAS
-    with ParallelOperator.from_hdf5(args.linarg_path, 
-                                    num_processes=args.num_processes,
-                                    block_metadata=block_metadata,
-                                    max_num_traits=len(pheno_cols) + len(covar_cols),
-                                    ) as genotypes:
-        result: pl.LazyFrame = run_gwas(
-                genotypes,
-                phenotypes.lazy(),
-                pheno_cols=pheno_cols,
-                covar_cols=covar_cols,
-                variant_info=None,
-                assume_hwe=not args.no_hwe,
-                logger=logger,
-                in_place_op=True,
-            )
-        genotypes.shutdown()
-        logger.info("Shut down parallel operator")
+    if args.repeat_covar:
+        logger.info("Running GWAS per phenotype without reusing covariates (--repeat-covar)")
+        with ParallelOperator.from_hdf5(
+            args.linarg_path,
+            num_processes=args.num_processes,
+            block_metadata=block_metadata,
+            max_num_traits=1 + len(covar_cols),
+        ) as genotypes:
+            per_results: list[pl.LazyFrame] = []
+            for ph in pheno_cols:
+                logger.info(f"Processing phenotype: {ph}")
+                res_ph = run_gwas(
+                    genotypes,
+                    phenotypes.lazy(),
+                    pheno_cols=[ph],
+                    covar_cols=covar_cols,
+                    variant_info=None,
+                    assume_hwe=not args.no_hwe,
+                    logger=logger,
+                    in_place_op=True,
+                    detach_arrays=True,
+                )
+                res_ph = res_ph.select([f"{ph}_BETA", f"{ph}_SE"])
+                per_results.append(res_ph)
 
-        # If variant info was requested, await its loading
-        if vinfo_future is not None:
-            v_info = vinfo_future.result()
-            logger.info(f"Variant info loaded after {time.time() - t_vinfo:.2f} seconds")
-            result = pl.concat([v_info, result], how="horizontal")
-            if _vinfo_executor is not None:
-                _vinfo_executor.shutdown(wait=False)
-        logger.info("Starting to write results")
-        result.collect().write_parquet(f"{args.out}.parquet", compression="lz4") # TODO: this still causes a memory usage spike
-        logger.info(f"Results written to {args.out}.parquet")
+            result: pl.LazyFrame = pl.concat(per_results, how="horizontal")
+
+            # If variant info was requested, await its loading
+            if vinfo_future is not None:
+                v_info = vinfo_future.result()
+                logger.info(f"Variant info loaded after {time.time() - t_vinfo:.2f} seconds")
+                result = pl.concat([v_info, result], how="horizontal")
+                if _vinfo_executor is not None:
+                    _vinfo_executor.shutdown(wait=False)
+
+            logger.info("Starting to write results")
+            result.collect().write_parquet(f"{args.out}.parquet", compression="lz4")
+            logger.info(f"Results written to {args.out}.parquet")
+
+            genotypes.shutdown()
+            logger.info("Shut down parallel operator")
+    else:
+        with ParallelOperator.from_hdf5(args.linarg_path, 
+                                        num_processes=args.num_processes,
+                                        block_metadata=block_metadata,
+                                        max_num_traits=len(pheno_cols) + len(covar_cols),
+                                        ) as genotypes:
+            result: pl.LazyFrame = run_gwas(
+                    genotypes,
+                    phenotypes.lazy(),
+                    pheno_cols=pheno_cols,
+                    covar_cols=covar_cols,
+                    variant_info=None,
+                    assume_hwe=not args.no_hwe,
+                    logger=logger,
+                    in_place_op=True,
+                )
+            genotypes.shutdown()
+            logger.info("Shut down parallel operator")
+
+            # If variant info was requested, await its loading
+            if vinfo_future is not None:
+                v_info = vinfo_future.result()
+                logger.info(f"Variant info loaded after {time.time() - t_vinfo:.2f} seconds")
+                result = pl.concat([v_info, result], how="horizontal")
+                if _vinfo_executor is not None:
+                    _vinfo_executor.shutdown(wait=False)
+            logger.info("Starting to write results")
+            result.collect().write_parquet(f"{args.out}.parquet", compression="lz4")
+            logger.info(f"Results written to {args.out}.parquet")
 
     logger.info(f"Finished in {time.time() - t:.2f} seconds")
 
@@ -593,6 +635,13 @@ def _main(args):
         "--all-variant-info",
         action="store_true",
         help="Include all variant metadata columns (CHROM, POS, ID, REF, ALT) in output. Default is ID only.",
+    )
+    assoc_p.add_argument(
+        "--repeat-covar",
+        action="store_true",
+        help=(
+            "Run phenotypes one at a time inside the parallel operator, repeating covariate projections. "
+        ),
     )
 
     # build h2g estimation parser from 'common' parser, but add additional options for RHE

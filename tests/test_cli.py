@@ -85,3 +85,35 @@ def test_cli_score_smoke(tmp_path: Path):
     with ParallelOperator.from_hdf5(str(linarg_path), num_processes=1) as op:
         n_unique_iids = op.iids.unique(maintain_order=True).len()
     assert df.shape[0] == n_unique_iids
+
+
+def test_cli_assoc_repeat_covar_smoke(tmp_path: Path):
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    out_prefix = tmp_path / "assoc_repeat_covar_out"
+
+    # Run CLI 'assoc' with --repeat-covar (loop mode)
+    args = [
+        "-v",
+        "assoc",
+        str(linarg_path),
+        str(pheno_path),
+        "--pheno-name",
+        "iid,height,bmi",
+        "--covar-name",
+        "iid,sex,age",
+        "--repeat-covar",
+        "--out",
+        str(out_prefix),
+        "--num-processes",
+        "2",
+    ]
+    rc = cli._main(args)
+    assert rc == 0 or rc is None
+
+    out_parquet = Path(f"{out_prefix}.parquet")
+    assert out_parquet.exists()
+
+    df = pl.read_parquet(out_parquet)
+    expected_cols = {"height_BETA", "height_SE", "bmi_BETA", "bmi_SE"}
+    assert expected_cols.issubset(set(df.columns))
