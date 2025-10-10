@@ -1,3 +1,4 @@
+from __future__ import annotations
 import time
 import warnings
 
@@ -13,7 +14,7 @@ import polars as pl
 from scipy.sparse import diags
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
-from .lineararg import LinearARG, list_blocks
+from .lineararg import LinearARG, list_blocks, list_iids
 
 FLAGS = {
     "wait": 0,
@@ -45,7 +46,7 @@ class _SharedArrayHandle:
             self._opened_shm = shared_memory.SharedMemory(name=self.name)
         return np.ndarray(self.shape, dtype=self.dtype, buffer=self._opened_shm.buf, **self._np_args)
 
-    def copy(self) -> "_SharedArrayHandle":
+    def copy(self) -> _SharedArrayHandle:
         return _SharedArrayHandle(name=self.name, lock=self.lock, shape=self.shape, dtype=self.dtype, _np_args=self._np_args)
 
     def close(self) -> None:
@@ -85,6 +86,7 @@ class _ParallelManager:
         self.flags = [Value("i", 0) for _ in range(num_processes)]
         self.processes: List[Process] = []
         self.handles: Dict[str, _SharedArrayHandle] = {}
+        self.num_traits = Value("i", 0, lock=False)
 
         for name, (shape, dtype) in object_specification.items():
             size = np.prod(shape) * np.dtype(dtype).itemsize
@@ -129,7 +131,7 @@ class _ParallelManager:
             args: Arguments to pass to target function
         """
         # Pass the dictionary of handles to the worker
-        process = Process(target=target, args=(self.handles, *args))
+        process = Process(target=target, args=(self.handles, self.num_traits, *args))
         process.start()
         self.processes.append(process)
 
@@ -332,43 +334,18 @@ class ParallelOperator(LinearOperator):
         return self.mean_centered @ aslinearoperator(diags(pq**-0.5))
 
     @classmethod
-    def from_hdf5(
-        cls,
-        hdf5_file: str,
-        num_processes: Optional[int] = None,
-        max_num_traits: int = 10,
-        block_metadata: Optional[pl.DataFrame] = None,
-    ) -> "ParallelOperator":
-        """Create a ParallelOperator from a metadata file.
-
-        Args:
-            metadata_path: Path to metadata file
-            num_processes: Number of processes to use; None -> use all available cores
-
-        Returns:
-            ParallelOperator instance
-        """
-        return _ManagerFactory.create_parallel(hdf5_file, num_processes, max_num_traits, block_metadata)
-
-
-class _ManagerFactory:
-    @classmethod
     def _worker(
         cls,
         handles: Dict[str, _SharedArrayHandle],
+        num_traits: Value,
         flag: Value,
         hdf5_file: str,
         blocks: list,
         variant_offsets: list,
-        num_traits: Value,
     ) -> None:
         """Worker process that loads LDGMs and processes blocks."""
 
-        linargs = []
-        assert blocks is not None
-        for block in blocks:
-            linarg = LinearARG.read(hdf5_file, block)
-            linargs.append(linarg)
+        linargs = [LinearARG.read(hdf5_file, block) for block in blocks]
 
         while True:
             while flag.value == FLAGS["wait"]:
@@ -377,17 +354,15 @@ class _ManagerFactory:
             if flag.value == FLAGS["shutdown"]:
                 break
             elif flag.value == FLAGS["matmat"]:
-                func = cls._matmat
+                func = cls._worker_matmat
             elif flag.value == FLAGS["rmatmat"]:
-                func = cls._rmatmat
+                func = cls._worker_rmatmat
             elif flag.value == FLAGS["num_heterozygotes"]:
-                if any(linarg.n_individuals is None for linarg in linargs):
-                    raise ValueError("Cannot compute num_heterozygotes:",
-                        "linear ARG lacks individual nodes. Run add_individual_nodes first.")
-                func = cls._num_heterozygotes
+                func = cls._worker_num_heterozygotes
             else:
                 flag.value = FLAGS["error"]
-                raise ValueError(f"Unexpected flag value: {flag.value}")
+                raise ValueError(f"Unexpected flag value: {flag.value}; possible: {FLAGS}")
+            
             with handles["sample_data"] as sample_data, handles["variant_data"] as variant_data:
                 sample_data_traits = sample_data[: num_traits.value, :].T
                 sample_lock = handles["sample_data"].lock
@@ -399,7 +374,7 @@ class _ManagerFactory:
             flag.value = FLAGS["wait"]
 
     @classmethod
-    def _matmat(
+    def _worker_matmat(
         cls,
         linarg: LinearARG,
         sample_data: np.ndarray,
@@ -411,7 +386,7 @@ class _ManagerFactory:
             sample_data += result
 
     @classmethod
-    def _rmatmat(
+    def _worker_rmatmat(
         cls,
         linarg: LinearARG,
         sample_data: np.ndarray,
@@ -421,19 +396,242 @@ class _ManagerFactory:
         variant_data[:] = linarg.T @ sample_data
 
     @classmethod
-    def _num_heterozygotes(
+    def _worker_num_heterozygotes(
         cls,
         linarg: LinearARG,
         sample_data: np.ndarray,
         variant_data: np.ndarray,
         sample_lock: Lock,
     ) -> None:
+        if linarg.n_individuals is None:
+            raise ValueError("Cannot compute num_heterozygotes:",
+                            "linear ARG lacks individual nodes. Run add_individual_nodes first.")
         include = sample_data[: linarg.n_individuals, :]
         for t in range(include.shape[1]):
             col = include[:, t]
             counts = linarg.number_of_heterozygotes(col.astype(np.bool_))
             variant_data[:, t] = counts.astype(variant_data.dtype, copy=False)
+    
 
+    @classmethod
+    def from_hdf5(
+        cls,
+        hdf5_file: str,
+        num_processes: Optional[int] = None,
+        max_num_traits: int = 10,
+        block_metadata: Optional[pl.DataFrame] = None,
+    ) -> ParallelOperator:
+        """Create a ParallelOperator from a metadata file.
+
+        Args:
+            metadata_path: Path to metadata file
+            num_processes: Number of processes to use; None -> use all available cores
+
+        Returns:
+            ParallelOperator instance
+        """
+        if block_metadata is None:
+            block_metadata = list_blocks(hdf5_file)
+        num_samples = block_metadata["n_samples"][0]
+        num_variants = block_metadata["n_variants"].sum()
+        shm_specification={
+                "sample_data": ((max_num_traits, num_samples), np.float32),
+                "variant_data": ((num_variants, max_num_traits), np.float32),
+            }
+
+        manager = _ManagerFactory.create_manager(
+            cls._worker,
+            hdf5_file, 
+            num_processes, 
+            block_metadata, 
+            shm_specification)
+        manager.start_workers(FLAGS["wait"])
+
+        # Get the actual handles from the manager to pass to the Operator instance
+        sample_data_handle = manager.handles["sample_data"]
+        variant_data_handle = manager.handles["variant_data"]
+
+        # Create and return the ParallelOperator instance
+        return ParallelOperator(
+            manager,
+            _sample_data_handle=sample_data_handle,
+            _variant_data_handle=variant_data_handle,
+            _num_traits=manager.num_traits,
+            _max_num_traits=max_num_traits,
+            shape=(num_samples, num_variants),
+            dtype=np.float32,
+            iids=list_iids(hdf5_file),
+        )
+
+
+@dataclass
+class GRMOperator(LinearOperator):
+    """A linear operator representing the GRM and supporting
+    matrix multiplication.
+
+    Attributes:
+        _manager: ParallelManager instance that coordinates worker processes
+        _input_data_handle: _SharedArrayHandle  # Handle to shared sample data
+        _output_data_handle: _SharedArrayHandle  # Handle to shared sample data
+        _num_traits: Value
+        _max_num_traits: int
+        shape: Shape of the operator
+        dtype: Data type
+        iids: individual IDs
+    """
+
+    _manager: _ParallelManager
+    _input_data_handle: _SharedArrayHandle
+    _output_data_handle: _SharedArrayHandle
+    _num_traits: Value
+    _max_num_traits: int
+    shape: tuple[int, int]
+    dtype: np.dtype = np.float32
+    iids: Optional[pl.Series] = None
+
+    def __enter__(self):
+        self._manager.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self._manager.__exit__(exc_type, exc_val, exc_tb)
+
+    def shutdown(self) -> None:
+        """Shut down workers without deleting shared memory arrays."""
+        self._manager.shutdown_workers()
+
+    @property
+    def num_samples(self):
+        return self.shape[0]
+
+    def _matmat(self, x):
+        n, k = x.shape
+        if n != self.shape[0]:
+            raise ValueError(
+                f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and{x.shape}."
+            )
+        result = np.empty((self.shape[0], k), dtype=np.float32)
+
+        # Process max_num_traits columns at a time
+        for start in range(0, k, self._max_num_traits):
+            end = min(start + self._max_num_traits, k)
+
+            self._num_traits.value = end - start
+            with self._input_data_handle as input_data:
+                input_data[: end - start, :] = x[:, start:end].T
+            self._manager.start_workers(FLAGS["matmat"])
+            self._manager.await_workers()
+            with self._output_data_handle as output_data:
+                result[:, start:end] = output_data[: end - start, :].T
+
+        return result
+
+    def _rmatmat(self, x: np.ndarray):
+        return self._matmat(x.T).T
+        
+    def _matvec(self, x: np.ndarray) -> np.ndarray:
+        return self._matmat(x.reshape(-1, 1))
+
+    def _rmatvec(self, x: np.ndarray) -> np.ndarray:
+        return self._rmatmat(x.reshape(-1, 1))
+
+    @classmethod
+    def _worker(
+        cls,
+        handles: Dict[str, _SharedArrayHandle],
+        num_traits: Value,
+        flag: Value,
+        hdf5_file: str,
+        blocks: list,
+        variant_offsets: list,
+    ) -> None:
+        """Worker process that loads LDGMs and processes blocks."""
+
+        linargs = [LinearARG.read(hdf5_file, block) for block in blocks]
+
+        while True:
+            while flag.value == FLAGS["wait"]:
+                time.sleep(0.001)
+
+            if flag.value == FLAGS["shutdown"]:
+                break
+            elif flag.value == FLAGS["matmat"]:
+                func = cls._worker_matmat
+            else:
+                flag.value = FLAGS["error"]
+                raise ValueError(f"Unexpected flag value: {flag.value}; possible: {FLAGS}")
+            
+            with handles["input_data"] as input_data, handles["output_data"] as output_data:
+                output_lock = handles["output_data"].lock
+                input_arr = input_data[: num_traits.value, :].T
+                output_arr = output_data[: num_traits.value, :].T
+                for linarg in linargs:
+                    func(linarg, input_arr, output_arr, output_lock)
+            flag.value = FLAGS["wait"]
+    
+    @classmethod
+    def _worker_matmat(
+        cls,
+        linarg: GRMOperator,
+        input_arr: np.ndarray,
+        output_arr: np.ndarray,
+        output_lock: Lock,
+    ) -> None:
+        result = linarg @ linarg.T @ input_arr
+        with output_lock:
+            output_arr += result
+
+    @classmethod
+    def from_hdf5(
+        cls,
+        hdf5_file: str,
+        num_processes: Optional[int] = None,
+        max_num_traits: int = 10,
+        block_metadata: Optional[pl.DataFrame] = None,
+    ) -> GRMOperator:
+        """Create a GRMOperator from a metadata file.
+
+        Args:
+            metadata_path: Path to metadata file
+            num_processes: Number of processes to use; None -> use all available cores
+
+        Returns:
+            GRMOperator instance
+        """
+        if block_metadata is None:
+            block_metadata = list_blocks(hdf5_file)
+        num_samples = block_metadata["n_samples"][0]
+        shm_specification={
+                "input_data": ((max_num_traits, num_samples), np.float32),
+                "output_data": ((max_num_traits, num_samples), np.float32),
+            }
+
+        manager = _ManagerFactory.create_manager(cls._worker, 
+                            hdf5_file, 
+                            num_processes, 
+                            block_metadata, 
+                            shm_specification)
+        manager.start_workers(FLAGS["wait"])
+
+        # Get the actual handles from the manager to pass to the Operator instance
+        input_data_handle = manager.handles["input_data"]
+        output_data_handle = manager.handles["output_data"]
+
+        # Create and return the ParallelOperator instance
+        return GRMOperator(
+            manager,
+            _input_data_handle=input_data_handle,
+            _output_data_handle=output_data_handle,
+            _num_traits=manager.num_traits,
+            _max_num_traits=max_num_traits,
+            shape=(num_samples, num_samples),
+            dtype=np.float32,
+            iids=list_iids(hdf5_file),
+        )
+
+
+class _ManagerFactory:
+    
     @classmethod
     def _split_blocks(
         cls, metadata: pl.DataFrame, num_processes: int
@@ -457,28 +655,16 @@ class _ManagerFactory:
         block_ranges = [(start, end) for start, end in zip(block_indices[:-1], block_indices[1:], strict=False)]
         return block_ranges
 
+    
     @classmethod
-    def create_parallel(
+    def create_manager(
         cls,
+        worker: Callable,
         hdf5_file: str,
         num_processes: Optional[int],
-        max_num_traits: int,
-        block_metadata: Optional[pl.DataFrame] = None,
-    ) -> "ParallelOperator":
-        """Create a ParallelOperator instance.
-
-        Args:
-            hdf5_file: Path to hdf5 file
-            num_processes: Number of processes to use
-            alpha: Alpha parameter
-            max_num_traits: Maximum number of traits
-            block_metadata: Blocks to load. If None, all blocks will be loaded.
-
-        Returns:
-            ParallelOperator instance
-        """
-        if block_metadata is None:
-            block_metadata = list_blocks(hdf5_file)
+        block_metadata: pl.DataFrame,
+        shm_specification: dict[str, tuple[tuple[int, int], np.dtype]],
+    ) -> _ParallelManager:
         blocks = block_metadata["block_name"]
 
         if num_processes is None:
@@ -487,52 +673,23 @@ class _ManagerFactory:
         process_block_ranges = cls._split_blocks(block_metadata, num_processes)
         process_blocks = [blocks[start:end] for start, end in process_block_ranges]
         assert all([blocks is not None for blocks in process_blocks])
-        num_samples = block_metadata["n_samples"][0]
-        num_variants = block_metadata["n_variants"].sum()
         variant_offsets = np.cumsum(block_metadata["n_variants"].to_numpy()).astype(int)
         block_offsets = [variant_offsets[start:end] for start, end in process_block_ranges]
-        num_traits = Value("i", 0, lock=False)
         manager = _ParallelManager(
             num_processes,
-            object_specification={
-                "sample_data": ((max_num_traits, num_samples), np.float32),
-                "variant_data": ((num_variants, max_num_traits), np.float32),
-            },
+            object_specification=shm_specification
         )
 
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning)
             for i in range(num_processes):
                 manager.add_process(
-                    target=cls._worker,
+                    target=worker,
                     args=(
                         manager.flags[i],
                         hdf5_file,
                         process_blocks[i],
                         block_offsets[i],
-                        num_traits,
                     ),
                 )
-        manager.start_workers(FLAGS["wait"])
-
-        # Get the actual handles from the manager to pass to the Operator instance
-        sample_data_handle = manager.handles["sample_data"]
-        variant_data_handle = manager.handles["variant_data"]
-
-        iids = None
-        with h5py.File(hdf5_file, "r") as h5f:
-            if "iids" in h5f.keys():
-                iids_data = h5f["iids"][:]
-                iids = pl.Series("iids", iids_data.astype(str))
-
-        # Create and return the ParallelOperator instance
-        return ParallelOperator(
-            manager,
-            _sample_data_handle=sample_data_handle,
-            _variant_data_handle=variant_data_handle,
-            _num_traits=num_traits,
-            _max_num_traits=max_num_traits,
-            shape=(num_samples, num_variants),
-            dtype=np.float32,
-            iids=iids,
-        )
+        return manager
