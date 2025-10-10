@@ -354,10 +354,11 @@ def _assoc_scan(args):
         ) as genotypes:
             per_results: list[pl.LazyFrame] = []
             for ph in pheno_cols:
-                logger.info(f"Processing phenotype: {ph}")
+                logger.info(f"Processing phenotype: {ph}")                
+                phenotype_missing_dropped = phenotypes.drop_nulls(ph) # drop rows with missing phenotype values
                 res_ph = run_gwas(
                     genotypes,
-                    phenotypes.lazy(),
+                    phenotype_missing_dropped.lazy(),
                     pheno_cols=[ph],
                     covar_cols=covar_cols,
                     variant_info=None,
