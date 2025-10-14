@@ -82,8 +82,10 @@ def get_gwas_beta_se(
     beta /= denominator
     if logger:
         logger.info(f"got beta")
-    
-    var_numerator = np.sum(y_concat[:, :num_traits]**2, axis=0) / (num_nonmissing - 2*num_covariates).astype(np.float32)
+    print(f"num nonmissing: {num_nonmissing}")
+    var_numerator = np.sum(y_concat[:, :num_traits]**2, axis=0) \
+        / (num_nonmissing - 2*num_covariates).astype(np.float32) \
+        / (num_nonmissing / y_resid.shape[0]).astype(np.float32)
     assert y_concat.dtype == np.float32
     assert var_numerator.dtype == np.float32
     if logger:
