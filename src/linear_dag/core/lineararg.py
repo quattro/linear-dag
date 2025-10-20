@@ -575,6 +575,16 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
 
     return pl.DataFrame(block_data)
 
+def list_iids(h5_fname: Union[str, PathLike]) -> pl.Series:
+    if not str(h5_fname).endswith(".h5"):
+        h5_fname = str(h5_fname) + ".h5"
+    with h5py.File(h5_fname, "r") as h5f:
+        if "iids" not in h5f.keys():
+            raise ValueError("iids not found in HDF5 file")
+        iids_data = h5f["iids"][:]
+        iids = pl.Series("iids", iids_data.astype(str))
+    return iids
+    
 
 def load_block_metadata(h5_fname, block_metadata):
     block_names = block_metadata.get_column("block_name").to_list()

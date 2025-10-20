@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from linear_dag.core.lineararg import list_blocks, LinearARG
-from linear_dag.core.parallel_processing import ParallelOperator
+from linear_dag.core.parallel_processing import ParallelOperator, GRMOperator
 
 
 TEST_DATA_DIR = Path(__file__).parent / "testdata"
@@ -144,3 +144,23 @@ def test_in_place_raises_when_exceeds_max_traits():
         X = np.ones((m, 3), dtype=np.float32)
         with pytest.raises(ValueError):
             _ = par._matmat(X, in_place=True)
+
+
+def test_grm_matmat_matches_serial():
+    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    linargs, _ = _load_serial_blocks(hdf5_path)
+
+    with GRMOperator.from_hdf5(hdf5_path, num_processes=2) as grm:
+        n = grm.shape[0]
+        rng = np.random.default_rng(42)
+        X = rng.standard_normal((n, 3)).astype(np.float32)
+
+        # Parallel result
+        Y_par = grm @ X
+
+    # Serial result: sum over blocks of L @ L.T @ X
+    Y_ser = np.zeros((n, 3), dtype=np.float32)
+    for la in linargs:
+        Y_ser += la @ la.T @ X
+
+    assert np.allclose(Y_par, Y_ser, rtol=1e-5, atol=1e-5)
