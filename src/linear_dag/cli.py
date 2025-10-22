@@ -217,81 +217,23 @@ def _read_pheno_or_covar(
     return df
 
 
-
-# def parquet_to_numpy(destination: np.ndarray, parquet_path: str, score_cols: list, dtype=np.float32):
-#     parq = pq.ParquetFile(parquet_path)
-#     row_offset = 0
-
-#     for rg_idx in range(parq.num_row_groups):
-#         table = parq.read_row_group(rg_idx, columns=score_cols)
-#         chunk_cols = [
-#             table[col].to_numpy(zero_copy_only=True).astype(dtype, copy=False)
-#             for col in score_cols
-#         ]
-#         chunk_arr = np.stack(chunk_cols, axis=1) 
-#         n_rows_chunk = chunk_arr.shape[0]
-#         destination[row_offset:row_offset + n_rows_chunk] = chunk_arr
-#         row_offset += n_rows_chunk
-
-
-def parquet_to_numpy(destination: np.ndarray, parquet_path: str, score_cols: list, dtype=np.float32):
-    parq = pq.ParquetFile(parquet_path)
-    row_offset = 0
-
-    for rg_idx in range(parq.num_row_groups):
-        table = parq.read_row_group(rg_idx, columns=score_cols)
-        n_rows_chunk = table.num_rows
-        
-        for col_idx, col_name in enumerate(score_cols):
-            try:
-                arr = table[col_name].to_numpy(zero_copy_only=True)
-            except:
-                arr = table[col_name].to_numpy(zero_copy_only=False)
-            if arr.dtype != dtype:
-                arr = arr.astype(dtype, copy=False)
-            destination[row_offset:row_offset + n_rows_chunk, col_idx] = arr
-        
-        row_offset += n_rows_chunk
-
-
 def _prs(args):
-    
     t = time.time()
-    
     logger = MemoryLogger(__name__)
     logger.info("Getting blocks")
     block_metadata = list_blocks(args.linarg_path)
     block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
-    logger.info("Reading in weights")
-    with ParallelOperator.from_hdf5(
-        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata, max_num_traits=len(args.score_cols)
-    ) as linarg:
-        
-        logger.info("Copying betas to shared memory")
-        shm_array = linarg.borrow_variant_data_view()
-        parquet_to_numpy(shm_array, args.beta_path, args.score_cols)
-        iids = linarg.iids
-        logger.info("Performing scoring")
-        prs = run_prs(linarg, shm_array, args.score_cols, iids)
-       
-    logger.info("Summing haplotype scores to individual scores")
-    unique_ids, row_indices = np.unique(iids, return_inverse=True)
-    num_ids = len(unique_ids)
-    num_cols = len(iids)
-    col_indices = np.arange(num_cols)
-    data = np.ones(num_cols, dtype=np.int8)
-    S = coo_matrix((data, (row_indices, col_indices)), shape=(num_ids, num_cols)).tocsc()
-    prs_ind = S @ prs   
-    
-    frame_dict = {"iid": unique_ids}
-    for i, score in enumerate(args.score_cols):
-        frame_dict[score] = prs_ind[:, i]
-    result = pl.DataFrame(frame_dict)
-            
+    result = run_prs(
+        args.linarg_path,
+        args.beta_path,
+        block_metadata,
+        args.score_cols,
+        args.num_processes,
+        logger
+        )
     logger.info("Writing results")
     result.write_csv(f"{args.out}.tsv", separator="\t")    
     logger.info(f"Finished in {time.time() - t:.2f} seconds")
-    
     return
 
 
@@ -344,34 +286,77 @@ def _assoc_scan(args):
         
 
     # Run parallel GWAS
-    with ParallelOperator.from_hdf5(args.linarg_path, 
-                                    num_processes=args.num_processes,
-                                    block_metadata=block_metadata,
-                                    max_num_traits=len(pheno_cols) + len(covar_cols),
-                                    ) as genotypes:
-        result: pl.LazyFrame = run_gwas(
-                genotypes,
-                phenotypes.lazy(),
-                pheno_cols=pheno_cols,
-                covar_cols=covar_cols,
-                variant_info=None,
-                assume_hwe=not args.no_hwe,
-                logger=logger,
-                in_place_op=True,
-            )
-        genotypes.shutdown()
-        logger.info("Shut down parallel operator")
+    if args.repeat_covar:
+        logger.info("Running GWAS per phenotype without reusing covariates (--repeat-covar)")
+        with ParallelOperator.from_hdf5(
+            args.linarg_path,
+            num_processes=args.num_processes,
+            block_metadata=block_metadata,
+            max_num_traits=1 + len(covar_cols),
+        ) as genotypes:
+            per_results: list[pl.LazyFrame] = []
+            for ph in pheno_cols:
+                logger.info(f"Processing phenotype: {ph}")                
+                phenotype_missing_dropped = phenotypes.drop_nulls(ph) # drop rows with missing phenotype values
+                res_ph = run_gwas(
+                    genotypes,
+                    phenotype_missing_dropped.lazy(),
+                    pheno_cols=[ph],
+                    covar_cols=covar_cols,
+                    variant_info=None,
+                    assume_hwe=not args.no_hwe,
+                    logger=logger,
+                    in_place_op=True,
+                    detach_arrays=True,
+                )
+                res_ph = res_ph.select([f"{ph}_BETA", f"{ph}_SE"])
+                per_results.append(res_ph)
 
-        # If variant info was requested, await its loading
-        if vinfo_future is not None:
-            v_info = vinfo_future.result()
-            logger.info(f"Variant info loaded after {time.time() - t_vinfo:.2f} seconds")
-            result = pl.concat([v_info, result], how="horizontal")
-            if _vinfo_executor is not None:
-                _vinfo_executor.shutdown(wait=False)
-        logger.info("Starting to write results")
-        result.collect().write_parquet(f"{args.out}.parquet", compression="lz4") # TODO: this still causes a memory usage spike
-        logger.info(f"Results written to {args.out}.parquet")
+            result: pl.LazyFrame = pl.concat(per_results, how="horizontal")
+
+            # If variant info was requested, await its loading
+            if vinfo_future is not None:
+                v_info = vinfo_future.result()
+                logger.info(f"Variant info loaded after {time.time() - t_vinfo:.2f} seconds")
+                result = pl.concat([v_info, result], how="horizontal")
+                if _vinfo_executor is not None:
+                    _vinfo_executor.shutdown(wait=False)
+
+            logger.info("Starting to write results")
+            result.collect().write_parquet(f"{args.out}.parquet", compression="lz4")
+            logger.info(f"Results written to {args.out}.parquet")
+
+            genotypes.shutdown()
+            logger.info("Shut down parallel operator")
+    else:
+        with ParallelOperator.from_hdf5(args.linarg_path, 
+                                        num_processes=args.num_processes,
+                                        block_metadata=block_metadata,
+                                        max_num_traits=len(pheno_cols) + len(covar_cols),
+                                        ) as genotypes:
+            result: pl.LazyFrame = run_gwas(
+                    genotypes,
+                    phenotypes.lazy(),
+                    pheno_cols=pheno_cols,
+                    covar_cols=covar_cols,
+                    variant_info=None,
+                    assume_hwe=not args.no_hwe,
+                    logger=logger,
+                    in_place_op=True,
+                )
+            genotypes.shutdown()
+            logger.info("Shut down parallel operator")
+
+            # If variant info was requested, await its loading
+            if vinfo_future is not None:
+                v_info = vinfo_future.result()
+                logger.info(f"Variant info loaded after {time.time() - t_vinfo:.2f} seconds")
+                result = pl.concat([v_info, result], how="horizontal")
+                if _vinfo_executor is not None:
+                    _vinfo_executor.shutdown(wait=False)
+            logger.info("Starting to write results")
+            result.collect().write_parquet(f"{args.out}.parquet", compression="lz4")
+            logger.info(f"Results written to {args.out}.parquet")
 
     logger.info(f"Finished in {time.time() - t:.2f} seconds")
 
@@ -593,6 +578,13 @@ def _main(args):
         "--all-variant-info",
         action="store_true",
         help="Include all variant metadata columns (CHROM, POS, ID, REF, ALT) in output. Default is ID only.",
+    )
+    assoc_p.add_argument(
+        "--repeat-covar",
+        action="store_true",
+        help=(
+            "Run phenotypes one at a time inside the parallel operator, repeating covariate projections. "
+        ),
     )
 
     # build h2g estimation parser from 'common' parser, but add additional options for RHE

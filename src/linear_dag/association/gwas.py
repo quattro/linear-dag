@@ -99,6 +99,8 @@ def _format_sumstats(
     var_denominator: np.ndarray,
     variant_info: pl.DataFrame,
     pheno_cols: list[str],
+    *,
+    detach_arrays: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> pl.LazyFrame:
     """
@@ -108,6 +110,12 @@ def _format_sumstats(
     """
     if not beta.flags.f_contiguous:
         raise ValueError("`beta` should be a Fortran-contiguous (column-major) array")
+
+    # Optionally detach from any shared/in-place buffers to avoid cross-iteration aliasing
+    # in repeat-covar mode. Keep Fortran order to match expected layout.
+    if detach_arrays:
+        beta = np.array(beta, dtype=np.float32, order="F", copy=True)
+        var_denominator = np.array(var_denominator, dtype=np.float32, copy=True)
         
     # Start from variant_info and add columns lazily; avoid concatenation
     df = pl.LazyFrame(
@@ -149,6 +157,7 @@ def run_gwas(
     variant_info: Optional[pl.LazyFrame] = None,
     assume_hwe: bool = True,
     in_place_op: bool = False,
+    detach_arrays: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> pl.LazyFrame:
     """
@@ -227,7 +236,15 @@ def run_gwas(
     if logger:
         logger.info(f"variant_info columns={len(variant_info.collect_schema().names())} pheno_cols={len(pheno_cols)}")
 
-    result = _format_sumstats(beta, var_numerator, var_denominator, variant_info, pheno_cols, logger=logger)
+    result = _format_sumstats(
+        beta,
+        var_numerator,
+        var_denominator,
+        variant_info,
+        pheno_cols,
+        detach_arrays=detach_arrays,
+        logger=logger,
+    )
     if logger:
         logger.info("Finished formatting GWAS results")
     return result
