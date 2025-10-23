@@ -224,9 +224,9 @@ def run_gwas(
 
     if variant_info is None:
         variant_info = pl.LazyFrame()
-    # variant_info = variant_info.with_columns(
-    #     pl.Series("A1FREQ", allele_counts.ravel() / genotypes.shape[0]).cast(pl.Float32),
-    # )
+    variant_info = variant_info.with_columns(
+        pl.Series("A1FREQ", allele_counts.ravel() / genotypes.shape[0]).cast(pl.Float32),
+    )
     if num_heterozygotes is not None:
         variant_info = variant_info.with_columns(
             pl.Series("A1_CARRIER_FREQ", num_heterozygotes.astype(np.float32).ravel() * 2 / genotypes.shape[0]).cast(
