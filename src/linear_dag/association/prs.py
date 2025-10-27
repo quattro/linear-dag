@@ -7,6 +7,7 @@ from linear_dag.core.lineararg import load_variant_info
 import logging
 from typing import Optional
 from scipy.sparse import coo_matrix
+import time
 
 
 def parquet_to_numpy(
