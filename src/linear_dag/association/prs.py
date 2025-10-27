@@ -16,59 +16,79 @@ def parquet_to_numpy(
     linarg_variants: pl.Series,
     beta_variants: pl.Series,
     dtype=np.float32,
+    logger: logging.Logger | None = None,
 ):
     """
     Stream betas from a Parquet file into the shared-memory destination in ARG-variant order.
-
-    This performs the equivalent of (left_op @ right_op @ betas) by:
-    - Computing the inner-join between ARG variant IDs (linarg_variants) and beta IDs (beta_variants)
-      to obtain index arrays row_idx (ARG space) and col_idx (beta/global row space).
-    - Iterating over Parquet row-groups, selecting only intersecting rows in each group via Arrow take,
-      and scattering them into the destination at the matching ARG rows.
-
-    destination: NumPy view into shared memory of shape (m_arg, k)
-    parquet_path: path to Parquet file containing columns score_cols and an ID column represented by beta_variants
-    score_cols: list of column names to load and score
-    linarg_variants: pl.Series of ARG variant IDs (length m_arg)
-    beta_variants: pl.Series of beta variant IDs in Parquet row order (length m_beta)
-    dtype: target dtype for destination entries
     """
-    parq = pq.ParquetFile(parquet_path)
 
-    # Build inner-merge index arrays: ARG rows (row_idx) and Parquet global rows (col_idx)
+    log = logger or logging.getLogger(__name__)
+    t_total = time.time()
+
+    log.info(f"Opening Parquet file: {parquet_path}")
+    t0 = time.time()
+    parq = pq.ParquetFile(parquet_path)
+    log.info(f"Loaded Parquet metadata in {time.time() - t0:.3f}s "
+             f"({parq.num_row_groups} row group(s), {parq.metadata.num_rows} rows)")
+
+    # ---- Join variant IDs ----
+    t0 = time.time()
+    log.info("Building variant ID join (linarg_variants vs beta_variants)...")
     row_df = pl.LazyFrame({"id": linarg_variants}).with_row_index("row_idx")
     col_df = pl.LazyFrame({"id": beta_variants}).with_row_index("col_idx")
     merged = row_df.join(col_df, on="id", how="inner").collect()
+    t_join = time.time() - t0
+    log.info(f"Join complete in {t_join:.3f}s "
+             f"({merged.height} intersecting variants)")
 
     if merged.height == 0:
-        # Nothing to load; leave destination as-is
+        log.warning("No overlapping variants found — nothing to load.")
         return
 
-    row_idx = merged.get_column("row_idx").to_numpy()  # ARG space
-    col_idx = merged.get_column("col_idx").to_numpy()  # Parquet global row indices
+    # ---- Extract indices ----
+    t0 = time.time()
+    row_idx = merged.get_column("row_idx").to_numpy()
+    col_idx = merged.get_column("col_idx").to_numpy()
+    log.info(f"Extracted index arrays in {time.time() - t0:.3f}s")
 
-    # Precompute row-group offsets in global row coordinates
+    # ---- Precompute row group offsets ----
+    t0 = time.time()
     n_rows_per_rg = [parq.metadata.row_group(i).num_rows for i in range(parq.num_row_groups)]
-    offsets = np.concatenate([[0], np.cumsum(n_rows_per_rg)])  # len = num_row_groups + 1
+    offsets = np.concatenate([[0], np.cumsum(n_rows_per_rg)])
+    log.info(f"Computed row group offsets in {time.time() - t0:.3f}s")
 
-    # Stream per row-group, take only needed rows, and scatter into destination
+    # ---- Stream + scatter ----
+    t_stream_total = 0.0
+    t_take_total = 0.0
+    t_scatter_total = 0.0
+
     for rg_idx in range(parq.num_row_groups):
         start, end = offsets[rg_idx], offsets[rg_idx + 1]
         mask = (col_idx >= start) & (col_idx < end)
         if not np.any(mask):
             continue
 
-        # Compute in-chunk indices and destination rows
+        log.debug(f"Processing row group {rg_idx} [{start}:{end}) "
+                  f"with {mask.sum()} matching rows...")
+
         in_chunk = (col_idx[mask] - start).astype(np.int64)
         dest_rows = row_idx[mask].astype(np.int64)
 
-        # Read only score columns for this row-group
+        # Read row group
+        t_rg = time.time()
         table = parq.read_row_group(rg_idx, columns=score_cols)
+        t_stream = time.time() - t_rg
+        t_stream_total += t_stream
+        log.info(f"Row group {rg_idx}: read in {t_stream:.3f}s")
 
-        # Use Arrow take to avoid converting the entire row-group when sparse
+        # Arrow take
+        t_take = time.time()
         sub = table.take(pa.array(in_chunk))
+        t_take_total += time.time() - t_take
+        log.info(f"Row group {rg_idx}: Arrow take() in {time.time() - t_take:.3f}s")
 
-        # Scatter per trait/score column
+        # Scatter to destination
+        t_scat = time.time()
         for j, c in enumerate(score_cols):
             try:
                 arr = sub[c].to_numpy(zero_copy_only=True)
@@ -77,7 +97,14 @@ def parquet_to_numpy(
             if arr.dtype != dtype:
                 arr = arr.astype(dtype, copy=False)
             destination[dest_rows, j] = arr
+        t_scatter_total += time.time() - t_scat
+        log.info(f"Row group {rg_idx}: scatter in {time.time() - t_scat:.3f}s")
 
+    log.info(
+        f"Finished parquet_to_numpy in {time.time() - t_total:.3f}s "
+        f"(join={t_join:.3f}s, read={t_stream_total:.3f}s, "
+        f"take={t_take_total:.3f}s, scatter={t_scatter_total:.3f}s)"
+    )
 
 def run_prs(
     linarg_path: str,
