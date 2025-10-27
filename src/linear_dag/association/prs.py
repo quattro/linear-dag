@@ -133,7 +133,7 @@ def run_prs(
 
         # 3) Stream-scatter betas into SHM in ARG order
         shm_array = linarg.borrow_variant_data_view()
-        parquet_to_numpy(shm_array, beta_path, score_cols, linarg_ids, beta_ids)
+        parquet_to_numpy(shm_array, beta_path, score_cols, linarg_ids, beta_ids, logger=logger)
 
         # 4) Compute scores with in-place matmul (consumes betas already in SHM)
         if logger:
