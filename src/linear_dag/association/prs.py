@@ -124,13 +124,25 @@ def run_prs(
 
         # ---- 1) Load ARG variant IDs lazily ----
         block_names = block_metadata.get_column("block_name").to_list()
-        linarg_lf = load_variant_info(linarg_path, block_names, columns="id_only").select(["ID"])
+        linarg_lf = (
+            load_variant_info(linarg_path, block_names, columns="id_only")
+            .select([pl.col("ID").cast(pl.Utf8)])
+        )
         log.info(f"Prepared ARG LazyFrame for {len(block_names)} blocks")
 
         # ---- 2) Load beta variant IDs lazily from Parquet ----
         parq = pq.ParquetFile(beta_path)
         beta_table = parq.read(columns=["ID"])
-        beta_lf = pl.from_arrow(beta_table).lazy()
+
+        # Force Arrow column to string if it came in as binary
+        if beta_table.schema.field("ID").type == "binary":
+            beta_table = beta_table.set_column(
+                0,
+                "ID",
+                beta_table["ID"].cast(pa.string())
+            )
+
+        beta_lf = pl.from_arrow(beta_table).lazy().select([pl.col("ID").cast(pl.Utf8)])
         log.info(f"Prepared beta LazyFrame from Parquet: {beta_path}")
 
         # ---- 3) Join IDs lazily (zero-copy) ----
