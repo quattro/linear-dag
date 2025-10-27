@@ -71,9 +71,6 @@ def parquet_to_numpy(
         if not np.any(mask):
             continue
 
-        log.debug(f"Processing row group {rg_idx} [{start}:{end}) "
-                  f"with {mask.sum()} matching rows...")
-
         in_chunk = (col_idx[mask] - start).astype(np.int64)
         dest_rows = row_idx[mask].astype(np.int64)
 
