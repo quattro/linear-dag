@@ -35,6 +35,8 @@ def parquet_to_numpy(
     # ---- Join variant IDs ----
     t0 = time.time()
     log.info("Building variant ID join (linarg_variants vs beta_variants)...")
+    print(linarg_variants)
+    print(beta_variants)
     row_df = pl.LazyFrame({"id": linarg_variants}).with_row_index("row_idx")
     col_df = pl.LazyFrame({"id": beta_variants}).with_row_index("col_idx")
     merged = row_df.join(col_df, on="id", how="inner").collect()
@@ -43,7 +45,7 @@ def parquet_to_numpy(
              f"({merged.height} intersecting variants)")
 
     if merged.height == 0:
-        log.warning("No overlapping variants found — nothing to load.")
+        print("No overlapping variants found — nothing to load.")
         return
 
     # ---- Extract indices ----
