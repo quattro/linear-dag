@@ -112,49 +112,65 @@ def run_prs(
     block_metadata: pl.DataFrame,
     score_cols: list[str],
     num_processes: int,
-    logger: Optional[logging.Logger] = None) -> np.ndarray:
-        
+    logger: Optional[logging.Logger] = None
+) -> pl.DataFrame:
+    log = logger or logging.getLogger(__name__)
+
     with ParallelOperator.from_hdf5(
         linarg_path, num_processes=num_processes, block_metadata=block_metadata, max_num_traits=len(score_cols)
     ) as linarg:
-        
-        if logger:
-            logger.info("Reading in betas and copying to shared memory")
-        # 1) Load ARG variant IDs (ID-only, in ARG column order for selected blocks)
+
+        log.info("Reading in betas and copying to shared memory")
+
+        # ---- 1) Load ARG variant IDs lazily ----
         block_names = block_metadata.get_column("block_name").to_list()
-        linarg_ids_lf = load_variant_info(linarg_path, block_names, columns="id_only")
-        linarg_ids = linarg_ids_lf.collect().get_column("ID").cast(pl.String)
+        linarg_lf = load_variant_info(linarg_path, block_names, columns="id_only").select(["ID"])
+        log.info(f"Prepared ARG LazyFrame for {len(block_names)} blocks")
 
-        # 2) Load beta variant IDs from Parquet (assume column name 'ID')
+        # ---- 2) Load beta variant IDs lazily from Parquet ----
         parq = pq.ParquetFile(beta_path)
-        beta_table = parq.read(columns=["ID"])  # reads only ID column
-        beta_ids = pl.Series("ID", beta_table.column("ID").to_numpy()).cast(pl.String)
+        beta_table = parq.read(columns=["ID"])
+        beta_lf = pl.from_arrow(beta_table).lazy()
+        log.info(f"Prepared beta LazyFrame from Parquet: {beta_path}")
 
-        # 3) Stream-scatter betas into SHM in ARG order
+        # ---- 3) Join IDs lazily (zero-copy) ----
+        merged_lf = linarg_lf.join(beta_lf, on="ID", how="inner")
+        merged = merged_lf.collect()
+        log.info(f"Join complete: {merged.height} intersecting variants")
+
+        if merged.height == 0:
+            log.warning("No overlapping variants found — returning empty DataFrame")
+            return pl.DataFrame({"iid": [], **{c: [] for c in score_cols}})
+
+        # ---- 4) Extract row/col indices for scatter ----
+        row_idx = merged.get_column("row_idx").to_numpy() if "row_idx" in merged.columns else np.arange(merged.height)
+        col_idx = merged.get_column("col_idx").to_numpy() if "col_idx" in merged.columns else np.arange(merged.height)
+
+        # ---- 5) Stream-scatter betas into shared memory ----
         shm_array = linarg.borrow_variant_data_view()
-        parquet_to_numpy(shm_array, beta_path, score_cols, linarg_ids, beta_ids, logger=logger)
+        parquet_to_numpy(shm_array, beta_path, score_cols, row_idx, col_idx, logger=log)
 
-        # 4) Compute scores with in-place matmul (consumes betas already in SHM)
-        if logger:
-            logger.info("Performing scoring")
+        # ---- 6) Compute PRS scores ----
+        log.info("Performing scoring")
         k = len(score_cols)
         dummy = np.empty((linarg.shape[1], k), dtype=np.float32)
         prs = linarg._matmat(dummy, in_place=True)
         iids = linarg.iids
-       
-    if logger:
-        logger.info("Summing haplotype scores to individual scores")
+
+    # ---- 7) Sum haplotype scores to individual scores ----
+    log.info("Summing haplotype scores to individual scores")
     unique_ids, row_indices = np.unique(iids, return_inverse=True)
     num_ids = len(unique_ids)
     num_cols = len(iids)
     col_indices = np.arange(num_cols)
     data = np.ones(num_cols, dtype=np.int8)
     S = coo_matrix((data, (row_indices, col_indices)), shape=(num_ids, num_cols)).tocsc()
-    prs_ind = S @ prs   
-    
+    prs_ind = S @ prs
+
+    # ---- 8) Build output Polars DataFrame ----
     frame_dict = {"iid": unique_ids}
     for i, score in enumerate(score_cols):
         frame_dict[score] = prs_ind[:, i]
     result = pl.DataFrame(frame_dict)
-    
+
     return result
