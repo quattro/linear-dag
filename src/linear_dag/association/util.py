@@ -5,7 +5,7 @@ from scipy.sparse.linalg import LinearOperator
 
 def _backslash(A: np.ndarray, b: np.ndarray) -> np.ndarray:
     """MATLAB-style backslash"""
-    return np.linalg.solve(A.T @ A, A.T @ b)
+    return np.linalg.pinv(A) @ b
 
 
 def _residualize_phenotypes_mar(
