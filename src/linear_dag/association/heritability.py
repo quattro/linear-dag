@@ -9,7 +9,8 @@ import polars as pl
 import scipy as sp
 
 from numpy.random import Generator
-from scipy.sparse.linalg import LinearOperator
+from scipy.sparse import identity
+from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 from ..core.operators import get_inner_merge_operators
 from .util import impute_missing_with_mean, residualize_phenotypes
@@ -41,24 +42,18 @@ def randomized_haseman_elston(
     if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
 
+    # align and residualize
     left_op, right_op = get_inner_merge_operators(data.select("iid").collect().to_series(), grm.iids)
     phenotypes = data.select(pheno_cols).collect().to_numpy()
     covariates = data.select(covar_cols).collect().to_numpy()
+    yresid, covariates = _prep_for_h2_estimation(left_op, right_op, phenotypes, covariates)
 
-    # we've residualized y here already
-    yresid, covariates = _prep_for_h2_estimation(
-        grm,
-        left_op,
-        right_op,
-        phenotypes,
-        covariates,
-    )
-
+    # set up for randomized estimator
     generator = np.random.default_rng(seed=seed)
     estimator = _construct_estimator(trace_est)
     sampler = _construct_sampler(sampler, generator)
 
-    # wrap the sampler in a residualizer
+    # wrap the probe-sampler in a residualizer
     # these should be independent in expectation, but it's not much overhead to residualize for exact independence
     def _resid_sampler(n, k):
         omega = sampler(n, k)
@@ -81,12 +76,18 @@ def randomized_haseman_elston(
 
     # normalize back to h2g space
     heritability = solution[0, :] / (solution[0, :] + solution[1, :])
+
+    s2g_std_err, s2e_std_err = _compute_std_err(grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs)
+
     df_result = pl.DataFrame(
         {
             "phenotype": pheno_cols,
-            "s2g": np.asarray(solution[0, :]),
-            "s2e": np.asarray(solution[1, :]),
-            "h2g": np.asarray(heritability),
+            "s2g": solution[0, :],
+            "s2g.se": s2g_std_err,
+            "s2e": solution[1, :],
+            "s2e.se": s2e_std_err,
+            "h2g": heritability,
+            "h2g.se": np.zeros_like(s2e_std_err),
         }
     )
 
@@ -95,7 +96,6 @@ def randomized_haseman_elston(
 
 
 def _prep_for_h2_estimation(
-    genotypes: LinearOperator,
     left_op: LinearOperator,
     right_op: LinearOperator,
     phenotypes: np.ndarray,
@@ -405,3 +405,28 @@ def _xnystrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tupl
     sq_trace_std_err = np.std(sq_estimates) / np.sqrt(k)
 
     return trace_est, sq_trace_est, {"tr.std.err": trace_std_err, "sq.tr.std.err": sq_trace_std_err}
+
+
+def _compute_std_err(
+    grm,
+    yresid,
+    solutions,
+    grm_sq_trace,
+    grm_trace,
+    num_matvecs,
+):
+    n = yresid.shape[0]
+    I = aslinearoperator(identity(n))  # noqa: E741
+    s2g_std_err = []
+    s2e_std_err = []
+    for idx, solution in enumerate(solutions.T):
+        K = grm * solution[0] + I * solution[1]
+        resid = K - I
+        op = resid @ K @ resid
+        term1 = 2 * yresid[:, idx].T @ (op.matvec(yresid[:, idx]))
+        term2 = (solution[0] ** 2) * grm_sq_trace / num_matvecs
+        std_err = np.sqrt(term1 + term2) / (grm_sq_trace - n)
+        s2g_std_err.append(std_err)
+        s2e_std_err.append(np.sqrt(2 * solution[1] ** 2 / (n - 1)))
+
+    return np.array(s2g_std_err), np.array(s2e_std_err)
