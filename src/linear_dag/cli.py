@@ -1,5 +1,4 @@
 import argparse
-import gzip
 import logging
 import os
 import re
@@ -10,11 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 from importlib import metadata
 from os import PathLike
 from typing import Optional, Union
-from scipy.sparse import coo_matrix
 
-import numpy as np
 import polars as pl
-import pyarrow.parquet as pq
 
 from linear_dag.pipeline import (
     add_individuals_to_linarg,
@@ -29,7 +25,8 @@ from linear_dag.pipeline import (
 from .association.gwas import run_gwas
 from .association.heritability import randomized_haseman_elston
 from .association.prs import run_prs
-from .core.lineararg import LinearARG, list_blocks, load_variant_info, load_block_metadata
+from .core.grm_parallel import GRMOperator
+from .core.lineararg import list_blocks, load_variant_info
 from .core.parallel_processing import ParallelOperator
 from .memory_logger import MemoryLogger
 
@@ -223,16 +220,9 @@ def _prs(args):
     logger.info("Getting blocks")
     block_metadata = list_blocks(args.linarg_path)
     block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
-    result = run_prs(
-        args.linarg_path,
-        args.beta_path,
-        block_metadata,
-        args.score_cols,
-        args.num_processes,
-        logger
-        )
+    result = run_prs(args.linarg_path, args.beta_path, block_metadata, args.score_cols, args.num_processes, logger)
     logger.info("Writing results")
-    result.write_csv(f"{args.out}.tsv", separator="\t")    
+    result.write_csv(f"{args.out}.tsv", separator="\t")
     logger.info(f"Finished in {time.time() - t:.2f} seconds")
     return
 
@@ -279,11 +269,8 @@ def _assoc_scan(args):
         _vinfo_executor = ThreadPoolExecutor(max_workers=1)
         t_vinfo = time.time()
         columns_mode = "all" if getattr(args, "all_variant_info", False) else "id_only"
-        vinfo_future = _vinfo_executor.submit(
-            load_variant_info, args.linarg_path, block_names, columns=columns_mode
-        )
-        logger.info(f"Started loading variant info")
-        
+        vinfo_future = _vinfo_executor.submit(load_variant_info, args.linarg_path, block_names, columns=columns_mode)
+        logger.info("Started loading variant info")
 
     # Run parallel GWAS
     if args.repeat_covar:
@@ -296,8 +283,8 @@ def _assoc_scan(args):
         ) as genotypes:
             per_results: list[pl.LazyFrame] = []
             for ph in pheno_cols:
-                logger.info(f"Processing phenotype: {ph}")                
-                phenotype_missing_dropped = phenotypes.drop_nulls(ph) # drop rows with missing phenotype values
+                logger.info(f"Processing phenotype: {ph}")
+                phenotype_missing_dropped = phenotypes.drop_nulls(ph)  # drop rows with missing phenotype values
                 res_ph = run_gwas(
                     genotypes,
                     phenotype_missing_dropped.lazy(),
@@ -329,21 +316,22 @@ def _assoc_scan(args):
             genotypes.shutdown()
             logger.info("Shut down parallel operator")
     else:
-        with ParallelOperator.from_hdf5(args.linarg_path, 
-                                        num_processes=args.num_processes,
-                                        block_metadata=block_metadata,
-                                        max_num_traits=len(pheno_cols) + len(covar_cols),
-                                        ) as genotypes:
+        with ParallelOperator.from_hdf5(
+            args.linarg_path,
+            num_processes=args.num_processes,
+            block_metadata=block_metadata,
+            max_num_traits=len(pheno_cols) + len(covar_cols),
+        ) as genotypes:
             result: pl.LazyFrame = run_gwas(
-                    genotypes,
-                    phenotypes.lazy(),
-                    pheno_cols=pheno_cols,
-                    covar_cols=covar_cols,
-                    variant_info=None,
-                    assume_hwe=not args.no_hwe,
-                    logger=logger,
-                    in_place_op=True,
-                )
+                genotypes,
+                phenotypes.lazy(),
+                pheno_cols=pheno_cols,
+                covar_cols=covar_cols,
+                variant_info=None,
+                assume_hwe=not args.no_hwe,
+                logger=logger,
+                in_place_op=True,
+            )
             genotypes.shutdown()
             logger.info("Shut down parallel operator")
 
@@ -372,10 +360,10 @@ def _estimate_h2g(args):
     block_metadata, covar_cols, pheno_cols, phenotypes = _prep_data(
         args.linarg_path,
         args.pheno,
-        args.pheno_names,
+        args.pheno_name,
         args.pheno_col_nums,
         args.covar,
-        args.covar_names,
+        args.covar_name,
         args.covar_col_nums,
         args.chromosomes,
         args.block_names,
@@ -383,22 +371,21 @@ def _estimate_h2g(args):
         logger,
     )
     logger.info("Creating parallel operator")
-    with ParallelOperator.from_hdf5(
-        args.linarg_path, num_processes=args.num_processes, block_metadata=block_metadata
-    ) as linarg:
+    with GRMOperator.from_hdf5(args.linarg_path, num_processes=args.num_processes, alpha=-1.0) as grm:
         logger.info("Estimating SNP heritability")
         results = randomized_haseman_elston(
-            linarg,
+            grm,
             phenotypes.lazy(),
             pheno_cols,
             covar_cols,
             args.num_matvecs,
+            args.estimator,
             args.sampler,
             args.seed,
         )
         # TODO : write results out
-        print(results)
         logger.info("Finished. Writing results")
+        results.write_csv(f"{args.out}.h2g.tsv", separator="\t")
         logger.info("Done!")
 
     return
@@ -436,12 +423,10 @@ def _prep_data(
         columns = None
     phenotypes = _read_pheno_or_covar(pheno, columns)
     pheno_cols = [x for x in phenotypes.columns if x != "iid"]
-    
+
     # filter out phenotypes that are all missing
-    phenotypes = phenotypes.filter(
-        pl.any_horizontal([pl.col(c).is_not_null() for c in pheno_cols])
-    )    
-    
+    phenotypes = phenotypes.filter(pl.any_horizontal([pl.col(c).is_not_null() for c in pheno_cols]))
+
     if covar is not None:
         logger.info("Loading covariates")
         if covar_names is not None:
@@ -465,9 +450,7 @@ def _prep_data(
 
 
 def _filter_blocks(
-    block_metadata: pl.DataFrame, 
-    chromosomes: list | None = None, 
-    block_names: list | None = None
+    block_metadata: pl.DataFrame, chromosomes: list | None = None, block_names: list | None = None
 ) -> pl.DataFrame:
     """Helper to filter blocks by a list of chromosomes or block names."""
     if block_names is not None and chromosomes is not None:
@@ -477,7 +460,6 @@ def _filter_blocks(
     if chromosomes is not None:
         block_metadata = block_metadata.filter(pl.col("chrom").is_in(chromosomes))
     return block_metadata
-
 
 
 def _make_geno(args):
@@ -582,9 +564,7 @@ def _main(args):
     assoc_p.add_argument(
         "--repeat-covar",
         action="store_true",
-        help=(
-            "Run phenotypes one at a time inside the parallel operator, repeating covariate projections. "
-        ),
+        help=("Run phenotypes one at a time inside the parallel operator, repeating covariate projections. "),
     )
 
     # build h2g estimation parser from 'common' parser, but add additional options for RHE
@@ -862,17 +842,9 @@ def _create_common_parser(subp, name, help):
         help="Covariate column number or numbers (comma/space delimited)",
     )
     common_p.add_argument(
-        "--chromosomes",
-        type=str,
-        nargs="+",
-        help="Which chromosomes to include. Defaults to all chromosomes."
+        "--chromosomes", type=str, nargs="+", help="Which chromosomes to include. Defaults to all chromosomes."
     )
-    common_p.add_argument(
-        "--block-names",
-        type=str,
-        nargs="+",
-        help="Which blocks to include. Defaults to all blocks."
-    )
+    common_p.add_argument("--block-names", type=str, nargs="+", help="Which blocks to include. Defaults to all blocks.")
     common_p.add_argument(
         "--num-processes",
         type=int,

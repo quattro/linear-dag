@@ -1,3 +1,4 @@
+import logging
 import warnings
 
 from functools import partial
@@ -8,31 +9,30 @@ import polars as pl
 import scipy as sp
 
 from numpy.random import Generator
-from scipy.sparse import diags
-from scipy.sparse.linalg import aslinearoperator, LinearOperator
+from scipy.sparse.linalg import LinearOperator
 
 from ..core.operators import get_inner_merge_operators
-from .util import get_genotype_variance_explained, impute_missing_with_mean, residualize_phenotypes
+from .util import impute_missing_with_mean, residualize_phenotypes
 
 
 def randomized_haseman_elston(
-    genotypes: LinearOperator,
+    grm: LinearOperator,
     data: pl.LazyFrame,
     pheno_cols: list[str],
     covar_cols: list[str],
     num_matvecs: int = 20,
-    alpha: float = -1,
     trace_est: str = "hutchinson",
     sampler: str = "normal",
     seed: Optional[Union[int, Generator]] = None,
-) -> list[float]:
+    logger: Optional[logging.Logger] = None,
+) -> pl.DataFrame:
     """
     Implementation of the RHE algorithm from:
         Pazokitoroudi, A. et al. Efficient variance components analysis across millions of genomes.
         Nat Commun 11, 4020 (2020). https://doi.org/10.1038/s41467-020-17576-9
     Notation below follows Methods section of this paper.
 
-    :param linarg: linear ARG for the genotype matrix
+    :param grm: GRM operator
     :param y: phenotype vector
     :param b: number of random vectors to use when estimating Tr(GRM^2)
     :return: the heritability estimate
@@ -41,28 +41,25 @@ def randomized_haseman_elston(
     if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
 
-    left_op, right_op = get_inner_merge_operators(data.select("iid").collect().to_series(), genotypes.iids)
+    left_op, right_op = get_inner_merge_operators(data.select("iid").collect().to_series(), grm.iids)
     phenotypes = data.select(pheno_cols).collect().to_numpy()
     covariates = data.select(covar_cols).collect().to_numpy()
 
     # we've residualized y here already
-    yresid, covariates, gtg_diag = _prep_for_h2_estimation(
-        genotypes,
+    yresid, covariates = _prep_for_h2_estimation(
+        grm,
         left_op,
         right_op,
         phenotypes,
         covariates,
     )
 
-    sigmasq = (gtg_diag ** (1 + alpha)).flatten()
-    op = genotypes.normalized
-    K = op @ aslinearoperator(diags(sigmasq / np.sum(sigmasq))) @ op.T
-
     generator = np.random.default_rng(seed=seed)
     estimator = _construct_estimator(trace_est)
     sampler = _construct_sampler(sampler, generator)
 
-    # wrap the sampler in a residualizer | TODO: shouldnt these be independent anyways? Do we need this?
+    # wrap the sampler in a residualizer
+    # these should be independent in expectation, but it's not much overhead to residualize for exact independence
     def _resid_sampler(n, k):
         omega = sampler(n, k)
         with warnings.catch_warnings():
@@ -72,10 +69,10 @@ def randomized_haseman_elston(
 
     # se not used atm, but for some trace estimators (eg xtrace, xnystrace) we can compute it
     N = len(yresid)
-    grm_trace, grm_sq_trace, se = estimator(K, num_matvecs, _resid_sampler)
+    grm_trace, grm_sq_trace, se = estimator(grm, num_matvecs, _resid_sampler)
 
     # compute y_j' K y_j for each y_j \in y
-    C = np.sum(K.matmat(yresid) * yresid, axis=0)
+    C = np.sum(grm.matmat(yresid) * yresid, axis=0)
 
     # construct linear equations to solve
     LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, N]])
@@ -84,9 +81,17 @@ def randomized_haseman_elston(
 
     # normalize back to h2g space
     heritability = solution[0, :] / (solution[0, :] + solution[1, :])
+    df_result = pl.DataFrame(
+        {
+            "phenotype": pheno_cols,
+            "s2g": np.asarray(solution[0, :]),
+            "s2e": np.asarray(solution[1, :]),
+            "h2g": np.asarray(heritability),
+        }
+    )
 
     # SE estimates?
-    return heritability
+    return df_result
 
 
 def _prep_for_h2_estimation(
@@ -127,10 +132,7 @@ def _prep_for_h2_estimation(
     y_resid = residualize_phenotypes(phenotypes, covariates, is_missing)
     y_resid /= np.sqrt(np.sum(y_resid**2, axis=0) / num_nonmissing)  # ||y_resid||^2 == num_nonmissing
 
-    var_explained, allele_counts = get_genotype_variance_explained(right_op @ genotypes, covariates)
-    denominator = (allele_counts - var_explained + 1e-6) / two_n
-
-    return y_resid, covariates, denominator
+    return y_resid, covariates
 
 
 _Sampler = Callable[[int, int], np.ndarray]
@@ -333,7 +335,10 @@ def _xnystrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tupl
 
     # compute and symmetrize H, then take cholesky factor
     H = samples.T @ Y
-    L = np.linalg.cholesky(0.5 * (H + H.T))
+    try:
+        L = np.linalg.cholesky(0.5 * (H + H.T))
+    except np.linalg.LinAlgError:
+        raise RuntimeError("Stochastic low-rank GRM is not PSD. Try changing number of mat-vecs")
 
     # Nystrom approx is Q @ B @ B' Q'
     B = sp.linalg.solve_triangular(L, R.T, lower=True)

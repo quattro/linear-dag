@@ -10,7 +10,7 @@ import polars as pl
 from scipy.sparse import diags
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
-from .lineararg import LinearARG, list_blocks
+from .lineararg import LinearARG, list_blocks, list_iids
 
 FLAGS = {
     "wait": 0,
@@ -99,6 +99,7 @@ class GRMOperator(LinearOperator):
     _shared_data: Array
     _num_traits: Value
     _alpha: Value
+    iids: pl.Series
     shape: tuple[int, int]
     max_num_traits: int
     dtype: np.dtype = np.float32
@@ -255,6 +256,7 @@ class _ManagerFactory:
 
         block_metadata = list_blocks(hdf5_file)
         blocks = block_metadata["block_name"]
+        iids = list_iids(hdf5_file)
 
         if num_processes is None:
             num_processes = min(len(block_metadata), cpu_count())
@@ -273,4 +275,6 @@ class _ManagerFactory:
                 args=(hdf5_file, process_blocks[i], manager.flags[i], shared_data, num_traits, alpha_value),
             )
 
-        return GRMOperator(manager, shared_data, num_traits, alpha_value, (num_samples, num_samples), max_num_traits)
+        return GRMOperator(
+            manager, shared_data, num_traits, alpha_value, iids, (num_samples, num_samples), max_num_traits
+        )
