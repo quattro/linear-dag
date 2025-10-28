@@ -3,9 +3,9 @@ import time
 from scipy.sparse.linalg import LinearOperator
 
 
-def _backslash(A: np.ndarray, b: np.ndarray) -> np.ndarray:
+def _backslash(A: np.ndarray, b: np.ndarray, lam: float = 1e-6) -> np.ndarray:
     """MATLAB-style backslash"""
-    return np.linalg.pinv(A) @ b
+    return np.linalg.solve(A.T @ A + lam * np.eye(A.shape[1]), A.T @ b)
 
 
 def _residualize_phenotypes_mar(
