@@ -5,7 +5,8 @@ from scipy.sparse.linalg import LinearOperator
 
 def _backslash(A: np.ndarray, b: np.ndarray, lam: float = 1e-6) -> np.ndarray:
     """MATLAB-style backslash"""
-    return np.linalg.solve(A.T @ A + lam * np.eye(A.shape[1]), A.T @ b)
+    # return np.linalg.solve(A.T @ A, A.T @ b)
+    return np.linalg.pinv(A) @ b
 
 
 def _residualize_phenotypes_mar(
@@ -70,7 +71,7 @@ def get_genotype_variance_explained(
         end_idx = min(start_idx + batch_size, num_snps)
         XtC_batch = XtC[start_idx:end_idx, :]
         # C_backslash_XtC_batch = np.linalg.solve(covariate_inner, XtC_batch.T).astype(np.float32)
-        C_backslash_XtC_batch = np.linalg.solve(covariate_inner + lam * np.eye(covariate_inner.shape[1]), XtC_batch.T).astype(np.float32)
+        C_backslash_XtC_batch = (np.linalg.pinv(covariate_inner) @ XtC_batch.T).astype(np.float32)
         total_var_explained[start_idx:end_idx] = np.sum(
             XtC_batch.T * C_backslash_XtC_batch, axis=0
         ).reshape(-1, 1)
