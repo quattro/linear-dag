@@ -3,12 +3,10 @@ import time
 from scipy.sparse.linalg import LinearOperator
 
 
-def _backslash(A: np.ndarray, b: np.ndarray, lam: float = 1e-6) -> np.ndarray:
+def _backslash(A: np.ndarray, b: np.ndarray, lam: float = 1e-5) -> np.ndarray:
     """MATLAB-style backslash"""
     # return np.linalg.solve(A.T @ A, A.T @ b)
     return np.linalg.pinv(A.T @ A, rcond=lam) @ (A.T @ b)
-    # return np.linalg.lstsq(A.T @ A + lam * np.eye(A.shape[1]), A.T @ b, rcond=None)[0]
-
 
 def _residualize_phenotypes_mar(
     phenotypes: np.ndarray, covariates: np.ndarray, phenotypes_missing: np.ndarray
@@ -45,7 +43,7 @@ def get_genotype_variance_explained(
     XtC: np.ndarray,
     C: np.ndarray,
     batch_size: int = 100_000,
-    lam: float = 1e-6,
+    lam: float = 1e-5,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Get variance of genotypes explained by covariates:
             diag(X'C(C'C)^-1C'X) / n
