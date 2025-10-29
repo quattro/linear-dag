@@ -43,6 +43,7 @@ def get_genotype_variance_explained(
     XtC: np.ndarray,
     C: np.ndarray,
     batch_size: int = 100_000,
+    lam: float = 1e-6,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Get variance of genotypes explained by covariates:
             diag(X'C(C'C)^-1C'X) / n
@@ -52,7 +53,8 @@ def get_genotype_variance_explained(
         XtC: X'C
         C: Covariates matrix, which should include the all-ones annotation except for missing values
         batch_size: Number of SNPs to process at once to reduce memory usage
-
+        lam: Regularization parameter for the pseudoinverse
+        
     Returns:
         tuple: (total_var_explained, allele_count)
             total_var_explained: Total variance of genotypes explained by covariates
@@ -67,7 +69,8 @@ def get_genotype_variance_explained(
     for start_idx in range(0, num_snps, batch_size):
         end_idx = min(start_idx + batch_size, num_snps)
         XtC_batch = XtC[start_idx:end_idx, :]
-        C_backslash_XtC_batch = np.linalg.solve(covariate_inner, XtC_batch.T).astype(np.float32)
+        # C_backslash_XtC_batch = np.linalg.solve(covariate_inner, XtC_batch.T).astype(np.float32)
+        C_backslash_XtC_batch = np.linalg.solve(covariate_inner + lam * np.eye(covariate_inner.shape[1]), XtC_batch.T).astype(np.float32)
         total_var_explained[start_idx:end_idx] = np.sum(
             XtC_batch.T * C_backslash_XtC_batch, axis=0
         ).reshape(-1, 1)
