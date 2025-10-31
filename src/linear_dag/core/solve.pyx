@@ -508,7 +508,7 @@ def topological_sort(A: "csr_matrix", nodes_to_ignore: Optional[Set] = None) -> 
     num_unvisited_nonself_parents -= A.diagonal().astype(np.intc)
 
     # nodes_to_visit initialized with nodes having in-degree 0
-    cdef Stack nodes_to_visit = Stack()
+    cdef Stack nodes_to_visit = Stack(num_nodes)
     cdef int i
     for i in np.where(num_unvisited_nonself_parents == 0)[0]:
         nodes_to_visit.push(i)

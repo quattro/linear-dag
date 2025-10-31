@@ -1,7 +1,7 @@
 # one_summed_cy.pyx
 import numpy as np
-from .data_structures cimport node, edge, list_node
-from .data_structures cimport DiGraph, LinkedListArray, CountingArray, Stack, IntegerList, IntegerSet
+from .data_structures cimport CountingArray, Stack
+from .digraph cimport node, edge, DiGraph
 from scipy.sparse import csr_matrix
 cimport numpy as cnp
 
@@ -15,8 +15,8 @@ def linearize_brick_graph(G: DiGraph) -> csr_matrix:
     # Weighted in-degree of each node in the subgraph of descendants of the current node
     cdef CountingArray subgraph_indegree = CountingArray(G.maximum_number_of_nodes)
 
-    cdef Stack nodes_to_visit = Stack()
-    cdef Stack nodes_to_visit_again = Stack()
+    cdef Stack nodes_to_visit = Stack(G.maximum_number_of_nodes)
+    cdef Stack nodes_to_visit_again = Stack(G.maximum_number_of_nodes)
     cdef edge* current_edge
     cdef edge* new_edge
     cdef long starting_node_idx
@@ -62,10 +62,9 @@ def linearize_brick_graph(G: DiGraph) -> csr_matrix:
     cdef counter = 0
     cdef edge * e
     for i in range(G.maximum_number_of_edges):
-        e = G.edges[i]
-        if e is NULL:
+        e = G.get_edge(i)
+        if e is NULL or e.u is NULL:
             continue
-        assert e.u is not NULL
 
         data[counter] = edge_weights[e.index]
         row_ind[counter] = e.v.index
