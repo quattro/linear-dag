@@ -19,7 +19,7 @@ from scipy.sparse.linalg import aslinearoperator, LinearOperator, spsolve_triang
 from linear_dag.core.solve import get_nonunique_indices_csc
 from linear_dag.genotype import read_vcf
 
-from .data_structures import DiGraph
+from .digraph import DiGraph
 from .linear_arg_inference import linear_arg_from_genotypes
 from .one_summed_cy import linearize_brick_graph
 from .solve import (
@@ -82,11 +82,30 @@ class LinearARG(LinearOperator):
         :param make_triangular: whether to re-order rows and columns such that the adjacency matrix is triangular
         :return: linear ARG instance
         """
+        import time
         A, flip, variants_idx, samples_idx, variant_info = linear_arg_from_genotypes(
             genotypes, flip, variant_info, find_recombinations, verbosity
         )
+        
+        if verbosity > 0:
+            print("Removing degree-zero nodes")
+        t0 = time.time()
         A_filt, variants_idx_reindexed, samples_idx_reindexed = remove_degree_zero_nodes(A, variants_idx, samples_idx)
+        t1 = time.time()
+        if verbosity > 0:
+            print(f"  Time: {t1-t0:.3f}s")
+        
+        if verbosity > 0:
+            print("Making triangular")
+        t0 = time.time()
         A_tri, variants_idx_tri = make_triangular(A_filt, variants_idx_reindexed, samples_idx_reindexed)
+        t1 = time.time()
+        if verbosity > 0:
+            print(f"  Time: {t1-t0:.3f}s")
+        
+        if verbosity > 0:
+            print("Creating LinearARG object")
+        t0 = time.time()
         linarg = LinearARG(
             A_tri,
             variants_idx_tri,
@@ -97,6 +116,9 @@ class LinearARG(LinearOperator):
             iids=pl.Series(iids).cast(pl.String),
         )
         linarg.calculate_nonunique_indices()
+        t1 = time.time()
+        if verbosity > 0:
+            print(f"  Time: {t1-t0:.3f}s")
         return linarg
 
     @staticmethod
@@ -111,9 +133,17 @@ class LinearARG(LinearOperator):
         maf_filter: float = None,
         snps_only: bool = False,
     ) -> Union[tuple, "LinearARG"]:
+        import time
+        if verbosity > 0:
+            print("Reading VCF")
+        t0 = time.time()
         genotypes, flip, v_info, iids = read_vcf(
             path, phased, region, flip_minor_alleles, maf_filter=maf_filter, remove_indels=snps_only
         )
+        t1 = time.time()
+        if verbosity > 0:
+            print(f"  Time: {t1-t0:.3f}s")
+        
         if genotypes is None:
             raise ValueError("No valid variants found in VCF")
 
