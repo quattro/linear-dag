@@ -32,8 +32,6 @@ cdef class LinkedListArray:
     cdef long n  # Number of lists
     cdef long capacity  # Current capacity of node pool
     cdef long next_free  # Index of next free node
-    cdef public double time_argsort
-    cdef public double time_loop
     
     cdef void _resize(self)
     cdef long _get_free_node(self)

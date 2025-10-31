@@ -8,7 +8,6 @@ import numpy as np
 from scipy.sparse import csr_matrix, csc_matrix
 cimport numpy as cnp
 from .data_structures cimport list_node # in data_structures.pxd
-import time
 
 cdef int MAXINT = 32767
 
@@ -188,10 +187,6 @@ cdef class LinkedListArray:
         for i in range(initial_capacity):
             self.nodes[i].next = i + 1
         self.nodes[initial_capacity - 1].next = -1  # Last node has no next
-        
-        # Timing accumulators
-        self.time_argsort = 0.0
-        self.time_loop = 0.0
 
     def __dealloc__(self):
         free(self.nodes)
@@ -292,7 +287,6 @@ cdef class LinkedListArray:
         """
         Assign values in 'what' to lists 'where' according to indices 'which'.
         """
-        t0 = time.time()
         cdef long[:] tmp = np.empty_like(what)
         cdef long[:] indptrs = np.zeros(len(where) + 2, dtype=np.int64)
         
@@ -310,7 +304,6 @@ cdef class LinkedListArray:
         for i in range(len(what)):
             tmp[indptrs[which[i]+1]] = what[i]
             indptrs[which[i]+1] += 1
-        t1 = time.time()
         
         # Sort each group and assign to lists
         cdef long start, end, k
@@ -320,10 +313,6 @@ cdef class LinkedListArray:
             qsort(&tmp[start], end - start, sizeof(long), compare_long)
             for k in range(start, end):
                 self._extend(where[i], tmp[k])
-        t2 = time.time()
-        
-        self.time_argsort += (t1 - t0)
-        self.time_loop += (t2 - t1)
             
 
             
