@@ -291,7 +291,7 @@ cdef class LinkedListArray:
         cdef long[:] indptrs = np.zeros(len(where) + 2, dtype=np.int64)
         
         # Count occurrences of each 'which'
-        cdef long i, j
+        cdef long i
         for i in which:
             indptrs[i+2] += 1
         cdef int total = 0
