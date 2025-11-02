@@ -8,7 +8,7 @@ cimport numpy as cnp
 cdef int REALLOC_FACTOR = 2
 
 def linearize_brick_graph(G: DiGraph) -> csr_matrix:
-    G = G.copy()
+    # G = G.copy()
     cdef int[:] edge_weights = np.ones(REALLOC_FACTOR * G.maximum_number_of_edges, dtype=np.intc)
     cdef long[:] order = G.reverse_topological_sort()
 
