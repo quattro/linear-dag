@@ -6,6 +6,7 @@ cdef struct node:
     edge* first_out
 
 cdef struct edge:
+    int index
     node* u
     node* v
     edge* next_in
@@ -28,7 +29,7 @@ cdef class DiGraph:
     cdef edge* get_edge(self, long index)
     cdef void extend_edge_array(self)
     cdef node* add_node(self, long node_index)
-    cdef long add_edge(self, long u_index, long v_index)
+    cdef edge* add_edge(self, long u_index, long v_index)
     cdef void remove_edge(self, edge* e)
     cdef void remove_node(self, node* u)
     cdef void set_edge_child(self, edge* e, node* v)

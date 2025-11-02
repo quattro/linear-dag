@@ -16,6 +16,7 @@ cdef struct node:
     edge* first_out
 
 cdef struct edge:
+    int index
     node* u
     node* v
     edge* next_in
@@ -91,6 +92,7 @@ cdef class DiGraph:
         assert which_array < 64
         cdef int arr_idx = edge_idx - (cum_size - self.edge_array_length * (1 << which_array))
         cdef edge* edge = &self.edge_arrays[which_array][arr_idx]
+        assert edge.index == edge_idx
         return edge
 
     @property
@@ -213,7 +215,7 @@ cdef class DiGraph:
     def delete_node(self, int node_index):
         self.remove_node(&self.nodes[node_index])
 
-    cdef long add_edge(self, long u_index, long v_index):
+    cdef edge* add_edge(self, long u_index, long v_index):
         if self.number_of_available_edges == 0:
             self.extend_edge_array()
         
@@ -227,8 +229,6 @@ cdef class DiGraph:
 
         self.number_of_available_edges -= 1
         cdef edge* new_edge = self.available_edge
-        # Calculate edge index from pointer position in edge arrays
-        cdef long edge_index = self.maximum_number_of_edges - self.number_of_available_edges - 1
         self.available_edge = self.available_edge.next_in
         if self.available_edge == new_edge:
             assert self.number_of_available_edges == 0
@@ -236,7 +236,7 @@ cdef class DiGraph:
         self.set_edge_parent(new_edge, &self.nodes[u_index])
         self.set_edge_child(new_edge, &self.nodes[v_index])
 
-        return edge_index
+        return new_edge
 
     def create_edge(self, long u_index, long v_index):
         self.add_edge(u_index, v_index)
@@ -458,6 +458,7 @@ cdef class DiGraph:
         
         for i in range(array_len):
             e = &self.edge_arrays[which_arr][i]
+            e.index = global_edge_idx + i
             e.u = NULL
             e.v = NULL
             e.next_in = &self.edge_arrays[which_arr][(i+1) % array_len]
