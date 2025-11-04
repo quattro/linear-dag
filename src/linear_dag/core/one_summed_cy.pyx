@@ -59,7 +59,7 @@ def linearize_brick_graph(G: DiGraph) -> csr_matrix:
     cdef long[:] row_ind = np.empty(G.maximum_number_of_edges, dtype=np.int64)
     cdef long[:] col_ind = np.empty(G.maximum_number_of_edges, dtype=np.int64)
     cdef long i
-    cdef counter = 0
+    cdef int counter = 0
     cdef edge * e
     for i in range(G.maximum_number_of_edges):
         e = G.get_edge(i)
