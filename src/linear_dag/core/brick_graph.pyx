@@ -33,7 +33,6 @@ cdef class BrickGraph:
     cdef object _cleanup          # Function to cleanup HDF5 file
     cdef object _hdf5_file        # HDF5 file object
 
-
     @staticmethod
     def forward_backward(genotypes: csc_matrix, bint add_samples = True, bint save_to_disk = False, str out = None):
         """
@@ -46,12 +45,16 @@ cdef class BrickGraph:
         """
         num_samples, num_variants = genotypes.shape
 
+        cdef int[:] indices = genotypes.indices
+        cdef int[:] indptr = genotypes.indptr
+        cdef int[:] carriers
+
         # Forward pass
         cdef BrickGraph forward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_forward_graph.h5')
         forward_pass.direction = 1
         cdef long i
         for i in range(num_variants):
-            carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i + 1]].astype(np.int64)
+            carriers = indices[indptr[i]:indptr[i + 1]]
             forward_pass.intersect_clades(carriers, i)
 
         # Add samples
@@ -69,7 +72,7 @@ cdef class BrickGraph:
         cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_backward_graph.h5')
         backward_pass.direction = -1
         for i in reversed(range(num_variants)):
-            carriers = genotypes.indices[genotypes.indptr[i]:genotypes.indptr[i+1]].astype(np.int64)
+            carriers = indices[indptr[i]:indptr[i+1]]
             backward_pass.intersect_clades(carriers, i)
         cdef DiGraph backward_graph = backward_pass.graph
 
@@ -161,7 +164,7 @@ cdef class BrickGraph:
         self.subsequence = LinkedListArray(self.tree.maximum_number_of_nodes, initial_capacity)
 
 
-    cpdef void intersect_clades(self, long[:] new_clade, long clade_index):
+    cpdef void intersect_clades(self, int[:] new_clade, long clade_index):
         """
         Adds a new clade to a rooted tree and splits existing clades if they intersect with the new clade. Returns the
         lowest common ancestor from the previous tree of nodes in the new clade.
@@ -178,7 +181,7 @@ cdef class BrickGraph:
 
         cdef IntegerList traversal = IntegerList(2 * len(new_clade))
         self.times_revisited.clear()
-        cdef long i
+        cdef int i
         for i in new_clade:
             traversal.push(i)
             self.times_revisited.set_element(i, 1)
@@ -299,7 +302,7 @@ cdef class BrickGraph:
         return count
 
 
-    cdef node* partial_traversal(self, long[:] leaves):
+    cdef node* partial_traversal(self, int[:] leaves):
         """
         Finds the lowest common ancestor of an array of leaves in the tree. 
         For all descendants of the LCA, counts the number of leaves that are descended from them
