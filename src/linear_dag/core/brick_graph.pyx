@@ -690,6 +690,9 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
         graph, samples, variants = read_brick_graph_h5(f'{brick_graph_dir}/{f}')
         #number_of_nodes = adj_mat.shape[0]
         number_of_nodes = graph.number_of_nodes
+        print(f'number of nodes: {number of nodes}', flush=True)
+        print(f'samples: {samples}', flush=True)
+        print(f'variants: {variants}', flush=True)
 
         # Get new node ids corresponding to the merged graph
         print(f'iterating through nodes', flush=True)
