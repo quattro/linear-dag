@@ -8,8 +8,7 @@ from scipy.sparse import csr_matrix, csc_matrix, coo_matrix
 import os
 import h5py
 cdef int MAXINT = 2147483647
-
-
+cdef int TRAVERSAL_METHOD_THRESHOLD = 10
 
 cdef class BrickGraph:
     """
@@ -174,7 +173,11 @@ cdef class BrickGraph:
             return
 
         # Find LCA of the clade while tracking in self.num_visits the number of carriers descended from each node
-        cdef node * lowest_common_ancestor = self.partial_traversal(new_clade)
+        cdef node * lowest_common_ancestor
+        if new_clade_size * TRAVERSAL_METHOD_THRESHOLD < self.num_samples:
+            lowest_common_ancestor = self.partial_traversal(new_clade)
+        else:
+            lowest_common_ancestor = self.partial_traversal2(new_clade)
         assert lowest_common_ancestor is not NULL
 
         self.add_edges_from_subsequence(lowest_common_ancestor.index, clade_index)
@@ -301,8 +304,36 @@ cdef class BrickGraph:
         self.times_visited.set_element(v.index, count)
         return count
 
-
     cdef node* partial_traversal(self, int[:] leaves):
+        """
+        Finds the lowest common ancestor of an array of leaves in the tree. For all descendants of the LCA, counts
+        the number of leaves that are descended from them.
+        """
+        self.times_visited.clear()
+        cdef int num_leaves = len(leaves)
+        if num_leaves == 0:
+            return <node*> NULL
+
+        # Bottom-up traversal from every leaf node to the root
+        cdef int i
+        cdef node * v
+        cdef int num_visits
+        for i in leaves:
+            v = &self.tree.nodes[i]
+            while True:
+                num_visits = self.times_visited.get_element(v.index) + 1
+                self.times_visited.set_element(v.index, num_visits)
+                if num_visits == num_leaves: # reached LCA
+                    assert i == leaves[num_leaves-1]
+                    break
+                if v.first_in is NULL: # reached root
+                    break
+                v = v.first_in.u
+
+        cdef node * lowest_common_ancestor = v
+        return lowest_common_ancestor
+
+    cdef node* partial_traversal2(self, int[:] leaves):
         """
         Finds the lowest common ancestor of an array of leaves in the tree. 
         For all descendants of the LCA, counts the number of leaves that are descended from them
