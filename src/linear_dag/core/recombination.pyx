@@ -45,8 +45,8 @@ cdef class Recombination(DiGraph):
 
     @staticmethod
     def from_graph(brick_graph: DiGraph) -> Recombination:
-        n, m = brick_graph.maximum_number_of_nodes, brick_graph.maximum_number_of_edges
-        result = Recombination(n + m, m)
+        n, m = brick_graph.number_of_nodes, brick_graph.number_of_edges
+        result = Recombination(n + m // 4 + 1, m)
         result.copy_from(brick_graph)
         result.compute_cliques()
         result.collect_cliques()
@@ -61,7 +61,7 @@ cdef class Recombination(DiGraph):
 
         # Find trios of the form (left_parent, right_parent, child)
         for left_parent in range(self.maximum_number_of_nodes):
-            if not self.is_node[left_parent]:
+            if not self.is_node(left_parent):
                 continue
 
             out_edge = self.nodes[left_parent].first_out

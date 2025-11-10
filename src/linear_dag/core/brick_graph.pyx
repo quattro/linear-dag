@@ -127,7 +127,6 @@ cdef class BrickGraph:
         self.num_samples = num_samples
         self.num_variants = num_variants
         self.graph = DiGraph(num_variants + num_samples, num_variants + num_samples)
-        self.graph.initialize_all_nodes()
         self.initialize_tree()
         tree_num_nodes = self.tree.maximum_number_of_nodes
         self.times_visited = CountingArray(tree_num_nodes)
@@ -422,9 +421,8 @@ cpdef long[:] combine_cliques(DiGraph forward_graph, DiGraph backward_graph):
     cdef edge * current_edge
     cdef edge * back_edge
     for node_index in range(num_nodes):
-        if not forward_graph.has_node(node_index):
+        if not forward_graph.has_node(node_index) or not backward_graph.has_node(node_index):
             continue
-        assert backward_graph.has_node(node_index)
 
         # If some neighbor of the current node has a back-edge to the current node as well, then it must be the first
         # neighbor due to the order in which edges are added (last in, first out)
@@ -432,7 +430,8 @@ cpdef long[:] combine_cliques(DiGraph forward_graph, DiGraph backward_graph):
         if current_edge is NULL:
             continue
         neighbor_index = current_edge.v.index
-        assert backward_graph.has_node(neighbor_index)
+        if not backward_graph.has_node(neighbor_index):
+            continue
 
         # Similarly, back edge is the first if it exists
         back_edge = backward_graph.nodes[neighbor_index].first_out
@@ -576,16 +575,16 @@ cpdef DiGraph reduction_union(DiGraph forward_reduction, DiGraph backward_reduct
     for node_index in range(num_nodes):
         # Set of nodes that is reachable in two hops from this one
         reachable_in_two_hops.clear()
-        if forward_reduction.is_node[node_index]:
+        if forward_reduction.is_node(node_index):
             search_two_hops(reachable_in_two_hops, forward_reduction, backward_reduction, node_index)
-        if backward_reduction.is_node[node_index]:
+        if backward_reduction.is_node(node_index):
             search_two_hops(reachable_in_two_hops, backward_reduction, forward_reduction, node_index)
 
         # Add neighbors that aren't reachable in two hops
-        if forward_reduction.is_node[node_index]:
+        if forward_reduction.is_node(node_index):
             current_node = &forward_reduction.nodes[node_index]
             add_nonredundant_neighbors(result, current_node, reachable_in_two_hops)
-        if backward_reduction.is_node[node_index]:
+        if backward_reduction.is_node(node_index):
             current_node = &backward_reduction.nodes[node_index]
             add_nonredundant_neighbors(result, current_node, reachable_in_two_hops)
 
@@ -744,7 +743,7 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
         # Add edges from graph to result while preserving the order of the parent nodes for each child node
         print(f'add edges from graph to result', flush=True)
         for node_idx in range(number_of_nodes):
-            if not graph.is_node[node_idx]:
+            if not graph.is_node(node_idx):
                 continue
             add_neighbors(result, &graph.nodes[node_idx], new_node_ids)
 
@@ -800,7 +799,6 @@ def read_graph_from_disk(file_path):
         cols = f['cols'][:]
 
     digraph = DiGraph(n, len(rows))
-    digraph.initialize_all_nodes()
 
     # add edges in order they were stored
     for i in range(len(rows)):
