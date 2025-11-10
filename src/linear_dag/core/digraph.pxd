@@ -16,7 +16,6 @@ cdef struct edge:
 
 cdef class DiGraph:
     cdef node* nodes
-    cdef bint* is_node
     cdef edge** edge_arrays
     cdef node* available_node
     cdef edge* available_edge
@@ -44,6 +43,7 @@ cdef class DiGraph:
     cdef void collapse_node_with_outdegree_one(self, node* u)
     cdef long number_of_successors(self, node* u)
     cdef long number_of_predecessors(self, node* u)
+    cdef bint is_node(self, long node_index)
     cpdef bint has_node(self, long node_index)
     cpdef long some_parent(self, long node_index)
     cpdef long some_child(self, long node_index)

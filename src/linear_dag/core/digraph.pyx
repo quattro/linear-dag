@@ -42,7 +42,6 @@ cdef class DiGraph:
         :param number_of_edges: Total number of edges in the graph.
         """
         self.nodes = <node*> malloc(number_of_nodes * sizeof(node))
-        self.is_node = <bint*> malloc(number_of_nodes * sizeof(bint))
         self.edge_arrays = <edge**> malloc(64 * sizeof(edge*))
         cdef int i
         for i in range(64):
@@ -58,10 +57,9 @@ cdef class DiGraph:
 
         cdef long i
         for i in range(number_of_nodes):
-            self.nodes[i].index = i
+            self.nodes[i].index = i + 1
             self.nodes[i].first_in = <edge*> &self.nodes[((i - 1) + number_of_nodes) % number_of_nodes]
             self.nodes[i].first_out = <edge*> &self.nodes[(i + 1) % number_of_nodes]
-            self.is_node[i] = False
         self.available_node = &self.nodes[0]
 
         self.maximum_number_of_edges = 0
@@ -79,7 +77,6 @@ cdef class DiGraph:
                 free(self.edge_arrays[i])
         free(self.edge_arrays)
         free(self.nodes)
-        free(self.is_node)
 
     cdef edge* get_edge(self, long edge_idx):
         if edge_idx >= self.maximum_number_of_edges:
@@ -112,7 +109,7 @@ cdef class DiGraph:
         return self.maximum_number_of_edges
 
     def parents(self, node_index: int) -> int:
-        if not self.is_node[node_index]:
+        if not self.is_node(node_index):
             raise ValueError("Node index is not a node")
         cdef edge* e = self.nodes[node_index].first_in
         while e is not NULL:
@@ -125,10 +122,16 @@ cdef class DiGraph:
             yield e.v.index
             e = e.next_out
 
+    cdef bint is_node(self, long node_index):
+        """Check if a node is initialized by checking if its index matches the array position"""
+        if node_index >= self.maximum_number_of_nodes or node_index < 0:
+            return 0
+        return self.nodes[node_index].index == node_index
+
     cpdef bint has_node(self, long node_index):
         if node_index >= self.maximum_number_of_nodes or node_index < 0:
             return 0
-        return self.is_node[node_index]
+        return self.is_node(node_index)
 
     cpdef long some_parent(self, long node_index):
         return self.nodes[node_index].first_in.u.index
@@ -149,13 +152,13 @@ cdef class DiGraph:
         if node_index == -1:
             if self.number_of_available_nodes == 0:
                 self.extend_node_array(self.maximum_number_of_nodes * 2)
-            node_index = self.available_node.index
+            node_index = self.available_node - self.nodes
         
         if self.number_of_available_nodes == 1:
-            assert self.available_node.index == node_index
+            assert (self.available_node - self.nodes) == node_index
             assert <node*> self.available_node.first_out == self.available_node
             self.available_node = NULL
-        elif node_index == self.available_node.index:
+        elif node_index == (self.available_node - self.nodes):
             self.available_node = <node*> self.available_node.first_out
             
         cdef node* new_node = &self.nodes[node_index]
@@ -174,7 +177,6 @@ cdef class DiGraph:
         new_node.first_out = NULL
         new_node.index = node_index
 
-        self.is_node[node_index] = True
         self.number_of_available_nodes -= 1
 
         return new_node
@@ -184,14 +186,17 @@ cdef class DiGraph:
         return u.index
 
     cdef void remove_node(self, node* u):
-        if not self.is_node[u.index]:
+        if not self.is_node(u.index):
             raise ValueError("Tried to remove a node which does not exist")
+        
+        cdef long array_position = (u - self.nodes)
+        
         while u.first_out is not NULL:
             self.remove_edge(u.first_out)
         while u.first_in is not NULL:
             self.remove_edge(u.first_in)
         
-        self.is_node[u.index] = False
+        u.index = array_position + 1
         self.number_of_available_nodes += 1
 
         cdef node* available_node = self.available_node
@@ -222,9 +227,9 @@ cdef class DiGraph:
         if u_index == v_index:
             raise ValueError("Self edges are not supported")
 
-        if not self.is_node[u_index]:
+        if not self.is_node(u_index):
             self.add_node(u_index)
-        if not self.is_node[v_index]:
+        if not self.is_node(v_index):
             self.add_node(v_index)
 
         self.number_of_available_edges -= 1
@@ -404,8 +409,20 @@ cdef class DiGraph:
             edgelist.append((e.u.index, e.v.index))
         return edgelist
 
+    def maximum_node_index(self) -> int:
+        cdef long i
+        cdef node* u
+        cdef long max_index = -1
+        for i in range(self.maximum_number_of_nodes):
+            u = &self.nodes[i]
+            if not self.is_node(i):
+                continue
+            if u.index > max_index:
+                max_index = u.index
+        return max_index
+
     def to_csr(self) -> csr_matrix:
-        n = self.maximum_number_of_nodes
+        n = self.maximum_node_index() + 1
         edges = self.edge_list()
         rows, cols = zip(*edges)
         return csr_matrix((np.ones(len(edges)), (list(rows), list(cols))),
@@ -425,22 +442,6 @@ cdef class DiGraph:
     # TODO - nontrivial because all edges need to be redirected
     cdef void extend_node_array(self, int new_maximum_number_of_nodes):
         raise NotImplementedError
-        # if new_maximum_number_of_nodes <= self.maximum_number_of_nodes:
-        #     raise ValueError("New maximum number of nodes must be greater than the current maximum.")
-
-        # self.nodes = <node*> realloc(self.nodes, new_maximum_number_of_nodes * sizeof(node))
-        # if self.nodes == NULL:
-        #     raise MemoryError("Could not reallocate memory for nodes array.")
-
-        # self.is_node = <bint *> realloc(self.is_node, new_maximum_number_of_nodes * sizeof(bint))
-        # if self.is_node == NULL:
-        #     raise MemoryError("Could not reallocate memory for is_node array.")
-
-        # for i in reversed(range(self.maximum_number_of_nodes, new_maximum_number_of_nodes)):
-        #     self.is_node[i] = False
-        #     self.nodes[i] = <node*> self.available_nodes.push(i)
-
-        # self.maximum_number_of_nodes = new_maximum_number_of_nodes
 
     cdef void extend_edge_array(self):
         cdef long which_arr
@@ -639,7 +640,7 @@ cdef class DiGraph:
         cdef Stack nodes_to_visit = Stack(num_nodes)
         cdef long i
         for i in np.where(num_unvisited_children == 0)[0]:
-            if self.is_node[i]:
+            if self.is_node(i):
                 nodes_to_visit.push(i)
 
         cdef long[:] result = np.empty(num_nodes, dtype=np.int64)
