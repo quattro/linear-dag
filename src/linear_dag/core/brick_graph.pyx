@@ -127,6 +127,7 @@ cdef class BrickGraph:
         self.num_samples = num_samples
         self.num_variants = num_variants
         self.graph = DiGraph(num_variants + num_samples, num_variants + num_samples)
+        # self.graph.initialize_all_nodes()
         self.initialize_tree()
         tree_num_nodes = self.tree.maximum_number_of_nodes
         self.times_visited = CountingArray(tree_num_nodes)
@@ -650,6 +651,7 @@ cpdef tuple read_brick_graph_h5(filename):
         variant_indices = f['variant_indices'][:]
         sample_indices = f['sample_indices'][:]
     graph = DiGraph.from_csc(A)
+    # graph.initialize_all_nodes()
     return graph, sample_indices, variant_indices
 
 cpdef tuple get_graph_statistics(str brick_graph_dir):
@@ -719,7 +721,7 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
         print(f'starting to process file {f}', flush=True)
         graph, samples, variants = read_brick_graph_h5(f'{brick_graph_dir}/{f}')
         #number_of_nodes = adj_mat.shape[0]
-        number_of_nodes = graph.number_of_nodes
+        number_of_nodes = graph.maximum_number_of_nodes
         print(f'number of nodes: {number_of_nodes}', flush=True)
         print(f'samples: {samples}', flush=True)
         print(f'variants: {variants}', flush=True)
@@ -729,7 +731,7 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
         sample_counter = 0
         new_node_ids = np.zeros(number_of_nodes, dtype=np.int64)
         for i in range(number_of_nodes):
-            if i in samples:
+            if i in samples: # TODO slow
                 new_node_ids[i] = sample_counter
                 sample_counter += 1
             else:
@@ -799,6 +801,7 @@ def read_graph_from_disk(file_path):
         cols = f['cols'][:]
 
     digraph = DiGraph(n, len(rows))
+    # digraph.initialize_all_nodes()
 
     # add edges in order they were stored
     for i in range(len(rows)):

@@ -143,7 +143,9 @@ class LinearARG(LinearOperator):
         t1 = time.time()
         if verbosity > 0:
             print(f"  Time: {t1-t0:.3f}s")
-        
+        if verbosity > 0:
+            print(f"Number of variants: {genotypes.shape[1]}")
+            
         if genotypes is None:
             raise ValueError("No valid variants found in VCF")
 

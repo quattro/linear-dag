@@ -45,7 +45,7 @@ cdef class Recombination(DiGraph):
 
     @staticmethod
     def from_graph(brick_graph: DiGraph) -> Recombination:
-        n, m = brick_graph.number_of_nodes, brick_graph.number_of_edges
+        n, m = brick_graph.maximum_node_index() + 1, brick_graph.number_of_edges
         result = Recombination(n + m // 4 + 1, m)
         result.copy_from(brick_graph)
         result.compute_cliques()
