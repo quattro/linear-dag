@@ -92,3 +92,10 @@ MATLAB/old/*
 .windsurfrules
 setup_cython.py
 compile_cython.sh
+src/linear_dag/core/tree.pyx
+src/linear_dag/core/tree.pxd
+src/linear_dag/core/tree.cpp
+setup_tree.py
+compile_tree.py
+test_collapse.py
+test_tree.py
