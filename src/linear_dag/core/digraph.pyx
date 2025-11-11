@@ -335,6 +335,10 @@ cdef class DiGraph:
     cpdef void copy_from(self, DiGraph other):
         """Copy all edges from another DiGraph into this one."""
         cdef long i
+        cdef int u_idx
+        for u_idx in range(other.maximum_node_index() + 1):
+            self.add_node(u_idx)
+
         cdef edge* e
         for i in range(other.maximum_number_of_edges):
             e = other.get_edge(i)
