@@ -61,8 +61,10 @@ cdef class BrickGraph:
         if add_samples:
             sample_indices =  np.arange(num_variants, num_variants+num_samples, dtype=np.int64)
             for i in range(num_samples):
+                forward_pass.graph.add_node(sample_indices[i])
                 forward_pass.add_edges_from_subsequence(i, sample_indices[i])
                 forward_pass.subsequence.clear_list(i)
+                assert forward_pass.graph.has_node(sample_indices[i])
         else:
             sample_indices = np.array([])
         cdef DiGraph forward_graph = forward_pass.graph

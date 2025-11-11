@@ -767,6 +767,9 @@ def remove_degree_zero_nodes(
     node_degree = A.getnnz(axis=0) + A.getnnz(axis=1)
     nonzero_indices = set(np.where(node_degree > 0)[0])
     required_indices = set(variant_indices).union(sample_indices)
+    assert all(idx < A.shape[0] for idx in nonzero_indices)
+    assert all(idx < A.shape[0] for idx in variant_indices)
+    assert all(idx < A.shape[0] for idx in sample_indices)
     indices_to_keep = np.array(sorted(nonzero_indices.union(required_indices)), dtype=int)
 
     index_map = -np.ones(A.shape[0], dtype=int)
