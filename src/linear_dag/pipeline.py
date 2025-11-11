@@ -384,7 +384,7 @@ def get_linarg_stats(linarg_dir, load_dir, linarg=None):
         genotypes_nnz,
         linarg.nnz,
         np.round(genotypes_nnz / linarg.nnz, 3),
-        all(allele_counts_from_genotype == allele_count_from_linarg),
+        np.all(allele_counts_from_genotype == allele_count_from_linarg),
     ]
     stats = [str(x) for x in stats]
     with open(f"{linarg_dir}/linear_arg_stats.txt", "w") as file:
