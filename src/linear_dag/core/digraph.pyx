@@ -423,7 +423,7 @@ cdef class DiGraph:
         return max_index
 
     def to_csr(self) -> csr_matrix:
-        n = self.maximum_number_of_nodes#self.maximum_node_index() + 1
+        n = self.maximum_node_index() + 1
         edges = self.edge_list()
         rows, cols = zip(*edges)
         return csr_matrix((np.ones(len(edges)), (list(rows), list(cols))),
