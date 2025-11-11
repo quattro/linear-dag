@@ -52,6 +52,38 @@ def test_from_vcf():
     assert linarg.variants.collect().height > 0
 
 
+def test_zero_ac_variants():
+    """Test handling of variants with 0 allele count (all-zero columns)."""
+    genotypes = csc_matrix(np.array([
+        [1, 0, 1, 0],
+        [0, 0, 1, 0],
+        [1, 0, 0, 0],
+        [0, 0, 1, 0]
+    ]))
+    flip = np.array([False, False, False, False])
+    
+    linarg = LinearARG.from_genotypes(genotypes, flip, find_recombinations=True)
+    
+    assert isinstance(linarg, LinearARG)
+    assert linarg.shape[0] == genotypes.shape[0]
+
+
+def test_samples_with_no_variants():
+    """Test handling of samples with no variants (all-zero rows)."""
+    genotypes = csc_matrix(np.array([
+        [1, 1, 1],
+        [0, 0, 0],
+        [1, 0, 1],
+        [0, 0, 0]
+    ]))
+    flip = np.array([False, False, False])
+    
+    linarg = LinearARG.from_genotypes(genotypes, flip, find_recombinations=True)
+    
+    assert isinstance(linarg, LinearARG)
+    assert linarg.shape[0] == genotypes.shape[0]
+
+
 def test_read_write_matmul(tmp_path):
     """
     Test that a written and then read LinearARG object gives the same
