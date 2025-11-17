@@ -531,7 +531,11 @@ def topological_sort(A: "csr_matrix", nodes_to_ignore: Optional[Set] = None) -> 
                 nodes_to_visit.push(child)
         i += 1
 
-    if (nodes_to_ignore is None) and (i != num_nodes):
-        raise ValueError("Adjacency matrix is not acyclic")
+    if nodes_to_ignore is None:
+        if i != num_nodes:
+            raise ValueError("Adjacency matrix is not acyclic")
+    else:
+        if i != num_nodes - len(nodes_to_ignore):
+            raise ValueError("Adjacency matrix is not acyclic")
 
     return result
