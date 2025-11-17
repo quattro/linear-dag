@@ -323,26 +323,49 @@ def merge(linarg_dir, load_dir):
     )
     A_tri, variant_indices_tri = make_triangular(A_filt, variant_indices_reindexed, sample_indices_reindexed)
     linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), variants=var_info, sex=sex, iids=iids)
-    linarg.calculate_nonunique_indices()
-    logger.info("Saving linear ARG")
+    
+    # --- Save outputs ---
+    save_dir = f"{linarg_dir}/merge_debug/"
+    os.makedirs(save_dir, exist_ok=True)
 
-    # pull block info before saving
-    block = (
-        var_info.select(
-            [
-                pl.col("CHROM").first().alias("chrom"),
-                pl.col("POS").min().alias("start"),
-                pl.col("POS").max().alias("end"),
-            ]
-        )
-        .collect()
-        .to_dicts()[0]
-    )
-    linarg.write(f"{linarg_dir}/linear_arg", block_info=block)
-    logger.info("Computing linear ARG stats")
-    get_linarg_stats(linarg_dir, load_dir, linarg)
+    logger.info("Saving A, variant indices, and triangulation outputs")
 
-    return
+    # Save sparse matrices
+    sp.save_npz(f"{save_dir}/A.npz", A)
+    sp.save_npz(f"{save_dir}/A_filt.npz", A_filt)
+    sp.save_npz(f"{save_dir}/A_tri.npz", A_tri)
+
+    # Save numpy arrays
+    np.save(f"{save_dir}/variant_indices.npy", variant_indices)
+    np.save(f"{save_dir}/sample_indices.npy", sample_indices)
+
+    np.save(f"{save_dir}/variant_indices_reindexed.npy", variant_indices_reindexed)
+    np.save(f"{save_dir}/sample_indices_reindexed.npy", sample_indices_reindexed)
+
+    np.save(f"{save_dir}/variant_indices_tri.npy", variant_indices_tri)
+
+    logger.info(f"Saved matrices and arrays to: {save_dir}")    
+    
+    # linarg.calculate_nonunique_indices()
+    # logger.info("Saving linear ARG")
+
+    # # pull block info before saving
+    # block = (
+    #     var_info.select(
+    #         [
+    #             pl.col("CHROM").first().alias("chrom"),
+    #             pl.col("POS").min().alias("start"),
+    #             pl.col("POS").max().alias("end"),
+    #         ]
+    #     )
+    #     .collect()
+    #     .to_dicts()[0]
+    # )
+    # linarg.write(f"{linarg_dir}/linear_arg", block_info=block)
+    # logger.info("Computing linear ARG stats")
+    # get_linarg_stats(linarg_dir, load_dir, linarg)
+
+    # return
 
 
 def get_linarg_stats(linarg_dir, load_dir, linarg=None):
