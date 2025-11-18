@@ -197,12 +197,19 @@ def reduction_union_recom(linarg_dir, load_dir, partition_identifier):
     t4 = time.time()
     logger.info(f"Combined nodes and computed reduction union in {np.round(t4 - t3, 3)} seconds")
 
+    for i in sample_indices:
+        assert len(list(brick_graph.successors(int(i)))) == 0
+
     logger.info("Finding recombinations")
     t5 = time.time()
     recom = Recombination.from_graph(brick_graph)
     recom.find_recombinations()
     t6 = time.time()
     logger.info(f"Found recombinations in {np.round(t6 - t5, 3)} seconds")
+
+    for i in sample_indices:
+        assert len(list(recom.successors(int(i)))) == 0
+
     adj_mat = recom.to_csc()
 
     logger.info("Saving brick graph")

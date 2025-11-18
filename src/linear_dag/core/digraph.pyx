@@ -590,6 +590,8 @@ cdef class DiGraph:
         """
         Iterate over successors of a node
         """
+        if not self.has_node(u_idx):
+            raise ValueError(f"Node {u_idx} does not exist.")
         cdef edge* e = self.nodes[u_idx].first_out
         while e is not NULL:
             yield e.v.index
@@ -599,6 +601,8 @@ cdef class DiGraph:
         """
         Iterate over predecessors of a node
         """
+        if not self.has_node(v_idx):
+            raise ValueError("Node {v_idx} does not exist.")
         cdef edge * e = self.nodes[v_idx].first_in
         while e is not NULL:
             yield e.u.index

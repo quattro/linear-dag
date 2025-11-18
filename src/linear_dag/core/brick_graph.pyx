@@ -58,13 +58,15 @@ cdef class BrickGraph:
 
         # Add samples
         cdef long[:] sample_indices
+        cdef node* u
         if add_samples:
             sample_indices =  np.arange(num_variants, num_variants+num_samples, dtype=np.int64)
             for i in range(num_samples):
-                forward_pass.graph.add_node(sample_indices[i])
+                u = forward_pass.graph.add_node(sample_indices[i])
                 forward_pass.add_edges_from_subsequence(i, sample_indices[i])
                 forward_pass.subsequence.clear_list(i)
                 assert forward_pass.graph.has_node(sample_indices[i])
+                assert forward_pass.graph.number_of_successors(u) == 0
         else:
             sample_indices = np.array([])
         cdef DiGraph forward_graph = forward_pass.graph
@@ -590,6 +592,9 @@ cpdef DiGraph reduction_union(DiGraph forward_reduction, DiGraph backward_reduct
         if backward_reduction.is_node(node_index):
             current_node = &backward_reduction.nodes[node_index]
             add_nonredundant_neighbors(result, current_node, reachable_in_two_hops)
+        
+        if not result.has_node(node_index):
+            result.add_node(node_index)
 
     return result
 
