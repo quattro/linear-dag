@@ -295,6 +295,7 @@ def _assoc_scan(args):
                     logger=logger,
                     in_place_op=True,
                     detach_arrays=True,
+                    recompute_AC=args.recompute_ac,
                 )
                 res_ph = res_ph.select([f"{ph}_BETA", f"{ph}_SE"])
                 per_results.append(res_ph)
@@ -331,6 +332,7 @@ def _assoc_scan(args):
                 assume_hwe=not args.no_hwe,
                 logger=logger,
                 in_place_op=True,
+                recompute_AC=args.recompute_ac,
             )
             genotypes.shutdown()
             logger.info("Shut down parallel operator")
@@ -564,7 +566,12 @@ def _main(args):
     assoc_p.add_argument(
         "--repeat-covar",
         action="store_true",
-        help=("Run phenotypes one at a time inside the parallel operator, repeating covariate projections. "),
+        help=("Run phenotypes one at a time inside the parallel operator, repeating covariate projections."),
+    )
+    assoc_p.add_argument(
+        "--recompute-ac",
+        action="store_true",
+        help=("Recompute allele counts."),
     )
 
     # build h2g estimation parser from 'common' parser, but add additional options for RHE
