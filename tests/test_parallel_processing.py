@@ -164,3 +164,30 @@ def test_grm_matmat_matches_serial():
         Y_ser += la @ la.T @ X
 
     assert np.allclose(Y_par, Y_ser, rtol=1e-5, atol=1e-5)
+
+
+def test_grm_matmat_with_alpha():
+    from scipy.sparse import diags
+    from scipy.sparse.linalg import aslinearoperator
+    
+    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    linargs, _ = _load_serial_blocks(hdf5_path)
+    
+    alpha = 0.5
+    
+    with GRMOperator.from_hdf5(hdf5_path, num_processes=2, alpha=alpha) as grm:
+        n = grm.shape[0]
+        rng = np.random.default_rng(42)
+        X = rng.standard_normal((n, 3)).astype(np.float32)
+        
+        # Parallel result
+        Y_par = grm @ X
+    
+    # Serial result: sum over blocks of L.normalized @ K @ L.normalized.T @ X
+    Y_ser = np.zeros((n, 3), dtype=np.float32)
+    for la in linargs:
+        pq = la.allele_frequencies * (1 - la.allele_frequencies)
+        K = aslinearoperator(diags(pq ** (1 + alpha)))
+        Y_ser += la.normalized @ K @ la.normalized.T @ X
+    
+    assert np.allclose(Y_par, Y_ser, rtol=1e-5, atol=1e-5)

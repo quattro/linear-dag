@@ -76,17 +76,19 @@ class _SharedArrayHandle:
 class _ParallelManager:
     """Manager for coordinating parallel worker processes using shared memory."""
 
-    def __init__(self, num_processes: int, object_specification: Dict[str, Tuple[Tuple[int, ...], Type[np.generic]]]):
+    def __init__(self, num_processes: int, object_specification: Dict[str, Tuple[Tuple[int, ...], Type[np.generic]]], alpha: float = -1.0):
         """
         Args:
             num_processes: Number of worker processes.
             object_specification: Dict mapping name to (shape, dtype) for shared arrays.
+            alpha: Alpha parameter for GRM computation.
         """
         self.num_processes = num_processes
         self.flags = [Value("i", 0) for _ in range(num_processes)]
         self.processes: List[Process] = []
         self.handles: Dict[str, _SharedArrayHandle] = {}
         self.num_traits = Value("i", 0, lock=False)
+        self.alpha = Value("f", alpha, lock=False)
 
         for name, (shape, dtype) in object_specification.items():
             size = np.prod(shape) * np.dtype(dtype).itemsize
@@ -131,7 +133,7 @@ class _ParallelManager:
             args: Arguments to pass to target function
         """
         # Pass the dictionary of handles to the worker
-        process = Process(target=target, args=(self.handles, self.num_traits, *args))
+        process = Process(target=target, args=(self.handles, self.num_traits, self.alpha, *args))
         process.start()
         self.processes.append(process)
 
@@ -474,6 +476,7 @@ class GRMOperator(LinearOperator):
         _input_data_handle: _SharedArrayHandle  # Handle to shared sample data
         _output_data_handle: _SharedArrayHandle  # Handle to shared sample data
         _num_traits: Value
+        _alpha: Value
         _max_num_traits: int
         shape: Shape of the operator
         dtype: Data type
@@ -484,6 +487,7 @@ class GRMOperator(LinearOperator):
     _input_data_handle: _SharedArrayHandle
     _output_data_handle: _SharedArrayHandle
     _num_traits: Value
+    _alpha: Value
     _max_num_traits: int
     shape: tuple[int, int]
     dtype: np.dtype = np.float32
@@ -503,6 +507,14 @@ class GRMOperator(LinearOperator):
     @property
     def num_samples(self):
         return self.shape[0]
+
+    @property
+    def alpha(self):
+        return self._alpha.value
+
+    @alpha.setter
+    def alpha(self, alpha: float):
+        self._alpha.value = alpha
 
     def _matmat(self, x):
         n, k = x.shape
@@ -540,6 +552,7 @@ class GRMOperator(LinearOperator):
         cls,
         handles: Dict[str, _SharedArrayHandle],
         num_traits: Value,
+        alpha: Value,
         flag: Value,
         hdf5_file: str,
         blocks: list,
@@ -566,7 +579,7 @@ class GRMOperator(LinearOperator):
                 input_arr = input_data[: num_traits.value, :].T
                 output_arr = output_data[: num_traits.value, :].T
                 for linarg in linargs:
-                    func(linarg, input_arr, output_arr, output_lock)
+                    func(linarg, input_arr, output_arr, output_lock, alpha.value)
             flag.value = FLAGS["wait"]
     
     @classmethod
@@ -576,8 +589,18 @@ class GRMOperator(LinearOperator):
         input_arr: np.ndarray,
         output_arr: np.ndarray,
         output_lock: Lock,
+        alpha: float,
     ) -> None:
-        result = linarg @ linarg.T @ input_arr
+        if alpha == -1.0:
+            # Special case: no weighting by heterozygosity
+            result = linarg @ linarg.T @ input_arr
+        else:
+            from scipy.sparse import diags
+            from scipy.sparse.linalg import aslinearoperator
+            
+            pq = linarg.allele_frequencies * (1 - linarg.allele_frequencies)
+            K = aslinearoperator(diags(pq ** alpha))
+            result = linarg @ K @ linarg.T @ input_arr
         with output_lock:
             output_arr += result
 
@@ -586,6 +609,7 @@ class GRMOperator(LinearOperator):
         cls,
         hdf5_file: str,
         num_processes: Optional[int] = None,
+        alpha: float = -1.0,
         max_num_traits: int = 10,
         block_metadata: Optional[pl.DataFrame] = None,
     ) -> GRMOperator:
@@ -594,6 +618,7 @@ class GRMOperator(LinearOperator):
         Args:
             metadata_path: Path to metadata file
             num_processes: Number of processes to use; None -> use all available cores
+            alpha: Alpha parameter for GRM computation
 
         Returns:
             GRMOperator instance
@@ -610,7 +635,8 @@ class GRMOperator(LinearOperator):
                             hdf5_file, 
                             num_processes, 
                             block_metadata, 
-                            shm_specification)
+                            shm_specification,
+                            alpha)
         manager.start_workers(FLAGS["wait"])
 
         # Get the actual handles from the manager to pass to the Operator instance
@@ -623,6 +649,7 @@ class GRMOperator(LinearOperator):
             _input_data_handle=input_data_handle,
             _output_data_handle=output_data_handle,
             _num_traits=manager.num_traits,
+            _alpha=manager.alpha,
             _max_num_traits=max_num_traits,
             shape=(num_samples, num_samples),
             dtype=np.float32,
@@ -664,6 +691,7 @@ class _ManagerFactory:
         num_processes: Optional[int],
         block_metadata: pl.DataFrame,
         shm_specification: dict[str, tuple[tuple[int, int], np.dtype]],
+        alpha: float = -1.0,
     ) -> _ParallelManager:
         blocks = block_metadata["block_name"]
 
@@ -677,7 +705,8 @@ class _ManagerFactory:
         block_offsets = [variant_offsets[start:end] for start, end in process_block_ranges]
         manager = _ParallelManager(
             num_processes,
-            object_specification=shm_specification
+            object_specification=shm_specification,
+            alpha=alpha
         )
 
         with warnings.catch_warnings():
