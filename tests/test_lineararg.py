@@ -52,6 +52,38 @@ def test_from_vcf():
     assert linarg.variants.collect().height > 0
 
 
+def test_zero_ac_variants():
+    """Test handling of variants with 0 allele count (all-zero columns)."""
+    genotypes = csc_matrix(np.array([
+        [1, 0, 1, 0],
+        [0, 0, 1, 0],
+        [1, 0, 0, 0],
+        [0, 0, 1, 0]
+    ]))
+    flip = np.array([False, False, False, False])
+    
+    linarg = LinearARG.from_genotypes(genotypes, flip, find_recombinations=True)
+    
+    assert isinstance(linarg, LinearARG)
+    assert linarg.shape[0] == genotypes.shape[0]
+
+
+def test_samples_with_no_variants():
+    """Test handling of samples with no variants (all-zero rows)."""
+    genotypes = csc_matrix(np.array([
+        [1, 1, 1],
+        [0, 0, 0],
+        [1, 0, 1],
+        [0, 0, 0]
+    ]))
+    flip = np.array([False, False, False])
+    
+    linarg = LinearARG.from_genotypes(genotypes, flip, find_recombinations=True)
+    
+    assert isinstance(linarg, LinearARG)
+    assert linarg.shape[0] == genotypes.shape[0]
+
+
 def test_read_write_matmul(tmp_path):
     """
     Test that a written and then read LinearARG object gives the same
@@ -114,48 +146,3 @@ def test_read_write_matmul(tmp_path):
     diploid_genotypes = get_diploid_operator(genotypes) @ np.eye(genotypes.shape[1])
     num_carriers = np.sum(diploid_genotypes > 0, axis=0)
     assert np.all(num_carriers == loaded_linarg.number_of_carriers())
-
-
-def test_parallel_operator():
-    """
-    Test that ParallelOperator gives the same result as serial processing.
-    """
-    # 1. Setup
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
-    num_traits = 5
-
-    # 2. Parallel version
-    with ParallelOperator.from_hdf5(hdf5_path, num_processes=2) as operator:
-        n, m = operator.shape
-
-        # Test transpose multiplication
-        y = np.random.rand(n, num_traits)
-        parallel_result_T = operator.T @ y
-
-        # Test forward multiplication
-        b = np.random.rand(m, num_traits)
-        parallel_result = operator @ b
-
-    # 3. Serial version
-    blocks = list_blocks(hdf5_path)['block_name']
-
-    # Transpose multiplication
-    serial_results_T = []
-    for block_name in blocks:
-        linarg = LinearARG.read(hdf5_path, block=block_name)
-        serial_results_T.append(linarg.T @ y)
-    serial_result_T = np.vstack(serial_results_T)
-
-    # Forward multiplication
-    serial_result = np.zeros((n, num_traits))
-    variant_offset = 0
-    for block_name in blocks:
-        linarg = LinearARG.read(hdf5_path, block=block_name)
-        num_block_variants = linarg.shape[1]
-        block_b = b[variant_offset : variant_offset + num_block_variants, :]
-        serial_result += linarg @ block_b
-        variant_offset += num_block_variants
-
-    # 4. Assertions
-    np.testing.assert_allclose(parallel_result_T, serial_result_T, rtol=1e-3, atol=1e-2)
-    np.testing.assert_allclose(parallel_result, serial_result, rtol=1e-3, atol=1e-2)

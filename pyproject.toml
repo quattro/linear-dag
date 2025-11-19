@@ -41,13 +41,13 @@ dependencies = [
   "numpy",
   "scipy>=1.14.1",
   "polars>=1.25.0",
-  "jupyter",
   "psutil",
   "h5py>=3.13.0",
   "pytest>=8.4.1",
   "h5py",
   "memory_profiler",
   "pyarrow>=21.0.0",
+  "setuptools>=80.9.0",
 ]
 
 [project.scripts]
@@ -99,10 +99,12 @@ include = [
   "recombination.pyx",
   "solve.pyx",
   "data_structures.pyx",
+  "digraph.pyx",
   "brick_graph.pyx",
-  "data_structures.pxd"  # Ensure this is included
-] 
-
+  "data_structures.pxd",
+  "digraph.pxd"
+]  
+ 
 [tool.hatch.envs.default.scripts]
 test = "pytest {args:tests}"
 test-cov = "coverage run -m pytest {args:tests}"

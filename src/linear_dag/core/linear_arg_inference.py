@@ -1,5 +1,6 @@
 # linear_arg_inference.py
 import warnings
+import time
 
 import numpy as np
 import polars as pl
@@ -18,17 +19,29 @@ def linear_arg_from_genotypes(genotypes, flip, variant_info, find_recombinations
 
     if verbosity > 0:
         print("Inferring brick graph")
+    t0 = time.time()
     brick_graph, samples_idx, variants_idx = BrickGraph.from_genotypes(genotypes)
+    t1 = time.time()
+    if verbosity > 0:
+        print(f"  Time: {t1-t0:.3f}s")
 
     if verbosity > 0:
         print("Finding recombinations")
+    t0 = time.time()
     recom = Recombination.from_graph(brick_graph)
     if find_recombinations:
         recom.find_recombinations()
+    t1 = time.time()
+    if verbosity > 0:
+        print(f"  Time: {t1-t0:.3f}s")
 
     if verbosity > 0:
         print("Linearizing brick graph")
+    t0 = time.time()
     linear_arg_adjacency_matrix = csc_matrix(linearize_brick_graph(recom))
+    t1 = time.time()
+    if verbosity > 0:
+        print(f"  Time: {t1-t0:.3f}s")
 
     num_variants = len(variants_idx)
     if variant_info is None:
