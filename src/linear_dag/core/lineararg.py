@@ -593,16 +593,8 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
             for block_name in block_names:
                 group = f[block_name]
                 attrs = group.attrs
-                block_info = {
-                    "block_name": block_name,
-                    "chrom": attrs.get("chrom"),
-                    "start": attrs.get("start"),
-                    "end": attrs.get("end"),
-                    "n": attrs.get("n"),
-                    "n_samples": attrs.get("n_samples"),
-                    "n_variants": attrs.get("n_variants"),
-                    "n_entries": attrs.get("n_entries"),
-                }
+                block_info = {key: value for key, value in attrs.items()}
+                block_info["block_name"] = block_name
                 block_data.append(block_info)
 
     return pl.DataFrame(block_data)
