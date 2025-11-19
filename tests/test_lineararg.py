@@ -146,3 +146,30 @@ def test_read_write_matmul(tmp_path):
     diploid_genotypes = get_diploid_operator(genotypes) @ np.eye(genotypes.shape[1])
     num_carriers = np.sum(diploid_genotypes > 0, axis=0)
     assert np.all(num_carriers == loaded_linarg.number_of_carriers())
+
+
+def test_get_carriers_subset():
+    """Test get_carriers_subset method against linarg @ indicator."""
+    vcf_path = TEST_DATA_DIR / "1kg_small.vcf"
+    linarg, genotypes = LinearARG.from_vcf(vcf_path, return_genotypes=True)
+    
+    # Test with a subset of variant indices
+    np.random.seed(42)
+    n_variants = linarg.shape[1]
+    subset_size = min(10, n_variants)
+    user_indices = np.sort(np.random.choice(n_variants, subset_size, replace=False))
+    
+    # Get carriers using the new method
+    carriers_matrix = linarg.get_carriers_subset(user_indices)
+    
+    # Verify shape
+    assert carriers_matrix.shape == (linarg.shape[0], len(user_indices))
+    
+    # Verify against linarg @ indicator for each variant
+    for i, variant_idx in enumerate(user_indices):
+        indicator = np.zeros(n_variants)
+        indicator[variant_idx] = 1
+        expected = linarg @ indicator
+        actual = carriers_matrix[:, i].toarray().ravel()
+        np.testing.assert_array_equal(actual, expected, 
+            err_msg=f"Mismatch for variant index {variant_idx}")

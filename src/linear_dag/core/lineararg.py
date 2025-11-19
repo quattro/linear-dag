@@ -16,7 +16,7 @@ import polars as pl
 from scipy.sparse import csc_matrix, csr_matrix, diags, eye
 from scipy.sparse.linalg import aslinearoperator, LinearOperator, spsolve_triangular
 
-from linear_dag.core.solve import get_nonunique_indices_csc
+from linear_dag.core.solve import get_nonunique_indices_csc, get_carriers
 from linear_dag.genotype import read_vcf
 
 from .digraph import DiGraph
@@ -246,6 +246,21 @@ class LinearARG(LinearOperator):
         num_carriers[self.flip] = ref_carriers[self.flip]
         
         return num_carriers.astype(np.int32)
+    
+    def get_carriers_subset(self, variant_indices: npt.NDArray[np.int_]) -> csc_matrix:
+        """
+        Get carriers for a subset of variants specified by variant_indices.
+        
+        :param variant_indices: Indices into the variant dimension (0 to shape[1]-1)
+        :return: CSC matrix of shape (n_samples, len(variant_indices)) indicating carriers
+        """
+        variant_node_indices = self.variant_indices[variant_indices]
+        if self.n_individuals is None:
+            A = self.A
+        else:
+            n = self.A.shape[0] - self.n_individuals
+            A = self.A[:n, :][:, :n]
+        return get_carriers(A, variant_node_indices, self.n_samples)
     
     def remove_samples(self, iids_to_remove: npt.ArrayLike):
         sample_mask = np.isin(self.iids, iids_to_remove)
