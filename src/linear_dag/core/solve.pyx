@@ -7,7 +7,7 @@ import numpy as np
 cimport numpy as np
 from libc.string cimport memset
 from scipy.sparse import csc_matrix, csr_matrix
-from .data_structures cimport Stack, InfiniteStack
+from .data_structures cimport Stack, InfiniteStack, IntegerSet
 cimport scipy.linalg.cython_blas as blas
 from typing import Optional, Set
 
@@ -535,3 +535,74 @@ def topological_sort(A: "csr_matrix", nodes_to_ignore: Optional[Set] = None) -> 
         raise ValueError("Adjacency matrix is not acyclic")
 
     return result
+
+def get_carriers(A: "csc_matrix", variant_indices: np.ndarray, num_samples: long):
+
+    cdef long[:] indices
+    cdef long[:] indptrs
+
+    indices, indptrs = _get_carriers(A.indices.astype(np.int64), \
+                                    A.indptr.astype(np.int64), \
+                                    variant_indices.astype(np.int64))
+
+    # translate from A indices to sample indices
+    cdef long i
+    cdef long n = A.shape[0]
+    for i in range(len(indices)):
+        indices[i] = n - indices[i] - 1
+        assert indices[i] >= 0
+        assert indices[i] < num_samples
+
+    for i in range(num_samples):
+        assert A.indptr[n - i - 1] == A.indptr[n - i]
+
+    indices = np.asarray(indices)
+    indptrs = np.asarray(indptrs)
+    return csc_matrix((np.ones_like(indices), indices, indptrs), shape=(num_samples, len(variant_indices)))
+
+
+
+cdef tuple _get_carriers(long[:] indices, long[:] indptrs, long[:] variants):
+    cdef long initial_size = len(variants) * 32
+    cdef Stack leaves_visited = Stack(initial_size)
+    cdef long[:] result_indptrs = np.zeros(len(variants)+1, dtype=np.int64)
+    cdef IntegerSet visited = IntegerSet(len(indptrs) - 1)
+
+    cdef int i
+    for i in range(len(variants)):
+        visited.clear()
+        _dfs(variants[i], leaves_visited, indices, indptrs, visited)
+        result_indptrs[i + 1] = leaves_visited.length
+    
+    cdef long n = leaves_visited.length
+    cdef long[:] result_indices = np.zeros(n, dtype=np.int64)
+    for i in range(n - 1, -1, -1):
+        result_indices[i] = leaves_visited.pop()
+    assert leaves_visited.length == 0
+
+    return result_indices, result_indptrs
+
+
+
+cdef void _dfs(long node, Stack leaves_visited, long[:] indices, long[:] indptr, IntegerSet visited):
+    if visited.contains(node):
+        return
+    visited.add(node)
+    
+    assert node < len(indptr)-1
+    cdef long[:] neighbors = indices[indptr[node]:indptr[node+1]]
+    
+    if len(neighbors) == 0:
+        leaves_visited.push(node)
+        return
+    
+    cdef int i
+    for i in range(len(neighbors)):
+        _dfs(neighbors[i], leaves_visited, indices, indptr, visited)
+
+    
+
+
+
+
+
