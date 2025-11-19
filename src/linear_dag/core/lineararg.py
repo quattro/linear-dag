@@ -392,7 +392,10 @@ class LinearARG(LinearOperator):
         pass
 
     def write(
-        self, h5_fname: Union[str, PathLike], block_info: Optional[dict] = None, compression_option: str = "gzip"
+        self, h5_fname: Union[str, PathLike],
+        block_info: Optional[dict] = None,
+        compression_option: str = "gzip",
+        save_threshold: bool = False,
     ):
         """Writes LinearARG to disk.
         :param h5_fname: The base path and prefix used for output files.
@@ -460,6 +463,18 @@ class LinearARG(LinearOperator):
                             compression=compression_option,
                             shuffle=True,
                         )
+            
+            if save_threshold:
+                N = self.A.shape[0]
+                af = self.allele_frequencies
+                maf = np.minimum(af, 1 - af)
+                order = int(np.ceil(np.log10(N)))        
+                thresholds = 10.0 ** -np.arange(1, order + 1)
+                destination.attrs["threshold_values"] = thresholds
+                destination.attrs["threshold_n_variants"] = (maf[:, None] > thresholds).sum(axis=0)
+
+                                
+            
         return
 
     @staticmethod

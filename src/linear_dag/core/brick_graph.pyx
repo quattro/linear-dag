@@ -716,25 +716,17 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
     cdef list index_mapping = []
     cdef list files = os.listdir(brick_graph_dir)
 
-    print('starting merge_brick_graphs', flush=True)
-
     ind_arr = np.array([int(f.split('_')[0]) for f in files])
     order = ind_arr.argsort()
     files = np.array(files)[order].tolist() # sort files by index
 
-    print('iterating through files', flush=True)
     for f in files:
 
-        print(f'starting to process file {f}', flush=True)
         graph, samples, variants = read_brick_graph_h5(f'{brick_graph_dir}/{f}')
         #number_of_nodes = adj_mat.shape[0]
         number_of_nodes = graph.maximum_number_of_nodes
-        print(f'number of nodes: {number_of_nodes}', flush=True)
-        print(f'samples: {samples}', flush=True)
-        print(f'variants: {variants}', flush=True)
 
         # Get new node ids corresponding to the merged graph
-        print(f'iterating through nodes', flush=True)
         sample_counter = 0
         new_node_ids = np.zeros(number_of_nodes, dtype=np.int64)
         for i in range(number_of_nodes):
@@ -744,13 +736,11 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
             else:
                 new_node_ids[i] = non_sample_counter
                 non_sample_counter += 1
-        print(f'iterating through variants', flush=True)
         for var in variants:
             variant_indices.append(new_node_ids[var])
         index_mapping.append(new_node_ids)
 
         # Add edges from graph to result while preserving the order of the parent nodes for each child node
-        print(f'add edges from graph to result', flush=True)
         for node_idx in range(number_of_nodes):
             if not graph.is_node(node_idx):
                 continue

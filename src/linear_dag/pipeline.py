@@ -67,7 +67,7 @@ def compress_vcf(
         block_info = None
 
     logger.info("Writing to disk")
-    linarg.write(output_h5, block_info=block_info)
+    linarg.write(output_h5, block_info=block_info, save_threshold=True)
     logger.info("Done!")
 
 
@@ -345,7 +345,7 @@ def merge(linarg_dir, load_dir):
         .collect()
         .to_dicts()[0]
     )
-    linarg.write(f"{linarg_dir}/linear_arg", block_info=block)
+    linarg.write(f"{linarg_dir}/linear_arg", block_info=block, save_threshold=True)
     logger.info("Computing linear ARG stats")
     get_linarg_stats(linarg_dir, load_dir, linarg)
 
@@ -437,7 +437,7 @@ def add_individuals_to_linarg(linarg_dir, load_dir):
         "start": block_name.split("_")[1],
         "end": block_name.split("_")[2],
     }
-    linarg.write(f"{linarg_dir}/linear_arg_individual", block_info=block_info)
+    linarg.write(f"{linarg_dir}/linear_arg_individual", block_info=block_info, save_threshold=True)
 
     # logger.info("Computing linear ARG stats")
     # get_linarg_individual_stats(linarg_dir, load_dir)
