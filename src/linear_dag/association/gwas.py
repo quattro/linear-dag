@@ -25,6 +25,7 @@ def get_gwas_beta_se(
     y_resid: np.ndarray,
     covariates: np.ndarray,
     num_nonmissing: np.ndarray | None = None,
+    y_nonmissing: np.ndarray | None = None,
     num_heterozygotes: np.ndarray | None = None,
     in_place_op: bool = False,
     logger: Optional[logging.Logger] = None,
@@ -43,15 +44,21 @@ def get_gwas_beta_se(
     if not np.allclose(covariates[:, 0], 1):
         raise ValueError("First column of covariates should be all-ones")
 
+    handle_missingness = y_nonmissing is not None
+    if handle_missingness:
+        if logger:
+            logger.info(f"y_nonmissing shape={y_nonmissing.shape}")
+        num_nonmissing = np.sum(y_nonmissing, axis=0)
+    else:
+        y_nonmissing = np.zeros((y_resid.shape[0], 0), dtype=y_resid.dtype)
+
     if num_nonmissing is None:
         num_nonmissing = y_resid.shape[0] * np.ones(y_resid.shape[1])
 
     num_covariates = covariates.shape[1]
     num_traits = y_resid.shape[1]
-    if any(num_nonmissing < num_covariates):
-        raise ValueError("num_nonmissing must be at least num_covariates for each trait")
 
-    y_concat = np.concatenate((y_resid, covariates), axis=1, dtype=np.float32)
+    y_concat = np.concatenate((y_resid, covariates, y_nonmissing), axis=1, dtype=np.float32)
     if in_place_op:
         if not isinstance(genotypes, ParallelOperator):
             raise ValueError("in_place_op=True requires genotypes to be a ParallelOperator")
@@ -72,13 +79,24 @@ def get_gwas_beta_se(
 
     # Denominator, equal across traits despite different missingness
     var_explained, allele_counts = get_genotype_variance_explained(Xty[:, num_traits:], covariates)
+    if handle_missingness:
+        print(f"ratio: {y_resid.shape[0] / num_nonmissing}")
+        allele_counts = allele_counts * (y_resid.shape[0] / num_nonmissing)
+        print(f"allele_counts={allele_counts}")
+    
     denominator = allele_counts - var_explained
     if num_heterozygotes is not None:  # else assume HWE
         # assumes diploid
-        num_homozygotes = (allele_counts - num_heterozygotes.reshape(*allele_counts.shape)) / 2
+        num_homozygotes = (allele_counts - num_heterozygotes.reshape(-1, 1)) / 2
         denominator = denominator + 2*num_homozygotes - var_explained
-    beta[denominator.ravel() < 1e-6, :] = 0 # avoid numerical issues for variants with no variance
+    
+    # avoid numerical issues for variants with no variance
+    if handle_missingness:
+        beta[denominator < 1e-6] = 0 
+    else:
+        beta[denominator.ravel() < 1e-6, :] = 0
     denominator[denominator < 1e-6] = 1e-6
+
     beta /= denominator
     if logger:
         logger.info(f"got beta")
@@ -101,6 +119,7 @@ def _format_sumstats(
     pheno_cols: list[str],
     *,
     detach_arrays: bool = False,
+    recompute_AC: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> pl.LazyFrame:
     """
@@ -108,8 +127,6 @@ def _format_sumstats(
     - store BETA and VAR_DENOMINATOR as columns
     - compute SE lazily from expressions
     """
-    if not beta.flags.f_contiguous:
-        raise ValueError("`beta` should be a Fortran-contiguous (column-major) array")
 
     # Optionally detach from any shared/in-place buffers to avoid cross-iteration aliasing
     # in repeat-covar mode. Keep Fortran order to match expected layout.
@@ -122,7 +139,15 @@ def _format_sumstats(
         beta,
         schema={f"{name}_BETA": pl.Float32 for name in pheno_cols},
         orient="row",
-    ).with_columns(VAR_DENOMINATOR=pl.lit(var_denominator.ravel()))
+    )
+    
+    # Handle var_denominator: if recompute_AC, create per-trait columns; otherwise single column
+    if recompute_AC:
+        for k, name in enumerate(pheno_cols):
+            df = df.with_columns(pl.Series(f"{name}_VAR_DENOM", var_denominator[:, k]))
+    else:
+        df = df.with_columns(VAR_DENOMINATOR=pl.lit(var_denominator.ravel()))
+    
     df = pl.concat([variant_info, df], how="horizontal")
 
     if logger:
@@ -132,8 +157,9 @@ def _format_sumstats(
     exprs = []
     for k, name in enumerate(pheno_cols):
         se_name = f"{name}_SE"
+        denom_col = f"{name}_VAR_DENOM" if recompute_AC else "VAR_DENOMINATOR"
         exprs.append(
-            (pl.lit(float(var_numerator[k])) / pl.col("VAR_DENOMINATOR")).sqrt().cast(pl.Float32).alias(se_name)
+            (pl.lit(float(var_numerator[k])) / pl.col(denom_col)).sqrt().cast(pl.Float32).alias(se_name)
         )
     df = df.with_columns(exprs)
 
@@ -156,6 +182,7 @@ def run_gwas(
     covar_cols: list[str],
     variant_info: Optional[pl.LazyFrame] = None,
     assume_hwe: bool = True,
+    recompute_AC: bool = False,
     in_place_op: bool = False,
     detach_arrays: bool = False,
     logger: Optional[logging.Logger] = None,
@@ -168,11 +195,15 @@ def run_gwas(
     """
     if logger:
         logger.info(f"run_gwas: assume_hwe={assume_hwe}; n_pheno={len(pheno_cols)} n_covar={len(covar_cols)}")
+    
     if not assume_hwe and not hasattr(genotypes, "n_individuals"):
         raise ValueError("If assume_hwe is False, genotypes must be a linear ARG with individual nodes.")
 
     if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
+
+    if recompute_AC and not assume_hwe:
+        raise ValueError("Unsupported configuration: recompute_AC requires assume_HWE")
 
     left_op, right_op = get_inner_merge_operators(
         data.select("iid").cast(pl.Utf8).collect().to_series(), genotypes.iids
@@ -212,6 +243,7 @@ def run_gwas(
         y_resid,
         covariates,
         num_nonmissing,
+        y_nonmissing=~is_missing if recompute_AC else None,
         num_heterozygotes=num_heterozygotes,
         in_place_op=in_place_op,
         logger=logger,
@@ -224,9 +256,10 @@ def run_gwas(
 
     if variant_info is None:
         variant_info = pl.LazyFrame()
-    variant_info = variant_info.with_columns(
-        pl.Series("A1FREQ", allele_counts.ravel() / genotypes.shape[0]).cast(pl.Float32),
-    )
+    if not recompute_AC:
+        variant_info = variant_info.with_columns(
+            pl.Series("A1FREQ", allele_counts.ravel() / genotypes.shape[0]).cast(pl.Float32),
+        )
     if num_heterozygotes is not None:
         variant_info = variant_info.with_columns(
             pl.Series("A1_CARRIER_FREQ", num_heterozygotes.astype(np.float32).ravel() * 2 / genotypes.shape[0]).cast(
@@ -243,6 +276,7 @@ def run_gwas(
         variant_info,
         pheno_cols,
         detach_arrays=detach_arrays,
+        recompute_AC=recompute_AC,
         logger=logger,
     )
     if logger:

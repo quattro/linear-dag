@@ -61,6 +61,7 @@ def get_genotype_variance_explained(
             allele_count: Allele count of the genotypes, assuming first column of covariates is all-ones
                             except for missing values
     """
+    num_covar = C.shape[1]
     covariate_inner = C.T @ C
     
     num_snps = XtC.shape[0]
@@ -68,14 +69,17 @@ def get_genotype_variance_explained(
     
     for start_idx in range(0, num_snps, batch_size):
         end_idx = min(start_idx + batch_size, num_snps)
-        XtC_batch = XtC[start_idx:end_idx, :]
+        XtC_batch = XtC[start_idx:end_idx, :num_covar]
         # C_backslash_XtC_batch = np.linalg.solve(covariate_inner, XtC_batch.T).astype(np.float32)
         C_backslash_XtC_batch = (np.linalg.pinv(covariate_inner, rcond=lam) @ XtC_batch.T).astype(np.float32)
         total_var_explained[start_idx:end_idx] = np.sum(
             XtC_batch.T * C_backslash_XtC_batch, axis=0
         ).reshape(-1, 1)
 
-    allele_count = XtC[:, 0].reshape(-1, 1)
+    if XtC.shape[1] == num_covar:
+        allele_count = XtC[:, 0].reshape(-1, 1)
+    else:
+        allele_count = XtC[:, num_covar:]
     return total_var_explained, allele_count
 
 
