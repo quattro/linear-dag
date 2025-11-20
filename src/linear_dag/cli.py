@@ -317,11 +317,17 @@ def _assoc_scan(args):
             genotypes.shutdown()
             logger.info("Shut down parallel operator")
     else:
+        
+        if args.recompute_ac:
+            max_num_traits = 2 * len(pheno_cols) + len(covar_cols)
+        else:
+            max_num_traits = len(pheno_cols) + len(covar_cols)
+        
         with ParallelOperator.from_hdf5(
             args.linarg_path,
             num_processes=args.num_processes,
             block_metadata=block_metadata,
-            max_num_traits=len(pheno_cols) + len(covar_cols),
+            max_num_traits=max_num_traits,
         ) as genotypes:
             result: pl.LazyFrame = run_gwas(
                 genotypes,
