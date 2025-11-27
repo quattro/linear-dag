@@ -14,6 +14,7 @@ from scipy.sparse import diags
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 from .lineararg import LinearARG, list_blocks, list_iids
+import h5py
 
 FLAGS = {
     "wait": 0,
@@ -26,6 +27,44 @@ FLAGS = {
 }
 assert len(np.unique([val for val in FLAGS.values()])) == len(FLAGS)
 
+
+def _compute_filtered_variant_counts(
+    block_metadata: pl.DataFrame,
+    maf_log10_threshold: float,
+) -> pl.DataFrame:
+    """Compute number of variants per block that meet MAF threshold.
+    
+    Args:
+        block_metadata: DataFrame with block information including threshold_values and threshold_n_variants
+        maf_log10_threshold: log10 of MAF threshold (e.g., -3 for MAF > 0.001)
+    
+    Returns:
+        Updated block_metadata with filtered n_variants
+    """
+    threshold_value = 10 ** maf_log10_threshold
+    
+    if 'threshold_values' not in block_metadata.columns or 'threshold_n_variants' not in block_metadata.columns:
+        raise ValueError(
+            "block_metadata missing threshold_values or threshold_n_variants columns. "
+            "Ensure file was written with save_threshold=True"
+        )
+    
+    filtered_counts = []
+    for row in block_metadata.iter_rows(named=True):
+        threshold_values = row['threshold_values']
+        matches = np.where(threshold_values == threshold_value)[0]
+        if len(matches) == 0:
+            raise ValueError(
+                f"Threshold {threshold_value} not found. "
+                f"Available thresholds: {threshold_values}"
+            )
+        
+        filtered_counts.append(row['threshold_n_variants'][matches[0]])
+    
+    return block_metadata.with_columns(
+        pl.Series('n_variants', filtered_counts)
+    )
+    
 
 @dataclass
 class _SharedArrayHandle:
@@ -341,10 +380,18 @@ class ParallelOperator(LinearOperator):
         hdf5_file: str,
         blocks: list,
         variant_offsets: list,
+        maf_log10_threshold: Optional[float] = None,
     ) -> None:
         """Worker process that loads LDGMs and processes blocks."""
 
         linargs = [LinearARG.read(hdf5_file, block) for block in blocks]
+        
+        if maf_log10_threshold is not None:
+            threshold_value = 10 ** maf_log10_threshold
+            for linarg in linargs:
+                linarg.filter_variants_by_maf(threshold_value)
+                linarg.nonunique_indices = None
+                linarg.calculate_nonunique_indices()
 
         while True:
             while flag.value == FLAGS["wait"]:
@@ -417,7 +464,8 @@ class ParallelOperator(LinearOperator):
         cls,
         hdf5_file: str,
         num_processes: Optional[int] = None,
-        max_num_traits: int = 10,
+        max_num_traits: int = 8,
+        maf_log10_threshold: Optional[int] = None,
         block_metadata: Optional[pl.DataFrame] = None,
     ) -> ParallelOperator:
         """Create a ParallelOperator from a metadata file.
@@ -425,14 +473,23 @@ class ParallelOperator(LinearOperator):
         Args:
             metadata_path: Path to metadata file
             num_processes: Number of processes to use; None -> use all available cores
+            max_num_traits: Width of shared memory array for matmat operations
+            maf_log10_threshold: x s.t. variants with MAF < 10^x are dropped
+            block_metadata: Metadata for blocks to be used; use this to select subset of blocks
 
         Returns:
             ParallelOperator instance
         """
         if block_metadata is None:
             block_metadata = list_blocks(hdf5_file)
-        num_samples = block_metadata["n_samples"][0]
+
+        if maf_log10_threshold is not None:
+            block_metadata = _compute_filtered_variant_counts(
+                block_metadata, maf_log10_threshold
+            )
+
         num_variants = block_metadata["n_variants"].sum()
+        num_samples = block_metadata["n_samples"][0]
         shm_specification={
                 "sample_data": ((max_num_traits, num_samples), np.float32),
                 "variant_data": ((num_variants, max_num_traits), np.float32),
@@ -443,7 +500,8 @@ class ParallelOperator(LinearOperator):
             hdf5_file, 
             num_processes, 
             block_metadata, 
-            shm_specification)
+            shm_specification,
+            maf_log10_threshold)
         manager.start_workers(FLAGS["wait"])
 
         # Get the actual handles from the manager to pass to the Operator instance
