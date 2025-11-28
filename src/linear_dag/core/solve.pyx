@@ -545,18 +545,28 @@ def get_carriers(A: "csc_matrix", variant_indices: np.ndarray, num_samples: long
                                     A.indptr.astype(np.int64), \
                                     variant_indices.astype(np.int64))
 
-    # translate from A indices to sample indices
-    cdef long i
+    # translate from A indices to sample indices and filter out non-sample indices
+    cdef long i, j, k
     cdef long n = A.shape[0]
-    for i in range(len(indices)):
-        indices[i] = n - indices[i] - 1
-        assert indices[i] >= 0
-        assert indices[i] < num_samples
+    cdef long translated_idx
+    
+    j = 0
+    k = 0  # counts sample indices found
+    for i in range(len(indptrs) - 1):
+        while j < indptrs[i + 1]:
+            translated_idx = n - indices[j] - 1
+            assert translated_idx >= 0
+            if translated_idx < num_samples:
+                indices[k] = translated_idx
+                k += 1
+            j += 1
+        indptrs[i + 1] = k
 
     for i in range(num_samples):
         assert A.indptr[n - i - 1] == A.indptr[n - i]
 
-    indices = np.asarray(indices)
+    # Trim indices to only the sample indices we found
+    indices = np.asarray(indices[:k])
     indptrs = np.asarray(indptrs)
     return csc_matrix((np.ones_like(indices), indices, indptrs), shape=(num_samples, len(variant_indices)))
 
