@@ -47,6 +47,10 @@ def randomized_haseman_elston(
     phenotypes = data.select(pheno_cols).collect().to_numpy()
     covariates = data.select(covar_cols).collect().to_numpy()
     yresid, covariates = _prep_for_h2_estimation(left_op, right_op, phenotypes, covariates)
+    N = len(yresid)
+
+    if num_matvecs > N:
+        raise ValueError(f"num_matvecs={num_matvecs} should be << N={N}")
 
     # set up for randomized estimator
     generator = np.random.default_rng(seed=seed)
@@ -63,31 +67,40 @@ def randomized_haseman_elston(
         return omega - covariates @ beta
 
     # se not used atm, but for some trace estimators (eg xtrace, xnystrace) we can compute it
-    N = len(yresid)
     grm_trace, grm_sq_trace, se = estimator(grm, num_matvecs, _resid_sampler)
 
     # compute y_j' K y_j for each y_j \in y
     C = np.sum(grm.matmat(yresid) * yresid, axis=0)
 
+    # compute y_j' y_j for each y_j \in y
+    E = np.sum(yresid * yresid, axis=0)
+
     # construct linear equations to solve
     LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, N]])
-    RHS = np.vstack([C, N * np.ones_like(C)])
+    RHS = np.vstack([C, E])
     solution = np.linalg.solve(LHS, RHS)
 
-    # normalize back to h2g space
-    heritability = solution[0, :] / (solution[0, :] + solution[1, :])
+    # compute the (co)variance of our estimates
+    var_s2g, var_s2e, covariances = _compute_err_variance(grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs)
 
-    s2g_std_err, s2e_std_err = _compute_std_err(grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs)
+    # normalize back to h2g space
+    s2g = solution[0, :]
+    s2e = solution[1, :]
+    heritability = s2g / (s2g + s2e)
+    # approx delta method to compute std err of h2g
+    numer = (s2e**2) * var_s2g + (s2g**2) * var_s2e - 2 * s2g * s2e * covariances
+    denom = (s2g + s2e) ** 4
+    var_h2g = numer / denom
 
     df_result = pl.DataFrame(
         {
             "phenotype": pheno_cols,
-            "s2g": solution[0, :],
-            "s2g.se": s2g_std_err,
-            "s2e": solution[1, :],
-            "s2e.se": s2e_std_err,
+            "s2g": s2g,
+            "s2g.se": np.sqrt(var_s2g),
+            "s2e": s2e,
+            "s2e.se": np.sqrt(var_s2e),
             "h2g": heritability,
-            "h2g.se": np.zeros_like(s2e_std_err),
+            "h2g.se": np.sqrt(var_h2g),
         }
     )
 
@@ -100,7 +113,7 @@ def _prep_for_h2_estimation(
     right_op: LinearOperator,
     phenotypes: np.ndarray,
     covariates: np.ndarray,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     if not np.allclose(covariates[:, 0], 1):
         raise ValueError("First column of covariates should be all-ones")
 
@@ -119,8 +132,6 @@ def _prep_for_h2_estimation(
 
     covariates = left_op.T @ covariates
     phenotypes = left_op.T @ phenotypes
-    if not np.allclose(covariates[:, 0], 1):
-        raise ValueError("First column of covariates should be all-ones")
 
     # Handle missingness
     covariates = impute_missing_with_mean(covariates)
@@ -128,7 +139,7 @@ def _prep_for_h2_estimation(
     num_nonmissing = np.sum(~is_missing, axis=0)
     phenotypes.ravel()[is_missing.ravel()] = 0
 
-    # Residualize phenotypes on covariates
+    # Residualize phenotypes on covariates and standardize
     y_resid = residualize_phenotypes(phenotypes, covariates, is_missing)
     y_resid /= np.sqrt(np.sum(y_resid**2, axis=0) / num_nonmissing)  # ||y_resid||^2 == num_nonmissing
 
@@ -407,26 +418,50 @@ def _xnystrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tupl
     return trace_est, sq_trace_est, {"tr.std.err": trace_std_err, "sq.tr.std.err": sq_trace_std_err}
 
 
-def _compute_std_err(
+def _compute_err_variance(
     grm,
     yresid,
     solutions,
     grm_sq_trace,
     grm_trace,
     num_matvecs,
-):
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     n = yresid.shape[0]
     I = aslinearoperator(identity(n))  # noqa: E741
-    s2g_std_err = []
-    s2e_std_err = []
-    for idx, solution in enumerate(solutions.T):
-        K = grm * solution[0] + I * solution[1]
-        resid = K - I
-        op = resid @ K @ resid
-        term1 = 2 * yresid[:, idx].T @ (op.matvec(yresid[:, idx]))
-        term2 = (solution[0] ** 2) * grm_sq_trace / num_matvecs
-        std_err = np.sqrt(term1 + term2) / (grm_sq_trace - n)
-        s2g_std_err.append(std_err)
-        s2e_std_err.append(np.sqrt(2 * solution[1] ** 2 / (n - 1)))
+    var_s2g = []
+    var_s2e = []
+    covariances = []
+    resid = n * grm - grm_trace * I
+    denom = n * grm_sq_trace - grm_trace**2
+    for idx, (s2g, s2e) in enumerate(solutions.T):
+        V = grm * s2g + I * s2e
+        y = yresid[:, idx]
 
-    return np.array(s2g_std_err), np.array(s2e_std_err)
+        # var[s2g]
+        proj = resid.matvec(y)
+        term1 = 2 * proj.T @ V.matvec(proj)
+        term2 = (s2g**2) * grm_sq_trace / num_matvecs  # variance due to tr(K^2) estimate
+        var_s2g.append((term1 + term2) / denom**2)
+
+        # cov[U, W]
+        tmp = V.matvec(y)
+        covUW_hat = 2 * y.T @ resid.matvec(tmp)  # ≈ Cov(U, W)
+
+        # var[W] via plug-in formula
+        # tr(V^2) = s2g^2 * tr(K^2) + 2 s2g s2e tr(K) + s2e^2 * n
+        trV2 = s2g**2 * grm_sq_trace + 2 * s2g * s2e * grm_trace + s2e**2 * n
+        varW_hat = 2 * trV2
+
+        # var[s2e]
+        var_s2e_i = (
+            (grm_trace**2 / (n**2 * denom**2)) * term1  # from var[U]
+            + varW_hat / (n**2)  # from Var(W)
+            - (2 * grm_trace / (n**2 * denom)) * covUW_hat  # from cov[U, W]
+        )
+        var_s2e.append(var_s2e_i)
+
+        # cov[s2g, s2e]
+        cov_ge = covUW_hat / (denom * n) - (grm_trace / n) * term1 / (denom**2)
+        covariances.append(cov_ge)
+
+    return np.array(var_s2g), np.array(var_s2e), np.array(covariances)

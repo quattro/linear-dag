@@ -25,9 +25,8 @@ from linear_dag.pipeline import (
 from .association.gwas import run_gwas
 from .association.heritability import randomized_haseman_elston
 from .association.prs import run_prs
-from .core.grm_parallel import GRMOperator
 from .core.lineararg import list_blocks, load_variant_info
-from .core.parallel_processing import ParallelOperator
+from .core.parallel_processing import GRMOperator, ParallelOperator
 from .memory_logger import MemoryLogger
 
 title = """                            @@@@
@@ -94,15 +93,20 @@ def _construct_cmd_string(args, parser):
     def _add(name, value, action, args, options, level=1):
         spacer = " " * NUM_SPACE * level
         if isinstance(action, argparse._StoreAction):
-            if action.option_strings:
+            if action.required:
+                args.append(spacer + str(value))
+            elif action.option_strings:
                 if value is not None:
                     if value != action.default:
                         options.append(spacer + f"--{name} {value}")
-                    else:
-                        args.append(spacer + str(value))
         elif isinstance(action, argparse._StoreTrueAction):
             if value:
                 options.append(spacer + f"--{name}")
+        elif isinstance(action, _SplitAction):
+            if value is not None:
+                cmd_style_name = name.replace("_", "-")
+                values = ",".join(value)
+                options.append(spacer + f"--{cmd_style_name} {values}")
 
         return args, options
 
@@ -124,7 +128,6 @@ def _construct_cmd_string(args, parser):
             value = getattr(args, name)
             pos_args, options = _add(name, value, action, pos_args, options, level=1)
 
-    # fmt_args = os.linesep.join(pos_args)
     fmt_options = os.linesep.join(options)
     fmt_sub_args = os.linesep.join(sub_args + sub_options)
 

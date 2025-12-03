@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import time
 import warnings
 
@@ -14,7 +15,6 @@ from scipy.sparse import diags
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 from .lineararg import LinearARG, list_blocks, list_iids
-import h5py
 
 FLAGS = {
     "wait": 0,
@@ -33,38 +33,33 @@ def _compute_filtered_variant_counts(
     maf_log10_threshold: float,
 ) -> pl.DataFrame:
     """Compute number of variants per block that meet MAF threshold.
-    
+
     Args:
         block_metadata: DataFrame with block information including threshold_values and threshold_n_variants
         maf_log10_threshold: log10 of MAF threshold (e.g., -3 for MAF > 0.001)
-    
+
     Returns:
         Updated block_metadata with filtered n_variants
     """
-    threshold_value = 10 ** maf_log10_threshold
-    
-    if 'threshold_values' not in block_metadata.columns or 'threshold_n_variants' not in block_metadata.columns:
+    threshold_value = 10**maf_log10_threshold
+
+    if "threshold_values" not in block_metadata.columns or "threshold_n_variants" not in block_metadata.columns:
         raise ValueError(
             "block_metadata missing threshold_values or threshold_n_variants columns. "
             "Ensure file was written with save_threshold=True"
         )
-    
+
     filtered_counts = []
     for row in block_metadata.iter_rows(named=True):
-        threshold_values = row['threshold_values']
+        threshold_values = row["threshold_values"]
         matches = np.where(threshold_values == threshold_value)[0]
         if len(matches) == 0:
-            raise ValueError(
-                f"Threshold {threshold_value} not found. "
-                f"Available thresholds: {threshold_values}"
-            )
-        
-        filtered_counts.append(row['threshold_n_variants'][matches[0]])
-    
-    return block_metadata.with_columns(
-        pl.Series('n_variants', filtered_counts)
-    )
-    
+            raise ValueError(f"Threshold {threshold_value} not found. " f"Available thresholds: {threshold_values}")
+
+        filtered_counts.append(row["threshold_n_variants"][matches[0]])
+
+    return block_metadata.with_columns(pl.Series("n_variants", filtered_counts))
+
 
 @dataclass
 class _SharedArrayHandle:
@@ -74,7 +69,7 @@ class _SharedArrayHandle:
     lock: Lock
     shape: Tuple[int, ...]
     dtype: Type[np.generic]
-    _np_args: dict # extra args when accessing as an array
+    _np_args: dict  # extra args when accessing as an array
     _shm: shared_memory.SharedMemory = None  # Backing SHM object (only in creator)
     _opened_shm: shared_memory.SharedMemory = None  # Handle in current process
 
@@ -85,7 +80,9 @@ class _SharedArrayHandle:
         return np.ndarray(self.shape, dtype=self.dtype, buffer=self._opened_shm.buf, **self._np_args)
 
     def copy(self) -> _SharedArrayHandle:
-        return _SharedArrayHandle(name=self.name, lock=self.lock, shape=self.shape, dtype=self.dtype, _np_args=self._np_args)
+        return _SharedArrayHandle(
+            name=self.name, lock=self.lock, shape=self.shape, dtype=self.dtype, _np_args=self._np_args
+        )
 
     def close(self) -> None:
         """Close the handle to the shared memory for this process."""
@@ -132,7 +129,9 @@ class _ParallelManager:
             shm = shared_memory.SharedMemory(create=True, size=size)
             lock = Lock()
             # Store the handle, including the raw SHM object for later unlinking
-            self.handles[name] = _SharedArrayHandle(name=shm.name, lock=lock, shape=shape, dtype=dtype, _shm=shm, _np_args={'order': 'F'})
+            self.handles[name] = _SharedArrayHandle(
+                name=shm.name, lock=lock, shape=shape, dtype=dtype, _shm=shm, _np_args={"order": "F"}
+            )
 
     def __enter__(self):
         return self
@@ -316,13 +315,9 @@ class ParallelOperator(LinearOperator):
         if individuals_to_include.ndim == 1:
             individuals_to_include = individuals_to_include.copy().reshape(-1, 1)
         if individuals_to_include.shape[0] != self.n_individuals:
-            raise ValueError(
-                f"individuals_to_include should have size {self.n_individuals} in dim 0."
-            )
+            raise ValueError(f"individuals_to_include should have size {self.n_individuals} in dim 0.")
         if individuals_to_include.dtype != np.bool_:
-            raise TypeError(
-                f"individuals_to_include should be of type bool, not {individuals_to_include.dtype}."
-            )
+            raise TypeError(f"individuals_to_include should be of type bool, not {individuals_to_include.dtype}.")
         result = np.empty((self.shape[1], individuals_to_include.shape[1]), dtype=np.int32)
 
         # Process max_num_traits columns at a time
@@ -331,7 +326,9 @@ class ParallelOperator(LinearOperator):
             self._num_traits.value = end - start
 
             with self._sample_data_handle as sample_data:
-                sample_data[: end - start, :self.n_individuals] = individuals_to_include[:, start:end].astype(np.float32).T
+                sample_data[: end - start, : self.n_individuals] = (
+                    individuals_to_include[:, start:end].astype(np.float32).T
+                )
             self._manager.start_workers(FLAGS["num_heterozygotes"])
             self._manager.await_workers()
 
@@ -340,7 +337,6 @@ class ParallelOperator(LinearOperator):
 
         return result
 
-        
     def _matvec(self, x: np.ndarray) -> np.ndarray:
         return self._matmat(x.reshape(-1, 1))
 
@@ -385,9 +381,9 @@ class ParallelOperator(LinearOperator):
         """Worker process that loads LDGMs and processes blocks."""
 
         linargs = [LinearARG.read(hdf5_file, block) for block in blocks]
-        
+
         if maf_log10_threshold is not None:
-            threshold_value = 10 ** maf_log10_threshold
+            threshold_value = 10**maf_log10_threshold
             for linarg in linargs:
                 linarg.filter_variants_by_maf(threshold_value)
                 linarg.nonunique_indices = None
@@ -408,7 +404,7 @@ class ParallelOperator(LinearOperator):
             else:
                 flag.value = FLAGS["error"]
                 raise ValueError(f"Unexpected flag value: {flag.value}; possible: {FLAGS}")
-            
+
             with handles["sample_data"] as sample_data, handles["variant_data"] as variant_data:
                 sample_data_traits = sample_data[: num_traits.value, :].T
                 sample_lock = handles["sample_data"].lock
@@ -450,14 +446,15 @@ class ParallelOperator(LinearOperator):
         sample_lock: Lock,
     ) -> None:
         if linarg.n_individuals is None:
-            raise ValueError("Cannot compute num_heterozygotes:",
-                            "linear ARG lacks individual nodes. Run add_individual_nodes first.")
+            raise ValueError(
+                "Cannot compute num_heterozygotes:",
+                "linear ARG lacks individual nodes. Run add_individual_nodes first.",
+            )
         include = sample_data[: linarg.n_individuals, :]
         for t in range(include.shape[1]):
             col = include[:, t]
             counts = linarg.number_of_heterozygotes(col.astype(np.bool_))
             variant_data[:, t] = counts.astype(variant_data.dtype, copy=False)
-    
 
     @classmethod
     def from_hdf5(
@@ -484,24 +481,18 @@ class ParallelOperator(LinearOperator):
             block_metadata = list_blocks(hdf5_file)
 
         if maf_log10_threshold is not None:
-            block_metadata = _compute_filtered_variant_counts(
-                block_metadata, maf_log10_threshold
-            )
+            block_metadata = _compute_filtered_variant_counts(block_metadata, maf_log10_threshold)
 
         num_variants = block_metadata["n_variants"].sum()
         num_samples = block_metadata["n_samples"][0]
-        shm_specification={
-                "sample_data": ((max_num_traits, num_samples), np.float32),
-                "variant_data": ((num_variants, max_num_traits), np.float32),
-            }
+        shm_specification = {
+            "sample_data": ((max_num_traits, num_samples), np.float32),
+            "variant_data": ((num_variants, max_num_traits), np.float32),
+        }
 
         manager = _ManagerFactory.create_manager(
-            cls._worker,
-            hdf5_file, 
-            num_processes, 
-            block_metadata, 
-            shm_specification,
-            maf_log10_threshold)
+            cls._worker, hdf5_file, num_processes, block_metadata, shm_specification, maf_log10_threshold
+        )
         manager.start_workers(FLAGS["wait"])
 
         # Get the actual handles from the manager to pass to the Operator instance
@@ -575,6 +566,9 @@ class GRMOperator(LinearOperator):
             )
         result = np.empty((self.shape[0], k), dtype=np.float32)
 
+        with self._output_data_handle as output_data:
+            output_data.fill(0)
+
         # Process max_num_traits columns at a time
         for start in range(0, k, self._max_num_traits):
             end = min(start + self._max_num_traits, k)
@@ -582,6 +576,7 @@ class GRMOperator(LinearOperator):
             self._num_traits.value = end - start
             with self._input_data_handle as input_data:
                 input_data[: end - start, :] = x[:, start:end].T
+
             self._manager.start_workers(FLAGS["matmat"])
             self._manager.await_workers()
             with self._output_data_handle as output_data:
@@ -591,7 +586,7 @@ class GRMOperator(LinearOperator):
 
     def _rmatmat(self, x: np.ndarray):
         return self._matmat(x.T).T
-        
+
     def _matvec(self, x: np.ndarray) -> np.ndarray:
         return self._matmat(x.reshape(-1, 1))
 
@@ -624,7 +619,7 @@ class GRMOperator(LinearOperator):
             else:
                 flag.value = FLAGS["error"]
                 raise ValueError(f"Unexpected flag value: {flag.value}; possible: {FLAGS}")
-            
+
             with handles["input_data"] as input_data, handles["output_data"] as output_data:
                 output_lock = handles["output_data"].lock
                 input_arr = input_data[: num_traits.value, :].T
@@ -632,7 +627,7 @@ class GRMOperator(LinearOperator):
                 for linarg in linargs:
                     func(linarg, input_arr, output_arr, output_lock, alpha_value)
             flag.value = FLAGS["wait"]
-    
+
     @classmethod
     def _worker_matmat(
         cls,
@@ -642,9 +637,10 @@ class GRMOperator(LinearOperator):
         output_lock: Lock,
         alpha: float,
     ) -> None:
+        _, num_variants = linarg.shape
         pq = linarg.allele_frequencies * (1 - linarg.allele_frequencies)
         K = aslinearoperator(diags(pq ** (1 + alpha)))
-        result = linarg.normalized @ K @ linarg.normalized.T @ input_arr
+        result = (linarg.normalized @ K @ linarg.normalized.T @ input_arr) / num_variants
         with output_lock:
             output_arr += result
 
@@ -670,18 +666,15 @@ class GRMOperator(LinearOperator):
         if block_metadata is None:
             block_metadata = list_blocks(hdf5_file)
         num_samples = block_metadata["n_samples"][0]
-        shm_specification={
-                "input_data": ((max_num_traits, num_samples), np.float32),
-                "output_data": ((max_num_traits, num_samples), np.float32),
-            }
+        shm_specification = {
+            "input_data": ((max_num_traits, num_samples), np.float32),
+            "output_data": ((max_num_traits, num_samples), np.float32),
+        }
 
         alpha_value = Value("d", alpha)
-        manager = _ManagerFactory.create_manager(cls._worker, 
-                            hdf5_file, 
-                            num_processes, 
-                            block_metadata, 
-                            shm_specification,
-                            alpha)
+        manager = _ManagerFactory.create_manager(
+            cls._worker, hdf5_file, num_processes, block_metadata, shm_specification, alpha
+        )
         manager.start_workers(FLAGS["wait"])
 
         # Get the actual handles from the manager to pass to the Operator instance
@@ -703,7 +696,6 @@ class GRMOperator(LinearOperator):
 
 
 class _ManagerFactory:
-    
     @classmethod
     def _split_blocks(
         cls, metadata: pl.DataFrame, num_processes: int
@@ -727,7 +719,6 @@ class _ManagerFactory:
         block_ranges = [(start, end) for start, end in zip(block_indices[:-1], block_indices[1:], strict=False)]
         return block_ranges
 
-    
     @classmethod
     def create_manager(
         cls,
@@ -758,12 +749,6 @@ class _ManagerFactory:
             for i in range(num_processes):
                 manager.add_process(
                     target=worker,
-                    args=(
-                        manager.flags[i],
-                        hdf5_file,
-                        process_blocks[i],
-                        block_offsets[i],
-                        *args
-                    ),
+                    args=(manager.flags[i], hdf5_file, process_blocks[i], block_offsets[i], *args),
                 )
         return manager
