@@ -81,7 +81,10 @@ title = """                            @@@@
 
 
 def _construct_cmd_string(args, parser):
-    """internal helper function to construct a visually pleasing string of the command line arguments"""
+    """internal helper function to construct a visually pleasing string of the command line arguments.
+    it relies on a few class definitions internal to argparse and may be brittle in the future, but likely years on
+    from now...
+    """
 
     pos_args = []
     options = []
@@ -98,7 +101,8 @@ def _construct_cmd_string(args, parser):
             elif action.option_strings:
                 if value is not None:
                     if value != action.default:
-                        options.append(spacer + f"--{name} {value}")
+                        cmd_style_name = name.replace("_", "-")
+                        options.append(spacer + f"--{cmd_style_name} {value}")
         elif isinstance(action, argparse._StoreTrueAction):
             if value:
                 options.append(spacer + f"--{name}")
