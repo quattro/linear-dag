@@ -1,6 +1,7 @@
 import gzip
 import os
 import time
+import subprocess
 
 from os import PathLike
 from typing import Optional, Union
@@ -69,11 +70,326 @@ def compress_vcf(
     logger.info("Writing to disk")
     linarg.write(output_h5, block_info=block_info, save_threshold=True)
     logger.info("Done!")
+    
+
+def msc_step0(
+    vcf_metadata: Union[str, PathLike],
+    large_partition_size: int,
+    n_small_blocks: int,
+    out: Union[str, PathLike],
+    flip_minor_alleles: bool = False,
+    keep: Optional[Union[str, PathLike]] = None,
+    maf: Optional[float] = None,
+    remove_indels: bool = False,
+    sex_path: Optional[Union[str, PathLike]] = None,
+    mount_point: Optional[Union[str, PathLike]] = None,
+):
+    """
+    Partitions chromosomes into large blocks of size large_partition_size and smaller blocks of
+    size partition_size / n_small_blocks. Output jobs_metadata.txt containing linear ARG parameters
+    required for steps 1-5 in the multi-step compress pipeline.
+    """
+    os.makedirs(out, exist_ok=True)
+    
+    vcf_meta = pl.read_csv(vcf_metadata, separator=" ")
+    # Initialize with proper dtypes
+    job_meta = pl.DataFrame({
+        "small_job_id": pl.Series(dtype=pl.Int64),
+        "large_job_id": pl.Series(dtype=pl.Int64),
+        "small_region": pl.Series(dtype=pl.Utf8),
+        "large_region": pl.Series(dtype=pl.Utf8),
+        "vcf_path": pl.Series(dtype=pl.Utf8)
+    })
+    
+    n_large_jobs = 0
+    for chrom in vcf_meta["chr"].unique():
+        chrom_meta = vcf_meta.filter(pl.col("chr") == chrom)
+        
+        # first_coord = chrom_meta["first_var_coord"].item()
+        # last_coord = chrom_meta["last_var_coord"].item()
+        
+        vcf_path = chrom_meta["vcf_path"].item()
+        
+        first_coord = int(subprocess.check_output(
+            f"bcftools query -f '%POS\\n' \"{vcf_path}\" | head -n 1", 
+            shell=True, text=True
+        ).strip())
+        
+        last_coord = int(subprocess.check_output(
+            f"bcftools query -f '%POS\\n' \"{vcf_path}\" | tail -n 1", 
+            shell=True, text=True
+        ).strip())
+        
+        large_partitions = get_partitions(first_coord, last_coord, large_partition_size)
+        small_partition_size = int(large_partition_size / n_small_blocks)
+        small_partitions = [get_partitions(start, end, small_partition_size) 
+                          for start, end in large_partitions]
+        
+        for i, (large_start, large_end) in enumerate(large_partitions):
+            for small_start, small_end in small_partitions[i]:
+                new_row = pl.DataFrame({
+                    "small_job_id": [job_meta.height],
+                    "large_job_id": [n_large_jobs],
+                    "small_region": [f"{chrom}:{small_start}-{small_end}"],
+                    "large_region": [f"{chrom}:{large_start}-{large_end}"],
+                    "vcf_path": [vcf_path]
+                })
+                job_meta = pl.concat([job_meta, new_row])
+            n_large_jobs += 1
+    
+    params = {
+        "large_partition_size": str(large_partition_size),
+        "n_small_blocks": str(n_small_blocks),
+        "out": str(out),
+        "flip_minor_alleles": str(flip_minor_alleles),
+        "keep": str(keep),
+        "maf": str(maf),
+        "remove_indels": str(remove_indels),    
+        "sex_path": str(sex_path),
+        "mount_point": str(mount_point),
+    }
+
+    job_meta.write_parquet(f"{out}/job_metadata.parquet", metadata=params)
+
+
+def msc_step1(
+    jobs_metadata: Union[str, PathLike],
+    small_job_id: int,
+):
+    job_meta = pl.read_parquet(jobs_metadata)
+    job = job_meta.filter(pl.col("small_job_id") == small_job_id)
+    vcf_path = job["vcf_path"].item()
+    region = job["small_region"].item()
+    
+    params = pl.read_parquet_metadata(jobs_metadata)
+    flip_minor_alleles = params['flip_minor_alleles']
+    keep = None if params['keep'] == "None" else params['keep']
+    maf = float(params['maf'])
+    remove_indels = True if params['remove_indels'] == "True" else False
+    sex_path = None if params['sex_path'] == "None" else params['sex_path']
+    out = params['out']
+
+    make_genotype_matrix(
+        vcf_path=vcf_path,
+        out=out,
+        region=region,
+        partition_number=small_job_id,
+        flip_minor_alleles=flip_minor_alleles,
+        samples_path=keep,
+        maf_filter=maf,
+        remove_indels=remove_indels,
+        sex_path=sex_path,
+    )
+    
+    run_forward_backward(out, "", f"{small_job_id}_{region}")  
+    
+def msc_step2(
+    jobs_metadata: Union[str, PathLike],
+    small_job_id: int,
+):
+    job_meta = pl.read_parquet(jobs_metadata)
+    job = job_meta.filter(pl.col("small_job_id") == small_job_id)
+    region = job["small_region"].item()
+    
+    params = pl.read_parquet_metadata(jobs_metadata)
+    mount_point = params['mount_point']
+    out = params['out']
+    
+    reduction_union_recom(out, mount_point, f"{small_job_id}_{region}") 
+
+
+def msc_step3(
+    jobs_metadata: Union[str, PathLike],
+    large_job_id: int,
+):
+    job_meta = pl.read_parquet(jobs_metadata)
+    jobs = job_meta.filter(pl.col("large_job_id") == large_job_id)
+    large_region = jobs["large_region"].to_list()[0]
+    
+    params = pl.read_parquet_metadata(jobs_metadata)
+    mount_point = params['mount_point']
+    out = params['out']
+    
+    # check that all brick graphs have been generated before merging
+    partition_identifiers = []
+    for row in jobs.iter_rows(named=True):
+        small_job_id = row['small_job_id']
+        small_region = row['small_region']
+        partition_identifier = f"{small_job_id}_{small_region}"
+        if not os.path.exists(f"{mount_point}{out}/brick_graph_partitions/{partition_identifier}.h5"):
+            raise FileNotFoundError(f"{mount_point}{out}/brick_graph_partitions/{partition_identifier}.h5 does not exist. Please run step 2 on all partitions before step 3.")
+        with h5py.File(f"{mount_point}{out}/brick_graph_partitions/{partition_identifier}.h5", "r") as f:
+            is_empty = f.attrs.get("is_empty", False)
+        if is_empty:
+            continue
+        partition_identifiers.append(partition_identifier)
+    large_partition_identifier = f"{large_job_id}_{large_region}"
+    merge(out, mount_point, partition_identifiers, large_partition_identifier)    
+
+
+def msc_step4(
+    jobs_metadata: Union[str, PathLike],
+    large_job_id: int,
+):
+    job_meta = pl.read_parquet(jobs_metadata)
+    jobs = job_meta.filter(pl.col("large_job_id") == large_job_id)
+    large_region = jobs["large_region"].to_list()[0]
+    large_partition_identifier = f'{large_job_id}_{large_region}'
+    
+    params = pl.read_parquet_metadata(jobs_metadata)
+    mount_point = params['mount_point']
+    out = params['out']
+    
+    partition_identifiers = []
+    for row in jobs.iter_rows(named=True):
+        small_job_id = row['small_job_id']
+        small_region = row['small_region']
+        p_id = f"{small_job_id}_{small_region}"
+        if not os.path.exists(f"{mount_point}{out}/brick_graph_partitions/{p_id}.h5"):
+            raise FileNotFoundError(f"{mount_point}{out}/brick_graph_partitions/{p_id}.h5 does not exist. Please run step 2 on all partitions before step 4.")
+        with h5py.File(f"{mount_point}{out}/brick_graph_partitions/{p_id}.h5", "r") as f:
+            is_empty = f.attrs.get("is_empty", False)
+        if is_empty:
+            continue
+        partition_identifiers.append(p_id)
+            
+    add_individuals_to_linarg(out, mount_point, partition_identifiers, large_partition_identifier)
+  
+    
+def msc_step5(
+    jobs_metadata: Union[str, PathLike],
+):
+    """
+    Merge multiple LinearARG HDF5 files into a single file.
+    
+    Args:
+        jobs_metadata: Path to the jobs metadata parquet file
+    """
+    params = pl.read_parquet_metadata(jobs_metadata)
+    mount_point = params['mount_point']
+    out = params['out']
+    
+    os.makedirs(f"{out}/logs", exist_ok=True)
+    logger = MemoryLogger(__name__, log_file=f"{out}/logs/msc_step5.log")
+    logger.info("Starting merge of LinearARG partitions")
+    
+
+    job_meta = pl.read_parquet(jobs_metadata)
+    
+    job_meta = job_meta.filter(pl.col("large_job_id") < 2) # for testing! delete later!!!
+
+    
+    partition_identifiers = set(
+        f"{i}_{region}" 
+        for i, region in zip(
+            job_meta["large_job_id"].to_list(), 
+            job_meta["large_region"].to_list()
+        )
+    )
+        
+    params = pl.read_parquet_metadata(jobs_metadata)
+    mount_point = params['mount_point']
+    out = params['out']
+    
+    final_merge(out, mount_point, partition_identifiers, logger)
+    if os.path.exists(f"{mount_point}{out}/individual_linear_args/"):
+        final_merge(out, mount_point, partition_identifiers, logger, individual=True)
+
+
+def final_merge(
+    out,
+    mount_point,
+    partition_identifiers,
+    logger,
+    individual=False,
+):
+     # check that all linear ARGs have been inferred and are correct
+    for part_id in partition_identifiers:
+        stats_path = f"{mount_point}{out}/linear_args/{part_id}_stats.txt"
+        if not os.path.exists(stats_path):
+            raise FileNotFoundError(
+                f"Stats file not found: {stats_path}. "
+                "Please run step 4 on all partitions before step 5."
+            )
+        if not is_allele_count_correct(stats_path):
+            raise ValueError(f"Allele counts do not match for partition {part_id}.")
+
+    if individual:
+        output_path = f"{out}/linear_arg_individual.h5"
+    else:
+        output_path = f"{out}/linear_arg.h5"
+    logger.info(f"Merging {len(partition_identifiers)} partitions into {output_path}")
+    with h5py.File(output_path, "w") as merged:
+        iids_saved = False
+        
+        for part_id in partition_identifiers:
+            if individual:
+                src_path = f"{mount_point}{out}/individual_linear_args/{part_id}.h5"
+            else:
+                src_path = f"{mount_point}{out}/linear_args/{part_id}.h5"
+            # logger.debug(f"Processing partition: {part_id}")
+            
+            with h5py.File(src_path, "r") as src:
+                # handle iids specially
+                if not iids_saved and 'iids' in src:
+                    merged.create_dataset(
+                        'iids', 
+                        data=src['iids'][:],
+                        compression='gzip',
+                        shuffle=True
+                    )
+                    iids_saved = True
+                
+                # Copy everything except 'iids' using the recursive function
+                for key in src.keys():
+                    if key == 'iids':
+                        continue
+                    
+                    if key not in merged:
+                        merged.create_group(key)
+                    copy_h5_group(src[key], merged[key])
+        
+        if not iids_saved:
+            raise ValueError("No 'iids' dataset found in any of the input files")
+    logger.info("Successfully merged all partitions")
+    
+
+
+def copy_h5_group(src_group, dest_group):
+    """Recursively copy all datasets and groups from src_group to dest_group"""
+    for key in src_group.keys():
+        if isinstance(src_group[key], h5py.Dataset):
+            if key in dest_group:
+                del dest_group[key]  # Remove if exists to avoid conflicts
+            src_group.copy(key, dest_group, name=key)
+        elif isinstance(src_group[key], h5py.Group):
+            # Recursively copy subgroups
+            if key not in dest_group:
+                dest_group.create_group(key)
+            copy_h5_group(src_group[key], dest_group[key])
+    
+    # Copy attributes
+    for attr_key, attr_val in src_group.attrs.items():
+        dest_group.attrs[attr_key] = attr_val
+    
+    
+
+def get_partitions(interval_start, interval_end, partition_size):
+    """
+    Returns a list of (start, end) tuples representing partitions of the interval [interval_start, interval_end]
+    where start and end are inclusive.
+    """
+    num_partitions = int((interval_end - interval_start + 1) / partition_size)
+    ticks = np.linspace(interval_start, interval_end+1, num_partitions+1).astype(int)
+    ends = ticks[1:] - 1
+    starts = ticks[:-1]
+    intervals = [(start, end) for start,end in zip(starts, ends)]
+    return intervals 
 
 
 def make_genotype_matrix(
     vcf_path: Union[str, PathLike],
-    linarg_dir: Union[str, PathLike],
+    out: Union[str, PathLike],
     region: str,
     partition_number: int,
     phased: bool = True,
@@ -86,11 +402,11 @@ def make_genotype_matrix(
     """
     From a vcf file, save the genotype matrix and variant metadata for the given region.
     """
-    os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
-    os.makedirs(f"{linarg_dir}/variant_metadata/", exist_ok=True)
-    os.makedirs(f"{linarg_dir}/genotype_matrices/", exist_ok=True)
+    os.makedirs(f"{out}/logs/", exist_ok=True)
+    os.makedirs(f"{out}/variant_metadata/", exist_ok=True)
+    os.makedirs(f"{out}/genotype_matrices/", exist_ok=True)
 
-    logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_number}_{region}_make_genotype_matrix.log")
+    logger = MemoryLogger(__name__, log_file=f"{out}/logs/{partition_number}_{region}_make_genotype_matrix.log")
 
     if samples_path is not None:
         samples = load_sample_ids(samples_path)
@@ -117,6 +433,12 @@ def make_genotype_matrix(
     )
     if genotypes is None:
         logger.info("No variants found")
+        with h5py.File(f"{out}/genotype_matrices/{partition_number}_{region}.h5", "w") as f:
+            f.attrs["is_empty"] = True
+        
+        with open(f"{out}/variant_metadata/{partition_number}_{region}.txt", "w") as f:
+            f.write("# No variants found in this region\n")
+        
         return None
     
     if phased:
@@ -125,7 +447,8 @@ def make_genotype_matrix(
     t2 = time.time()
     logger.info(f"vcf to sparse matrix completed in {np.round(t2 - t1, 3)} seconds")
     logger.info("Saving genotype matrix and variant metadata")
-    with h5py.File(f"{linarg_dir}/genotype_matrices/{partition_number}_{region}.h5", "w") as f:
+    
+    with h5py.File(f"{out}/genotype_matrices/{partition_number}_{region}.h5", "w") as f:
         f.create_dataset("shape", data=genotypes.shape, compression="gzip", shuffle=True)
         f.create_dataset("indptr", data=genotypes.indptr, compression="gzip", shuffle=True)
         f.create_dataset("indices", data=genotypes.indices, compression="gzip", shuffle=True)
@@ -134,20 +457,37 @@ def make_genotype_matrix(
         f.create_dataset("iids", data=iids, compression="gzip", shuffle=True)
         if sex_path is not None:
             f.create_dataset("sex", data=sex, compression="gzip", shuffle=True)
-    v_info.write_csv(f"{linarg_dir}/variant_metadata/{partition_number}_{region}.txt", separator=" ")
+        f.attrs["is_empty"] = False
+    
+    v_info.write_csv(f"{out}/variant_metadata/{partition_number}_{region}.txt", separator=" ")
 
 
-def run_forward_backward(linarg_dir, load_dir, partition_identifier):
+def run_forward_backward(out, mount_point, partition_identifier):
     """
     Run the forward and backward brick graph algorithms on the genotype matrix.
+    
+    Args:
+        out: Output directory
+        mount_point: Mount point for cloud storage (empty string if local)
+        partition_identifier: Identifier for the partition being processed
     """
-    os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
-    os.makedirs(f"{linarg_dir}/forward_backward_graphs/", exist_ok=True)
+    os.makedirs(f"{out}/logs/", exist_ok=True)
+    os.makedirs(f"{out}/forward_backward_graphs/", exist_ok=True)
 
-    logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_identifier}_forward_backward.log")
+    logger = MemoryLogger(__name__, log_file=f"{out}/logs/{partition_identifier}_forward_backward.log")
     logger.info("Loading genotype matrix")
     t1 = time.time()
-    with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.h5", "r") as f:
+    with h5py.File(f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5", "r") as f:
+        is_empty = f.attrs.get("is_empty", False)
+        if is_empty:
+            with h5py.File(f"{out}/forward_backward_graphs/{partition_identifier}_forward_graph.h5", "w") as f:
+                f.attrs["is_empty"] = True
+            with h5py.File(f"{out}/forward_backward_graphs/{partition_identifier}_backward_graph.h5", "w") as f:
+                f.attrs["is_empty"] = True
+            with open(f"{out}/forward_backward_graphs/{partition_identifier}_sample_indices.txt", "w") as f:
+                f.write("# No variants found in this region\n")
+            logger.info("Genotype matrix is empty")
+            return None
         genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
     t2 = time.time()
     logger.info(f"Genotype matrix loaded in {np.round(t2 - t1, 3)} seconds")
@@ -157,36 +497,41 @@ def run_forward_backward(linarg_dir, load_dir, partition_identifier):
         genotypes,
         add_samples=True,
         save_to_disk=True,
-        out=f"{linarg_dir}/forward_backward_graphs/{partition_identifier}",
+        out=f"{out}/forward_backward_graphs/{partition_identifier}",
     )
-    np.savetxt(f"{linarg_dir}/forward_backward_graphs/{partition_identifier}_sample_indices.txt", sample_indices)
+    np.savetxt(f"{out}/forward_backward_graphs/{partition_identifier}_sample_indices.txt", sample_indices)
     t4 = time.time()
     logger.info(f"Forward and backward brick graph algorithms completed in {np.round(t4 - t3, 3)} seconds")
 
 
-def reduction_union_recom(linarg_dir, load_dir, partition_identifier):
+def reduction_union_recom(out, mount_point, partition_identifier):
     """
     Compute the transitive reduction of the union of the forward and backward graphs
     and find recombinations to obtain the brick graph.
     """
-    os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
-    os.makedirs(f"{linarg_dir}/brick_graph_partitions/", exist_ok=True)
+    os.makedirs(f"{out}/logs/", exist_ok=True)
+    os.makedirs(f"{out}/brick_graph_partitions/", exist_ok=True)
 
-    logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_identifier}_reduction_union_recom.log")
+    logger = MemoryLogger(__name__, log_file=f"{out}/logs/{partition_identifier}_reduction_union_recom.log")
 
     logger.info("Loading genotypes, forward and backward graphs, and sample indices")
     t1 = time.time()
-    with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.h5", "r") as f:
+    with h5py.File(f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5", "r") as f:
+        is_empty = f.attrs.get("is_empty", False)
+        if is_empty:
+            with h5py.File(f"{out}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
+                f.attrs["is_empty"] = True
+            return None
         genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
     n, m = genotypes.shape
     forward_graph = read_graph_from_disk(
-        f"{load_dir}{linarg_dir}/forward_backward_graphs/{partition_identifier}_forward_graph.h5"
+        f"{mount_point}{out}/forward_backward_graphs/{partition_identifier}_forward_graph.h5"
     )
     backward_graph = read_graph_from_disk(
-        f"{load_dir}{linarg_dir}/forward_backward_graphs/{partition_identifier}_backward_graph.h5"
+        f"{mount_point}{out}/forward_backward_graphs/{partition_identifier}_backward_graph.h5"
     )
     sample_indices = np.loadtxt(
-        f"{load_dir}{linarg_dir}/forward_backward_graphs/{partition_identifier}_sample_indices.txt"
+        f"{mount_point}{out}/forward_backward_graphs/{partition_identifier}_sample_indices.txt"
     )
     t2 = time.time()
     logger.info(f"Loaded in {np.round(t2 - t1, 3)} seconds")
@@ -213,7 +558,7 @@ def reduction_union_recom(linarg_dir, load_dir, partition_identifier):
     adj_mat = recom.to_csc()
 
     logger.info("Saving brick graph")
-    with h5py.File(f"{linarg_dir}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
+    with h5py.File(f"{out}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
         f.attrs["n"] = adj_mat.shape[0]
         f.create_dataset("indptr", data=adj_mat.indptr, compression="gzip", shuffle=True)
         f.create_dataset("indices", data=adj_mat.indices, compression="gzip", shuffle=True)
@@ -227,17 +572,17 @@ def reduction_union_recom(linarg_dir, load_dir, partition_identifier):
     logger.info(f"Stats - n: {n}, m: {m}, geno_nnz: {geno_nnz}, brickgraph_nnz: {adj_mat.nnz}, nnz_ratio: {nnz_ratio}")
 
 
-def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
+def infer_brick_graph(out, mount_point, partition_identifier):
     """
     From a genotype matrix, infer the brick graph and find recombinations.
     """
-    os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
-    os.makedirs(f"{linarg_dir}/brick_graph_partitions/", exist_ok=True)
+    os.makedirs(f"{out}/logs/", exist_ok=True)
+    os.makedirs(f"{out}/brick_graph_partitions/", exist_ok=True)
 
-    logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/{partition_identifier}_infer_brick_graph.log")
+    logger = MemoryLogger(__name__, log_file=f"{out}/logs/{partition_identifier}_infer_brick_graph.log")
     logger.info("Loading genotype matrix")
     t1 = time.time()
-    with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{partition_identifier}.h5", "r") as f:
+    with h5py.File(f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5", "r") as f:
         genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
     n, m = genotypes.shape
     t2 = time.time()
@@ -254,7 +599,7 @@ def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
     adj_mat = recom.to_csc()
 
     logger.info("Saving brick graph")
-    with h5py.File(f"{linarg_dir}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
+    with h5py.File(f"{out}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
         f.attrs["n"] = adj_mat.shape[0]
         f.create_dataset("indptr", data=adj_mat.indptr, compression="gzip", shuffle=True)
         f.create_dataset("indices", data=adj_mat.indices, compression="gzip", shuffle=True)
@@ -268,23 +613,20 @@ def infer_brick_graph(linarg_dir, load_dir, partition_identifier):
     logger.info(f"Stats - n: {n}, m: {m}, geno_nnz: {geno_nnz}, brickgraph_nnz: {adj_mat.nnz}, nnz_ratio: {nnz_ratio}")
 
 
-def merge(linarg_dir, load_dir):
+def merge(out, mount_point, partition_identifiers, partition_identifier):
     """
     Merged partitioned brick graphs, find recombinations, and linearize.
     """
 
-    os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
+    os.makedirs(f"{out}/logs/", exist_ok=True)
+    os.makedirs(f"{out}/linear_args/", exist_ok=True)
 
-    logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/merge.log")
+    logger = MemoryLogger(__name__, log_file=f"{out}/logs/merge.log")
     logger.info("Merging brick graphs")
     t1 = time.time()
-    if not os.path.exists(f"{load_dir}{linarg_dir}/brick_graph_partitions"):
-        raise ValueError(
-            f"Path '{load_dir}{linarg_dir}/brick_graph_partitions' does not exist! Please provide valid path."
-        )
 
     merged_graph, variant_indices, num_samples, index_mapping = merge_brick_graphs(
-        f"{load_dir}{linarg_dir}/brick_graph_partitions"
+        f"{mount_point}{out}/brick_graph_partitions", partition_identifiers
     )
     t2 = time.time()
     logger.info(f"Brick graphs merged in {np.round(t2 - t1, 3)} seconds")
@@ -303,18 +645,15 @@ def merge(linarg_dir, load_dir):
     sample_indices = np.arange(num_samples)
 
     logger.info("Reading variant metadata and flip")
-    files = os.listdir(f"{load_dir}{linarg_dir}/variant_metadata/")
-    ind_arr = np.array([int(f.split("_")[0]) for f in files])
-    order = ind_arr.argsort()
-    files = np.array(files)[order].tolist()  # sort files by index
-    df_list = [pl.read_csv(f"{load_dir}{linarg_dir}/variant_metadata/{f}", separator=" ") for f in files]
+    
+    df_list = [pl.read_csv(f"{mount_point}{out}/variant_metadata/{p_id}.txt", separator=" ") for p_id in partition_identifiers]
     df = pl.concat(df_list)
     var_info = df.lazy()
     flip = []
     iids = None
     sex = None
-    for file in files:
-        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{file[:-3]}h5", "r") as f:
+    for p_id in partition_identifiers:
+        with h5py.File(f"{mount_point}{out}/genotype_matrices/{p_id}.h5", "r") as f:
             flip_partition = list(f["flip"][:])
             if iids is None:
                 iids = [iid.decode('utf-8') for iid in list(f["iids"][:])]
@@ -332,46 +671,36 @@ def merge(linarg_dir, load_dir):
     linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), variants=var_info, sex=sex, iids=iids)
     linarg.calculate_nonunique_indices()
     logger.info("Saving linear ARG")
-
-    # pull block info before saving
-    block = (
-        var_info.select(
-            [
-                pl.col("CHROM").first().alias("chrom"),
-                pl.col("POS").min().alias("start"),
-                pl.col("POS").max().alias("end"),
-            ]
-        )
-        .collect()
-        .to_dicts()[0]
-    )
-    linarg.write(f"{linarg_dir}/linear_arg", block_info=block, save_threshold=True)
+    
+    block = {
+        "chrom": partition_identifier.split("_")[1].split(":")[0],
+        "start": partition_identifier.split("_")[1].split(":")[1].split("-")[0],
+        "end": partition_identifier.split("_")[1].split(":")[1].split("-")[1],
+    }
+    
+    linarg.write(f"{out}/linear_args/{partition_identifier}.h5", block_info=block, save_threshold=True)
     logger.info("Computing linear ARG stats")
-    get_linarg_stats(linarg_dir, load_dir, linarg)
+    get_linarg_stats(out, mount_point, partition_identifiers, partition_identifier, linarg)
 
     return
 
 
-def get_linarg_stats(linarg_dir, load_dir, linarg=None):
+def get_linarg_stats(out, mount_point, partition_identifiers, partition_identifier, linarg=None):
     """
     Get stats from linear ARG.
     """
     if linarg is None:
-        linarg = LinearARG.read(f"{linarg_dir}/linear_arg.h5")
+        linarg = LinearARG.read(f"{mount_point}{out}/linear_args/{partition_identifier}.h5", block=partition_identifier.split("_")[1])
 
     linarg.flip = np.zeros(linarg.shape[1], dtype=bool)
 
     v = np.ones(linarg.shape[0])
     allele_count_from_linarg = v @ linarg
-
-    files = os.listdir(f"{load_dir}{linarg_dir}/genotype_matrices/")
-    ind_arr = np.array([int(f.split("_")[0]) for f in files])
-    order = ind_arr.argsort()
-    files = np.array(files)[order].tolist()  # sort files by index
+    
     genotypes_nnz = 0
     allele_counts = []
-    for f in files:
-        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{f}", "r") as f:
+    for p_id in partition_identifiers:
+        with h5py.File(f"{mount_point}{out}/genotype_matrices/{p_id}.h5", "r") as f:
             genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
 
         genotypes_nnz += np.sum(
@@ -394,7 +723,7 @@ def get_linarg_stats(linarg_dir, load_dir, linarg=None):
         np.all(allele_counts_from_genotype == allele_count_from_linarg),
     ]
     stats = [str(x) for x in stats]
-    with open(f"{linarg_dir}/linear_arg_stats.txt", "w") as file:
+    with open(f"{out}/linear_args/{partition_identifier}_stats.txt", "w") as file:
         file.write(
             " ".join(
                 [
@@ -411,20 +740,36 @@ def get_linarg_stats(linarg_dir, load_dir, linarg=None):
         file.write(" ".join(stats) + "\n")
 
     return
+    
+    
+def is_allele_count_correct(stats_file_path):
+    with open(stats_file_path, 'r') as f:
+        # Read header and data lines
+        header = f.readline().strip().split()
+        data = f.readline().strip().split()
+        
+        # Find the index of 'correct_allele_counts' in the header
+        try:
+            idx = header.index('correct_allele_counts')
+            # Convert the string to boolean
+            return data[idx].lower() == 'true'
+        except (ValueError, IndexError):
+            return False
 
 
-def add_individuals_to_linarg(linarg_dir, load_dir):
-    os.makedirs(f"{linarg_dir}/logs/", exist_ok=True)
-    logger = MemoryLogger(__name__, log_file=f"{linarg_dir}/logs/add_individual_nodes.log")
+def add_individuals_to_linarg(out, mount_point, partition_identifiers, partition_identifier):
+    os.makedirs(f"{out}/logs/", exist_ok=True)
+    os.makedirs(f"{out}/individual_linear_args/", exist_ok=True)    
+    logger = MemoryLogger(__name__, log_file=f"{out}/logs/add_individual_nodes.log")
 
     logger.info("Loading linear ARG")
     t1 = time.time()
-    with h5py.File(str(f"{load_dir}{linarg_dir}/linear_arg.h5"), "r") as f:
+    with h5py.File(str(f"{mount_point}{out}/linear_args/{partition_identifier}.h5"), "r") as f:
         block_name = list(f.keys())[0]
-    temp = LinearARG.read(f"{load_dir}{linarg_dir}/linear_arg.h5", block=block_name)
+    temp = LinearARG.read(f"{mount_point}{out}/linear_args/{partition_identifier}.h5", block=block_name)
     t2 = time.time()
     logger.info(f"Linear ARG loaded in {np.round(t2 - t1, 3)} seconds")
-
+    
     logger.info("Adding individual nodes to the linear ARG")
     t3 = time.time()
     linarg = temp.add_individual_nodes()
@@ -433,33 +778,32 @@ def add_individuals_to_linarg(linarg_dir, load_dir):
 
     logger.info("Saving linear ARG")
     block_info = {
-        "chrom": block_name.split("_")[0],
-        "start": block_name.split("_")[1],
-        "end": block_name.split("_")[2],
+        "chrom": block_name.split(":")[0],
+        "start": block_name.split(":")[1].split('-')[0],
+        "end": block_name.split(":")[1].split('-')[1],
     }
-    linarg.write(f"{linarg_dir}/linear_arg_individual", block_info=block_info, save_threshold=True)
+    
+    linarg.write(f"{out}/individual_linear_args/{partition_identifier}", block_info=block_info, save_threshold=True)
+    
+    logger.info("Computing linear ARG stats")
+    get_linarg_individual_stats(out, mount_point, partition_identifiers, partition_identifier, linarg)
 
-    # logger.info("Computing linear ARG stats")
-    # get_linarg_individual_stats(linarg_dir, load_dir)
 
-
-def get_linarg_individual_stats(linarg_dir, load_dir):
-    linarg = LinearARG.read(f"{linarg_dir}/linear_arg_individual.h5", load_metadata=True)
+def get_linarg_individual_stats(out, mount_point, partition_identifiers, partition_identifier, linarg=None):
+    
+    if linarg is None:
+        linarg = LinearARG.read(f"{out}/individual_linear_args/{partition_identifier}.h5", block=partition_identifier.split("_")[1])
 
     linarg.flip = np.zeros(linarg.shape[1], dtype=bool)
 
     v = np.ones(linarg.shape[0])
     allele_count_from_linarg = v @ linarg
 
-    files = os.listdir(f"{load_dir}{linarg_dir}/genotype_matrices/")
-    ind_arr = np.array([int(f.split("_")[0]) for f in files])
-    order = ind_arr.argsort()
-    files = np.array(files)[order].tolist()  # sort files by index
     genotypes_nnz = 0
     allele_counts = []
     carrier_counts = []
-    for f in files:
-        with h5py.File(f"{load_dir}{linarg_dir}/genotype_matrices/{f}", "r") as f:
+    for p_id in partition_identifiers:
+        with h5py.File(f"{mount_point}{out}/genotype_matrices/{p_id}.h5", "r") as f:
             genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
 
         genotypes_nnz += np.sum(
@@ -482,11 +826,11 @@ def get_linarg_individual_stats(linarg_dir, load_dir):
         genotypes_nnz,
         linarg.nnz,
         np.round(genotypes_nnz / linarg.nnz, 3),
-        all(allele_counts_from_genotype == allele_count_from_linarg),
-        all(carrier_counts_from_genotype == linarg.number_of_carriers),
+        np.allclose(allele_counts_from_genotype, allele_count_from_linarg),
+        np.allclose(carrier_counts_from_genotype, linarg.number_of_carriers()),
     ]
     stats = [str(x) for x in stats]
-    with open(f"{linarg_dir}/linear_arg_individual_stats.txt", "w") as file:
+    with open(f"{out}/individual_linear_args/{partition_identifier}_stats.txt", "w") as file:
         file.write(
             " ".join(
                 [

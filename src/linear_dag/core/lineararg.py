@@ -431,7 +431,7 @@ class LinearARG(LinearOperator):
             )
         with h5py.File(fname, mode) as f:
             if block_info:
-                block_name = f"{block_info['chrom']}_{block_info['start']}_{block_info['end']}"
+                block_name = f"{block_info['chrom']}:{block_info['start']}-{block_info['end']}"
                 destination = f.create_group(block_name)
                 destination.attrs["chrom"] = block_info["chrom"]
                 destination.attrs["start"] = block_info["start"]

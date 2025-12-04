@@ -13,6 +13,12 @@ from typing import Optional, Union
 import polars as pl
 
 from linear_dag.pipeline import (
+    msc_step0,
+    msc_step1,
+    msc_step2,
+    msc_step3,
+    msc_step4,
+    msc_step5,
     add_individuals_to_linarg,
     compress_vcf,
     infer_brick_graph,
@@ -542,6 +548,54 @@ def _compress(args):
     )
 
 
+def _step0(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    msc_step0(
+        args.vcf_metadata,
+        args.partition_size,
+        args.n_small_blocks,
+        args.out,
+        args.flip_minor_alleles,
+        args.keep,
+        args.maf,
+        args.remove_indels,
+        args.sex_path,
+        args.mount_point
+    )
+    return
+
+
+def _step1(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    msc_step1(args.job_metadata, args.small_job_id)
+    return
+
+def _step2(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    msc_step2(args.job_metadata, args.small_job_id)
+    return
+
+def _step3(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    msc_step3(args.job_metadata, args.large_job_id)
+    return
+
+def _step4(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    msc_step4(args.job_metadata, args.large_job_id)
+    return
+
+def _step5(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    msc_step5(args.job_metadata)
+    return
+
 def _main(args):
     argp = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -741,6 +795,64 @@ def _main(args):
     compress_p.set_defaults(func=_compress)
 
     prs_p = _create_common_parser(subp, "prs", help="Run PRS")
+    
+    
+    #### new multi-step compress pipeline ####
+    msc_p = subp.add_parser("multi-step-compress", help="Run one of the multi-step compress stages.")
+
+    msc_subp = msc_p.add_subparsers(dest="subcmd", required=True, help="Compression step to execute.")
+
+    step0_p = msc_subp.add_parser("step0", help="Multi-step compress step 0: partition genomic intervals into small and large partitions and set parameters.")
+    step0_p.add_argument("--vcf-metadata", help="Path to space-delimited .txt file with columns: chr, vcf_path.")
+    step0_p.add_argument("--partition-size", type=int, help="Approximate size of linear ARG blocks to infer.")
+    step0_p.add_argument("--n-small-blocks", type=int, help="Number of blocks to use per partition for steps 1-2.")
+    step0_p.add_argument("--flip-minor-alleles", action="store_true", help="Should minor alleles be flipped?")
+    step0_p.add_argument("--keep", nargs="?", const=None, default=None, help="Path to file of IIDs to include in construction of the genotype matrix.")
+    step0_p.add_argument("--maf", type=float, nargs="?", const=None, default=None, help="Filter out variants with MAF < maf")
+    step0_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
+    step0_p.add_argument("--sex-path", nargs="?", const=None, default=None, help="Path to sex data .txt file where males are encoded as 1 and females 0. Only use if running chrX.")
+    step0_p.add_argument("--mount-point", nargs="?", const="", default="", help="Cloud mount point. Do not specify if not using the cloud.")
+    step0_p.add_argument("--out", nargs="?", const="kodama", default="kodama", help="Location to save results.")
+    step0_p.set_defaults(func=_step0)
+    
+    step1_p = msc_subp.add_parser("step1", help="Multi-step compress step 1: extract genotype matrix and run the forward backward algorithm.")
+    step1_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
+    step1_p.add_argument("--small-job-id", type=int, help="Job id to run (small_job_id in job-metadata file).")
+    step1_p.set_defaults(func=_step1)
+    
+    step2_p = msc_subp.add_parser("step2", help="Multi-step compress step 2: run reduction union and find recombinations.")
+    step2_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
+    step2_p.add_argument("--small-job-id", type=int, help="Job id to run (small_job_id in job-metadata file).")
+    step2_p.set_defaults(func=_step2)
+    
+    step3_p = msc_subp.add_parser("step3", help="Multi-step compress step 3: merge small brick graph blocks, find recombinations, and linearize.")
+    step3_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
+    step3_p.add_argument("--large-job-id", type=int, help="Job id to run (large_job_id in job-metadata file).")
+    step3_p.set_defaults(func=_step3)
+    
+    step4_p = msc_subp.add_parser("step4", help="Multi-step compress step 4 (optional): add individual/sample nodes to the linear ARG.")
+    step4_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
+    step4_p.add_argument("--large-job-id", type=int, help="Job id to run (large_job_id in job-metadata file).")
+    step4_p.set_defaults(func=_step4)
+    
+    step5_p = msc_subp.add_parser("step5", help="Multi-step compress step 5: takes outputs of step3 (and step 4 if it has been run) and merges the linear ARG blocks into a single .h5 file.")
+    step5_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
+    step5_p.set_defaults(func=_step5)
+    #################################################
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
 
     # parse arguments
     args = argp.parse_args(args)
@@ -777,14 +889,15 @@ def _main(args):
         log.addHandler(stdout_handler)
 
     # setup log file, but write PLINK-style command first
-    disk_log_stream = open(f"{args.out}.log", "w")
-    disk_log_stream.write(masthead)
-    disk_log_stream.write(cmd_str + os.linesep)
-    disk_log_stream.write("Starting log..." + os.linesep)
+    if hasattr(args, 'out') and args.out:
+        disk_log_stream = open(f"{args.out}.log", "w")
+        disk_log_stream.write(masthead)
+        disk_log_stream.write(cmd_str + os.linesep)
+        disk_log_stream.write("Starting log..." + os.linesep)
 
-    disk_handler = logging.StreamHandler(disk_log_stream)
-    disk_handler.setFormatter(fmt)
-    log.addHandler(disk_handler)
+        disk_handler = logging.StreamHandler(disk_log_stream)
+        disk_handler.setFormatter(fmt)
+        log.addHandler(disk_handler)
 
     # launch w/e task was selected
     if hasattr(args, "func"):
