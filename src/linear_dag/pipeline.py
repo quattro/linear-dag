@@ -156,6 +156,7 @@ def msc_step1(
     jobs_metadata: Union[str, PathLike],
     small_job_id: int,
 ):
+    
     job_meta = pl.read_parquet(jobs_metadata)
     job = job_meta.filter(pl.col("small_job_id") == small_job_id)
     vcf_path = job["vcf_path"].item()
@@ -167,21 +168,29 @@ def msc_step1(
     maf = None if params['maf'] == "None" else float(params['maf'])
     remove_indels = True if params['remove_indels'] == "True" else False
     sex_path = None if params['sex_path'] == "None" else params['sex_path']
+    mount_point = params['mount_point']
     out = params['out']
-
-    make_genotype_matrix(
-        vcf_path=vcf_path,
-        out=out,
-        region=region,
-        partition_number=small_job_id,
-        flip_minor_alleles=flip_minor_alleles,
-        samples_path=keep,
-        maf_filter=maf,
-        remove_indels=remove_indels,
-        sex_path=sex_path,
-    )
     
-    run_forward_backward(out, "", f"{small_job_id}_{region}")  
+    if os.path.exists(f"{mount_point}{out}/genotype_matrices/{small_job_id}_{region}.h5"):
+        print(f"Genotype matrix for {small_job_id}_{region} already exists. Skipping.")
+    else:
+        make_genotype_matrix(
+            vcf_path=vcf_path,
+            out=out,
+            region=region,
+            partition_number=small_job_id,
+            flip_minor_alleles=flip_minor_alleles,
+            samples_path=keep,
+            maf_filter=maf,
+            remove_indels=remove_indels,
+            sex_path=sex_path,
+        )
+    
+    if os.path.exists(f"{mount_point}{out}/forward_backward_graphs/{small_job_id}_{region}_forward_graph.h5"):
+        print(f"Forward backward graph for {small_job_id}_{region} already exists. Skipping.")
+    else:
+        run_forward_backward(out, mount_point, f"{small_job_id}_{region}")  
+    
     
 def msc_step2(
     jobs_metadata: Union[str, PathLike],
@@ -195,7 +204,10 @@ def msc_step2(
     mount_point = params['mount_point']
     out = params['out']
     
-    reduction_union_recom(out, mount_point, f"{small_job_id}_{region}") 
+    if os.path.exists(f"{mount_point}{out}/brick_graph_partitions/{small_job_id}_{region}.h5"):
+        print(f"Brick graph for {small_job_id}_{region} already exists. Skipping.")
+    else:
+        reduction_union_recom(out, mount_point, f"{small_job_id}_{region}") 
 
 
 def msc_step3(
@@ -209,6 +221,10 @@ def msc_step3(
     params = pl.read_parquet_metadata(jobs_metadata)
     mount_point = params['mount_point']
     out = params['out']
+    
+    if os.path.exists(f"{mount_point}{out}/linear_args/{large_job_id}_{large_region}.h5"):
+        print(f"Linear ARG for {large_job_id}_{large_region} already exists. Skipping.")
+        return
     
     # check that all brick graphs have been generated before merging
     partition_identifiers = []
@@ -245,6 +261,10 @@ def msc_step4(
     params = pl.read_parquet_metadata(jobs_metadata)
     mount_point = params['mount_point']
     out = params['out']
+    
+    if os.path.exists(f"{mount_point}{out}/individual_linear_args/{large_job_id}_{large_region}.h5"):
+        print(f"Individual linear ARG for {large_job_id}_{large_region} already exists. Skipping.")
+        return
     
     partition_identifiers = []
     for row in jobs.iter_rows(named=True):
@@ -284,7 +304,6 @@ def msc_step5(
     logger = MemoryLogger(__name__, log_file=f"{out}/logs/msc_step5.log")
     logger.info("Starting merge of LinearARG partitions")
     
-
     job_meta = pl.read_parquet(jobs_metadata)
     
     partition_identifiers = set(
