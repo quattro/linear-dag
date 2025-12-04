@@ -17,6 +17,7 @@ from scipy.sparse import csc_matrix, csr_matrix, diags, eye
 from scipy.sparse.linalg import aslinearoperator, LinearOperator, spsolve_triangular
 
 from linear_dag.core.solve import get_nonunique_indices_csc, get_carriers
+from linear_dag.core.operators import get_pairing_matrix
 from linear_dag.genotype import read_vcf
 
 from .digraph import DiGraph
@@ -247,7 +248,7 @@ class LinearARG(LinearOperator):
         
         return num_carriers.astype(np.int32)
     
-    def get_carriers_subset(self, variant_indices: npt.NDArray[np.int_]) -> csc_matrix:
+    def get_carriers_subset(self, variant_indices: npt.NDArray[np.int_], unphased: bool = False ) -> csc_matrix:
         """
         Get carriers for a subset of variants specified by variant_indices.
         
@@ -260,7 +261,10 @@ class LinearARG(LinearOperator):
         else:
             n = self.A.shape[0] - self.n_individuals
             A = self.A[:n, :][:, :n]
-        return get_carriers(A, variant_node_indices, self.n_samples)
+        carriers: csc_matrix = get_carriers(A, variant_node_indices, self.n_samples)
+        if unphased:
+            carriers = get_pairing_matrix(self.shape[0]) @ carriers
+        return carriers
     
     def remove_samples(self, iids_to_remove: npt.ArrayLike):
         sample_mask = np.isin(self.iids, iids_to_remove)
@@ -492,6 +496,117 @@ class LinearARG(LinearOperator):
             
         return
 
+    def write_blosc(
+        self, h5_fname: Union[str, PathLike],
+        block_info: Optional[dict] = None,
+        save_threshold: bool = False,
+        codec: str = "zstd",
+        level: int = 5,
+    ):
+        """Writes LinearARG to disk with Blosc compression for faster reads.
+        
+        This method uses Blosc compression (default: Zstd level 5 with bitshuffle)
+        which provides 2-3x faster read performance compared to gzip while maintaining
+        good compression ratios. Files written with this method can be read normally
+        using LinearARG.read().
+        
+        :param h5_fname: The base path and prefix used for output files.
+        :param block_info: Optional dictionary containing:
+            - 'chrom': Chromosome number
+            - 'start': Start position
+            - 'end': End position
+        :param save_threshold: Whether to save threshold information.
+        :param codec: Blosc codec to use ('zstd', 'lz4', 'lz4hc', 'zlib'). Default: 'zstd'
+        :param level: Compression level (0-9). Default: 5
+        :return: None
+        """
+        try:
+            import hdf5plugin
+        except ImportError:
+            raise ImportError(
+                "hdf5plugin is required for Blosc compression. "
+            )
+
+        fname = h5_fname if str(h5_fname).endswith(".h5") else str(h5_fname) + ".h5"
+        mode = "a" if block_info else "w"
+        if (not block_info) and os.path.exists(fname):
+            raise FileExistsError(
+                f"The file '{fname}' already exists."
+                "To append a new linear ARG to an existing file, specify `block_info`."
+            )
+        
+        # Helper function to get appropriate Blosc filter for a dataset
+        def get_blosc_filter(data):
+            """Return appropriate Blosc filter based on data type."""
+            # For string dtypes, use regular shuffle instead of bitshuffle
+            if data.dtype.kind in ['U', 'S']:
+                return hdf5plugin.Blosc(cname=codec, clevel=level, shuffle=hdf5plugin.Blosc.SHUFFLE)
+            else:
+                # For numeric dtypes, use bitshuffle for better compression
+                return hdf5plugin.Blosc(cname=codec, clevel=level, shuffle=hdf5plugin.Blosc.BITSHUFFLE)
+        
+        with h5py.File(fname, mode) as f:
+            if block_info:
+                block_name = f"{block_info['chrom']}_{block_info['start']}_{block_info['end']}"
+                destination = f.create_group(block_name)
+                destination.attrs["chrom"] = block_info["chrom"]
+                destination.attrs["start"] = block_info["start"]
+                destination.attrs["end"] = block_info["end"]
+            else:
+                destination = f
+
+            destination.attrs["n"] = self.A.shape[0]
+            destination.attrs["n_samples"] = self.n_samples
+            destination.attrs["n_variants"] = self.shape[1]
+            destination.attrs["n_entries"] = self.nnz
+
+            # Write main datasets with Blosc compression
+            destination.create_dataset("indptr", data=self.A.indptr, compression=get_blosc_filter(self.A.indptr))
+            destination.create_dataset("indices", data=self.A.indices, compression=get_blosc_filter(self.A.indices))
+            destination.create_dataset("data", data=self.A.data, compression=get_blosc_filter(self.A.data))
+            destination.create_dataset(
+                "variant_indices", data=self.variant_indices, compression=get_blosc_filter(self.variant_indices)
+            )
+            destination.create_dataset("flip", data=self.flip, compression=get_blosc_filter(self.flip))
+
+            if self.nonunique_indices is not None:
+                destination.create_dataset(
+                    "nonunique_indices", data=self.nonunique_indices, compression=get_blosc_filter(self.nonunique_indices)
+                )
+            if self.iids is not None and "iids" not in f.keys():
+                str_iids = np.array(self.iids, dtype="S")
+                f.create_dataset("iids", data=str_iids, compression=get_blosc_filter(str_iids))
+            if self.n_individuals is not None:
+                destination.attrs["n_individuals"] = self.n_individuals
+            if self.variants is not None:
+                variant_info = self.variants.collect()
+                for field in ["CHROM", "POS", "ID", "REF", "ALT"]:
+                    if field == "POS":
+                        pos_data = np.array(variant_info[field]).astype(int)
+                        destination.create_dataset(
+                            field,
+                            data=pos_data,
+                            compression=get_blosc_filter(pos_data),
+                        )
+                    else:
+                        str_data = np.array(variant_info[field]).astype("S")
+                        destination.create_dataset(
+                            field,
+                            data=str_data,
+                            compression=get_blosc_filter(str_data),
+                        )
+            
+            if save_threshold:
+                N = self.A.shape[0]
+                af = self.allele_frequencies
+                maf = np.minimum(af, 1 - af)
+                order = int(np.ceil(np.log10(N)))        
+                thresholds = 10.0 ** -np.arange(1, order + 1)
+                destination.attrs["threshold_values"] = thresholds
+                destination.attrs["threshold_n_variants"] = (maf[:, None] > thresholds).sum(axis=0)
+
+        return
+
     @staticmethod
     def read_variant_info(
         h5_fname: Union[str, PathLike],
@@ -529,6 +644,13 @@ class LinearARG(LinearOperator):
         :param h5_fname: The base path and prefix of the PLINK files.
         :return: A LinearARG object.
         """
+        # Try to import hdf5plugin to enable Blosc decompression
+        # This is needed for files written with write_blosc()
+        try:
+            import hdf5plugin
+        except ImportError:
+            pass  # Blosc files will fail to read, but gzip/lzf files will work fine
+        
         fname = h5_fname if str(h5_fname).endswith(".h5") else str(h5_fname) + ".h5"
         with h5py.File(fname, "r") as file:
             iids = pl.Series(file["iids"][:].astype(str))
@@ -546,6 +668,18 @@ class LinearARG(LinearOperator):
                 v_info = None
 
         return LinearARG(A, variant_indices, flip, n_samples, n_individuals, v_info, iids, nonunique_indices)
+
+    def filter_variants_by_maf(self, maf_threshold: float) -> None:
+        """Filter variants to only include those with MAF > threshold.
+        
+        Args:
+            maf_threshold: MAF threshold value (e.g., 0.01 for 1%)
+        """
+        af = self.allele_frequencies
+        maf = np.minimum(af, 1 - af)
+        mask = maf > maf_threshold
+        self.variant_indices = self.variant_indices[mask]
+        self.flip = self.flip[mask]
 
     def calculate_nonunique_indices(self) -> None:
         """Calculates and stores non-unique indices to facilitate memory-efficient matmat and rmatmat operations."""

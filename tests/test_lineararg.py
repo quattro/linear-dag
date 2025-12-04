@@ -173,3 +173,17 @@ def test_get_carriers_subset():
         actual = carriers_matrix[:, i].toarray().ravel()
         np.testing.assert_array_equal(actual, expected, 
             err_msg=f"Mismatch for variant index {variant_idx}")
+    
+    # Test unphased option
+    carriers_unphased = linarg.get_carriers_subset(user_indices, unphased=True)
+    
+    # Verify shape: should have half the rows (diploid)
+    assert carriers_unphased.shape == (linarg.shape[0] // 2, len(user_indices))
+    
+    # Verify that unphased carriers are the sum of consecutive haplotype pairs
+    carriers_phased = carriers_matrix.toarray()
+    for i in range(carriers_unphased.shape[0]):
+        expected_diploid = carriers_phased[2*i, :] + carriers_phased[2*i + 1, :]
+        actual_diploid = carriers_unphased[i, :].toarray().ravel()
+        np.testing.assert_array_equal(actual_diploid, expected_diploid,
+            err_msg=f"Mismatch for individual {i}")
