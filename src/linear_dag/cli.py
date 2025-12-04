@@ -476,65 +476,6 @@ def _filter_blocks(
     return block_metadata
 
 
-def _make_geno(args):
-    logger = MemoryLogger(__name__)
-    logger.info("Starting main process")
-    make_genotype_matrix(
-        args.vcf_path,
-        args.linarg_dir,
-        args.region,
-        args.partition_number,
-        args.phased,
-        args.flip_minor_alleles,
-        args.keep,
-        args.maf,
-        args.remove_indels,
-        args.sex_path,
-    )
-
-    return
-
-
-def _infer_brick_graph(args):
-    logger = MemoryLogger(__name__)
-    logger.info("Starting main process")
-    infer_brick_graph(args.linarg_dir, args.load_dir, args.partition_identifier)
-
-    return
-
-
-def _merge(args):
-    logger = MemoryLogger(__name__)
-    logger.info("Starting main process")
-    merge(args.linarg_dir, args.load_dir)
-
-    return
-
-
-def _run_forward_backward(args):
-    logger = MemoryLogger(__name__)
-    logger.info("Starting main process")
-    run_forward_backward(args.linarg_dir, args.load_dir, args.partition_identifier)
-
-    return
-
-
-def _reduction_union_recom(args):
-    logger = MemoryLogger(__name__)
-    logger.info("Starting main process")
-    reduction_union_recom(args.linarg_dir, args.load_dir, args.partition_identifier)
-
-    return
-
-
-def _add_individuals_to_linarg(args):
-    logger = MemoryLogger(__name__)
-    logger.info("Starting main process")
-    add_individuals_to_linarg(args.linarg_dir, args.load_dir)
-
-    return
-
-
 def _compress(args):
     compress_vcf(
         input_vcf=args.vcf_path,
@@ -689,93 +630,6 @@ def _main(args):
     prs_p.add_argument("--out", default="kodama", help="Location to save result files.")
     prs_p.set_defaults(func=_prs)
 
-    make_geno_p = subp.add_parser(
-        "make-geno",
-        help="Step 1 of partition and merge pipeline. Makes sparse genotype matrices from VCF file.",
-    )
-    make_geno_p.add_argument("vcf_path", help="Path to VCF file")
-    make_geno_p.add_argument(
-        "linarg_dir",
-        help="Directory to store linear ARG outputs (must be the same for Steps 1-3)",
-    )
-    make_geno_p.add_argument("--region", help="Genomic region of the form chrN:start-end")
-    make_geno_p.add_argument("--partition-number", help="Partition number in genomic ordering")
-    make_geno_p.add_argument("--phased", action="store_true", help="Is data phased?")
-    make_geno_p.add_argument(
-        "--flip-minor-alleles",
-        action="store_true",
-        help="Should minor alleles be flipped?",
-    )
-    make_geno_p.add_argument(
-        "--keep",
-        help="Path to file of IIDs to include in construction of the genotype matrix.",
-    )
-    make_geno_p.add_argument(
-        "--maf",
-        type=float,
-        help="Filter out variants with MAF less than maf",
-    )
-    make_geno_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
-    make_geno_p.add_argument(
-        "--sex-path",
-        help="Path to .txt file sex data where males are encoded as 1 and females 0. Only use if running chrX.",
-    )
-    make_geno_p.add_argument("--out", default="kodama", help="Location to save result files.")
-    make_geno_p.set_defaults(func=_make_geno)
-
-    # construct parser for inferring brick graph
-    infer_brick_graph_p = _create_common_build_parser(
-        subp,
-        "infer-brick-graph",
-        help="Step 2 of partition and merge pipeline. Infers the brick graph from sparse matrix.",
-        include_parition=True,
-    )
-    infer_brick_graph_p.set_defaults(func=_infer_brick_graph)
-
-    # construct parser for merge operation across sub graphs
-    merge_p = _create_common_build_parser(
-        subp,
-        "merge",
-        help="Step 3 of partition and merge pipeline. Merge, find recombinations, and linearize brick graph.",
-        include_parition=False,
-    )
-    merge_p.set_defaults(func=_merge)
-
-    # sometimes running step2 in one go consumes too much memory. we can split into step2a and 2b
-    # (should these be flags for the `infer-brick-graph` parser/action?)
-    run_forward_backward_p = _create_common_build_parser(
-        subp,
-        "run-forward-backward",
-        help=(
-            "Step 2a of partition and merge pipeline."
-            " Runs forward and backward passes on genotype matrix to obtain the forward and backward graphs."
-        ),
-        include_parition=True,
-    )
-    run_forward_backward_p.set_defaults(func=_run_forward_backward)
-
-    reduction_union_recom_p = _create_common_build_parser(
-        subp,
-        "reduction-union-recom",
-        help=(
-            "Step 2b of partition and merge pipeline."
-            " Computes the brick graph from the forward and backward graphs and finds recombinations."
-        ),
-        include_parition=True,
-    )
-    reduction_union_recom_p.set_defaults(func=_reduction_union_recom)
-
-    add_individuals_p = _create_common_build_parser(
-        subp,
-        "add-individual-nodes",
-        help=(
-            "Step 4 (optional) of partition and merge pipeline."
-            " Adds individuals as nodes for fast computation of carrier counts."
-        ),
-        include_parition=False,
-    )
-    add_individuals_p.set_defaults(func=_add_individuals_to_linarg)
-
     compress_p = subp.add_parser(
         "compress",
         help="Compress VCF to kodama format",
@@ -797,7 +651,7 @@ def _main(args):
     prs_p = _create_common_parser(subp, "prs", help="Run PRS")
     
     
-    #### new multi-step compress pipeline ####
+    #### multi-step compress pipeline ####
     msc_p = subp.add_parser("multi-step-compress", help="Run one of the multi-step compress stages.")
 
     msc_subp = msc_p.add_subparsers(dest="subcmd", required=True, help="Compression step to execute.")

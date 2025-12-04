@@ -146,7 +146,7 @@ def msc_step0(
         "maf": str(maf),
         "remove_indels": str(remove_indels),    
         "sex_path": str(sex_path),
-        "mount_point": str(mount_point),
+        "mount_point": "" if mount_point is None else str(mount_point),
     }
 
     job_meta.write_parquet(f"{out}/job_metadata.parquet", metadata=params)
@@ -164,7 +164,7 @@ def msc_step1(
     params = pl.read_parquet_metadata(jobs_metadata)
     flip_minor_alleles = params['flip_minor_alleles']
     keep = None if params['keep'] == "None" else params['keep']
-    maf = float(params['maf'])
+    maf = None if params['maf'] == "None" else float(params['maf'])
     remove_indels = True if params['remove_indels'] == "True" else False
     sex_path = None if params['sex_path'] == "None" else params['sex_path']
     out = params['out']
@@ -224,6 +224,12 @@ def msc_step3(
             continue
         partition_identifiers.append(partition_identifier)
     large_partition_identifier = f"{large_job_id}_{large_region}"
+    
+    if len(partition_identifiers) == 0:
+        with h5py.File(f"{out}/linear_args/{large_partition_identifier}.h5", "w") as f:
+            f.attrs["is_empty"] = True
+        return
+    
     merge(out, mount_point, partition_identifiers, large_partition_identifier)    
 
 
@@ -252,6 +258,11 @@ def msc_step4(
         if is_empty:
             continue
         partition_identifiers.append(p_id)
+        
+    if len(partition_identifiers) == 0:
+        with h5py.File(f"{out}/individual_linear_args/{large_partition_identifier}.h5", "w") as f:
+            f.attrs["is_empty"] = True
+        return
             
     add_individuals_to_linarg(out, mount_point, partition_identifiers, large_partition_identifier)
   
@@ -275,9 +286,6 @@ def msc_step5(
     
 
     job_meta = pl.read_parquet(jobs_metadata)
-    
-    job_meta = job_meta.filter(pl.col("large_job_id") < 2) # for testing! delete later!!!
-
     
     partition_identifiers = set(
         f"{i}_{region}" 
@@ -303,9 +311,17 @@ def final_merge(
     logger,
     individual=False,
 ):
+    
+    non_empty_partition_identifiers = []
+    
      # check that all linear ARGs have been inferred and are correct
     for part_id in partition_identifiers:
         stats_path = f"{mount_point}{out}/linear_args/{part_id}_stats.txt"
+        with h5py.File(f"{out}/linear_args/{part_id}.h5", "r") as f:
+            is_empty = f.attrs.get("is_empty", False)
+        if is_empty:
+            continue
+        non_empty_partition_identifiers.append(part_id)
         if not os.path.exists(stats_path):
             raise FileNotFoundError(
                 f"Stats file not found: {stats_path}. "
@@ -318,16 +334,15 @@ def final_merge(
         output_path = f"{out}/linear_arg_individual.h5"
     else:
         output_path = f"{out}/linear_arg.h5"
-    logger.info(f"Merging {len(partition_identifiers)} partitions into {output_path}")
+    logger.info(f"Merging {len(non_empty_partition_identifiers)} partitions into {output_path}")
     with h5py.File(output_path, "w") as merged:
         iids_saved = False
         
-        for part_id in partition_identifiers:
+        for part_id in non_empty_partition_identifiers:
             if individual:
                 src_path = f"{mount_point}{out}/individual_linear_args/{part_id}.h5"
             else:
                 src_path = f"{mount_point}{out}/linear_args/{part_id}.h5"
-            # logger.debug(f"Processing partition: {part_id}")
             
             with h5py.File(src_path, "r") as src:
                 # handle iids specially
@@ -738,7 +753,7 @@ def get_linarg_stats(out, mount_point, partition_identifiers, partition_identifi
             + "\n"
         )
         file.write(" ".join(stats) + "\n")
-
+        
     return
     
     

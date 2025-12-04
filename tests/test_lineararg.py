@@ -100,7 +100,7 @@ def test_read_write_matmul(tmp_path):
     linarg.write(temp_h5_path, block_info=block_info)
 
     # 2. Read it from the temp file
-    loaded_linarg = LinearARG.read(temp_h5_path, block=f'{block_info["chrom"]}_{block_info["start"]}_{block_info["end"]}')
+    loaded_linarg = LinearARG.read(temp_h5_path, block=f'{block_info["chrom"]}:{block_info["start"]}-{block_info["end"]}')
     assert loaded_linarg.shape == linarg.shape
     print(loaded_linarg.iids)
     print(linarg.iids)
