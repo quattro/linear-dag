@@ -49,6 +49,14 @@ def get_row_filter_operator(merge_operator: LinearOperator):
     num_matches = merge_operator @ np.ones(merge_operator.shape[1])
     return aslinearoperator(eye(num_matches > 0))
 
+def get_pairing_matrix(two_n: int) -> LinearOperator:
+    if two_n % 2 != 0:
+        raise ValueError("Number of rows in haploid_operator must be even")
+    data = np.ones(two_n, dtype=np.int32)
+    indices = np.arange(two_n)
+    indptr = np.arange(0, two_n + 1, 2)
+    pairing_matrix = csr_matrix((data, indices, indptr), shape=(two_n // 2, two_n))
+    return pairing_matrix
 
 def get_diploid_operator(haploid_operator: LinearOperator) -> LinearOperator:
     """
@@ -58,13 +66,7 @@ def get_diploid_operator(haploid_operator: LinearOperator) -> LinearOperator:
     be normalized, divide the output by sqrt(2).
     """
     two_n = haploid_operator.shape[0]
-    if two_n % 2 != 0:
-        raise ValueError("Number of rows in haploid_operator must be even")
-    data = np.ones(two_n, dtype=np.int32)
-    indices = np.arange(two_n)
-    indptr = np.arange(0, two_n + 1, 2)
-    pairing_matrix = csr_matrix((data, indices, indptr), shape=(two_n // 2, two_n))
-    return aslinearoperator(pairing_matrix) @ haploid_operator
+    return aslinearoperator(get_pairing_matrix(two_n)) @ haploid_operator
 
 
 def estimate_column_variance(
