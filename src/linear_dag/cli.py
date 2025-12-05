@@ -287,6 +287,7 @@ def _assoc_scan(args):
             num_processes=args.num_processes,
             block_metadata=block_metadata,
             max_num_traits=1 + len(covar_cols),
+            maf_log10_threshold=args.maf_log10_threshold,
         ) as genotypes:
             per_results: list[pl.LazyFrame] = []
             for ph in pheno_cols:
@@ -328,6 +329,7 @@ def _assoc_scan(args):
             num_processes=args.num_processes,
             block_metadata=block_metadata,
             max_num_traits=len(pheno_cols) + len(covar_cols),
+            maf_log10_threshold=args.maf_log10_threshold,
         ) as genotypes:
             result: pl.LazyFrame = run_gwas(
                 genotypes,
@@ -572,6 +574,12 @@ def _main(args):
         "--repeat-covar",
         action="store_true",
         help=("Run phenotypes one at a time inside the parallel operator, repeating covariate projections. "),
+    )
+    assoc_p.add_argument(
+        "--maf-log10-threshold",
+        type=int,
+        default=None,
+        help=("MAF log10 threshold of variants to include in the association test."),
     )
 
     # build h2g estimation parser from 'common' parser, but add additional options for RHE
