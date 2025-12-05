@@ -189,7 +189,7 @@ def msc_step1(
     if os.path.exists(f"{mount_point}{out}/forward_backward_graphs/{small_job_id}_{region}_forward_graph.h5"):
         print(f"Forward backward graph for {small_job_id}_{region} already exists. Skipping.")
     else:
-        run_forward_backward(out, mount_point, f"{small_job_id}_{region}")  
+        run_forward_backward(out, "", f"{small_job_id}_{region}") # no mount point needed since matrices are generated in the same job
     
     
 def msc_step2(
