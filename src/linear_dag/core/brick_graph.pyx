@@ -661,7 +661,7 @@ cpdef tuple read_brick_graph_h5(filename):
     # graph.initialize_all_nodes()
     return graph, sample_indices, variant_indices
 
-cpdef tuple get_graph_statistics(str brick_graph_dir):
+cpdef tuple get_graph_statistics(str brick_graph_dir, list partition_identifiers):
     """
     Get merged graph statistics from directory of brick graph partitions.
     :param brick_graph_dir: location of brick graph partitions
@@ -669,14 +669,13 @@ cpdef tuple get_graph_statistics(str brick_graph_dir):
     """
     cdef long number_of_nodes = 0
     cdef long number_of_edges = 0
-    cdef list files = os.listdir(brick_graph_dir)
-    for f in files:
-        path = os.path.join(brick_graph_dir, f)
+    for f in partition_identifiers:
+        path = f'{brick_graph_dir}/{f}.h5'
         with h5py.File(path, 'r') as f:
             num_samples = f['sample_indices'].shape[0]
             number_of_nodes += f.attrs['n']
             number_of_edges += f['data'].shape[0]
-    number_of_nodes -= num_samples * (len(files)-1)
+    number_of_nodes -= num_samples * (len(partition_identifiers)-1)
     return num_samples, number_of_nodes, number_of_edges
 
 cdef add_neighbors(DiGraph graph_to_modify, node* v, node_ids):
@@ -698,13 +697,13 @@ cdef add_neighbors(DiGraph graph_to_modify, node* v, node_ids):
         e = e.prev_in
 
 
-cpdef tuple merge_brick_graphs(str brick_graph_dir):
+cpdef tuple merge_brick_graphs(str brick_graph_dir, list partition_identifiers):
     """
     Merge multiple brick graphs with shared sample nodes and other nodes disjoint.
     :param brick_graph_dir: location of brick graph partitions
     :return: merged graph, variant indices, index mapping
     """
-    num_samples, number_of_nodes, number_of_edges = get_graph_statistics(brick_graph_dir) # get statistics to initialize DiGraph object
+    num_samples, number_of_nodes, number_of_edges = get_graph_statistics(brick_graph_dir, partition_identifiers) # get statistics to initialize DiGraph object
     cdef DiGraph result = DiGraph(number_of_nodes, number_of_edges)
     cdef DiGraph graph
     cdef long i
@@ -714,15 +713,10 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir):
     cdef long[:] new_node_ids
     cdef list variant_indices = []
     cdef list index_mapping = []
-    cdef list files = os.listdir(brick_graph_dir)
 
-    ind_arr = np.array([int(f.split('_')[0]) for f in files])
-    order = ind_arr.argsort()
-    files = np.array(files)[order].tolist() # sort files by index
+    for f in partition_identifiers:
 
-    for f in files:
-
-        graph, samples, variants = read_brick_graph_h5(f'{brick_graph_dir}/{f}')
+        graph, samples, variants = read_brick_graph_h5(f'{brick_graph_dir}/{f}.h5')
         #number_of_nodes = adj_mat.shape[0]
         number_of_nodes = graph.maximum_number_of_nodes
 

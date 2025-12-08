@@ -13,6 +13,12 @@ from typing import Optional, Union
 import polars as pl
 
 from linear_dag.pipeline import (
+    msc_step0,
+    msc_step1,
+    msc_step2,
+    msc_step3,
+    msc_step4,
+    msc_step5,
     add_individuals_to_linarg,
     compress_vcf,
     infer_brick_graph,
@@ -302,6 +308,7 @@ def _assoc_scan(args):
                     logger=logger,
                     in_place_op=True,
                     detach_arrays=True,
+                    recompute_AC=args.recompute_ac,
                 )
                 res_ph = res_ph.select([f"{ph}_BETA", f"{ph}_SE"])
                 per_results.append(res_ph)
@@ -323,11 +330,17 @@ def _assoc_scan(args):
             genotypes.shutdown()
             logger.info("Shut down parallel operator")
     else:
+        
+        if args.recompute_ac:
+            max_num_traits = 2 * len(pheno_cols) + len(covar_cols)
+        else:
+            max_num_traits = len(pheno_cols) + len(covar_cols)
+        
         with ParallelOperator.from_hdf5(
             args.linarg_path,
             num_processes=args.num_processes,
             block_metadata=block_metadata,
-            max_num_traits=len(pheno_cols) + len(covar_cols),
+            max_num_traits=max_num_traits,
         ) as genotypes:
             result: pl.LazyFrame = run_gwas(
                 genotypes,
@@ -338,6 +351,7 @@ def _assoc_scan(args):
                 assume_hwe=not args.no_hwe,
                 logger=logger,
                 in_place_op=True,
+                recompute_AC=args.recompute_ac,
             )
             genotypes.shutdown()
             logger.info("Shut down parallel operator")
@@ -469,65 +483,6 @@ def _filter_blocks(
     return block_metadata
 
 
-def _make_geno(args):
-    logger = MemoryLogger(__name__)
-    logger.info("Starting main process")
-    make_genotype_matrix(
-        args.vcf_path,
-        args.linarg_dir,
-        args.region,
-        args.partition_number,
-        args.phased,
-        args.flip_minor_alleles,
-        args.keep,
-        args.maf,
-        args.remove_indels,
-        args.sex_path,
-    )
-
-    return
-
-
-def _infer_brick_graph(args):
-    logger = MemoryLogger(__name__)
-    logger.info("Starting main process")
-    infer_brick_graph(args.linarg_dir, args.load_dir, args.partition_identifier)
-
-    return
-
-
-def _merge(args):
-    logger = MemoryLogger(__name__)
-    logger.info("Starting main process")
-    merge(args.linarg_dir, args.load_dir)
-
-    return
-
-
-def _run_forward_backward(args):
-    logger = MemoryLogger(__name__)
-    logger.info("Starting main process")
-    run_forward_backward(args.linarg_dir, args.load_dir, args.partition_identifier)
-
-    return
-
-
-def _reduction_union_recom(args):
-    logger = MemoryLogger(__name__)
-    logger.info("Starting main process")
-    reduction_union_recom(args.linarg_dir, args.load_dir, args.partition_identifier)
-
-    return
-
-
-def _add_individuals_to_linarg(args):
-    logger = MemoryLogger(__name__)
-    logger.info("Starting main process")
-    add_individuals_to_linarg(args.linarg_dir, args.load_dir)
-
-    return
-
-
 def _compress(args):
     compress_vcf(
         input_vcf=args.vcf_path,
@@ -540,6 +495,54 @@ def _compress(args):
         add_individual_nodes=args.add_individual_nodes,
     )
 
+
+def _step0(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    msc_step0(
+        args.vcf_metadata,
+        args.partition_size,
+        args.n_small_blocks,
+        args.out,
+        args.flip_minor_alleles,
+        args.keep,
+        args.maf,
+        args.remove_indels,
+        args.sex_path,
+        args.mount_point
+    )
+    return
+
+
+def _step1(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    msc_step1(args.job_metadata, args.small_job_id)
+    return
+
+def _step2(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    msc_step2(args.job_metadata, args.small_job_id)
+    return
+
+def _step3(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    msc_step3(args.job_metadata, args.large_job_id)
+    return
+
+def _step4(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    msc_step4(args.job_metadata, args.large_job_id)
+    return
+
+def _step5(args):
+    logger = MemoryLogger(__name__)
+    logger.info("Starting main process")
+    msc_step5(args.job_metadata)
+    return
 
 def _main(args):
     argp = argparse.ArgumentParser(
@@ -571,7 +574,12 @@ def _main(args):
     assoc_p.add_argument(
         "--repeat-covar",
         action="store_true",
-        help=("Run phenotypes one at a time inside the parallel operator, repeating covariate projections. "),
+        help=("Run phenotypes one at a time inside the parallel operator, repeating covariate projections."),
+    )
+    assoc_p.add_argument(
+        "--recompute-ac",
+        action="store_true",
+        help=("Recompute allele counts."),
     )
 
     # build h2g estimation parser from 'common' parser, but add additional options for RHE
@@ -629,93 +637,6 @@ def _main(args):
     prs_p.add_argument("--out", default="kodama", help="Location to save result files.")
     prs_p.set_defaults(func=_prs)
 
-    make_geno_p = subp.add_parser(
-        "make-geno",
-        help="Step 1 of partition and merge pipeline. Makes sparse genotype matrices from VCF file.",
-    )
-    make_geno_p.add_argument("vcf_path", help="Path to VCF file")
-    make_geno_p.add_argument(
-        "linarg_dir",
-        help="Directory to store linear ARG outputs (must be the same for Steps 1-3)",
-    )
-    make_geno_p.add_argument("--region", help="Genomic region of the form chrN:start-end")
-    make_geno_p.add_argument("--partition-number", help="Partition number in genomic ordering")
-    make_geno_p.add_argument("--phased", action="store_true", help="Is data phased?")
-    make_geno_p.add_argument(
-        "--flip-minor-alleles",
-        action="store_true",
-        help="Should minor alleles be flipped?",
-    )
-    make_geno_p.add_argument(
-        "--keep",
-        help="Path to file of IIDs to include in construction of the genotype matrix.",
-    )
-    make_geno_p.add_argument(
-        "--maf",
-        type=float,
-        help="Filter out variants with MAF less than maf",
-    )
-    make_geno_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
-    make_geno_p.add_argument(
-        "--sex-path",
-        help="Path to .txt file sex data where males are encoded as 1 and females 0. Only use if running chrX.",
-    )
-    make_geno_p.add_argument("--out", default="kodama", help="Location to save result files.")
-    make_geno_p.set_defaults(func=_make_geno)
-
-    # construct parser for inferring brick graph
-    infer_brick_graph_p = _create_common_build_parser(
-        subp,
-        "infer-brick-graph",
-        help="Step 2 of partition and merge pipeline. Infers the brick graph from sparse matrix.",
-        include_parition=True,
-    )
-    infer_brick_graph_p.set_defaults(func=_infer_brick_graph)
-
-    # construct parser for merge operation across sub graphs
-    merge_p = _create_common_build_parser(
-        subp,
-        "merge",
-        help="Step 3 of partition and merge pipeline. Merge, find recombinations, and linearize brick graph.",
-        include_parition=False,
-    )
-    merge_p.set_defaults(func=_merge)
-
-    # sometimes running step2 in one go consumes too much memory. we can split into step2a and 2b
-    # (should these be flags for the `infer-brick-graph` parser/action?)
-    run_forward_backward_p = _create_common_build_parser(
-        subp,
-        "run-forward-backward",
-        help=(
-            "Step 2a of partition and merge pipeline."
-            " Runs forward and backward passes on genotype matrix to obtain the forward and backward graphs."
-        ),
-        include_parition=True,
-    )
-    run_forward_backward_p.set_defaults(func=_run_forward_backward)
-
-    reduction_union_recom_p = _create_common_build_parser(
-        subp,
-        "reduction-union-recom",
-        help=(
-            "Step 2b of partition and merge pipeline."
-            " Computes the brick graph from the forward and backward graphs and finds recombinations."
-        ),
-        include_parition=True,
-    )
-    reduction_union_recom_p.set_defaults(func=_reduction_union_recom)
-
-    add_individuals_p = _create_common_build_parser(
-        subp,
-        "add-individual-nodes",
-        help=(
-            "Step 4 (optional) of partition and merge pipeline."
-            " Adds individuals as nodes for fast computation of carrier counts."
-        ),
-        include_parition=False,
-    )
-    add_individuals_p.set_defaults(func=_add_individuals_to_linarg)
-
     compress_p = subp.add_parser(
         "compress",
         help="Compress VCF to kodama format",
@@ -735,6 +656,64 @@ def _main(args):
     compress_p.set_defaults(func=_compress)
 
     prs_p = _create_common_parser(subp, "prs", help="Run PRS")
+    
+    
+    #### multi-step compress pipeline ####
+    msc_p = subp.add_parser("multi-step-compress", help="Run one of the multi-step compress stages.")
+
+    msc_subp = msc_p.add_subparsers(dest="subcmd", required=True, help="Compression step to execute.")
+
+    step0_p = msc_subp.add_parser("step0", help="Multi-step compress step 0: partition genomic intervals into small and large partitions and set parameters.")
+    step0_p.add_argument("--vcf-metadata", help="Path to space-delimited .txt file with columns: chr, vcf_path.")
+    step0_p.add_argument("--partition-size", type=int, help="Approximate size of linear ARG blocks to infer.")
+    step0_p.add_argument("--n-small-blocks", type=int, help="Number of blocks to use per partition for steps 1-2.")
+    step0_p.add_argument("--flip-minor-alleles", action="store_true", help="Should minor alleles be flipped?")
+    step0_p.add_argument("--keep", nargs="?", const=None, default=None, help="Path to file of IIDs to include in construction of the genotype matrix.")
+    step0_p.add_argument("--maf", type=float, nargs="?", const=None, default=None, help="Filter out variants with MAF < maf")
+    step0_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
+    step0_p.add_argument("--sex-path", nargs="?", const=None, default=None, help="Path to sex data .txt file where males are encoded as 1 and females 0. Only use if running chrX.")
+    step0_p.add_argument("--mount-point", nargs="?", const="", default="", help="Cloud mount point. Do not specify if not using the cloud.")
+    step0_p.add_argument("--out", nargs="?", const="kodama", default="kodama", help="Location to save results.")
+    step0_p.set_defaults(func=_step0)
+    
+    step1_p = msc_subp.add_parser("step1", help="Multi-step compress step 1: extract genotype matrix and run the forward backward algorithm.")
+    step1_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
+    step1_p.add_argument("--small-job-id", type=int, help="Job id to run (small_job_id in job-metadata file).")
+    step1_p.set_defaults(func=_step1)
+    
+    step2_p = msc_subp.add_parser("step2", help="Multi-step compress step 2: run reduction union and find recombinations.")
+    step2_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
+    step2_p.add_argument("--small-job-id", type=int, help="Job id to run (small_job_id in job-metadata file).")
+    step2_p.set_defaults(func=_step2)
+    
+    step3_p = msc_subp.add_parser("step3", help="Multi-step compress step 3: merge small brick graph blocks, find recombinations, and linearize.")
+    step3_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
+    step3_p.add_argument("--large-job-id", type=int, help="Job id to run (large_job_id in job-metadata file).")
+    step3_p.set_defaults(func=_step3)
+    
+    step4_p = msc_subp.add_parser("step4", help="Multi-step compress step 4 (optional): add individual/sample nodes to the linear ARG.")
+    step4_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
+    step4_p.add_argument("--large-job-id", type=int, help="Job id to run (large_job_id in job-metadata file).")
+    step4_p.set_defaults(func=_step4)
+    
+    step5_p = msc_subp.add_parser("step5", help="Multi-step compress step 5: takes outputs of step3 (and step 4 if it has been run) and merges the linear ARG blocks into a single .h5 file.")
+    step5_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
+    step5_p.set_defaults(func=_step5)
+    #################################################
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
 
     # parse arguments
     args = argp.parse_args(args)
@@ -771,14 +750,15 @@ def _main(args):
         log.addHandler(stdout_handler)
 
     # setup log file, but write PLINK-style command first
-    disk_log_stream = open(f"{args.out}.log", "w")
-    disk_log_stream.write(masthead)
-    disk_log_stream.write(cmd_str + os.linesep)
-    disk_log_stream.write("Starting log..." + os.linesep)
+    if hasattr(args, 'out') and args.out:
+        disk_log_stream = open(f"{args.out}.log", "w")
+        disk_log_stream.write(masthead)
+        disk_log_stream.write(cmd_str + os.linesep)
+        disk_log_stream.write("Starting log..." + os.linesep)
 
-    disk_handler = logging.StreamHandler(disk_log_stream)
-    disk_handler.setFormatter(fmt)
-    log.addHandler(disk_handler)
+        disk_handler = logging.StreamHandler(disk_log_stream)
+        disk_handler.setFormatter(fmt)
+        log.addHandler(disk_handler)
 
     # launch w/e task was selected
     if hasattr(args, "func"):
