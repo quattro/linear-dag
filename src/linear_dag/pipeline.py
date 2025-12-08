@@ -204,6 +204,8 @@ def msc_step2(
     mount_point = params['mount_point']
     out = params['out']
     
+    if not os.path.exists(f"{mount_point}{out}/forward_backward_graphs/{small_job_id}_{region}_forward_graph.h5"):
+        raise FileNotFoundError(f"{mount_point}{out}/forward_backward_graphs/{small_job_id}_{region}_forward_graph.h5 does not exist. Please run step 1 before step 2.")
     if os.path.exists(f"{mount_point}{out}/brick_graph_partitions/{small_job_id}_{region}.h5"):
         print(f"Brick graph for {small_job_id}_{region} already exists. Skipping.")
     else:
@@ -336,6 +338,12 @@ def final_merge(
      # check that all linear ARGs have been inferred and are correct
     for part_id in partition_identifiers:
         stats_path = f"{mount_point}{out}/linear_args/{part_id}_stats.txt"
+        linarg_path = f"{mount_point}{out}/linear_args/{part_id}.h5"
+        if not os.path.exists(linarg_path):
+            raise FileNotFoundError(
+                f"Linear ARG not found: {linarg_path}. "
+                "Please run step 4 on all partitions before step 5."
+            )
         with h5py.File(f"{mount_point}{out}/linear_args/{part_id}.h5", "r") as f:
             is_empty = f.attrs.get("is_empty", False)
         if is_empty:
