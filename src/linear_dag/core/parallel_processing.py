@@ -53,6 +53,7 @@ def _compute_filtered_variant_counts(
     for row in block_metadata.iter_rows(named=True):
         threshold_values = row["threshold_values"]
         matches = np.where(threshold_values == threshold_value)[0]
+        matches = np.where(np.isclose(threshold_values, threshold_value, rtol=1e-12, atol=1e-15))[0] # handle floating-point error
         if len(matches) == 0:
             raise ValueError(f"Threshold {threshold_value} not found. " f"Available thresholds: {threshold_values}")
 
