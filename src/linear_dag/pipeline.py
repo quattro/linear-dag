@@ -336,7 +336,7 @@ def final_merge(
      # check that all linear ARGs have been inferred and are correct
     for part_id in partition_identifiers:
         stats_path = f"{mount_point}{out}/linear_args/{part_id}_stats.txt"
-        with h5py.File(f"{out}/linear_args/{part_id}.h5", "r") as f:
+        with h5py.File(f"{mount_point}{out}/linear_args/{part_id}.h5", "r") as f:
             is_empty = f.attrs.get("is_empty", False)
         if is_empty:
             continue
