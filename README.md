@@ -183,25 +183,106 @@ Options:
 - `--pfile`: Path to PLINK2 triplet (not yet implemented)
 - `--bgen`: Path to BGEN file (not yet implemented)
 
-2. Partition and Merge Pipeline (recommended for large datasets to avoid loading entire chromosomes into memory):
-```console
-# Step 1: Create sparse genotype matrices from VCF
-kodama make-geno --vcf_path input.vcf.gz --linarg_dir output_dir \
-    --region chr1-1000000-2000000 --partition_number 1 \
-    --phased --flip_minor_alleles
-
-# Step 2: Infer brick graph from sparse matrix
-kodama infer-brick-graph --linarg_dir output_dir \
-    --partition_identifier "1_chr1-1000000-2000000"
-
-# Step 3: Merge, find recombinations, and linearize brick graph
-kodama merge --linarg_dir output_dir
-```
-
 Global options:
 - `-v/--verbose`: Enable verbose output
 - `-q/--quiet`: Suppress output
 - `-o/--output`: Output prefix (default: "lineardag")
+
+
+## Multi-step compress pipeline
+
+For large datasets, the linear ARG can be inferred using the multi-step compress pipeline which partitions the dataset to save memory. It operates in 6 steps (including one optional step).
+
+### Step 0: Partition dataset
+
+Step0 is a preprocessing step that partitions the vcf file and can be run as follows
+```console
+kodama multi-step-compress step0 \
+    --vcf-metadata "vcf_metadata.txt" \
+    --partition-size 20000000 \
+    --n-small-blocks 20 \
+    --out "out_dir" \
+```
+
+`vcf_metadata.txt` is a space-delimited text file with chromosome names (must be in the form chr{chromosome_number}) and paths to the vcf files to compress. For example:
+```console
+chr vcf_path
+chr1 /path/to/chr1.vcf.gz
+chr2 /path/to/chr2.vcf.gz
+```
+
+`partition_size` is size of the linear ARGs to infer. `n-small-blocks` is the number of smaller blocks to partition the blocks of `partition_size` into for steps1-2. To see additional options, run:
+```console
+kodama multi-step-compress step0 -h
+```
+
+The output of this step is `out_dir/job_metadata.parquet` which is the input for subsequent steps.
+
+
+### Step 1: Extract genotype matrix and infer forward and backward graphs
+
+Step1 extracts a binary genotype matrix and infers forward and backward graphs. It can be run with:
+```console
+n_small_jobs=$(python -c "import polars as pl; print(pl.read_parquet('out_dir/job_metadata.parquet')['small_job_id'].n_unique())")
+
+for ((i=0; i<n_small_jobs; i++)); do
+    kodama multi-step-compress step1 \
+        --job-metadata "out_dir/job_metadata.parquet" \
+        --small-job-id $i \
+done
+```
+Steps 1-4 can be split into separate jobs to reduce wall time.
+
+
+### Step 2: Compute reduction union and find recombinations
+
+Step2 computes the reduction union of the forward and backward graph to obtain the brick graph and then finds recombinations on the brick graph. It can be run with:
+```console
+n_small_jobs=$(python -c "import polars as pl; print(pl.read_parquet('out_dir/job_metadata.parquet')['small_job_id'].n_unique())")
+
+for ((i=0; i<n_small_jobs; i++)); do
+    kodama multi-step-compress step2 \
+        --job-metadata "out_dir/job_metadata.parquet" \
+        --small-job-id $i \
+done
+```
+
+### Step 3: Merge brick graphs
+
+Step3 merges the brick graphs, finds recombinations on the merged brick graph, and linearizes the brick graph to obtain the linear ARG. It can be run with:
+```console
+n_large_jobs=$(python -c "import polars as pl; print(pl.read_parquet('out_dir/job_metadata.parquet')['large_job_id'].n_unique())")
+
+for ((i=0; i<n_large_jobs; i++)); do
+    kodama multi-step-compress step3 \
+        --job-metadata "out_dir/job_metadata.parquet" \
+        --large-job-id $i \
+done
+```
+
+### Step 4 (optional): Add individual nodes
+
+Step4 adds individual/sample nodes to the linear ARG in order to compute statistics such as number of carriers. It can be run with:
+```console
+n_large_jobs=$(python -c "import polars as pl; print(pl.read_parquet('out_dir/job_metadata.parquet')['large_job_id'].n_unique())")
+
+for ((i=0; i<n_large_jobs; i++)); do
+    kodama multi-step-compress step4 \
+        --job-metadata "out_dir/job_metadata.parquet" \
+        --large-job-id $i \
+done
+```
+This step can be skipped if you just want to infer a linear ARG without individual nodes.
+
+
+### Step 5: Final merge
+
+Step5 merges the linear ARGs into a single h5 file. It can be run with:
+```console
+kodama multi-step-compress step5 \
+    --job-metadata "out_dir/job_metadata.parquet" \
+```
+
 
 ## License
 
