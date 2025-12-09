@@ -256,7 +256,7 @@ class ParallelOperator(LinearOperator):
         m, k = x.shape
         if m != self.shape[1]:
             raise ValueError(
-                f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and{x.shape}."
+                f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and {x.shape}."
             )
         if in_place and k > self._max_num_traits:
             raise ValueError(f"in_place=True requires x.shape[1] <= max_num_traits = {self._max_num_traits}")

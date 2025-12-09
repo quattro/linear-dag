@@ -44,6 +44,7 @@ class LinearARG(LinearOperator):
     iids: Optional[pl.Series] = None
     nonunique_indices: Optional[npt.NDArray[np.int32]] = None
     sex: Optional[npt.NDArray[np.int32]] = None  # determines how individual_indices are handled
+    allele_counts: Optional[npt.NDArray[np.int32]] = None
 
     @property
     def individual_indices(self):
@@ -201,7 +202,10 @@ class LinearARG(LinearOperator):
 
     @cached_property
     def allele_frequencies(self):
-        return (np.ones(self.shape[0], dtype=np.int32) @ self) / self.shape[0]
+        if self.allele_counts is None: # if not precomputed
+            return (np.ones(self.shape[0], dtype=np.int32) @ self) / self.shape[0]
+        else:
+            return self.allele_counts / self.shape[0]
 
     def number_of_heterozygotes(self, indiv_to_include: np.ndarray|None=None):
         if self.n_individuals is None:
@@ -414,7 +418,7 @@ class LinearARG(LinearOperator):
         self, h5_fname: Union[str, PathLike],
         block_info: Optional[dict] = None,
         compression_option: str = "gzip",
-        save_threshold: bool = False,
+        save_allele_counts: bool = True,
     ):
         """Writes LinearARG to disk.
         :param h5_fname: The base path and prefix used for output files.
@@ -483,16 +487,14 @@ class LinearARG(LinearOperator):
                             shuffle=True,
                         )
             
-            if save_threshold:
-                N = self.A.shape[0]
-                af = self.allele_frequencies
-                maf = np.minimum(af, 1 - af)
-                order = int(np.ceil(np.log10(N)))        
-                thresholds = 10.0 ** -np.arange(1, order + 1)
-                destination.attrs["threshold_values"] = thresholds
-                destination.attrs["threshold_n_variants"] = (maf[:, None] > thresholds).sum(axis=0)
-
-                                
+            if save_allele_counts:
+                allele_counts = np.ones(self.shape[0], dtype=np.int32) @ self
+                destination.create_dataset(
+                    "allele_counts",
+                    data=allele_counts.astype(int),
+                    compression=compression_option,
+                    shuffle=True,
+                )
             
         return
 
@@ -667,7 +669,13 @@ class LinearARG(LinearOperator):
             else:
                 v_info = None
 
-        return LinearARG(A, variant_indices, flip, n_samples, n_individuals, v_info, iids, nonunique_indices)
+            if "allele_counts" in f:
+                allele_counts = f["allele_counts"][:]
+            else:
+                allele_counts = None
+                
+
+        return LinearARG(A, variant_indices, flip, n_samples, n_individuals=n_individuals, variants=v_info, iids=iids, nonunique_indices=nonunique_indices, allele_counts=allele_counts)
 
     def filter_variants_by_maf(self, maf_threshold: float) -> None:
         """Filter variants to only include those with MAF > threshold.
