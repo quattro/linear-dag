@@ -268,6 +268,12 @@ def run_gwas(
         )
     if logger:
         logger.info(f"variant_info columns={len(variant_info.collect_schema().names())} pheno_cols={len(pheno_cols)}")
+        
+    
+    print(f'beta shape: {beta.shape}')
+    print(f'beta: {beta[:5]}')
+    print(f'allele_counts shape: {allele_counts.shape}')
+    print(f'allele_counts: {allele_counts[:5]}')
 
     result = _format_sumstats(
         beta,
@@ -279,6 +285,9 @@ def run_gwas(
         recompute_AC=recompute_AC,
         logger=logger,
     )
+    
+    print(f'result: {result.collect()}')
+    
     if logger:
         logger.info("Finished formatting GWAS results")
     return result
