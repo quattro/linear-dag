@@ -44,7 +44,23 @@ class LinearARG(LinearOperator):
     iids: Optional[pl.Series] = None
     nonunique_indices: Optional[npt.NDArray[np.int32]] = None
     sex: Optional[npt.NDArray[np.int32]] = None  # determines how individual_indices are handled
-    allele_counts: Optional[npt.NDArray[np.int32]] = None
+    # allele_counts: Optional[npt.NDArray[np.int32]] = None
+    
+    @cached_property
+    def allele_counts(self) -> npt.NDArray[np.int32]:
+        """Compute and cache allele counts (sum of allele dosages across all samples)."""
+        return np.ones(self.shape[0], dtype=np.int32) @ self
+
+    def set_allele_counts(self, counts: npt.NDArray[np.int32]) -> None:
+        """Pre-set allele counts (e.g., when loading from disk)."""
+        object.__setattr__(self, 'allele_counts', counts)
+        
+    @cached_property
+    def allele_frequencies(self):
+        if self.allele_counts is None: # if not precomputed
+            return (np.ones(self.shape[0], dtype=np.int32) @ self) / self.shape[0]
+        else:
+            return self.allele_counts / self.shape[0]
 
     @property
     def individual_indices(self):
@@ -199,13 +215,6 @@ class LinearARG(LinearOperator):
         pq = self.allele_frequencies * (1 - self.allele_frequencies)
         pq[pq == 0] = 1
         return self.mean_centered @ aslinearoperator(diags(pq**-0.5))
-
-    @cached_property
-    def allele_frequencies(self):
-        if self.allele_counts is None: # if not precomputed
-            return (np.ones(self.shape[0], dtype=np.int32) @ self) / self.shape[0]
-        else:
-            return self.allele_counts / self.shape[0]
 
     def number_of_heterozygotes(self, indiv_to_include: np.ndarray|None=None):
         if self.n_individuals is None:
@@ -675,7 +684,11 @@ class LinearARG(LinearOperator):
                 allele_counts = None
                 
 
-        return LinearARG(A, variant_indices, flip, n_samples, n_individuals=n_individuals, variants=v_info, iids=iids, nonunique_indices=nonunique_indices, allele_counts=allele_counts)
+        linarg =  LinearARG(A, variant_indices, flip, n_samples, n_individuals=n_individuals, variants=v_info, iids=iids, nonunique_indices=nonunique_indices)
+        if allele_counts is not None:
+            linarg.set_allele_counts(allele_counts)
+        return linarg
+    
 
     def filter_variants_by_maf(self, maf_threshold: float) -> None:
         """Filter variants to only include those with MAF > threshold.
@@ -752,7 +765,13 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
     block_data = []
 
     def parse_block_name(block_name):
-        chrom, start, _ = block_name.split("_")
+        if len(block_name.split("_")) == 3: # chr1_start_end
+            chrom, start, _ = block_name.split("_")
+        else: # chr1:start-end
+            chrom = block_name.split(":")[0]
+            start = block_name.split(":")[1].split("-")[0]
+        if chrom.startswith("chr"):
+            chrom = chrom[3:]
         return (int(chrom), int(float(start)))
 
     with h5py.File(h5_fname, "r") as f:
@@ -780,105 +799,69 @@ def list_iids(h5_fname: Union[str, PathLike]) -> pl.Series:
         iids_data = h5f["iids"][:]
         iids = pl.Series("iids", iids_data.astype(str))
     return iids
-    
-
-def load_block_metadata(h5_fname, block_metadata):
-    block_names = block_metadata.get_column("block_name").to_list()
-    lazyframes = []
-    with h5py.File(h5_fname, "r") as f:
-        for block_name in block_names:
-            block = f[block_name]
-            v_dict = {field: block[field][:].astype(str) for field in ["CHROM", "POS", "ID", "REF", "ALT"]}
-            v_info = (
-                pl.DataFrame(v_dict)
-                .with_columns(
-                    [
-                        pl.col("POS").cast(pl.Int32),
-                    ]
-                )
-                .lazy()
-            )
-            lazyframes.append(v_info)
-    return pl.concat(lazyframes)
-
 
 def load_variant_info(
     h5_fname: str,
     block_names: Union[list[str], None] = None,
-    columns: str = "id_only",  # one of {"all", "id_only", "no_id"}
+    columns: str = "id_only",
+    maf_threshold: Optional[float] = None,
 ):
-    # Read all blocks from a single open file handle and build one DataFrame.
-    # Avoids per-block DataFrame construction and repeated file opens.
-
     if not str(h5_fname).endswith(".h5"):
         h5_fname = str(h5_fname) + ".h5"
-    # Determine which blocks to read and total number of variants for preallocation
+    
     blocks_df = list_blocks(h5_fname)
     blocks = block_names or blocks_df.get_column("block_name").to_list()
     if block_names is not None:
         blocks_df = blocks_df.filter(pl.col("block_name").is_in(block_names))
-    total_m = int(blocks_df.get_column("n_variants").sum())
 
-    # Use Python object arrays for byte strings; fastest LazyFrame build in practice
-    chrom_dtype = object
-    id_dtype = object
-    ref_dtype = object
-    alt_dtype = object
-
-    # Preallocate arrays according to requested columns
-    pos = None
-    chrom = None
-    id_ = None
-    ref = None
-    alt = None
-    if columns in ("all", "no_id"):
-        pos = np.empty(total_m, dtype=np.int32)
-        chrom = np.empty(total_m, dtype=chrom_dtype)
-        ref = np.empty(total_m, dtype=ref_dtype)
-        alt = np.empty(total_m, dtype=alt_dtype)
-    if columns in ("all", "id_only"):
-        id_ = np.empty(total_m, dtype=id_dtype)
+    # Initialize lists to collect data
+    chrom_list, pos_list, ref_list, alt_list, id_list = [], [], [], [], []
 
     with h5py.File(h5_fname, "r") as f:
-        offset = 0
         for block in blocks:
             g = f[block]
-            n = g["POS"].shape[0]
-            if columns in ("all", "no_id"):
-                chrom[offset : offset + n] = g["CHROM"][:]
-                pos[offset : offset + n] = g["POS"][:]
-                ref[offset : offset + n] = g["REF"][:]
-                alt[offset : offset + n] = g["ALT"][:]
-            if columns in ("all", "id_only"):
-                id_[offset : offset + n] = g["ID"][:]
-            offset += n
+            
+            # Calculate MAF mask
+            if maf_threshold is not None:
+                af = g["allele_counts"][:] / g.attrs["n_samples"]
+                maf = np.minimum(af, 1 - af)
+                mask = maf > maf_threshold
+            else:
+                mask = np.ones(g["allele_counts"].shape[0], dtype=bool)
+            
+            # Only process if any variants pass the filter
+            if np.any(mask):
+                if columns in ("all", "no_id"):
+                    chrom_list.extend(g["CHROM"][:][mask])
+                    pos_list.extend(g["POS"][:][mask])
+                    ref_list.extend(g["REF"][:][mask])
+                    alt_list.extend(g["ALT"][:][mask])
+                if columns in ("all", "id_only"):
+                    id_list.extend(g["ID"][:][mask])
 
-    # Build LazyFrame with requested columns
+    # Build LazyFrame from collected data
     data_dict = {}
     schema_list = []
+    
     if columns in ("all", "no_id"):
-        data_dict.update(
-            {
-                "CHROM": chrom,
-                "POS": pos,
-                "REF": ref,
-                "ALT": alt,
-            }
-        )
-        schema_list.extend(
-            [
-                ("CHROM", pl.Binary),
-                ("POS", pl.Int32),
-                ("REF", pl.Binary),
-                ("ALT", pl.Binary),
-            ]
-        )
+        data_dict.update({
+            "CHROM": chrom_list,
+            "POS": pos_list,
+            "REF": ref_list,
+            "ALT": alt_list,
+        })
+        schema_list.extend([
+            ("CHROM", pl.Binary),
+            ("POS", pl.Int32),
+            ("REF", pl.Binary),
+            ("ALT", pl.Binary),
+        ])
+    
     if columns in ("all", "id_only"):
-        data_dict["ID"] = id_
+        data_dict["ID"] = id_list
         schema_list.append(("ID", pl.Binary))
 
-    lf = pl.LazyFrame(data_dict, schema=schema_list)
-    return lf
+    return pl.LazyFrame(data_dict, schema=schema_list)
 
 
 def add_individuals_to_graph(
