@@ -282,7 +282,7 @@ def _assoc_scan(args):
         _vinfo_executor = ThreadPoolExecutor(max_workers=1)
         t_vinfo = time.time()
         columns_mode = "all" if getattr(args, "all_variant_info", False) else "id_only"
-        vinfo_future = _vinfo_executor.submit(load_variant_info, args.linarg_path, block_names, columns=columns_mode)
+        vinfo_future = _vinfo_executor.submit(load_variant_info, args.linarg_path, block_names, columns=columns_mode, maf_threshold=10**args.maf_log10_threshold)
         logger.info("Started loading variant info")
 
     # Run parallel GWAS
@@ -293,6 +293,7 @@ def _assoc_scan(args):
             num_processes=args.num_processes,
             block_metadata=block_metadata,
             max_num_traits=1 + len(covar_cols),
+            maf_log10_threshold=args.maf_log10_threshold,
         ) as genotypes:
             per_results: list[pl.LazyFrame] = []
             for ph in pheno_cols:
@@ -341,6 +342,7 @@ def _assoc_scan(args):
             num_processes=args.num_processes,
             block_metadata=block_metadata,
             max_num_traits=max_num_traits,
+            maf_log10_threshold=args.maf_log10_threshold,
         ) as genotypes:
             result: pl.LazyFrame = run_gwas(
                 genotypes,
@@ -574,7 +576,13 @@ def _main(args):
     assoc_p.add_argument(
         "--repeat-covar",
         action="store_true",
-        help=("Run phenotypes one at a time inside the parallel operator, repeating covariate projections."),
+        help=("Run phenotypes one at a time inside the parallel operator, repeating covariate projections. "),
+    )
+    assoc_p.add_argument(
+        "--maf-log10-threshold",
+        type=int,
+        default=None,
+        help=("MAF log10 threshold of variants to include in the association test."),
     )
     assoc_p.add_argument(
         "--recompute-ac",

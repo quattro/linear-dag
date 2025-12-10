@@ -52,7 +52,8 @@ def _compute_filtered_variant_counts(
     filtered_counts = []
     for row in block_metadata.iter_rows(named=True):
         threshold_values = row["threshold_values"]
-        matches = np.where(threshold_values == threshold_value)[0]
+        # matches = np.where(threshold_values == threshold_value)[0]
+        matches = np.where(np.isclose(threshold_values, threshold_value, rtol=1e-12, atol=1e-15))[0] # handle floating-point error
         if len(matches) == 0:
             raise ValueError(f"Threshold {threshold_value} not found. " f"Available thresholds: {threshold_values}")
 
@@ -255,7 +256,7 @@ class ParallelOperator(LinearOperator):
         m, k = x.shape
         if m != self.shape[1]:
             raise ValueError(
-                f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and{x.shape}."
+                f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and {x.shape}."
             )
         if in_place and k > self._max_num_traits:
             raise ValueError(f"in_place=True requires x.shape[1] <= max_num_traits = {self._max_num_traits}")
