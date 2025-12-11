@@ -68,7 +68,7 @@ def compress_vcf(
         block_info = None
 
     logger.info("Writing to disk")
-    linarg.write(output_h5, block_info=block_info, save_threshold=True)
+    linarg.write(output_h5, block_info=block_info)
     logger.info("Done!")
     
 
@@ -720,7 +720,7 @@ def merge(out, mount_point, partition_identifiers, partition_identifier):
         "end": partition_identifier.split("_")[1].split(":")[1].split("-")[1],
     }
     
-    linarg.write(f"{out}/linear_args/{partition_identifier}.h5", block_info=block, save_threshold=True)
+    linarg.write(f"{out}/linear_args/{partition_identifier}.h5", block_info=block)
     logger.info("Computing linear ARG stats")
     get_linarg_stats(out, mount_point, partition_identifiers, partition_identifier, linarg)
 
@@ -825,7 +825,7 @@ def add_individuals_to_linarg(out, mount_point, partition_identifiers, partition
         "end": block_name.split(":")[1].split('-')[1],
     }
     
-    linarg.write(f"{out}/individual_linear_args/{partition_identifier}", block_info=block_info, save_threshold=True)
+    linarg.write(f"{out}/individual_linear_args/{partition_identifier}", block_info=block_info)
     
     logger.info("Computing linear ARG stats")
     get_linarg_individual_stats(out, mount_point, partition_identifiers, partition_identifier, linarg)

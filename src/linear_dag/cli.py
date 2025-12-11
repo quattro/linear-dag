@@ -282,7 +282,8 @@ def _assoc_scan(args):
         _vinfo_executor = ThreadPoolExecutor(max_workers=1)
         t_vinfo = time.time()
         columns_mode = "all" if getattr(args, "all_variant_info", False) else "id_only"
-        vinfo_future = _vinfo_executor.submit(load_variant_info, args.linarg_path, block_names, columns=columns_mode, maf_threshold=10**args.maf_log10_threshold)
+        maf_threshold = None if args.maf_log10_threshold is None else 10**args.maf_log10_threshold
+        vinfo_future = _vinfo_executor.submit(load_variant_info, args.linarg_path, block_names, columns=columns_mode, maf_threshold=maf_threshold)
         logger.info("Started loading variant info")
 
     # Run parallel GWAS
