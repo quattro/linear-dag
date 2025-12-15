@@ -16,7 +16,7 @@ cdef struct node:
     edge* first_out
 
 cdef struct edge:
-    int index
+    long index
     node* u
     node* v
     edge* next_in
