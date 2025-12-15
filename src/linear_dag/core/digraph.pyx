@@ -79,18 +79,31 @@ cdef class DiGraph:
         free(self.nodes)
 
     cdef edge* get_edge(self, long edge_idx):
-        if edge_idx >= self.maximum_number_of_edges:
+        if edge_idx >= self.maximum_number_of_edges:  # use actual number of edges
             raise IndexError("Edge index out of bounds")
+
+        cdef long cum_size = 0
+        cdef long arr_len
         cdef long which_array = 0
-        cdef long cum_size = self.edge_array_length
-        while edge_idx >= cum_size:
+
+        # find the array containing this edge
+        while True:
+            arr_len = self.edge_array_length * (1 << which_array)
+            if self.edge_arrays[which_array] is NULL:
+                raise IndexError("Edge array missing")
+            if edge_idx < cum_size + arr_len:
+                break
+            cum_size += arr_len
             which_array += 1
-            cum_size += self.edge_array_length * (1 << which_array)
-        assert which_array < 64
-        cdef int arr_idx = edge_idx - (cum_size - self.edge_array_length * (1 << which_array))
-        cdef edge* edge = &self.edge_arrays[which_array][arr_idx]
-        assert edge.index == edge_idx
-        return edge
+
+        # compute index inside the array
+        cdef int arr_idx = edge_idx - cum_size
+        cdef edge* e = &self.edge_arrays[which_array][arr_idx]
+
+        # now this should always be true
+        assert e.index == edge_idx
+        return e
+
 
     @property
     def number_of_nodes(self) -> int:
