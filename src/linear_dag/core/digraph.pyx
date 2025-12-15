@@ -89,6 +89,13 @@ cdef class DiGraph:
         assert which_array < 64
         cdef int arr_idx = edge_idx - (cum_size - self.edge_array_length * (1 << which_array))
         cdef edge* edge = &self.edge_arrays[which_array][arr_idx]
+
+        if edge.index != edge_idx:
+            print("Assertion failed: edge index does not match!")
+            print(f"  Expected edge_idx={edge_idx}, but edge.index={edge.index}")
+            print(f"  which_array={which_array}, arr_idx={arr_idx}")
+            print(f"  edge_array_length={self.edge_array_length}")
+            print(f"  maximum_number_of_edges={self.maximum_number_of_edges}")
         assert edge.index == edge_idx
         return edge
 
