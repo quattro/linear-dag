@@ -1,4 +1,5 @@
 # digraph.pxd
+from libc.stdint cimport int64_t, uint64_t
 
 cdef struct node:
     int index
@@ -6,7 +7,7 @@ cdef struct node:
     edge* first_out
 
 cdef struct edge:
-    int index
+    int64_t index
     node* u
     node* v
     edge* next_in
@@ -19,13 +20,13 @@ cdef class DiGraph:
     cdef edge** edge_arrays
     cdef node* available_node
     cdef edge* available_edge
-    cdef long maximum_number_of_nodes
-    cdef long number_of_available_nodes
-    cdef long maximum_number_of_edges
-    cdef long number_of_available_edges
-    cdef long edge_array_length
+    cdef int64_t maximum_number_of_nodes
+    cdef int64_t number_of_available_nodes
+    cdef int64_t maximum_number_of_edges
+    cdef int64_t number_of_available_edges
+    cdef int64_t edge_array_length
     
-    cdef edge* get_edge(self, long index)
+    cdef edge* get_edge(self, int64_t index)
     cdef void extend_edge_array(self)
     cdef node* add_node(self, long node_index)
     cdef edge* add_edge(self, long u_index, long v_index)

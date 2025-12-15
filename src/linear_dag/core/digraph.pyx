@@ -8,6 +8,8 @@ from scipy.sparse import csr_matrix, csc_matrix
 cimport numpy as cnp
 from .data_structures cimport Stack
 
+from libc.stdint cimport int64_t, uint64_t
+
 cdef int MAXINT = 32767
 
 cdef struct node:
@@ -16,7 +18,7 @@ cdef struct node:
     edge* first_out
 
 cdef struct edge:
-    int index
+    int64_t index
     node* u
     node* v
     edge* next_in
@@ -78,17 +80,18 @@ cdef class DiGraph:
         free(self.edge_arrays)
         free(self.nodes)
 
-    cdef edge* get_edge(self, long edge_idx):
+    cdef edge* get_edge(self, int64_t edge_idx):
         if edge_idx >= self.maximum_number_of_edges:
             raise IndexError("Edge index out of bounds")
         cdef long which_array = 0
-        cdef long cum_size = self.edge_array_length
+        cdef int64_t cum_size = self.edge_array_length
         while edge_idx >= cum_size:
             which_array += 1
             cum_size += self.edge_array_length * (1 << which_array)
         assert which_array < 64
-        cdef int arr_idx = edge_idx - (cum_size - self.edge_array_length * (1 << which_array))
+        cdef int64_t arr_idx = edge_idx - (cum_size - self.edge_array_length * (1 << which_array))
         cdef edge* edge = &self.edge_arrays[which_array][arr_idx]
+
         assert edge.index == edge_idx
         return edge
 
@@ -455,7 +458,7 @@ cdef class DiGraph:
         self.edge_arrays[which_arr] = <edge*> malloc(array_len * sizeof(edge))
               
         cdef edge* e
-        cdef int i
+        cdef int64_t i
         cdef long global_edge_idx = self.maximum_number_of_edges
         
         for i in range(array_len):
