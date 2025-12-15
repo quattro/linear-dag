@@ -79,7 +79,7 @@ cdef class DiGraph:
         free(self.nodes)
 
     cdef edge* get_edge(self, long edge_idx):
-        if edge_idx >= self.maximum_number_of_edges:  # use actual number of edges
+        if edge_idx >= self.maximum_number_of_edges:
             raise IndexError("Edge index out of bounds")
 
         cdef long cum_size = 0
@@ -100,7 +100,6 @@ cdef class DiGraph:
         cdef int arr_idx = edge_idx - cum_size
         cdef edge* e = &self.edge_arrays[which_array][arr_idx]
 
-        # now this should always be true
         assert e.index == edge_idx
         return e
 
