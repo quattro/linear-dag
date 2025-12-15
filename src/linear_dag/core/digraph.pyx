@@ -455,7 +455,7 @@ cdef class DiGraph:
         self.edge_arrays[which_arr] = <edge*> malloc(array_len * sizeof(edge))
               
         cdef edge* e
-        cdef int i
+        cdef long i
         cdef long global_edge_idx = self.maximum_number_of_edges
         
         for i in range(array_len):
