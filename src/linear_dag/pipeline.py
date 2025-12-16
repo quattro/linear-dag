@@ -68,7 +68,7 @@ def compress_vcf(
         block_info = None
 
     logger.info("Writing to disk")
-    linarg.write(output_h5, block_info=block_info, save_threshold=True)
+    linarg.write(output_h5, block_info=block_info)
     logger.info("Done!")
     
 
@@ -105,8 +105,11 @@ def msc_step0(
     for chrom in vcf_meta["chr"].unique():
         chrom_meta = vcf_meta.filter(pl.col("chr") == chrom)
         
-        # first_coord = chrom_meta["first_var_coord"].item()
-        # last_coord = chrom_meta["last_var_coord"].item()
+        # accept chrom as either 22 or chr22 as cyvcf2 requires 'chr' as a prefix
+        if chrom[:3] != 'chr': 
+            chrom_name = f'chr{chrom}'
+        else:
+            chrom_name = chrom
         
         vcf_path = chrom_meta["vcf_path"].item()
         
@@ -130,8 +133,8 @@ def msc_step0(
                 new_row = pl.DataFrame({
                     "small_job_id": [job_meta.height],
                     "large_job_id": [n_large_jobs],
-                    "small_region": [f"{chrom}:{small_start}-{small_end}"],
-                    "large_region": [f"{chrom}:{large_start}-{large_end}"],
+                    "small_region": [f"{chrom_name}:{small_start}-{small_end}"],
+                    "large_region": [f"{chrom_name}:{large_start}-{large_end}"],
                     "vcf_path": [vcf_path]
                 })
                 job_meta = pl.concat([job_meta, new_row])
@@ -148,7 +151,8 @@ def msc_step0(
         "sex_path": str(sex_path),
         "mount_point": "" if mount_point is None else str(mount_point),
     }
-
+    
+    print(f'n_small_jobs: {job_meta.height}, n_large_jobs: {n_large_jobs}')
     job_meta.write_parquet(f"{out}/job_metadata.parquet", metadata=params)
 
 
@@ -720,7 +724,7 @@ def merge(out, mount_point, partition_identifiers, partition_identifier):
         "end": partition_identifier.split("_")[1].split(":")[1].split("-")[1],
     }
     
-    linarg.write(f"{out}/linear_args/{partition_identifier}.h5", block_info=block, save_threshold=True)
+    linarg.write(f"{out}/linear_args/{partition_identifier}.h5", block_info=block)
     logger.info("Computing linear ARG stats")
     get_linarg_stats(out, mount_point, partition_identifiers, partition_identifier, linarg)
 
@@ -825,7 +829,7 @@ def add_individuals_to_linarg(out, mount_point, partition_identifiers, partition
         "end": block_name.split(":")[1].split('-')[1],
     }
     
-    linarg.write(f"{out}/individual_linear_args/{partition_identifier}", block_info=block_info, save_threshold=True)
+    linarg.write(f"{out}/individual_linear_args/{partition_identifier}", block_info=block_info)
     
     logger.info("Computing linear ARG stats")
     get_linarg_individual_stats(out, mount_point, partition_identifiers, partition_identifier, linarg)

@@ -279,6 +279,7 @@ def run_gwas(
         recompute_AC=recompute_AC,
         logger=logger,
     )
+        
     if logger:
         logger.info("Finished formatting GWAS results")
     return result

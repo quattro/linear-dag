@@ -10,6 +10,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import polars as pl
+import h5py
 
 from scipy.sparse import diags
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
@@ -31,32 +32,26 @@ assert len(np.unique([val for val in FLAGS.values()])) == len(FLAGS)
 def _compute_filtered_variant_counts(
     block_metadata: pl.DataFrame,
     maf_log10_threshold: float,
+    hdf5_file: str,
 ) -> pl.DataFrame:
     """Compute number of variants per block that meet MAF threshold.
 
     Args:
-        block_metadata: DataFrame with block information including threshold_values and threshold_n_variants
+        block_metadata: DataFrame with block information
         maf_log10_threshold: log10 of MAF threshold (e.g., -3 for MAF > 0.001)
 
     Returns:
         Updated block_metadata with filtered n_variants
     """
-    threshold_value = 10**maf_log10_threshold
-
-    if "threshold_values" not in block_metadata.columns or "threshold_n_variants" not in block_metadata.columns:
-        raise ValueError(
-            "block_metadata missing threshold_values or threshold_n_variants columns. "
-            "Ensure file was written with save_threshold=True"
-        )
 
     filtered_counts = []
-    for row in block_metadata.iter_rows(named=True):
-        threshold_values = row["threshold_values"]
-        matches = np.where(threshold_values == threshold_value)[0]
-        if len(matches) == 0:
-            raise ValueError(f"Threshold {threshold_value} not found. " f"Available thresholds: {threshold_values}")
-
-        filtered_counts.append(row["threshold_n_variants"][matches[0]])
+    for block in block_metadata.get_column("block_name").to_list():
+        with h5py.File(hdf5_file, 'r') as f:
+            af = f[block]["allele_counts"][:] / f[block].attrs["n_samples"]
+        maf = np.minimum(af, 1 - af)
+        mask = maf > 10**maf_log10_threshold
+        n_variants = np.sum(mask)
+        filtered_counts.append(n_variants)
 
     return block_metadata.with_columns(pl.Series("n_variants", filtered_counts))
 
@@ -255,7 +250,7 @@ class ParallelOperator(LinearOperator):
         m, k = x.shape
         if m != self.shape[1]:
             raise ValueError(
-                f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and{x.shape}."
+                f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and {x.shape}."
             )
         if in_place and k > self._max_num_traits:
             raise ValueError(f"in_place=True requires x.shape[1] <= max_num_traits = {self._max_num_traits}")
@@ -481,7 +476,7 @@ class ParallelOperator(LinearOperator):
             block_metadata = list_blocks(hdf5_file)
 
         if maf_log10_threshold is not None:
-            block_metadata = _compute_filtered_variant_counts(block_metadata, maf_log10_threshold)
+            block_metadata = _compute_filtered_variant_counts(block_metadata, maf_log10_threshold, hdf5_file)
 
         num_variants = block_metadata["n_variants"].sum()
         num_samples = block_metadata["n_samples"][0]
