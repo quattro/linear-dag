@@ -204,7 +204,7 @@ kodama multi-step-compress step0 \
     --out "out_dir" \
 ```
 
-`vcf_metadata.txt` is a space-delimited text file with chromosome names (must be in the form chr{chromosome_number}) and paths to the vcf files to compress. For example:
+`vcf_metadata.txt` is a space-delimited text file with chromosome names (must be in the form chr{chromosome_number} or chromosome_number) and paths to the vcf files to compress. For example:
 ```console
 chr vcf_path
 chr1 /path/to/chr1.vcf.gz
