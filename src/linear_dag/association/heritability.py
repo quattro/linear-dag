@@ -83,10 +83,16 @@ def randomized_haseman_elston(
     # compute the (co)variance of our estimates
     var_s2g, var_s2e, covariances = _compute_err_variance(grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs)
 
-    # normalize back to h2g space
-    s2g = solution[0, :]
-    s2e = solution[1, :]
+    # we define h2g: = a * Tr(K) / (a * Tr(K) + b * Tr(I)), where a = solution[0] and b = solution[1]
+    # this handles any possible rescaling of the 'grm' like object to compute the correct total genetic variance
+    # rescale variances and covariances to trace(K) parameterization
+    s2g = solution[0, :] * grm_trace
+    s2e = solution[1, :] * N
     heritability = s2g / (s2g + s2e)
+    var_s2g = (grm_trace**2) * var_s2g
+    var_s2e = (N**2) * var_s2e
+    covariances = (grm_trace * N) * covariances
+
     # approx delta method to compute std err of h2g
     numer = (s2e**2) * var_s2g + (s2g**2) * var_s2e - 2 * s2g * s2e * covariances
     denom = (s2g + s2e) ** 4
