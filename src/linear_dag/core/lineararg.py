@@ -491,7 +491,7 @@ class LinearARG(LinearOperator):
                     else:
                         destination.create_dataset(
                             field,
-                            data=np.array(variant_info[field]).astype("S"),
+                            data=np.array(variant_info[field], dtype=object).astype("S"),
                             compression=compression_option,
                             shuffle=True,
                         )
