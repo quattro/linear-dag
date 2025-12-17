@@ -600,7 +600,7 @@ class LinearARG(LinearOperator):
                             compression=get_blosc_filter(pos_data),
                         )
                     else:
-                        str_data = np.array(variant_info[field]).astype("S")
+                        str_data = np.array(variant_info[field], dtype=object).astype("S")
                         destination.create_dataset(
                             field,
                             data=str_data,
