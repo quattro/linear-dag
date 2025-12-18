@@ -39,6 +39,7 @@ def residualize_phenotypes(
     return residuals
 
 
+
 def get_genotype_variance_explained(
     XtC: np.ndarray,
     C: np.ndarray,
@@ -54,7 +55,7 @@ def get_genotype_variance_explained(
         C: Covariates matrix, which should include the all-ones annotation except for missing values
         batch_size: Number of SNPs to process at once to reduce memory usage
         lam: Regularization parameter for the pseudoinverse
-        
+
     Returns:
         tuple: (total_var_explained, allele_count)
             total_var_explained: Total variance of genotypes explained by covariates
@@ -63,10 +64,10 @@ def get_genotype_variance_explained(
     """
     num_covar = C.shape[1]
     covariate_inner = C.T @ C
-    
+
     num_snps = XtC.shape[0]
     total_var_explained = np.zeros((num_snps, 1), dtype=np.float32)
-    
+
     for start_idx in range(0, num_snps, batch_size):
         end_idx = min(start_idx + batch_size, num_snps)
         XtC_batch = XtC[start_idx:end_idx, :num_covar]
@@ -76,11 +77,50 @@ def get_genotype_variance_explained(
             XtC_batch.T * C_backslash_XtC_batch, axis=0
         ).reshape(-1, 1)
 
-    if XtC.shape[1] == num_covar:
-        allele_count = XtC[:, 0].reshape(-1, 1)
-    else:
-        allele_count = XtC[:, num_covar:]
+    allele_count = XtC[:, 0:1]
+
     return total_var_explained, allele_count
+
+def get_genotype_variance_explained_recompute_AC(
+    XtCD: np.ndarray,
+    C: np.ndarray,
+    num_nonmissing: np.ndarray|None = None,
+    batch_size: int = 100_000,
+    lam: float = 1e-5,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Get variance of genotypes explained by covariates for each phenotype, using recomputed allele counts
+    for each phenotype.
+
+    Args:
+        XtCD: X'[C D], where C is the covariates matrix and D is the matrix of indicators for non-missing phenotypes
+        C: Covariates matrix, which should include the all-ones annotation except for missing values
+        num_nonmissing: Number of non-missing observations for each phenotype, equal to the number of nonzeros in
+        each column of D
+        batch_size: Number of SNPs to process at once to reduce memory usage
+        lam: Regularization parameter for the pseudoinverse
+
+    Returns:
+        tuple: (total_var_explained, allele_count)
+            total_var_explained: Total variance of genotypes explained by covariates
+            allele_count: Allele count of the genotypes, assuming first column of covariates is all-ones
+                            except for missing values
+    """
+    n, num_covar = C.shape
+    if num_covar + len(num_nonmissing) != XtCD.shape[1]:
+        raise ValueError("XtCD must have the same number of columns as C and D")
+
+    # n * v, n * p
+    total_var_explained, total_allele_count = get_genotype_variance_explained(XtCD[:,:num_covar], C, batch_size, lam)
+
+    # n' * p'
+    allele_count = XtCD[:, num_covar:]
+
+    # (p'/p)^2 * n' * v
+    var_explained = n / num_nonmissing * total_var_explained * \
+                            (allele_count / total_allele_count.reshape(-1,1)) ** 2
+    np.nan_to_num(var_explained, copy=False, nan=0.0)
+
+    return var_explained, allele_count
 
 
 def _get_genotype_variance(
