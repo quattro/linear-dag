@@ -14,6 +14,7 @@ from linear_dag.core.parallel_processing import ParallelOperator
 from ..core.operators import get_inner_merge_operators
 from .util import (
     get_genotype_variance_explained,
+    get_genotype_variance_explained_recompute_AC,
     impute_missing_with_mean,
     residualize_phenotypes,
 )
@@ -72,38 +73,49 @@ def get_gwas_beta_se(
 
     # Operate in place on possibly large array
     beta = Xty[:, :num_traits]
-    beta *= (right_op.shape[0]/num_nonmissing)
+    # beta *= (right_op.shape[0]/num_nonmissing)
     assert np.shares_memory(beta, Xty)
     if logger:
         logger.info(f"beta shape={beta.shape}")
 
     # Denominator, equal across traits despite different missingness
-    var_explained, allele_counts = get_genotype_variance_explained(Xty[:, num_traits:], covariates)
     if handle_missingness:
-        print(f"ratio: {y_resid.shape[0] / num_nonmissing}")
-        allele_counts = allele_counts * (y_resid.shape[0] / num_nonmissing)
-        print(f"allele_counts={allele_counts}")
-    
+        var_explained, allele_counts = get_genotype_variance_explained_recompute_AC(
+            Xty[:, num_traits:],
+            covariates,
+            num_nonmissing,
+        )
+    else:
+        var_explained, allele_counts = get_genotype_variance_explained(
+            Xty[:, num_traits:],
+            covariates,
+        )
+
+    # if True:
+    #     print(f"ratio: {y_resid.shape[0] / num_nonmissing}")
+    #     print(f"allele_counts={allele_counts}")
+
     denominator = allele_counts - var_explained
     if num_heterozygotes is not None:  # else assume HWE
         # assumes diploid
         num_homozygotes = (allele_counts - num_heterozygotes.reshape(-1, 1)) / 2
         denominator = denominator + 2*num_homozygotes - var_explained
-    
-    # avoid numerical issues for variants with no variance
-    if handle_missingness:
-        beta[denominator < 1e-6] = 0 
-    else:
-        beta[denominator.ravel() < 1e-6, :] = 0
-    denominator[denominator < 1e-6] = 1e-6
 
+    # avoid numerical issues for variants with no variance
+    numerically_zero = 1e-4 # typical nonzero values > 1
+    if handle_missingness:
+        beta[denominator < numerically_zero] = 0
+    else:
+        beta[denominator.ravel() < numerically_zero, :] = 0
+    denominator[denominator < numerically_zero] = numerically_zero
     beta /= denominator
+
     if logger:
         logger.info(f"got beta")
-    print(f"num nonmissing: {num_nonmissing}")
+
     var_numerator = np.sum(y_concat[:, :num_traits]**2, axis=0) \
-        / (num_nonmissing - 2*num_covariates).astype(np.float32) \
-        / (num_nonmissing / y_resid.shape[0]).astype(np.float32)
+        / (num_nonmissing - 2*num_covariates).astype(np.float32)
+
     assert y_concat.dtype == np.float32
     assert var_numerator.dtype == np.float32
     if logger:
@@ -133,21 +145,21 @@ def _format_sumstats(
     if detach_arrays:
         beta = np.array(beta, dtype=np.float32, order="F", copy=True)
         var_denominator = np.array(var_denominator, dtype=np.float32, copy=True)
-        
+
     # Start from variant_info and add columns lazily; avoid concatenation
     df = pl.LazyFrame(
         beta,
         schema={f"{name}_BETA": pl.Float32 for name in pheno_cols},
         orient="row",
     )
-    
+
     # Handle var_denominator: if recompute_AC, create per-trait columns; otherwise single column
     if recompute_AC:
         for k, name in enumerate(pheno_cols):
             df = df.with_columns(pl.Series(f"{name}_VAR_DENOM", var_denominator[:, k]))
     else:
         df = df.with_columns(VAR_DENOMINATOR=pl.lit(var_denominator.ravel()))
-    
+
     df = pl.concat([variant_info, df], how="horizontal")
 
     if logger:
@@ -171,7 +183,7 @@ def _format_sumstats(
     # df = df.select(names_in_order)
     if logger:
         logger.info("Finished formatting sumstats")
-        
+
     return df
 
 
@@ -195,7 +207,7 @@ def run_gwas(
     """
     if logger:
         logger.info(f"run_gwas: assume_hwe={assume_hwe}; n_pheno={len(pheno_cols)} n_covar={len(covar_cols)}")
-    
+
     if not assume_hwe and not hasattr(genotypes, "n_individuals"):
         raise ValueError("If assume_hwe is False, genotypes must be a linear ARG with individual nodes.")
 
@@ -279,15 +291,15 @@ def run_gwas(
         recompute_AC=recompute_AC,
         logger=logger,
     )
-        
+
     if logger:
         logger.info("Finished formatting GWAS results")
     return result
 
 
-def simple_gwas(genotypes: np.ndarray, 
-                phenotypes: np.ndarray, 
-                covariates: np.ndarray, 
+def simple_gwas(genotypes: np.ndarray,
+                phenotypes: np.ndarray,
+                covariates: np.ndarray,
                 ploidy: int = 1) -> tuple[np.ndarray, np.ndarray]:
     """
     Simple GWAS implementation for testing purposes.
@@ -295,10 +307,10 @@ def simple_gwas(genotypes: np.ndarray,
     and calculates beta and standard error for each variant. Genotypes
     can be either diploid or haploid. If genotypes are haploid but the
     chromosome is diploid, ploidy should be 2, and d.f. for the standard
-    error will be n - p, where p is the number of covariates, instead of 
+    error will be n - p, where p is the number of covariates, instead of
     (2n - p) / 2.
     """
-    
+
     nan_rows = np.isnan(phenotypes[:,0]).ravel()
     genotypes = genotypes[~nan_rows, :]
     phenotypes = phenotypes[~nan_rows]
@@ -312,12 +324,12 @@ def simple_gwas(genotypes: np.ndarray,
     Xr = M @ genotypes
     yr = M @ phenotypes
 
-    XtY = Xr.T @ yr 
-    XtX = np.sum(Xr * Xr, axis=0) 
+    XtY = Xr.T @ yr
+    XtX = np.sum(Xr * Xr, axis=0)
     XtX = np.maximum(XtX, 1e-6)
     beta = XtY / XtX[:, None]
 
-    s_yy = np.sum(yr * yr, axis=0) / (yr.shape[0] - ploidy*C.shape[1]) 
+    s_yy = np.sum(yr * yr, axis=0) / (yr.shape[0] - ploidy*C.shape[1])
     se = np.sqrt(s_yy / XtX[:, None])
 
     return beta, se
