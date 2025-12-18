@@ -43,6 +43,7 @@ def residualize_phenotypes(
 def get_genotype_variance_explained(
     XtC: np.ndarray,
     C: np.ndarray,
+    num_heterozygotes: np.ndarray | None,
     batch_size: int = 100_000,
     lam: float = 1e-5,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -77,14 +78,20 @@ def get_genotype_variance_explained(
             XtC_batch.T * C_backslash_XtC_batch, axis=0
         ).reshape(-1, 1)
 
-    allele_count = XtC[:, 0:1]
+    allele_counts = XtC[:, 0:1]
+    denominator = allele_counts - total_var_explained
+    if num_heterozygotes is not None:  # else assume HWE
+        # assumes diploid
+        num_homozygotes = (allele_counts - num_heterozygotes.reshape(-1, 1)) / 2
+        denominator = denominator + 2*num_homozygotes - total_var_explained
 
-    return total_var_explained, allele_count
+    return denominator, allele_counts
 
 def get_genotype_variance_explained_recompute_AC(
     XtCD: np.ndarray,
     C: np.ndarray,
-    num_nonmissing: np.ndarray|None = None,
+    num_heterozygotes: np.ndarray | None,
+    num_nonmissing: np.ndarray | None = None,
     batch_size: int = 100_000,
     lam: float = 1e-5,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -109,18 +116,44 @@ def get_genotype_variance_explained_recompute_AC(
     if num_covar + len(num_nonmissing) != XtCD.shape[1]:
         raise ValueError("XtCD must have the same number of columns as C and D")
 
-    # n * v, n * p
-    total_var_explained, total_allele_count = get_genotype_variance_explained(XtCD[:,:num_covar], C, batch_size, lam)
+    # total_var_explained: misleading variable name for in-place operations to work
+    total_var_explained, total_allele_counts = get_genotype_variance_explained(
+        XtCD[:,:num_covar],
+        C,
+        None,
+        batch_size,
+        lam
+    )
+
+    # n * v
+    total_var_explained *= -1
+    total_var_explained += total_allele_counts
 
     # n' * p'
-    allele_count = XtCD[:, num_covar:]
+    allele_counts = XtCD[:, num_covar:]
 
     # (p'/p)^2 * n' * v
-    var_explained = n / num_nonmissing * total_var_explained * \
-                            (allele_count / total_allele_count.reshape(-1,1)) ** 2
-    np.nan_to_num(var_explained, copy=False, nan=0.0)
+    # one large memory allocation
+    denominator = allele_counts.copy() ** 2
+    denominator *= (n / num_nonmissing).astype(np.float32)
+    denominator *= (total_var_explained / total_allele_counts.reshape(-1,1) ** 2)
+    np.nan_to_num(denominator, copy=False, nan=0.0)
 
-    return var_explained, allele_count
+    if num_heterozygotes is None:  # assume HWE
+        denominator *= -1
+        denominator += allele_counts
+    else:
+        # assumes diploid
+        num_homozygotes = (total_allele_counts - num_heterozygotes.reshape(-1, 1)) / 2
+        denominator *= -2
+        # avoid large memory allocation
+        num_snps = XtCD.shape[0]
+        for start_idx in range(0, num_snps, batch_size):
+            denominator[start_idx:start_idx+batch_size] += \
+            allele_counts[start_idx:start_idx+batch_size] + 2 * num_homozygotes * num_nonmissing / n
+
+    assert denominator.dtype == np.float32
+    return denominator, total_allele_counts
 
 
 def _get_genotype_variance(

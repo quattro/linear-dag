@@ -80,34 +80,22 @@ def get_gwas_beta_se(
 
     # Denominator, equal across traits despite different missingness
     if handle_missingness:
-        var_explained, allele_counts = get_genotype_variance_explained_recompute_AC(
+        denominator, allele_counts = get_genotype_variance_explained_recompute_AC(
             Xty[:, num_traits:],
             covariates,
+            num_heterozygotes,
             num_nonmissing,
         )
     else:
-        var_explained, allele_counts = get_genotype_variance_explained(
+        denominator, allele_counts = get_genotype_variance_explained(
             Xty[:, num_traits:],
             covariates,
+            num_heterozygotes,
         )
-
-    # if True:
-    #     print(f"ratio: {y_resid.shape[0] / num_nonmissing}")
-    #     print(f"allele_counts={allele_counts}")
-
-    denominator = allele_counts - var_explained
-    if num_heterozygotes is not None:  # else assume HWE
-        # assumes diploid
-        num_homozygotes = (allele_counts - num_heterozygotes.reshape(-1, 1)) / 2
-        denominator = denominator + 2*num_homozygotes - var_explained
 
     # avoid numerical issues for variants with no variance
     numerically_zero = 1e-4 # typical nonzero values > 1
-    if handle_missingness:
-        beta[denominator < numerically_zero] = 0
-    else:
-        beta[denominator.ravel() < numerically_zero, :] = 0
-    denominator[denominator < numerically_zero] = numerically_zero
+    denominator[denominator < numerically_zero] = np.nan
     beta /= denominator
 
     if logger:
@@ -180,7 +168,7 @@ def _format_sumstats(
     for name in pheno_cols:
         names_in_order.append(f"{name}_BETA")
         names_in_order.append(f"{name}_SE")
-    # df = df.select(names_in_order)
+    df = df.select(names_in_order)
     if logger:
         logger.info("Finished formatting sumstats")
 
@@ -214,9 +202,6 @@ def run_gwas(
     if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
 
-    if recompute_AC and not assume_hwe:
-        raise ValueError("Unsupported configuration: recompute_AC requires assume_HWE")
-
     left_op, right_op = get_inner_merge_operators(
         data.select("iid").cast(pl.Utf8).collect().to_series(), genotypes.iids
     )  # data iids to shared iids, shared iids to genotypes iids
@@ -249,6 +234,7 @@ def run_gwas(
     t = time.time()
     if logger:
         logger.info(f"starting GWAS computation; in_place_op={in_place_op}")
+
     beta, var_numerator, var_denominator, allele_counts = get_gwas_beta_se(
         genotypes,
         right_op,
@@ -264,20 +250,20 @@ def run_gwas(
         logger.info(f"GWAS computation finished in {time.time() - t:.3f}s")
     assert beta.dtype == np.float32
     assert var_numerator.dtype == np.float32
-    # assert var_denominator.dtype == np.float32
 
     if variant_info is None:
         variant_info = pl.LazyFrame()
-    if not recompute_AC:
-        variant_info = variant_info.with_columns(
-            pl.Series("A1FREQ", allele_counts.ravel() / genotypes.shape[0]).cast(pl.Float32),
-        )
+
+    variant_info = variant_info.with_columns(
+            pl.Series("A1FREQ", allele_counts.ravel() / genotypes.shape[0]).cast(pl.Float32))
+
     if num_heterozygotes is not None:
         variant_info = variant_info.with_columns(
             pl.Series("A1_CARRIER_FREQ", num_heterozygotes.astype(np.float32).ravel() * 2 / genotypes.shape[0]).cast(
                 pl.Float32
             )
         )
+
     if logger:
         logger.info(f"variant_info columns={len(variant_info.collect_schema().names())} pheno_cols={len(pheno_cols)}")
 
@@ -326,7 +312,7 @@ def simple_gwas(genotypes: np.ndarray,
 
     XtY = Xr.T @ yr
     XtX = np.sum(Xr * Xr, axis=0)
-    XtX = np.maximum(XtX, 1e-6)
+    XtX[XtX < 1e-6] = np.nan
     beta = XtY / XtX[:, None]
 
     s_yy = np.sum(yr * yr, axis=0) / (yr.shape[0] - ploidy*C.shape[1])
