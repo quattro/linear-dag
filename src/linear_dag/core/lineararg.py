@@ -474,8 +474,12 @@ class LinearARG(LinearOperator):
                     "nonunique_indices", data=self.nonunique_indices, compression=compression_option, shuffle=True
                 )
             if self.iids is not None and "iids" not in f.keys():
-                str_iids = np.array(self.iids, dtype="S")
-                f.create_dataset("iids", data=str_iids, compression=compression_option, shuffle=True)
+                str_iids = np.array(self.iids, dtype=object)
+                f.create_dataset("iids",
+                                data=str_iids,
+                                dtype=h5py.string_dtype(encoding="utf-8"),
+                                compression=compression_option,
+                                shuffle=True)
             if self.n_individuals is not None:
                 destination.attrs["n_individuals"] = self.n_individuals
             if self.variants is not None:
@@ -491,7 +495,8 @@ class LinearARG(LinearOperator):
                     else:
                         destination.create_dataset(
                             field,
-                            data=np.array(variant_info[field], dtype=object).astype("S"),
+                            data=np.array(variant_info[field], dtype=object),
+                            dtype=h5py.string_dtype(encoding="utf-8"),
                             compression=compression_option,
                             shuffle=True,
                         )
@@ -600,10 +605,11 @@ class LinearARG(LinearOperator):
                             compression=get_blosc_filter(pos_data),
                         )
                     else:
-                        str_data = np.array(variant_info[field], dtype=object).astype("S")
+                        str_data = np.array(variant_info[field], dtype=object)
                         destination.create_dataset(
                             field,
                             data=str_data,
+                            dtype=h5py.string_dtype(encoding="utf-8"),
                             compression=get_blosc_filter(str_data),
                         )
             
