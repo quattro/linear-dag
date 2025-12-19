@@ -48,6 +48,7 @@ def randomized_haseman_elston(
     covariates = data.select(covar_cols).collect().to_numpy()
     yresid, covariates = _prep_for_h2_estimation(left_op, right_op, phenotypes, covariates)
     N = len(yresid)
+    grm = right_op @ grm
     
     print("[DEBUG] After _prep_for_h2_estimation")
     print("  yresid shape:", yresid.shape)
