@@ -708,6 +708,46 @@ class LinearARG(LinearOperator):
         self.variant_indices = self.variant_indices[mask]
         self.flip = self.flip[mask]
 
+    def filter_variants_by_mask(self, mask: npt.NDArray[np.bool_]) -> None:
+        """Filter variants using a boolean mask.
+        
+        Args:
+            mask: Boolean array of length n_variants; True = keep variant
+        """
+        if len(mask) != len(self.variant_indices):
+            raise ValueError(
+                f"Mask length ({len(mask)}) must match number of variants ({len(self.variant_indices)})"
+            )
+        self.variant_indices = self.variant_indices[mask]
+        self.flip = self.flip[mask]
+
+    def filter_variants_by_bed(
+        self,
+        bed_regions: "pl.DataFrame",
+        maf_threshold: float = 0.0,
+    ) -> None:
+        """Filter variants to only include those within BED regions and above MAF threshold.
+        
+        Args:
+            bed_regions: DataFrame with columns 'chrom', 'chromStart', 'chromEnd'
+            maf_threshold: MAF threshold for variants in BED regions (default 0.0)
+        """
+        if self.variants is None:
+            raise ValueError("LinearARG must have variant metadata to filter by BED regions")
+        
+        variant_info = self.variants.collect()
+        chrom = variant_info['CHROM'].to_numpy().astype(str)
+        pos = variant_info['POS'].to_numpy()
+        
+        in_bed = variants_in_bed_regions(chrom, pos, bed_regions)
+        
+        af = self.allele_frequencies
+        maf = np.minimum(af, 1 - af)
+        maf_ok = maf > maf_threshold
+        
+        mask = in_bed & maf_ok
+        self.filter_variants_by_mask(mask)
+
     def calculate_nonunique_indices(self) -> None:
         """Calculates and stores non-unique indices to facilitate memory-efficient matmat and rmatmat operations."""
         if self.nonunique_indices is None:
@@ -805,6 +845,107 @@ def list_iids(h5_fname: Union[str, PathLike]) -> pl.Series:
         iids_data = h5f["iids"][:]
         iids = pl.Series("iids", iids_data.astype(str))
     return iids
+
+
+def variants_in_bed_regions(
+    chrom: npt.NDArray,
+    pos: npt.NDArray,
+    bed_regions: pl.DataFrame,
+) -> npt.NDArray[np.bool_]:
+    """Check which variants fall within any BED region.
+    
+    BED format uses 0-based, half-open coordinates [start, end).
+    
+    Args:
+        chrom: Array of chromosome names for each variant
+        pos: Array of positions for each variant
+        bed_regions: DataFrame with columns 'chrom', 'chromStart', 'chromEnd'
+        
+    Returns:
+        Boolean array where True indicates variant is within a BED region
+    """
+    mask = np.zeros(len(pos), dtype=bool)
+    
+    for row in bed_regions.iter_rows(named=True):
+        bed_chrom = row['chrom']
+        bed_start = row['chromStart']
+        bed_end = row['chromEnd']
+        
+        # Match chromosome and position range [start, end)
+        chrom_match = (chrom == bed_chrom)
+        pos_in_range = (pos >= bed_start) & (pos < bed_end)
+        mask |= (chrom_match & pos_in_range)
+    
+    return mask
+
+
+def compute_variant_filter_mask(
+    hdf5_file: str,
+    block_name: str,
+    maf_threshold: float = 0.0,
+    bed_regions: Optional[pl.DataFrame] = None,
+    bed_maf_threshold: float = 0.0,
+) -> npt.NDArray[np.bool_]:
+    """Compute a boolean mask for variant filtering based on MAF and BED regions.
+    
+    Filtering logic:
+    - If bed_regions is None: include variants with MAF > maf_threshold
+    - If bed_regions is provided:
+      - Variants inside BED regions: include if MAF > bed_maf_threshold
+      - Variants outside BED regions: include if MAF > maf_threshold
+    
+    Args:
+        hdf5_file: Path to HDF5 file
+        block_name: Name of the block to process
+        maf_threshold: MAF threshold for variants outside BED regions
+        bed_regions: Optional DataFrame with BED regions
+        bed_maf_threshold: MAF threshold for variants inside BED regions
+        
+    Returns:
+        Boolean mask array where True = include variant
+    """
+    with h5py.File(hdf5_file, 'r') as f:
+        g = f[block_name]
+        af = g["allele_counts"][:] / g.attrs["n_samples"]
+        maf = np.minimum(af, 1 - af)
+        
+        if bed_regions is not None:
+            chrom = g["CHROM"][:].astype(str)
+            pos = g["POS"][:]
+            in_bed = variants_in_bed_regions(chrom, pos, bed_regions)
+            
+            # Dual threshold: bed_maf_threshold inside BED, maf_threshold outside
+            mask = (in_bed & (maf > bed_maf_threshold)) | (~in_bed & (maf > maf_threshold))
+        else:
+            mask = maf > maf_threshold
+    
+    return mask
+
+
+def compute_filtered_variant_count(
+    hdf5_file: str,
+    block_name: str,
+    maf_threshold: float = 0.0,
+    bed_regions: Optional[pl.DataFrame] = None,
+    bed_maf_threshold: float = 0.0,
+) -> int:
+    """Compute the number of variants that pass the filter criteria.
+    
+    Args:
+        hdf5_file: Path to HDF5 file
+        block_name: Name of the block to process
+        maf_threshold: MAF threshold for variants outside BED regions
+        bed_regions: Optional DataFrame with BED regions
+        bed_maf_threshold: MAF threshold for variants inside BED regions
+        
+    Returns:
+        Number of variants passing the filter
+    """
+    mask = compute_variant_filter_mask(
+        hdf5_file, block_name, maf_threshold, bed_regions, bed_maf_threshold
+    )
+    return int(np.sum(mask))
+
 
 def load_variant_info(
     h5_fname: str,

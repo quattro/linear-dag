@@ -283,7 +283,7 @@ def test_gwas_recompute_AC():
         assert np.allclose(beta, beta_simple, atol=1e-6)
         se = se[beta!=0]
         se_simple = se_simple[beta!=0]
-        assert np.allclose(se, se_simple, atol=1e-4)
+        assert np.allclose(se, se_simple, atol=1e-6)
 
 def test_gwas_recompute_AC_no_hwe():
     """

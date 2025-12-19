@@ -15,7 +15,13 @@ import h5py
 from scipy.sparse import diags
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
-from .lineararg import LinearARG, list_blocks, list_iids
+from .lineararg import (
+    LinearARG,
+    list_blocks,
+    list_iids,
+    compute_filtered_variant_count,
+    compute_variant_filter_mask,
+)
 
 FLAGS = {
     "wait": 0,
@@ -31,27 +37,36 @@ assert len(np.unique([val for val in FLAGS.values()])) == len(FLAGS)
 
 def _compute_filtered_variant_counts(
     block_metadata: pl.DataFrame,
-    maf_log10_threshold: float,
     hdf5_file: str,
+    maf_log10_threshold: Optional[float] = None,
+    bed_regions: Optional[pl.DataFrame] = None,
+    bed_maf_log10_threshold: Optional[float] = None,
 ) -> pl.DataFrame:
-    """Compute number of variants per block that meet MAF threshold.
+    """Compute number of variants per block that meet filter criteria.
 
     Args:
         block_metadata: DataFrame with block information
-        maf_log10_threshold: log10 of MAF threshold (e.g., -3 for MAF > 0.001)
+        hdf5_file: Path to HDF5 file
+        maf_log10_threshold: log10 of MAF threshold for variants outside BED regions
+        bed_regions: Optional DataFrame with BED regions (chrom, chromStart, chromEnd)
+        bed_maf_log10_threshold: log10 of MAF threshold for variants inside BED regions
 
     Returns:
         Updated block_metadata with filtered n_variants
     """
+    maf_threshold = 10**maf_log10_threshold if maf_log10_threshold is not None else 0.0
+    bed_maf_threshold = 10**bed_maf_log10_threshold if bed_maf_log10_threshold is not None else 0.0
 
     filtered_counts = []
     for block in block_metadata.get_column("block_name").to_list():
-        with h5py.File(hdf5_file, 'r') as f:
-            af = f[block]["allele_counts"][:] / f[block].attrs["n_samples"]
-        maf = np.minimum(af, 1 - af)
-        mask = maf > 10**maf_log10_threshold
-        n_variants = np.sum(mask)
-        filtered_counts.append(n_variants)
+        count = compute_filtered_variant_count(
+            hdf5_file,
+            block,
+            maf_threshold=maf_threshold,
+            bed_regions=bed_regions,
+            bed_maf_threshold=bed_maf_threshold,
+        )
+        filtered_counts.append(count)
 
     return block_metadata.with_columns(pl.Series("n_variants", filtered_counts))
 
@@ -372,15 +387,31 @@ class ParallelOperator(LinearOperator):
         blocks: list,
         variant_offsets: list,
         maf_log10_threshold: Optional[float] = None,
+        bed_regions: Optional[pl.DataFrame] = None,
+        bed_maf_log10_threshold: Optional[float] = None,
     ) -> None:
         """Worker process that loads LDGMs and processes blocks."""
 
         linargs = [LinearARG.read(hdf5_file, block) for block in blocks]
 
-        if maf_log10_threshold is not None:
-            threshold_value = 10**maf_log10_threshold
-            for linarg in linargs:
-                linarg.filter_variants_by_maf(threshold_value)
+        # Apply variant filtering
+        needs_filtering = (
+            maf_log10_threshold is not None
+            or bed_regions is not None
+        )
+        if needs_filtering:
+            maf_threshold = 10**maf_log10_threshold if maf_log10_threshold is not None else 0.0
+            bed_maf_threshold = 10**bed_maf_log10_threshold if bed_maf_log10_threshold is not None else 0.0
+            
+            for linarg, block in zip(linargs, blocks):
+                mask = compute_variant_filter_mask(
+                    hdf5_file,
+                    block,
+                    maf_threshold=maf_threshold,
+                    bed_regions=bed_regions,
+                    bed_maf_threshold=bed_maf_threshold,
+                )
+                linarg.filter_variants_by_mask(mask)
                 linarg.nonunique_indices = None
                 linarg.calculate_nonunique_indices()
 
@@ -459,15 +490,19 @@ class ParallelOperator(LinearOperator):
         max_num_traits: int = 8,
         maf_log10_threshold: Optional[int] = None,
         block_metadata: Optional[pl.DataFrame] = None,
+        bed_file: Optional[str] = None,
+        bed_maf_log10_threshold: Optional[int] = None,
     ) -> ParallelOperator:
         """Create a ParallelOperator from a metadata file.
 
         Args:
-            metadata_path: Path to metadata file
+            hdf5_file: Path to HDF5 file
             num_processes: Number of processes to use; None -> use all available cores
             max_num_traits: Width of shared memory array for matmat operations
-            maf_log10_threshold: x s.t. variants with MAF < 10^x are dropped
+            maf_log10_threshold: x s.t. variants outside BED with MAF < 10^x are dropped
             block_metadata: Metadata for blocks to be used; use this to select subset of blocks
+            bed_file: Optional path to BED file defining regions of interest
+            bed_maf_log10_threshold: x s.t. variants inside BED with MAF < 10^x are dropped
 
         Returns:
             ParallelOperator instance
@@ -475,8 +510,22 @@ class ParallelOperator(LinearOperator):
         if block_metadata is None:
             block_metadata = list_blocks(hdf5_file)
 
-        if maf_log10_threshold is not None:
-            block_metadata = _compute_filtered_variant_counts(block_metadata, maf_log10_threshold, hdf5_file)
+        # Load BED regions if provided
+        bed_regions = None
+        if bed_file is not None:
+            from linear_dag.bed_io import read_bed
+            bed_regions = read_bed(bed_file)
+
+        # Compute filtered variant counts
+        needs_filtering = maf_log10_threshold is not None or bed_regions is not None
+        if needs_filtering:
+            block_metadata = _compute_filtered_variant_counts(
+                block_metadata,
+                hdf5_file,
+                maf_log10_threshold=maf_log10_threshold,
+                bed_regions=bed_regions,
+                bed_maf_log10_threshold=bed_maf_log10_threshold,
+            )
 
         num_variants = block_metadata["n_variants"].sum()
         num_samples = block_metadata["n_samples"][0]
@@ -486,7 +535,8 @@ class ParallelOperator(LinearOperator):
         }
 
         manager = _ManagerFactory.create_manager(
-            cls._worker, hdf5_file, num_processes, block_metadata, shm_specification, maf_log10_threshold
+            cls._worker, hdf5_file, num_processes, block_metadata, shm_specification,
+            maf_log10_threshold, bed_regions, bed_maf_log10_threshold
         )
         manager.start_workers(FLAGS["wait"])
 

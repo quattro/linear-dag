@@ -289,6 +289,8 @@ def _assoc_scan(args):
             block_metadata=block_metadata,
             max_num_traits=1 + len(covar_cols),
             maf_log10_threshold=args.maf_log10_threshold,
+            bed_file=args.bed,
+            bed_maf_log10_threshold=args.bed_maf_log10_threshold,
         ) as genotypes:
             per_results: list[pl.LazyFrame] = []
             for ph in pheno_cols:
@@ -337,6 +339,8 @@ def _assoc_scan(args):
             block_metadata=block_metadata,
             max_num_traits=max_num_traits,
             maf_log10_threshold=args.maf_log10_threshold,
+            bed_file=args.bed,
+            bed_maf_log10_threshold=args.bed_maf_log10_threshold,
         ) as genotypes:
             result: pl.LazyFrame = run_gwas(
                 genotypes,
@@ -581,7 +585,22 @@ def _main(args):
         "--maf-log10-threshold",
         type=int,
         default=None,
-        help=("MAF log10 threshold of variants to include in the association test."),
+        help=("MAF log10 threshold for variants outside BED regions (e.g., -2 for MAF > 0.01)."),
+    )
+    assoc_p.add_argument(
+        "--bed",
+        type=str,
+        default=None,
+        help=("Path to BED file defining genomic regions of interest. "
+              "Variants inside BED regions use --bed-maf-log10-threshold; "
+              "variants outside use --maf-log10-threshold."),
+    )
+    assoc_p.add_argument(
+        "--bed-maf-log10-threshold",
+        type=int,
+        default=None,
+        help=("MAF log10 threshold for variants inside BED regions (e.g., -4 for MAF > 0.0001). "
+              "Only used when --bed is specified."),
     )
     assoc_p.add_argument(
         "--recompute-ac",
