@@ -43,11 +43,12 @@ def randomized_haseman_elston(
         raise ValueError("First column of covar_cols should be '1'")
 
     # align and residualize
-    left_op, right_op = get_inner_merge_operators(data.select("iid").collect().to_series(), grm.iids)
+    left_op, right_op = get_inner_merge_operators(data.select("iid").cast(pl.Utf8).collect().to_series(), grm.iids)
     phenotypes = data.select(pheno_cols).collect().to_numpy()
     covariates = data.select(covar_cols).collect().to_numpy()
     yresid, covariates = _prep_for_h2_estimation(left_op, right_op, phenotypes, covariates)
     N = len(yresid)
+    grm = right_op @ grm @ right_op.T
 
     if num_matvecs > N:
         raise ValueError(f"num_matvecs={num_matvecs} should be << N={N}")
@@ -61,6 +62,7 @@ def randomized_haseman_elston(
     # these should be independent in expectation, but it's not much overhead to residualize for exact independence
     def _resid_sampler(n, k):
         omega = sampler(n, k)
+        
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             beta = np.linalg.lstsq(covariates, omega)[0]
