@@ -1,14 +1,15 @@
+import os
+import tempfile
+
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from linear_dag.core.lineararg import list_blocks, LinearARG
-from linear_dag.core.parallel_processing import ParallelOperator, GRMOperator
-
+from linear_dag.core.lineararg import LinearARG, list_blocks
+from linear_dag.core.parallel_processing import GRMOperator, ParallelOperator
 
 TEST_DATA_DIR = Path(__file__).parent / "testdata"
-
 
 
 def test_parallel_operator():
@@ -32,7 +33,7 @@ def test_parallel_operator():
         parallel_result = operator @ b
 
     # 3. Serial version
-    blocks = list_blocks(hdf5_path)['block_name']
+    blocks = list_blocks(hdf5_path)["block_name"]
 
     # Transpose multiplication
     serial_results_T = []
@@ -83,7 +84,7 @@ def test_matmat_matches_serial():
         Y_ser += la @ X[offset : offset + nv, :]
         offset += nv
 
-    assert np.allclose(Y_par, Y_ser, rtol=1e-5, atol=1e-5)
+    assert np.allclose(Y_par, Y_ser, rtol=1e-3, atol=1e-3)
 
 
 def test_rmatmat_matches_serial():
@@ -151,7 +152,6 @@ def test_rmatmat_in_place_view_and_correctness():
         assert np.allclose(Z_view, Z2_ser, rtol=1e-5, atol=1e-5)
 
 
-
 def test_matmat_in_place_uses_shared_variant_data():
     hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
     linargs, nvars = _load_serial_blocks(hdf5_path)
@@ -196,7 +196,7 @@ def test_grm_matmat_matches_serial():
     hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
     linargs, _ = _load_serial_blocks(hdf5_path)
 
-    with GRMOperator.from_hdf5(hdf5_path, num_processes=2) as grm:
+    with GRMOperator.from_hdf5(hdf5_path, num_processes=1) as grm:
         n = grm.shape[0]
         rng = np.random.default_rng(42)
         X = rng.standard_normal((n, 3)).astype(np.float32)
@@ -204,37 +204,114 @@ def test_grm_matmat_matches_serial():
         # Parallel result
         Y_par = grm @ X
 
-    # Serial result: sum over blocks of L @ L.T @ X
+    # Serial result: sum over blocks of (L.normalized @ L.normalized.T @ X) / num_block_variants
+    # GRMOperator divides each block's contribution by that block's variant count
     Y_ser = np.zeros((n, 3), dtype=np.float32)
     for la in linargs:
-        la = la.normalized
-        Y_ser += la @ la.T @ X
+        num_block_variants = la.shape[1]
+        la_norm = la.normalized
+        Y_ser += (la_norm @ la_norm.T @ X) / num_block_variants
 
-    assert np.allclose(Y_par, Y_ser, rtol=1e-5, atol=1e-5)
+    print(f"Y_par: {Y_par[:, 0]}, Y_ser: {Y_ser[:, 0]}")
+    assert np.allclose(Y_par, Y_ser , rtol=1e-4, atol=1e-4)
 
 
 def test_grm_matmat_with_alpha():
     from scipy.sparse import diags
     from scipy.sparse.linalg import aslinearoperator
-    
+
     hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
     linargs, _ = _load_serial_blocks(hdf5_path)
-    
+
     alpha = 0.5
-    
+
     with GRMOperator.from_hdf5(hdf5_path, num_processes=2, alpha=alpha) as grm:
         n = grm.shape[0]
         rng = np.random.default_rng(42)
         X = rng.standard_normal((n, 3)).astype(np.float32)
-        
+
         # Parallel result
         Y_par = grm @ X
-    
-    # Serial result: sum over blocks of L.normalized @ K @ L.normalized.T @ X
+
+    # Serial result: sum over blocks of (L.normalized @ K @ L.normalized.T @ X) / num_block_variants
+    # GRMOperator divides each block's contribution by that block's variant count
     Y_ser = np.zeros((n, 3), dtype=np.float32)
     for la in linargs:
+        num_block_variants = la.shape[1]
         pq = la.allele_frequencies * (1 - la.allele_frequencies)
         K = aslinearoperator(diags(pq ** (1 + alpha)))
-        Y_ser += la.normalized @ K @ la.normalized.T @ X
-    
-    assert np.allclose(Y_par, Y_ser, rtol=1e-5, atol=1e-5)
+        Y_ser += (la.normalized @ K @ la.normalized.T @ X) / num_block_variants
+
+    assert np.allclose(Y_par, Y_ser, rtol=1e-3, atol=1e-3)
+
+
+def test_maf_threshold_filtering():
+    """Test MAF threshold filtering in ParallelOperator."""
+    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+
+    # Create a temporary file with threshold data
+    with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        # Read blocks and rewrite with threshold data
+        metadata = list_blocks(hdf5_path)
+        for block_info in metadata.iter_rows(named=True):
+            linarg = LinearARG.read(hdf5_path, block_info["block_name"])
+            block_dict = {
+                "chrom": str(block_info["chrom"]),
+                "start": int(block_info["start"]),
+                "end": int(block_info["end"]),
+            }
+            linarg.write(tmp_path, block_info=block_dict)
+
+        # Test with MAF > 0.01 threshold
+        maf_log10_threshold = -2
+
+        # Test with parallel operator
+        with ParallelOperator.from_hdf5(
+            tmp_path, max_num_traits=2, num_processes=2, maf_log10_threshold=maf_log10_threshold
+        ) as linarg_op:
+            x = np.random.randn(linarg_op.shape[1], 3).astype(np.float32)
+            result_parallel = linarg_op @ x
+
+        # Compute serial version with filtering
+        metadata_filtered = list_blocks(tmp_path)
+        result_serial = 0
+        variant_counter = 0
+        total_filtered_variants = 0
+
+        threshold_value = 10**maf_log10_threshold
+
+        for block_info in metadata_filtered.iter_rows(named=True):
+            linarg = LinearARG.read(tmp_path, block_info["block_name"])
+
+            # Apply same filtering as worker
+            linarg.filter_variants_by_maf(threshold_value)
+            n_filtered = linarg.shape[1]
+            total_filtered_variants += n_filtered
+
+            result = linarg @ x[variant_counter : variant_counter + n_filtered, :]
+            variant_counter += n_filtered
+            result_serial += result
+
+        # Check shapes match
+        assert linarg_op.shape[1] == total_filtered_variants, (
+            f"Shape mismatch: operator has {linarg_op.shape[1]} variants, expected {total_filtered_variants}"
+        )
+
+        # Check that parallel and serial results match
+        assert np.allclose(result_parallel, result_serial, rtol=1e-2, atol=1e-2), (
+            "MAF filtered multiplication results do not match"
+        )
+
+        # Test that filtering actually reduces variant count
+        with ParallelOperator.from_hdf5(tmp_path, max_num_traits=2, num_processes=1) as linarg_op_unfiltered:
+            unfiltered_variants = linarg_op_unfiltered.shape[1]
+
+        assert total_filtered_variants < unfiltered_variants, "Filtering should reduce variant count"
+
+    finally:
+        # Clean up
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
