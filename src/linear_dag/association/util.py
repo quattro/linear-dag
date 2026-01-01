@@ -148,9 +148,27 @@ def get_genotype_variance_explained_recompute_AC(
         denominator *= -2
         # avoid large memory allocation
         num_snps = XtCD.shape[0]
+        
+        
+        print(f'num_homozygotes shape: {num_homozygotes.shape}')
+        
         for start_idx in range(0, num_snps, batch_size):
-            denominator[start_idx:start_idx+batch_size] += \
-            allele_counts[start_idx:start_idx+batch_size] + 2 * num_homozygotes * num_nonmissing / n
+            
+            end_idx = min(start_idx + batch_size, num_snps)
+
+            batch_homozygotes = num_homozygotes[start_idx:end_idx]
+            batch_allele_counts = allele_counts[start_idx:end_idx]
+            
+            print(f'batch_homozygotes shape: {batch_homozygotes.shape}')
+            print(f'batch_allele_counts shape: {batch_allele_counts.shape}')
+
+            denominator[start_idx:end_idx] += (
+                batch_allele_counts
+                + 2 * batch_homozygotes * num_nonmissing / n
+            )
+            
+            # denominator[start_idx:start_idx+batch_size] += \
+            # allele_counts[start_idx:start_idx+batch_size] + 2 * num_homozygotes * num_nonmissing / n
 
     assert denominator.dtype == np.float32
     return denominator, total_allele_counts

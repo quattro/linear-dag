@@ -49,11 +49,6 @@ def randomized_haseman_elston(
     yresid, covariates = _prep_for_h2_estimation(left_op, right_op, phenotypes, covariates)
     N = len(yresid)
     grm = right_op @ grm @ right_op.T
-    
-    print("[DEBUG] After _prep_for_h2_estimation")
-    print("  yresid shape:", yresid.shape)
-    print("  covariates shape:", covariates.shape)
-    print("  N:", N)
 
     if num_matvecs > N:
         raise ValueError(f"num_matvecs={num_matvecs} should be << N={N}")
@@ -62,22 +57,12 @@ def randomized_haseman_elston(
     generator = np.random.default_rng(seed=seed)
     estimator = _construct_estimator(trace_est)
     sampler = _construct_sampler(sampler, generator)
-    
-    print("[DEBUG] Estimator / sampler setup")
-    print("  num_matvecs:", num_matvecs)
-    print("  trace_est:", trace_est)
-    print("  sampler:", sampler)
 
     # wrap the probe-sampler in a residualizer
     # these should be independent in expectation, but it's not much overhead to residualize for exact independence
     def _resid_sampler(n, k):
         omega = sampler(n, k)
         
-        print("[DEBUG] _resid_sampler called")
-        print("  n:", n, "k:", k)
-        print("  omega shape:", omega.shape)
-        print("  covariates shape:", covariates.shape)
-                
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             beta = np.linalg.lstsq(covariates, omega)[0]
