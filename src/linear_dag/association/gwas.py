@@ -73,6 +73,12 @@ def get_gwas_beta_se(
 
     # Operate in place on possibly large array
     beta = Xty[:, :num_traits]
+    
+    print('Xty:')
+    print(f' 4134685: {beta[4134685]}')
+    print(f' 5487797: {beta[5487797]}')
+    print(f' 7811929: {beta[7811929]}')
+    
     # beta *= (right_op.shape[0]/num_nonmissing)
     assert np.shares_memory(beta, Xty)
     if logger:
@@ -92,6 +98,21 @@ def get_gwas_beta_se(
             covariates,
             num_heterozygotes,
         )
+        
+    print('denominator:')
+    print(f' 4134685: {denominator[4134685]}')
+    print(f' 5487797: {denominator[5487797]}')
+    print(f' 7811929: {denominator[7811929]}')
+    
+    print('allele_counts:')
+    print(f' 4134685: {allele_counts[4134685]}')
+    print(f' 5487797: {allele_counts[5487797]}')
+    print(f' 7811929: {allele_counts[7811929]}')
+    
+    print('beta:')
+    print(f' 4134685: {beta[4134685]}')
+    print(f' 5487797: {beta[5487797]}')
+    print(f' 7811929: {beta[7811929]}')
 
     # avoid numerical issues for variants with no variance
     numerically_zero = 1e-4 # typical nonzero values > 1
