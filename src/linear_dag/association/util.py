@@ -190,14 +190,14 @@ def _get_genotype_variance(
     var_genotypes = 3 * allele_counts - 2 * carrier_counts  # 4 * num_homozygotes + num_heterozygotes
     
     print('var_genotypes:')
-    print(f' 4134685: {var_genotypes[4134685+85278662]}')
-    print(f' 5487797: {var_genotypes[5487797+85278662]}')
-    print(f' 7811929: {var_genotypes[7811929+85278662]}')
+    print(f' 89413347: {var_genotypes[89413347]}')
+    print(f' 90766459: {var_genotypes[90766459]}')
+    print(f' 93090591: {var_genotypes[93090591]}')
     
     print('carrier_counts:')
-    print(f' 4134685: {carrier_counts[4134685+85278662]}')
-    print(f' 5487797: {carrier_counts[5487797+85278662]}')
-    print(f' 7811929: {carrier_counts[7811929+85278662]}')
+    print(f' 89413347: {carrier_counts[89413347]}')
+    print(f' 90766459: {carrier_counts[90766459]}')
+    print(f' 93090591: {carrier_counts[93090591]}')
     
     return var_genotypes, carrier_counts
 
