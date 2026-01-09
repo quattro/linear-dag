@@ -163,6 +163,16 @@ def get_genotype_variance_explained_recompute_AC(
             
             # denominator[start_idx:start_idx+batch_size] += \
             # allele_counts[start_idx:start_idx+batch_size] + 2 * num_homozygotes * num_nonmissing / n
+            
+    print('total_var_explained:')
+    if len(total_var_explained[0]) != 1:
+        print(f' 89413347: {total_var_explained[89413347][60]}')
+        print(f' 90766459: {total_var_explained[90766459][60]}')
+        print(f' 93090591: {total_var_explained[93090591][60]}')
+    else:
+        print(f' 89413347: {total_var_explained[89413347]}')
+        print(f' 90766459: {total_var_explained[90766459]}')
+        print(f' 93090591: {total_var_explained[93090591]}')
 
     assert denominator.dtype == np.float32
     return denominator, total_allele_counts
