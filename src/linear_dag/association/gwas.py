@@ -75,9 +75,14 @@ def get_gwas_beta_se(
     beta = Xty[:, :num_traits]
     
     print('Xty:')
-    print(f' 89413347: {beta[89413347][60]}')
-    print(f' 90766459: {beta[90766459][60]}')
-    print(f' 93090591: {beta[93090591][60]}')
+    if len(beta[0]) != 1:
+        print(f' 89413347: {beta[89413347][60]}')
+        print(f' 90766459: {beta[90766459][60]}')
+        print(f' 93090591: {beta[93090591][60]}')
+    else:
+        print(f' 89413347: {beta[89413347]}')
+        print(f' 90766459: {beta[90766459]}')
+        print(f' 93090591: {beta[93090591]}')
     
     # beta *= (right_op.shape[0]/num_nonmissing)
     assert np.shares_memory(beta, Xty)
@@ -100,9 +105,14 @@ def get_gwas_beta_se(
         )
         
     print('denominator:')
-    print(f' 89413347: {denominator[89413347][60]}')
-    print(f' 90766459: {denominator[90766459][60]}')
-    print(f' 93090591: {denominator[93090591][60]}')
+    if len(denominator[0]) != 1:
+        print(f' 89413347: {denominator[89413347][60]}')
+        print(f' 90766459: {denominator[90766459][60]}')
+        print(f' 93090591: {denominator[93090591][60]}')
+    else:
+        print(f' 89413347: {denominator[89413347]}')
+        print(f' 90766459: {denominator[90766459]}')
+        print(f' 93090591: {denominator[93090591]}')
     
     print('allele_counts:')
     print(f' 89413347: {allele_counts[89413347]}')
@@ -115,9 +125,14 @@ def get_gwas_beta_se(
     beta /= denominator
     
     print('beta:')
-    print(f' 89413347: {beta[89413347][60]}')
-    print(f' 90766459: {beta[90766459][60]}')
-    print(f' 93090591: {beta[93090591][60]}')
+    if len(beta[0]) != 1:
+        print(f' 89413347: {beta[89413347][60]}')
+        print(f' 90766459: {beta[90766459][60]}')
+        print(f' 93090591: {beta[93090591][60]}')
+    else:
+        print(f' 89413347: {beta[89413347]}')
+        print(f' 90766459: {beta[90766459]}')
+        print(f' 93090591: {beta[93090591]}')
 
     if logger:
         logger.info(f"got beta")
