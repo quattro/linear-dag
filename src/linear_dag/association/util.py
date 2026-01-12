@@ -127,16 +127,22 @@ def get_genotype_variance_explained_recompute_AC(
 
     # n * v
     total_var_explained *= -1
-    total_var_explained += total_allele_counts # amber: is this p - v ?
+    total_var_explained += total_allele_counts # amber: p - v ?
 
     # n' * p'
     allele_counts = XtCD[:, num_covar:]
 
     # (p'/p)^2 * n' * v
     # one large memory allocation
-    denominator = allele_counts.copy() ** 2 # amber: p'^2 ?
-    denominator *= (n / num_nonmissing).astype(np.float32) # amber: p'^2 * n' ?
-    denominator *= (total_var_explained / total_allele_counts.reshape(-1,1) ** 2) # amber: p'^2 * n' * (p - v) / p^2 ?
+    # denominator = allele_counts.copy() ** 2 # amber: p'^2 ?
+    # denominator *= (n / num_nonmissing).astype(np.float32) # amber: p'^2 * n' ?
+    # denominator *= (total_var_explained / total_allele_counts.reshape(-1,1) ** 2) # amber: p'^2 * n' * (p - v) / p^2 ?
+    denominator = allele_counts.astype(np.float64) ** 2
+    denominator *= (n / num_nonmissing)
+    denominator *= (
+        total_var_explained.astype(np.float64)
+        / total_allele_counts.astype(np.float64) ** 2
+    )
     np.nan_to_num(denominator, copy=False, nan=0.0)
 
     if num_heterozygotes is None:  # assume HWE
@@ -157,8 +163,8 @@ def get_genotype_variance_explained_recompute_AC(
             batch_allele_counts = allele_counts[start_idx:end_idx]
 
             denominator[start_idx:end_idx] += (
-                batch_allele_counts
-                + 2 * batch_homozygotes * num_nonmissing / n
+                batch_allele_counts.astype(np.float64)
+                + 2 * batch_homozygotes.astype(np.float64) * num_nonmissing / n
             )
             
             # denominator[start_idx:start_idx+batch_size] += \
