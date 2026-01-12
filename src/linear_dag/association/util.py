@@ -165,7 +165,11 @@ def get_genotype_variance_explained_recompute_AC(
             # allele_counts[start_idx:start_idx+batch_size] + 2 * num_homozygotes * num_nonmissing / n
             
     print(f'n: {n}')
-    print(f'num_nonmissing: {num_nonmissing[60]}')
+    if len(num_nonmissing) !=1:
+        print(f'num_nonmissing: {num_nonmissing[60]}')
+    else:
+        print(f'num_nonmissing: {num_nonmissing}')
+
             
     print('denominator:')
     if len(denominator[0]) != 1:
