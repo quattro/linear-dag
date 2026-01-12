@@ -217,6 +217,7 @@ def get_genotype_variance_explained_recompute_AC(
         print(f' 90766459: {total_var_explained[90766459]}')
         print(f' 93090591: {total_var_explained[93090591]}')
 
+    denominator = denominator.astype(np.float32)
     assert denominator.dtype == np.float32
     return denominator, total_allele_counts
 
