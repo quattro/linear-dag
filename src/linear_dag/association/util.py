@@ -127,16 +127,16 @@ def get_genotype_variance_explained_recompute_AC(
 
     # n * v
     total_var_explained *= -1
-    total_var_explained += total_allele_counts
+    total_var_explained += total_allele_counts # amber: is this p - v ?
 
     # n' * p'
     allele_counts = XtCD[:, num_covar:]
 
     # (p'/p)^2 * n' * v
     # one large memory allocation
-    denominator = allele_counts.copy() ** 2
-    denominator *= (n / num_nonmissing).astype(np.float32)
-    denominator *= (total_var_explained / total_allele_counts.reshape(-1,1) ** 2)
+    denominator = allele_counts.copy() ** 2 # amber: p'^2 ?
+    denominator *= (n / num_nonmissing).astype(np.float32) # amber: p'^2 * n' ?
+    denominator *= (total_var_explained / total_allele_counts.reshape(-1,1) ** 2) # amber: p'^2 * n' * (p - v) / p^2 ?
     np.nan_to_num(denominator, copy=False, nan=0.0)
 
     if num_heterozygotes is None:  # assume HWE
@@ -163,6 +163,39 @@ def get_genotype_variance_explained_recompute_AC(
             
             # denominator[start_idx:start_idx+batch_size] += \
             # allele_counts[start_idx:start_idx+batch_size] + 2 * num_homozygotes * num_nonmissing / n
+            
+    print(f'n: {n}')
+    print(f'num_nonmissing: {num_nonmissing[60]}')
+            
+    print('denominator:')
+    if len(denominator[0]) != 1:
+        print(f' 89413347: {denominator[89413347][60]}')
+        print(f' 90766459: {denominator[90766459][60]}')
+        print(f' 93090591: {denominator[93090591][60]}')
+    else:
+        print(f' 89413347: {denominator[89413347]}')
+        print(f' 90766459: {denominator[90766459]}')
+        print(f' 93090591: {denominator[93090591]}')
+        
+    print('allele_counts:')
+    print(f' 89413347: {allele_counts[89413347]}')
+    print(f' 90766459: {allele_counts[90766459]}')
+    print(f' 93090591: {allele_counts[93090591]}')
+    
+    print('total_allele_counts:')
+    print(f' 89413347: {total_allele_counts[89413347]}')
+    print(f' 90766459: {total_allele_counts[90766459]}')
+    print(f' 93090591: {total_allele_counts[93090591]}')
+    
+    print('num_homozygotes:')
+    print(f' 89413347: {num_homozygotes[89413347]}')
+    print(f' 90766459: {num_homozygotes[90766459]}')
+    print(f' 93090591: {num_homozygotes[93090591]}')
+    
+    print('num_heterozygotes:')
+    print(f' 89413347: {num_heterozygotes[89413347]}')
+    print(f' 90766459: {num_heterozygotes[90766459]}')
+    print(f' 93090591: {num_heterozygotes[93090591]}')
             
     print('total_var_explained:')
     if len(total_var_explained[0]) != 1:

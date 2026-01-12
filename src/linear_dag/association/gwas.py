@@ -103,21 +103,6 @@ def get_gwas_beta_se(
             covariates,
             num_heterozygotes,
         )
-        
-    print('denominator:')
-    if len(denominator[0]) != 1:
-        print(f' 89413347: {denominator[89413347][60]}')
-        print(f' 90766459: {denominator[90766459][60]}')
-        print(f' 93090591: {denominator[93090591][60]}')
-    else:
-        print(f' 89413347: {denominator[89413347]}')
-        print(f' 90766459: {denominator[90766459]}')
-        print(f' 93090591: {denominator[93090591]}')
-    
-    print('allele_counts:')
-    print(f' 89413347: {allele_counts[89413347]}')
-    print(f' 90766459: {allele_counts[90766459]}')
-    print(f' 93090591: {allele_counts[93090591]}')
 
     # avoid numerical issues for variants with no variance
     numerically_zero = 1e-4 # typical nonzero values > 1
