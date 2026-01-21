@@ -116,6 +116,14 @@ def get_genotype_variance_explained_recompute_AC(
     if num_covar + len(num_nonmissing) != XtCD.shape[1]:
         raise ValueError("XtCD must have the same number of columns as C and D")
 
+    # Flip cases where AF > 0.5 to avoid approximation error when AF~1
+    # Denominator is insensitive to allele flipping
+    # (1-X)'C == sum(C) - X'C
+    mask = XtCD[:,0] > n/2
+    XtCD[mask, :] *= -1
+    XtCD[mask, :num_covar] += np.sum(C, axis=0)
+    XtCD[mask, num_covar:] += num_nonmissing
+
     # total_var_explained: misleading variable name for in-place operations to work
     total_var_explained, total_allele_counts = get_genotype_variance_explained(
         XtCD[:,:num_covar],
@@ -148,9 +156,9 @@ def get_genotype_variance_explained_recompute_AC(
         denominator *= -2
         # avoid large memory allocation
         num_snps = XtCD.shape[0]
-                
+
         for start_idx in range(0, num_snps, batch_size):
-            
+
             end_idx = min(start_idx + batch_size, num_snps)
 
             batch_homozygotes = num_homozygotes[start_idx:end_idx]
@@ -160,9 +168,10 @@ def get_genotype_variance_explained_recompute_AC(
                 batch_allele_counts
                 + 2 * batch_homozygotes * num_nonmissing / n
             )
-            
-            # denominator[start_idx:start_idx+batch_size] += \
-            # allele_counts[start_idx:start_idx+batch_size] + 2 * num_homozygotes * num_nonmissing / n
+
+
+    # un-flip alleles
+    total_allele_counts[mask] = n - total_allele_counts[mask]
 
     assert denominator.dtype == np.float32
     return denominator, total_allele_counts
