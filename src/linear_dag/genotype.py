@@ -21,6 +21,7 @@ def read_vcf(
     samples: Optional[list[str]] = None,
     maf_filter: float = None,
     remove_indels: bool = False,
+    remove_multiallelics: bool = False,
     sex: np.array = None,
 ):
     def _update_dict_from_vcf(var: cv.Variant, data: DefaultDict[str, list]) -> DefaultDict[str, list]:
@@ -98,6 +99,9 @@ def read_vcf(
         if remove_indels:
             if any(len(alt) != 1 for alt in var.ALT) or len(var.REF) != 1:
                 continue
+
+        if remove_multiallelics and len(var.ALT) > 1:
+            continue
 
         gts, is_flipped = final_read(var, flip_minor_alleles)
 

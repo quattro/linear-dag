@@ -16,8 +16,8 @@ import polars as pl
 from scipy.sparse import csc_matrix, csr_matrix, diags, eye
 from scipy.sparse.linalg import aslinearoperator, LinearOperator, spsolve_triangular
 
-from linear_dag.core.solve import get_nonunique_indices_csc, get_carriers
 from linear_dag.core.operators import get_pairing_matrix
+from linear_dag.core.solve import get_carriers, get_nonunique_indices_csc
 from linear_dag.genotype import read_vcf
 
 from .digraph import DiGraph
@@ -45,7 +45,7 @@ class LinearARG(LinearOperator):
     nonunique_indices: Optional[npt.NDArray[np.int32]] = None
     sex: Optional[npt.NDArray[np.int32]] = None  # determines how individual_indices are handled
     # allele_counts: Optional[npt.NDArray[np.int32]] = None
-    
+
     @cached_property
     def allele_counts(self) -> npt.NDArray[np.int32]:
         """Compute and cache allele counts (sum of allele dosages across all samples)."""
@@ -53,11 +53,11 @@ class LinearARG(LinearOperator):
 
     def set_allele_counts(self, counts: npt.NDArray[np.int32]) -> None:
         """Pre-set allele counts (e.g., when loading from disk)."""
-        object.__setattr__(self, 'allele_counts', counts)
-        
+        object.__setattr__(self, "allele_counts", counts)
+
     @cached_property
     def allele_frequencies(self):
-        if self.allele_counts is None: # if not precomputed
+        if self.allele_counts is None:  # if not precomputed
             return (np.ones(self.shape[0], dtype=np.int32) @ self) / self.shape[0]
         else:
             return self.allele_counts / self.shape[0]
@@ -101,10 +101,11 @@ class LinearARG(LinearOperator):
         :return: linear ARG instance
         """
         import time
+
         A, flip, variants_idx, samples_idx, variant_info = linear_arg_from_genotypes(
             genotypes, flip, variant_info, find_recombinations, verbosity
         )
-        
+
         if verbosity > 0:
             print("Removing degree-zero nodes")
         t0 = time.time()
@@ -112,7 +113,7 @@ class LinearARG(LinearOperator):
         t1 = time.time()
         if verbosity > 0:
             print(f"  Time: {t1-t0:.3f}s")
-        
+
         if verbosity > 0:
             print("Making triangular")
         t0 = time.time()
@@ -120,7 +121,7 @@ class LinearARG(LinearOperator):
         t1 = time.time()
         if verbosity > 0:
             print(f"  Time: {t1-t0:.3f}s")
-        
+
         if verbosity > 0:
             print("Creating LinearARG object")
         t0 = time.time()
@@ -150,20 +151,28 @@ class LinearARG(LinearOperator):
         verbosity: int = 0,
         maf_filter: float = None,
         snps_only: bool = False,
+        remove_multiallelics: bool = False,
     ) -> Union[tuple, "LinearARG"]:
         import time
+
         if verbosity > 0:
             print("Reading VCF")
         t0 = time.time()
         genotypes, flip, v_info, iids = read_vcf(
-            path, phased, region, flip_minor_alleles, maf_filter=maf_filter, remove_indels=snps_only
+            path,
+            phased,
+            region,
+            flip_minor_alleles,
+            maf_filter=maf_filter,
+            remove_indels=snps_only,
+            remove_multiallelics=remove_multiallelics,
         )
         t1 = time.time()
         if verbosity > 0:
             print(f"  Time: {t1-t0:.3f}s")
         if verbosity > 0:
             print(f"Number of variants: {genotypes.shape[1]}")
-            
+
         if genotypes is None:
             raise ValueError("No valid variants found in VCF")
 
@@ -216,14 +225,14 @@ class LinearARG(LinearOperator):
         pq[pq == 0] = 1
         return self.mean_centered @ aslinearoperator(diags(pq**-0.5))
 
-    def number_of_heterozygotes(self, indiv_to_include: np.ndarray|None=None):
+    def number_of_heterozygotes(self, indiv_to_include: np.ndarray | None = None):
         if self.n_individuals is None:
             raise ValueError("The linear ARG does not have individual nodes. Try running add_individual_nodes first.")
         if indiv_to_include is None:
             indiv_to_include = np.ones(self.n_individuals, dtype=np.bool_)
         if indiv_to_include.dtype != np.bool_:
             raise ValueError("indiv_to_include must be a boolean array")
-        
+
         # num_het = 2 * num_carriers - num_alleles
         vi = np.zeros(self.A.shape[0], dtype=np.float64)
         vi[self.individual_indices[indiv_to_include]] = 2
@@ -231,7 +240,7 @@ class LinearARG(LinearOperator):
         spsolve_backward_triangular(self.A, vi)
         return vi[self.variant_indices].astype(np.int32)
 
-    def number_of_carriers(self, indiv_to_include: np.ndarray|None=None):
+    def number_of_carriers(self, indiv_to_include: np.ndarray | None = None):
         if self.n_individuals is None:
             raise ValueError("The linear ARG does not have individual nodes. Try running add_individual_nodes first.")
         if indiv_to_include is None:
@@ -243,10 +252,10 @@ class LinearARG(LinearOperator):
         vi[self.individual_indices[indiv_to_include]] = 1
         spsolve_backward_triangular(self.A, vi)
         alt_carriers = vi[self.variant_indices]
-        
+
         if not np.any(self.flip):
             return alt_carriers.astype(np.int32)
-        
+
         # n1 + 2*n2
         vh = np.zeros(self.A.shape[0], dtype=np.float64)
         vh[self.sample_indices[np.repeat(indiv_to_include, 2)]] = 1
@@ -258,13 +267,13 @@ class LinearARG(LinearOperator):
         ref_carriers = np.sum(indiv_to_include) - hom_alt
         num_carriers = alt_carriers.copy()
         num_carriers[self.flip] = ref_carriers[self.flip]
-        
+
         return num_carriers.astype(np.int32)
-    
-    def get_carriers_subset(self, variant_indices: npt.NDArray[np.int_], unphased: bool = False ) -> csc_matrix:
+
+    def get_carriers_subset(self, variant_indices: npt.NDArray[np.int_], unphased: bool = False) -> csc_matrix:
         """
         Get carriers for a subset of variants specified by variant_indices.
-        
+
         :param variant_indices: Indices into the variant dimension (0 to shape[1]-1)
         :return: CSC matrix of shape (n_samples, len(variant_indices)) indicating carriers
         """
@@ -278,7 +287,7 @@ class LinearARG(LinearOperator):
         if unphased:
             carriers = get_pairing_matrix(self.shape[0]) @ carriers
         return carriers
-    
+
     def remove_samples(self, iids_to_remove: npt.ArrayLike):
         sample_mask = np.isin(self.iids, iids_to_remove)
         sample_indices_to_remove = np.where(sample_mask)[0]
@@ -424,7 +433,8 @@ class LinearARG(LinearOperator):
         pass
 
     def write(
-        self, h5_fname: Union[str, PathLike],
+        self,
+        h5_fname: Union[str, PathLike],
         block_info: Optional[dict] = None,
         compression_option: str = "gzip",
         save_allele_counts: bool = True,
@@ -475,11 +485,13 @@ class LinearARG(LinearOperator):
                 )
             if self.iids is not None and "iids" not in f.keys():
                 str_iids = np.array(self.iids, dtype=object)
-                f.create_dataset("iids",
-                                data=str_iids,
-                                dtype=h5py.string_dtype(encoding="utf-8"),
-                                compression=compression_option,
-                                shuffle=True)
+                f.create_dataset(
+                    "iids",
+                    data=str_iids,
+                    dtype=h5py.string_dtype(encoding="utf-8"),
+                    compression=compression_option,
+                    shuffle=True,
+                )
             if self.n_individuals is not None:
                 destination.attrs["n_individuals"] = self.n_individuals
             if self.variants is not None:
@@ -500,7 +512,7 @@ class LinearARG(LinearOperator):
                             compression=compression_option,
                             shuffle=True,
                         )
-            
+
             if save_allele_counts:
                 allele_counts = np.ones(self.shape[0], dtype=np.int32) @ self
                 destination.create_dataset(
@@ -509,23 +521,24 @@ class LinearARG(LinearOperator):
                     compression=compression_option,
                     shuffle=True,
                 )
-            
+
         return
 
     def write_blosc(
-        self, h5_fname: Union[str, PathLike],
+        self,
+        h5_fname: Union[str, PathLike],
         block_info: Optional[dict] = None,
         save_threshold: bool = False,
         codec: str = "zstd",
         level: int = 5,
     ):
         """Writes LinearARG to disk with Blosc compression for faster reads.
-        
+
         This method uses Blosc compression (default: Zstd level 5 with bitshuffle)
         which provides 2-3x faster read performance compared to gzip while maintaining
         good compression ratios. Files written with this method can be read normally
         using LinearARG.read().
-        
+
         :param h5_fname: The base path and prefix used for output files.
         :param block_info: Optional dictionary containing:
             - 'chrom': Chromosome number
@@ -539,9 +552,7 @@ class LinearARG(LinearOperator):
         try:
             import hdf5plugin
         except ImportError:
-            raise ImportError(
-                "hdf5plugin is required for Blosc compression. "
-            )
+            raise ImportError("hdf5plugin is required for Blosc compression. ")
 
         fname = h5_fname if str(h5_fname).endswith(".h5") else str(h5_fname) + ".h5"
         mode = "a" if block_info else "w"
@@ -550,17 +561,17 @@ class LinearARG(LinearOperator):
                 f"The file '{fname}' already exists."
                 "To append a new linear ARG to an existing file, specify `block_info`."
             )
-        
+
         # Helper function to get appropriate Blosc filter for a dataset
         def get_blosc_filter(data):
             """Return appropriate Blosc filter based on data type."""
             # For string dtypes, use regular shuffle instead of bitshuffle
-            if data.dtype.kind in ['U', 'S']:
+            if data.dtype.kind in ["U", "S"]:
                 return hdf5plugin.Blosc(cname=codec, clevel=level, shuffle=hdf5plugin.Blosc.SHUFFLE)
             else:
                 # For numeric dtypes, use bitshuffle for better compression
                 return hdf5plugin.Blosc(cname=codec, clevel=level, shuffle=hdf5plugin.Blosc.BITSHUFFLE)
-        
+
         with h5py.File(fname, mode) as f:
             if block_info:
                 block_name = f"{block_info['chrom']}_{block_info['start']}_{block_info['end']}"
@@ -587,7 +598,9 @@ class LinearARG(LinearOperator):
 
             if self.nonunique_indices is not None:
                 destination.create_dataset(
-                    "nonunique_indices", data=self.nonunique_indices, compression=get_blosc_filter(self.nonunique_indices)
+                    "nonunique_indices",
+                    data=self.nonunique_indices,
+                    compression=get_blosc_filter(self.nonunique_indices),
                 )
             if self.iids is not None and "iids" not in f.keys():
                 str_iids = np.array(self.iids, dtype="S")
@@ -612,12 +625,12 @@ class LinearARG(LinearOperator):
                             dtype=h5py.string_dtype(encoding="utf-8"),
                             compression=get_blosc_filter(str_data),
                         )
-            
+
             if save_threshold:
                 N = self.A.shape[0]
                 af = self.allele_frequencies
                 maf = np.minimum(af, 1 - af)
-                order = int(np.ceil(np.log10(N)))        
+                order = int(np.ceil(np.log10(N)))
                 thresholds = 10.0 ** -np.arange(1, order + 1)
                 destination.attrs["threshold_values"] = thresholds
                 destination.attrs["threshold_n_variants"] = (maf[:, None] > thresholds).sum(axis=0)
@@ -661,13 +674,18 @@ class LinearARG(LinearOperator):
         :param h5_fname: The base path and prefix of the PLINK files.
         :return: A LinearARG object.
         """
+        import importlib.util as iu
+
         # Try to import hdf5plugin to enable Blosc decompression
         # This is needed for files written with write_blosc()
-        try:
-            import hdf5plugin
-        except ImportError:
-            pass  # Blosc files will fail to read, but gzip/lzf files will work fine
-        
+        # if None Blosc files will fail to read, but gzip/lzf files will work fine
+        if iu.find_spec("hdf5plugin") is None:
+            import warnings
+
+            warnings.warn("hdf5plugin is required for blosc compression; this may impact reading")
+        else:
+            import hdf5plugin  # noqa: F401
+
         fname = h5_fname if str(h5_fname).endswith(".h5") else str(h5_fname) + ".h5"
         with h5py.File(fname, "r") as file:
             iids = pl.Series(file["iids"][:].astype(str))
@@ -688,17 +706,24 @@ class LinearARG(LinearOperator):
                 allele_counts = f["allele_counts"][:]
             else:
                 allele_counts = None
-                
 
-        linarg =  LinearARG(A, variant_indices, flip, n_samples, n_individuals=n_individuals, variants=v_info, iids=iids, nonunique_indices=nonunique_indices)
+        linarg = LinearARG(
+            A,
+            variant_indices,
+            flip,
+            n_samples,
+            n_individuals=n_individuals,
+            variants=v_info,
+            iids=iids,
+            nonunique_indices=nonunique_indices,
+        )
         if allele_counts is not None:
             linarg.set_allele_counts(allele_counts)
         return linarg
-    
 
     def filter_variants_by_maf(self, maf_threshold: float) -> None:
         """Filter variants to only include those with MAF > threshold.
-        
+
         Args:
             maf_threshold: MAF threshold value (e.g., 0.01 for 1%)
         """
@@ -710,14 +735,12 @@ class LinearARG(LinearOperator):
 
     def filter_variants_by_mask(self, mask: npt.NDArray[np.bool_]) -> None:
         """Filter variants using a boolean mask.
-        
+
         Args:
             mask: Boolean array of length n_variants; True = keep variant
         """
         if len(mask) != len(self.variant_indices):
-            raise ValueError(
-                f"Mask length ({len(mask)}) must match number of variants ({len(self.variant_indices)})"
-            )
+            raise ValueError(f"Mask length ({len(mask)}) must match number of variants ({len(self.variant_indices)})")
         self.variant_indices = self.variant_indices[mask]
         self.flip = self.flip[mask]
 
@@ -727,24 +750,24 @@ class LinearARG(LinearOperator):
         maf_threshold: float = 0.0,
     ) -> None:
         """Filter variants to only include those within BED regions and above MAF threshold.
-        
+
         Args:
             bed_regions: DataFrame with columns 'chrom', 'chromStart', 'chromEnd'
             maf_threshold: MAF threshold for variants in BED regions (default 0.0)
         """
         if self.variants is None:
             raise ValueError("LinearARG must have variant metadata to filter by BED regions")
-        
+
         variant_info = self.variants.collect()
-        chrom = variant_info['CHROM'].to_numpy().astype(str)
-        pos = variant_info['POS'].to_numpy()
-        
+        chrom = variant_info["CHROM"].to_numpy().astype(str)
+        pos = variant_info["POS"].to_numpy()
+
         in_bed = variants_in_bed_regions(chrom, pos, bed_regions)
-        
+
         af = self.allele_frequencies
         maf = np.minimum(af, 1 - af)
         maf_ok = maf > maf_threshold
-        
+
         mask = in_bed & maf_ok
         self.filter_variants_by_mask(mask)
 
@@ -811,9 +834,9 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
     block_data = []
 
     def parse_block_name(block_name):
-        if len(block_name.split("_")) == 3: # chr1_start_end
+        if len(block_name.split("_")) == 3:  # chr1_start_end
             chrom, start, _ = block_name.split("_")
-        else: # chr1:start-end
+        else:  # chr1:start-end
             chrom = block_name.split(":")[0]
             start = block_name.split(":")[1].split("-")[0]
         if chrom.startswith("chr"):
@@ -836,6 +859,7 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
 
     return pl.DataFrame(block_data)
 
+
 def list_iids(h5_fname: Union[str, PathLike]) -> pl.Series:
     if not str(h5_fname).endswith(".h5"):
         h5_fname = str(h5_fname) + ".h5"
@@ -853,29 +877,29 @@ def variants_in_bed_regions(
     bed_regions: pl.DataFrame,
 ) -> npt.NDArray[np.bool_]:
     """Check which variants fall within any BED region.
-    
+
     BED format uses 0-based, half-open coordinates [start, end).
-    
+
     Args:
         chrom: Array of chromosome names for each variant
         pos: Array of positions for each variant
         bed_regions: DataFrame with columns 'chrom', 'chromStart', 'chromEnd'
-        
+
     Returns:
         Boolean array where True indicates variant is within a BED region
     """
     mask = np.zeros(len(pos), dtype=bool)
-    
+
     for row in bed_regions.iter_rows(named=True):
-        bed_chrom = row['chrom']
-        bed_start = row['chromStart']
-        bed_end = row['chromEnd']
-        
+        bed_chrom = row["chrom"]
+        bed_start = row["chromStart"]
+        bed_end = row["chromEnd"]
+
         # Match chromosome and position range [start, end)
-        chrom_match = (chrom == bed_chrom)
+        chrom_match = chrom == bed_chrom
         pos_in_range = (pos >= bed_start) & (pos < bed_end)
-        mask |= (chrom_match & pos_in_range)
-    
+        mask |= chrom_match & pos_in_range
+
     return mask
 
 
@@ -887,38 +911,38 @@ def compute_variant_filter_mask(
     bed_maf_threshold: float = 0.0,
 ) -> npt.NDArray[np.bool_]:
     """Compute a boolean mask for variant filtering based on MAF and BED regions.
-    
+
     Filtering logic:
     - If bed_regions is None: include variants with MAF > maf_threshold
     - If bed_regions is provided:
       - Variants inside BED regions: include if MAF > bed_maf_threshold
       - Variants outside BED regions: include if MAF > maf_threshold
-    
+
     Args:
         hdf5_file: Path to HDF5 file
         block_name: Name of the block to process
         maf_threshold: MAF threshold for variants outside BED regions
         bed_regions: Optional DataFrame with BED regions
         bed_maf_threshold: MAF threshold for variants inside BED regions
-        
+
     Returns:
         Boolean mask array where True = include variant
     """
-    with h5py.File(hdf5_file, 'r') as f:
+    with h5py.File(hdf5_file, "r") as f:
         g = f[block_name]
         af = g["allele_counts"][:] / g.attrs["n_samples"]
         maf = np.minimum(af, 1 - af)
-        
+
         if bed_regions is not None:
             chrom = g["CHROM"][:].astype(str)
             pos = g["POS"][:]
             in_bed = variants_in_bed_regions(chrom, pos, bed_regions)
-            
+
             # Dual threshold: bed_maf_threshold inside BED, maf_threshold outside
             mask = (in_bed & (maf > bed_maf_threshold)) | (~in_bed & (maf > maf_threshold))
         else:
             mask = maf > maf_threshold
-    
+
     return mask
 
 
@@ -930,20 +954,18 @@ def compute_filtered_variant_count(
     bed_maf_threshold: float = 0.0,
 ) -> int:
     """Compute the number of variants that pass the filter criteria.
-    
+
     Args:
         hdf5_file: Path to HDF5 file
         block_name: Name of the block to process
         maf_threshold: MAF threshold for variants outside BED regions
         bed_regions: Optional DataFrame with BED regions
         bed_maf_threshold: MAF threshold for variants inside BED regions
-        
+
     Returns:
         Number of variants passing the filter
     """
-    mask = compute_variant_filter_mask(
-        hdf5_file, block_name, maf_threshold, bed_regions, bed_maf_threshold
-    )
+    mask = compute_variant_filter_mask(hdf5_file, block_name, maf_threshold, bed_regions, bed_maf_threshold)
     return int(np.sum(mask))
 
 
@@ -955,7 +977,7 @@ def load_variant_info(
 ):
     if not str(h5_fname).endswith(".h5"):
         h5_fname = str(h5_fname) + ".h5"
-    
+
     blocks_df = list_blocks(h5_fname)
     blocks = block_names or blocks_df.get_column("block_name").to_list()
     if block_names is not None:
@@ -967,7 +989,7 @@ def load_variant_info(
     with h5py.File(h5_fname, "r") as f:
         for block in blocks:
             g = f[block]
-            
+
             # Calculate MAF mask
             if maf_threshold is not None:
                 af = g["allele_counts"][:] / g.attrs["n_samples"]
@@ -975,7 +997,7 @@ def load_variant_info(
                 mask = maf > maf_threshold
             else:
                 mask = np.ones(g["allele_counts"].shape[0], dtype=bool)
-            
+
             # Only process if any variants pass the filter
             if np.any(mask):
                 if columns in ("all", "no_id"):
@@ -989,21 +1011,25 @@ def load_variant_info(
     # Build LazyFrame from collected data
     data_dict = {}
     schema_list = []
-    
+
     if columns in ("all", "no_id"):
-        data_dict.update({
-            "CHROM": chrom_list,
-            "POS": pos_list,
-            "REF": ref_list,
-            "ALT": alt_list,
-        })
-        schema_list.extend([
-            ("CHROM", pl.Binary),
-            ("POS", pl.Int32),
-            ("REF", pl.Binary),
-            ("ALT", pl.Binary),
-        ])
-    
+        data_dict.update(
+            {
+                "CHROM": chrom_list,
+                "POS": pos_list,
+                "REF": ref_list,
+                "ALT": alt_list,
+            }
+        )
+        schema_list.extend(
+            [
+                ("CHROM", pl.Binary),
+                ("POS", pl.Int32),
+                ("REF", pl.Binary),
+                ("ALT", pl.Binary),
+            ]
+        )
+
     if columns in ("all", "id_only"):
         data_dict["ID"] = id_list
         schema_list.append(("ID", pl.Binary))

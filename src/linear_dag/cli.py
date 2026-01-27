@@ -277,7 +277,9 @@ def _assoc_scan(args):
         t_vinfo = time.time()
         columns_mode = "all" if getattr(args, "all_variant_info", False) else "id_only"
         maf_threshold = None if args.maf_log10_threshold is None else 10**args.maf_log10_threshold
-        vinfo_future = _vinfo_executor.submit(load_variant_info, args.linarg_path, block_names, columns=columns_mode, maf_threshold=maf_threshold)
+        vinfo_future = _vinfo_executor.submit(
+            load_variant_info, args.linarg_path, block_names, columns=columns_mode, maf_threshold=maf_threshold
+        )
         logger.info("Started loading variant info")
 
     # Run parallel GWAS
@@ -492,6 +494,7 @@ def _compress(args):
         flip_minor_alleles=args.flip_minor_alleles,
         maf_filter=args.maf,
         remove_indels=args.remove_indels,
+        remove_multiallelics=args.remove_multiallelics,
         add_individual_nodes=args.add_individual_nodes,
     )
 
@@ -508,6 +511,7 @@ def _step0(args):
         args.keep,
         args.maf,
         args.remove_indels,
+        args.remove_multiallelics,
         args.sex_path,
         args.mount_point,
     )
@@ -591,16 +595,20 @@ def _main(args):
         "--bed",
         type=str,
         default=None,
-        help=("Path to BED file defining genomic regions of interest. "
-              "Variants inside BED regions use --bed-maf-log10-threshold; "
-              "variants outside use --maf-log10-threshold."),
+        help=(
+            "Path to BED file defining genomic regions of interest. "
+            "Variants inside BED regions use --bed-maf-log10-threshold; "
+            "variants outside use --maf-log10-threshold."
+        ),
     )
     assoc_p.add_argument(
         "--bed-maf-log10-threshold",
         type=int,
         default=None,
-        help=("MAF log10 threshold for variants inside BED regions (e.g., -4 for MAF > 0.0001). "
-              "Only used when --bed is specified."),
+        help=(
+            "MAF log10 threshold for variants inside BED regions (e.g., -4 for MAF > 0.0001). "
+            "Only used when --bed is specified."
+        ),
     )
     assoc_p.add_argument(
         "--recompute-ac",
@@ -675,6 +683,9 @@ def _main(args):
     compress_p.add_argument("--maf", type=float, help="Filter out variants with MAF less than maf")
     compress_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
     compress_p.add_argument(
+        "--remove-multiallelics", action="store_true", help="Should multi-allelic sites be excluded?"
+    )
+    compress_p.add_argument(
         "--add-individual-nodes", action="store_true", help="Add individual nodes for Hardy Weinberg calculations."
     )
     compress_p.add_argument("--region", help="Genomic region of the form chrN:start-end")
@@ -695,9 +706,15 @@ def _main(args):
             "partition genomic intervals into small and large partitions and set parameters."
         ),
     )
-    step0_p.add_argument("--vcf-metadata", help="Path to space-delimited .txt file with columns: chr, vcf_path.")
-    step0_p.add_argument("--partition-size", type=int, help="Approximate size of linear ARG blocks to infer.")
-    step0_p.add_argument("--n-small-blocks", type=int, help="Number of blocks to use per partition for steps 1-2.")
+    step0_p.add_argument(
+        "--vcf-metadata", required=True, help="Path to space-delimited .txt file with columns: chr, vcf_path."
+    )
+    step0_p.add_argument(
+        "--partition-size", required=True, type=int, help="Approximate size of linear ARG blocks to infer."
+    )
+    step0_p.add_argument(
+        "--n-small-blocks", required=True, type=int, help="Number of blocks to use per partition for steps 1-2."
+    )
     step0_p.add_argument("--flip-minor-alleles", action="store_true", help="Should minor alleles be flipped?")
     step0_p.add_argument(
         "--keep",
@@ -710,6 +727,7 @@ def _main(args):
         "--maf", type=float, nargs="?", const=None, default=None, help="Filter out variants with MAF < maf"
     )
     step0_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
+    step0_p.add_argument("--remove-multiallelics", action="store_true", help="Should multi-allelic sites be excluded?")
     step0_p.add_argument(
         "--sex-path",
         nargs="?",
@@ -730,29 +748,37 @@ def _main(args):
     step1_p = msc_subp.add_parser(
         "step1", help="Multi-step compress step 1: extract genotype matrix and run the forward backward algorithm."
     )
-    step1_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
-    step1_p.add_argument("--small-job-id", type=int, help="Job id to run (small_job_id in job-metadata file).")
+    step1_p.add_argument("--job-metadata", required=True, help="Path to job metadata file outputted from step 0.")
+    step1_p.add_argument(
+        "--small-job-id", required=True, type=int, help="Job id to run (small_job_id in job-metadata file)."
+    )
     step1_p.set_defaults(func=_step1)
 
     step2_p = msc_subp.add_parser(
         "step2", help="Multi-step compress step 2: run reduction union and find recombinations."
     )
-    step2_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
-    step2_p.add_argument("--small-job-id", type=int, help="Job id to run (small_job_id in job-metadata file).")
+    step2_p.add_argument("--job-metadata", required=True, help="Path to job metadata file outputted from step 0.")
+    step2_p.add_argument(
+        "--small-job-id", required=True, type=int, help="Job id to run (small_job_id in job-metadata file)."
+    )
     step2_p.set_defaults(func=_step2)
 
     step3_p = msc_subp.add_parser(
         "step3", help="Multi-step compress step 3: merge small brick graph blocks, find recombinations, and linearize."
     )
-    step3_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
-    step3_p.add_argument("--large-job-id", type=int, help="Job id to run (large_job_id in job-metadata file).")
+    step3_p.add_argument("--job-metadata", required=True, help="Path to job metadata file outputted from step 0.")
+    step3_p.add_argument(
+        "--large-job-id", required=True, type=int, help="Job id to run (large_job_id in job-metadata file)."
+    )
     step3_p.set_defaults(func=_step3)
 
     step4_p = msc_subp.add_parser(
         "step4", help="Multi-step compress step 4 (optional): add individual/sample nodes to the linear ARG."
     )
-    step4_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
-    step4_p.add_argument("--large-job-id", type=int, help="Job id to run (large_job_id in job-metadata file).")
+    step4_p.add_argument("--job-metadata", required=True, help="Path to job metadata file outputted from step 0.")
+    step4_p.add_argument(
+        "--large-job-id", required=True, type=int, help="Job id to run (large_job_id in job-metadata file)."
+    )
     step4_p.set_defaults(func=_step4)
 
     step5_p = msc_subp.add_parser(
@@ -763,7 +789,7 @@ def _main(args):
             "linear ARG blocks into a single .h5 file."
         ),
     )
-    step5_p.add_argument("--job-metadata", help="Path to job metadata file outputted from step 0.")
+    step5_p.add_argument("--job-metadata", required=True, help="Path to job metadata file outputted from step 0.")
     step5_p.set_defaults(func=_step5)
     #################################################
 

@@ -47,7 +47,9 @@ def randomized_haseman_elston(
     phenotypes = data.select(pheno_cols).collect().to_numpy()
     covariates = data.select(covar_cols).collect().to_numpy()
     yresid, covariates = _prep_for_h2_estimation(left_op, right_op, phenotypes, covariates)
-    N = len(yresid)
+
+    # length here represent N in haplotype space, we need to account for this otherwise wrong results!
+    N = len(yresid) // 2  # assumes diploid!!
     grm = right_op @ grm @ right_op.T
 
     if num_matvecs > N:
@@ -62,7 +64,7 @@ def randomized_haseman_elston(
     # these should be independent in expectation, but it's not much overhead to residualize for exact independence
     def _resid_sampler(n, k):
         omega = sampler(n, k)
-        
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             beta = np.linalg.lstsq(covariates, omega)[0]
@@ -112,7 +114,6 @@ def randomized_haseman_elston(
         }
     )
 
-    # SE estimates?
     return df_result
 
 
@@ -203,12 +204,13 @@ def _construct_estimator(tr_est: str) -> _TraceEstimator:
         estimator = _hutchinson_estimator
     elif tr_est in {"hutch++", "hutchpp"}:
         estimator = _hutch_pp_estimator
-    elif tr_est == "xtrace":
-        estimator = _xtrace_estimator
+    # elif tr_est == "xtrace":
+    #    estimator = _xtrace_estimator
     elif tr_est in {"xnystrace", "xnystrom"}:
         estimator = _xnystrace_estimator
     else:
-        raise ValueError(f"{tr_est} not valid estimator (e.g., 'hutchinson', 'hutch++', 'xtrace', 'xnystrace')")
+        # raise ValueError(f"{tr_est} not valid estimator (e.g., 'hutchinson', 'hutch++', 'xtrace', 'xnystrace')")
+        raise ValueError(f"{tr_est} not valid estimator (e.g., 'hutchinson', 'hutch++', 'xnystrace')")
 
     return estimator
 

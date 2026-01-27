@@ -1,7 +1,7 @@
 import gzip
 import os
-import time
 import subprocess
+import time
 
 from os import PathLike
 from typing import Optional, Union
@@ -27,6 +27,7 @@ def compress_vcf(
     flip_minor_alleles: bool = False,
     maf_filter: Optional[float] = None,
     remove_indels: bool = False,
+    remove_multiallelics: bool = False,
     add_individual_nodes: bool = False,
 ):
     """
@@ -47,6 +48,7 @@ def compress_vcf(
         flip_minor_alleles=flip_minor_alleles,
         maf_filter=maf_filter,
         snps_only=remove_indels,
+        remove_multiallelics=remove_multiallelics,
     )
     logger.info(f"Number of variants: {linarg.shape[1]}")
     logger.info(f"Number of samples: {linarg.shape[0]}")
@@ -70,7 +72,7 @@ def compress_vcf(
     logger.info("Writing to disk")
     linarg.write(output_h5, block_info=block_info)
     logger.info("Done!")
-    
+
 
 def msc_step0(
     vcf_metadata: Union[str, PathLike],
@@ -81,6 +83,7 @@ def msc_step0(
     keep: Optional[Union[str, PathLike]] = None,
     maf: Optional[float] = None,
     remove_indels: bool = False,
+    remove_multiallelics: bool = False,
     sex_path: Optional[Union[str, PathLike]] = None,
     mount_point: Optional[Union[str, PathLike]] = None,
 ):
@@ -90,56 +93,65 @@ def msc_step0(
     required for steps 1-5 in the multi-step compress pipeline.
     """
     os.makedirs(out, exist_ok=True)
-    
+
     vcf_meta = pl.read_csv(vcf_metadata, separator=" ")
     # Initialize with proper dtypes
-    job_meta = pl.DataFrame({
-        "small_job_id": pl.Series(dtype=pl.Int64),
-        "large_job_id": pl.Series(dtype=pl.Int64),
-        "small_region": pl.Series(dtype=pl.Utf8),
-        "large_region": pl.Series(dtype=pl.Utf8),
-        "vcf_path": pl.Series(dtype=pl.Utf8)
-    })
-    
+    job_meta = pl.DataFrame(
+        {
+            "small_job_id": pl.Series(dtype=pl.Int64),
+            "large_job_id": pl.Series(dtype=pl.Int64),
+            "small_region": pl.Series(dtype=pl.Utf8),
+            "large_region": pl.Series(dtype=pl.Utf8),
+            "vcf_path": pl.Series(dtype=pl.Utf8),
+        }
+    )
+
     n_large_jobs = 0
     for chrom in vcf_meta["chr"].unique():
         chrom_meta = vcf_meta.filter(pl.col("chr") == chrom)
-        
+
         # accept chrom as either 22 or chr22 as cyvcf2 requires 'chr' as a prefix
-        if chrom[:3] != 'chr': 
-            chrom_name = f'chr{chrom}'
+        if chrom[:3] != "chr":
+            chrom_name = f"chr{chrom}"
         else:
             chrom_name = chrom
-        
+
         vcf_path = chrom_meta["vcf_path"].item()
-        
-        first_coord = int(subprocess.check_output(
-            f"bcftools query -f '%POS\\n' \"{vcf_path}\" | head -n 1", 
-            shell=True, text=True
-        ).strip())
-        
-        last_coord = int(subprocess.check_output(
-            f"bcftools query -f '%POS\\n' \"{vcf_path}\" | tail -n 1", 
-            shell=True, text=True
-        ).strip())
-        
+
+        first_coord = subprocess.check_output(
+            f"bcftools query -f '%POS\\n' \"{vcf_path}\" | head -n 1", shell=True, text=True
+        ).strip()
+
+        # bcftools might not be installed!
+        if first_coord == "":
+            raise FileNotFoundError("bcftools not found! bcftools is required to run this pipeline.")
+
+        first_coord = int(first_coord)
+        # if we made it here, then bcftools is installed
+        last_coord = int(
+            subprocess.check_output(
+                f"bcftools query -f '%POS\\n' \"{vcf_path}\" | tail -n 1", shell=True, text=True
+            ).strip()
+        )
+
         large_partitions = get_partitions(first_coord, last_coord, large_partition_size)
         small_partition_size = int(large_partition_size / n_small_blocks)
-        small_partitions = [get_partitions(start, end, small_partition_size) 
-                          for start, end in large_partitions]
-        
+        small_partitions = [get_partitions(start, end, small_partition_size) for start, end in large_partitions]
+
         for i, (large_start, large_end) in enumerate(large_partitions):
             for small_start, small_end in small_partitions[i]:
-                new_row = pl.DataFrame({
-                    "small_job_id": [job_meta.height],
-                    "large_job_id": [n_large_jobs],
-                    "small_region": [f"{chrom_name}:{small_start}-{small_end}"],
-                    "large_region": [f"{chrom_name}:{large_start}-{large_end}"],
-                    "vcf_path": [vcf_path]
-                })
+                new_row = pl.DataFrame(
+                    {
+                        "small_job_id": [job_meta.height],
+                        "large_job_id": [n_large_jobs],
+                        "small_region": [f"{chrom_name}:{small_start}-{small_end}"],
+                        "large_region": [f"{chrom_name}:{large_start}-{large_end}"],
+                        "vcf_path": [vcf_path],
+                    }
+                )
                 job_meta = pl.concat([job_meta, new_row])
             n_large_jobs += 1
-    
+
     params = {
         "large_partition_size": str(large_partition_size),
         "n_small_blocks": str(n_small_blocks),
@@ -147,12 +159,13 @@ def msc_step0(
         "flip_minor_alleles": str(flip_minor_alleles),
         "keep": str(keep),
         "maf": str(maf),
-        "remove_indels": str(remove_indels),    
+        "remove_indels": str(remove_indels),
+        "remove_multiallelics": str(remove_multiallelics),
         "sex_path": str(sex_path),
         "mount_point": "" if mount_point is None else str(mount_point),
     }
-    
-    print(f'n_small_jobs: {job_meta.height}, n_large_jobs: {n_large_jobs}')
+
+    print(f"n_small_jobs: {job_meta.height}, n_large_jobs: {n_large_jobs}")
     job_meta.write_parquet(f"{out}/job_metadata.parquet", metadata=params)
 
 
@@ -160,21 +173,21 @@ def msc_step1(
     jobs_metadata: Union[str, PathLike],
     small_job_id: int,
 ):
-    
     job_meta = pl.read_parquet(jobs_metadata)
     job = job_meta.filter(pl.col("small_job_id") == small_job_id)
     vcf_path = job["vcf_path"].item()
     region = job["small_region"].item()
-    
+
     params = pl.read_parquet_metadata(jobs_metadata)
-    flip_minor_alleles = params['flip_minor_alleles']
-    keep = None if params['keep'] == "None" else params['keep']
-    maf = None if params['maf'] == "None" else float(params['maf'])
-    remove_indels = True if params['remove_indels'] == "True" else False
-    sex_path = None if params['sex_path'] == "None" else params['sex_path']
-    mount_point = params['mount_point']
-    out = params['out']
-    
+    flip_minor_alleles = params["flip_minor_alleles"]
+    keep = None if params["keep"] == "None" else params["keep"]
+    maf = None if params["maf"] == "None" else float(params["maf"])
+    remove_indels = params["remove_indels"] == "True"
+    remove_multiallelics = params["remove_multiallelics"] == "True"
+    sex_path = None if params["sex_path"] == "None" else params["sex_path"]
+    mount_point = params["mount_point"]
+    out = params["out"]
+
     if os.path.exists(f"{mount_point}{out}/genotype_matrices/{small_job_id}_{region}.h5"):
         print(f"Genotype matrix for {small_job_id}_{region} already exists. Skipping.")
     else:
@@ -187,15 +200,18 @@ def msc_step1(
             samples_path=keep,
             maf_filter=maf,
             remove_indels=remove_indels,
+            remove_multiallelics=remove_multiallelics,
             sex_path=sex_path,
         )
-    
+
     if os.path.exists(f"{mount_point}{out}/forward_backward_graphs/{small_job_id}_{region}_forward_graph.h5"):
         print(f"Forward backward graph for {small_job_id}_{region} already exists. Skipping.")
     else:
-        run_forward_backward(out, "", f"{small_job_id}_{region}") # no mount point needed since matrices are generated in the same job
-    
-    
+        run_forward_backward(
+            out, "", f"{small_job_id}_{region}"
+        )  # no mount point needed since matrices are generated in the same job
+
+
 def msc_step2(
     jobs_metadata: Union[str, PathLike],
     small_job_id: int,
@@ -203,17 +219,22 @@ def msc_step2(
     job_meta = pl.read_parquet(jobs_metadata)
     job = job_meta.filter(pl.col("small_job_id") == small_job_id)
     region = job["small_region"].item()
-    
+
     params = pl.read_parquet_metadata(jobs_metadata)
-    mount_point = params['mount_point']
-    out = params['out']
-    
+    mount_point = params["mount_point"]
+    out = params["out"]
+
     if not os.path.exists(f"{mount_point}{out}/forward_backward_graphs/{small_job_id}_{region}_forward_graph.h5"):
-        raise FileNotFoundError(f"{mount_point}{out}/forward_backward_graphs/{small_job_id}_{region}_forward_graph.h5 does not exist. Please run step 1 before step 2.")
+        raise FileNotFoundError(
+            (
+                f"{mount_point}{out}/forward_backward_graphs/{small_job_id}_{region}_forward_graph.h5 does not exist.",
+                "Please run step 1 before step 2.",
+            )
+        )
     if os.path.exists(f"{mount_point}{out}/brick_graph_partitions/{small_job_id}_{region}.h5"):
         print(f"Brick graph for {small_job_id}_{region} already exists. Skipping.")
     else:
-        reduction_union_recom(out, mount_point, f"{small_job_id}_{region}") 
+        reduction_union_recom(out, mount_point, f"{small_job_id}_{region}")
 
 
 def msc_step3(
@@ -223,36 +244,41 @@ def msc_step3(
     job_meta = pl.read_parquet(jobs_metadata)
     jobs = job_meta.filter(pl.col("large_job_id") == large_job_id)
     large_region = jobs["large_region"].to_list()[0]
-    
+
     params = pl.read_parquet_metadata(jobs_metadata)
-    mount_point = params['mount_point']
-    out = params['out']
-    
+    mount_point = params["mount_point"]
+    out = params["out"]
+
     if os.path.exists(f"{mount_point}{out}/linear_args/{large_job_id}_{large_region}.h5"):
         print(f"Linear ARG for {large_job_id}_{large_region} already exists. Skipping.")
         return
-    
+
     # check that all brick graphs have been generated before merging
     partition_identifiers = []
     for row in jobs.iter_rows(named=True):
-        small_job_id = row['small_job_id']
-        small_region = row['small_region']
+        small_job_id = row["small_job_id"]
+        small_region = row["small_region"]
         partition_identifier = f"{small_job_id}_{small_region}"
         if not os.path.exists(f"{mount_point}{out}/brick_graph_partitions/{partition_identifier}.h5"):
-            raise FileNotFoundError(f"{mount_point}{out}/brick_graph_partitions/{partition_identifier}.h5 does not exist. Please run step 2 on all partitions before step 3.")
+            raise FileNotFoundError(
+                (
+                    f"{mount_point}{out}/brick_graph_partitions/{partition_identifier}.h5 does not exist. ",
+                    "Please run step 2 on all partitions before step 3.",
+                )
+            )
         with h5py.File(f"{mount_point}{out}/brick_graph_partitions/{partition_identifier}.h5", "r") as f:
             is_empty = f.attrs.get("is_empty", False)
         if is_empty:
             continue
         partition_identifiers.append(partition_identifier)
     large_partition_identifier = f"{large_job_id}_{large_region}"
-    
+
     if len(partition_identifiers) == 0:
         with h5py.File(f"{out}/linear_args/{large_partition_identifier}.h5", "w") as f:
             f.attrs["is_empty"] = True
         return
-    
-    merge(out, mount_point, partition_identifiers, large_partition_identifier)    
+
+    merge(out, mount_point, partition_identifiers, large_partition_identifier)
 
 
 def msc_step4(
@@ -262,68 +288,69 @@ def msc_step4(
     job_meta = pl.read_parquet(jobs_metadata)
     jobs = job_meta.filter(pl.col("large_job_id") == large_job_id)
     large_region = jobs["large_region"].to_list()[0]
-    large_partition_identifier = f'{large_job_id}_{large_region}'
-    
+    large_partition_identifier = f"{large_job_id}_{large_region}"
+
     params = pl.read_parquet_metadata(jobs_metadata)
-    mount_point = params['mount_point']
-    out = params['out']
-    
+    mount_point = params["mount_point"]
+    out = params["out"]
+
     if os.path.exists(f"{mount_point}{out}/individual_linear_args/{large_job_id}_{large_region}.h5"):
         print(f"Individual linear ARG for {large_job_id}_{large_region} already exists. Skipping.")
         return
-    
+
     partition_identifiers = []
     for row in jobs.iter_rows(named=True):
-        small_job_id = row['small_job_id']
-        small_region = row['small_region']
+        small_job_id = row["small_job_id"]
+        small_region = row["small_region"]
         p_id = f"{small_job_id}_{small_region}"
         if not os.path.exists(f"{mount_point}{out}/brick_graph_partitions/{p_id}.h5"):
-            raise FileNotFoundError(f"{mount_point}{out}/brick_graph_partitions/{p_id}.h5 does not exist. Please run step 2 on all partitions before step 4.")
+            raise FileNotFoundError(
+                (
+                    f"{mount_point}{out}/brick_graph_partitions/{p_id}.h5 does not exist. ",
+                    "Please run step 2 on all partitions before step 4.",
+                )
+            )
         with h5py.File(f"{mount_point}{out}/brick_graph_partitions/{p_id}.h5", "r") as f:
             is_empty = f.attrs.get("is_empty", False)
         if is_empty:
             continue
         partition_identifiers.append(p_id)
-        
+
     if len(partition_identifiers) == 0:
         with h5py.File(f"{out}/individual_linear_args/{large_partition_identifier}.h5", "w") as f:
             f.attrs["is_empty"] = True
         return
-            
+
     add_individuals_to_linarg(out, mount_point, partition_identifiers, large_partition_identifier)
-  
-    
+
+
 def msc_step5(
     jobs_metadata: Union[str, PathLike],
 ):
     """
     Merge multiple LinearARG HDF5 files into a single file.
-    
+
     Args:
         jobs_metadata: Path to the jobs metadata parquet file
     """
     params = pl.read_parquet_metadata(jobs_metadata)
-    mount_point = params['mount_point']
-    out = params['out']
-    
+    mount_point = params["mount_point"]
+    out = params["out"]
+
     os.makedirs(f"{out}/logs", exist_ok=True)
     logger = MemoryLogger(__name__, log_file=f"{out}/logs/msc_step5.log")
     logger.info("Starting merge of LinearARG partitions")
-    
+
     job_meta = pl.read_parquet(jobs_metadata)
-    
+
     partition_identifiers = set(
-        f"{i}_{region}" 
-        for i, region in zip(
-            job_meta["large_job_id"].to_list(), 
-            job_meta["large_region"].to_list()
-        )
+        f"{i}_{region}" for i, region in zip(job_meta["large_job_id"].to_list(), job_meta["large_region"].to_list())
     )
-        
+
     params = pl.read_parquet_metadata(jobs_metadata)
-    mount_point = params['mount_point']
-    out = params['out']
-    
+    mount_point = params["mount_point"]
+    out = params["out"]
+
     final_merge(out, mount_point, partition_identifiers, logger)
     if os.path.exists(f"{mount_point}{out}/individual_linear_args/"):
         final_merge(out, mount_point, partition_identifiers, logger, individual=True)
@@ -336,17 +363,15 @@ def final_merge(
     logger,
     individual=False,
 ):
-    
     non_empty_partition_identifiers = []
-    
-     # check that all linear ARGs have been inferred and are correct
+
+    # check that all linear ARGs have been inferred and are correct
     for part_id in partition_identifiers:
         stats_path = f"{mount_point}{out}/linear_args/{part_id}_stats.txt"
         linarg_path = f"{mount_point}{out}/linear_args/{part_id}.h5"
         if not os.path.exists(linarg_path):
             raise FileNotFoundError(
-                f"Linear ARG not found: {linarg_path}. "
-                "Please run step 4 on all partitions before step 5."
+                f"Linear ARG not found: {linarg_path}. " "Please run step 4 on all partitions before step 5."
             )
         with h5py.File(f"{mount_point}{out}/linear_args/{part_id}.h5", "r") as f:
             is_empty = f.attrs.get("is_empty", False)
@@ -355,8 +380,7 @@ def final_merge(
         non_empty_partition_identifiers.append(part_id)
         if not os.path.exists(stats_path):
             raise FileNotFoundError(
-                f"Stats file not found: {stats_path}. "
-                "Please run step 4 on all partitions before step 5."
+                f"Stats file not found: {stats_path}. " "Please run step 4 on all partitions before step 5."
             )
         if not is_allele_count_correct(stats_path):
             raise ValueError(f"Allele counts do not match for partition {part_id}.")
@@ -368,37 +392,31 @@ def final_merge(
     logger.info(f"Merging {len(non_empty_partition_identifiers)} partitions into {output_path}")
     with h5py.File(output_path, "w") as merged:
         iids_saved = False
-        
+
         for part_id in non_empty_partition_identifiers:
             if individual:
                 src_path = f"{mount_point}{out}/individual_linear_args/{part_id}.h5"
             else:
                 src_path = f"{mount_point}{out}/linear_args/{part_id}.h5"
-            
+
             with h5py.File(src_path, "r") as src:
                 # handle iids specially
-                if not iids_saved and 'iids' in src:
-                    merged.create_dataset(
-                        'iids', 
-                        data=src['iids'][:],
-                        compression='gzip',
-                        shuffle=True
-                    )
+                if not iids_saved and "iids" in src:
+                    merged.create_dataset("iids", data=src["iids"][:], compression="gzip", shuffle=True)
                     iids_saved = True
-                
+
                 # Copy everything except 'iids' using the recursive function
                 for key in src.keys():
-                    if key == 'iids':
+                    if key == "iids":
                         continue
-                    
+
                     if key not in merged:
                         merged.create_group(key)
                     copy_h5_group(src[key], merged[key])
-        
+
         if not iids_saved:
             raise ValueError("No 'iids' dataset found in any of the input files")
     logger.info("Successfully merged all partitions")
-    
 
 
 def copy_h5_group(src_group, dest_group):
@@ -413,12 +431,11 @@ def copy_h5_group(src_group, dest_group):
             if key not in dest_group:
                 dest_group.create_group(key)
             copy_h5_group(src_group[key], dest_group[key])
-    
+
     # Copy attributes
     for attr_key, attr_val in src_group.attrs.items():
         dest_group.attrs[attr_key] = attr_val
-    
-    
+
 
 def get_partitions(interval_start, interval_end, partition_size):
     """
@@ -426,11 +443,11 @@ def get_partitions(interval_start, interval_end, partition_size):
     where start and end are inclusive.
     """
     num_partitions = int((interval_end - interval_start + 1) / partition_size)
-    ticks = np.linspace(interval_start, interval_end+1, num_partitions+1).astype(int)
+    ticks = np.linspace(interval_start, interval_end + 1, num_partitions + 1).astype(int)
     ends = ticks[1:] - 1
     starts = ticks[:-1]
-    intervals = [(start, end) for start,end in zip(starts, ends)]
-    return intervals 
+    intervals = [(start, end) for start, end in zip(starts, ends)]
+    return intervals
 
 
 def make_genotype_matrix(
@@ -443,6 +460,7 @@ def make_genotype_matrix(
     samples_path: Optional[Union[str, PathLike]] = None,
     maf_filter: Optional[float] = None,
     remove_indels: bool = False,
+    remove_multiallelics: bool = False,
     sex_path=None,
 ):
     """
@@ -475,25 +493,26 @@ def make_genotype_matrix(
         samples=samples,
         maf_filter=maf_filter,
         remove_indels=remove_indels,
+        remove_multiallelics=remove_multiallelics,
         sex=sex,
     )
     if genotypes is None:
         logger.info("No variants found")
         with h5py.File(f"{out}/genotype_matrices/{partition_number}_{region}.h5", "w") as f:
             f.attrs["is_empty"] = True
-        
+
         with open(f"{out}/variant_metadata/{partition_number}_{region}.txt", "w") as f:
             f.write("# No variants found in this region\n")
-        
+
         return None
-    
+
     if phased:
         iids = [id_ for id_ in iids for _ in range(2)]
 
     t2 = time.time()
     logger.info(f"vcf to sparse matrix completed in {np.round(t2 - t1, 3)} seconds")
     logger.info("Saving genotype matrix and variant metadata")
-    
+
     with h5py.File(f"{out}/genotype_matrices/{partition_number}_{region}.h5", "w") as f:
         f.create_dataset("shape", data=genotypes.shape, compression="gzip", shuffle=True)
         f.create_dataset("indptr", data=genotypes.indptr, compression="gzip", shuffle=True)
@@ -504,14 +523,14 @@ def make_genotype_matrix(
         if sex_path is not None:
             f.create_dataset("sex", data=sex, compression="gzip", shuffle=True)
         f.attrs["is_empty"] = False
-    
+
     v_info.write_csv(f"{out}/variant_metadata/{partition_number}_{region}.txt", separator=" ")
 
 
 def run_forward_backward(out, mount_point, partition_identifier):
     """
     Run the forward and backward brick graph algorithms on the genotype matrix.
-    
+
     Args:
         out: Output directory
         mount_point: Mount point for cloud storage (empty string if local)
@@ -576,9 +595,7 @@ def reduction_union_recom(out, mount_point, partition_identifier):
     backward_graph = read_graph_from_disk(
         f"{mount_point}{out}/forward_backward_graphs/{partition_identifier}_backward_graph.h5"
     )
-    sample_indices = np.loadtxt(
-        f"{mount_point}{out}/forward_backward_graphs/{partition_identifier}_sample_indices.txt"
-    )
+    sample_indices = np.loadtxt(f"{mount_point}{out}/forward_backward_graphs/{partition_identifier}_sample_indices.txt")
     t2 = time.time()
     logger.info(f"Loaded in {np.round(t2 - t1, 3)} seconds")
 
@@ -691,8 +708,10 @@ def merge(out, mount_point, partition_identifiers, partition_identifier):
     sample_indices = np.arange(num_samples)
 
     logger.info("Reading variant metadata and flip")
-    
-    df_list = [pl.read_csv(f"{mount_point}{out}/variant_metadata/{p_id}.txt", separator=" ") for p_id in partition_identifiers]
+
+    df_list = [
+        pl.read_csv(f"{mount_point}{out}/variant_metadata/{p_id}.txt", separator=" ") for p_id in partition_identifiers
+    ]
     df = pl.concat(df_list)
     var_info = df.lazy()
     flip = []
@@ -702,7 +721,7 @@ def merge(out, mount_point, partition_identifiers, partition_identifier):
         with h5py.File(f"{mount_point}{out}/genotype_matrices/{p_id}.h5", "r") as f:
             flip_partition = list(f["flip"][:])
             if iids is None:
-                iids = [iid.decode('utf-8') for iid in list(f["iids"][:])]
+                iids = [iid.decode("utf-8") for iid in list(f["iids"][:])]
             if "sex" in f and sex is None:
                 sex = f["sex"][:]
         flip += flip_partition
@@ -717,13 +736,13 @@ def merge(out, mount_point, partition_identifiers, partition_identifier):
     linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), variants=var_info, sex=sex, iids=iids)
     linarg.calculate_nonunique_indices()
     logger.info("Saving linear ARG")
-    
+
     block = {
         "chrom": partition_identifier.split("_")[1].split(":")[0],
         "start": partition_identifier.split("_")[1].split(":")[1].split("-")[0],
         "end": partition_identifier.split("_")[1].split(":")[1].split("-")[1],
     }
-    
+
     linarg.write(f"{out}/linear_args/{partition_identifier}.h5", block_info=block)
     logger.info("Computing linear ARG stats")
     get_linarg_stats(out, mount_point, partition_identifiers, partition_identifier, linarg)
@@ -736,13 +755,15 @@ def get_linarg_stats(out, mount_point, partition_identifiers, partition_identifi
     Get stats from linear ARG.
     """
     if linarg is None:
-        linarg = LinearARG.read(f"{mount_point}{out}/linear_args/{partition_identifier}.h5", block=partition_identifier.split("_")[1])
+        linarg = LinearARG.read(
+            f"{mount_point}{out}/linear_args/{partition_identifier}.h5", block=partition_identifier.split("_")[1]
+        )
 
     linarg.flip = np.zeros(linarg.shape[1], dtype=bool)
 
     v = np.ones(linarg.shape[0])
     allele_count_from_linarg = v @ linarg
-    
+
     genotypes_nnz = 0
     allele_counts = []
     for p_id in partition_identifiers:
@@ -784,28 +805,28 @@ def get_linarg_stats(out, mount_point, partition_identifiers, partition_identifi
             + "\n"
         )
         file.write(" ".join(stats) + "\n")
-        
+
     return
-    
-    
+
+
 def is_allele_count_correct(stats_file_path):
-    with open(stats_file_path, 'r') as f:
+    with open(stats_file_path, "r") as f:
         # Read header and data lines
         header = f.readline().strip().split()
         data = f.readline().strip().split()
-        
+
         # Find the index of 'correct_allele_counts' in the header
         try:
-            idx = header.index('correct_allele_counts')
+            idx = header.index("correct_allele_counts")
             # Convert the string to boolean
-            return data[idx].lower() == 'true'
+            return data[idx].lower() == "true"
         except (ValueError, IndexError):
             return False
 
 
 def add_individuals_to_linarg(out, mount_point, partition_identifiers, partition_identifier):
     os.makedirs(f"{out}/logs/", exist_ok=True)
-    os.makedirs(f"{out}/individual_linear_args/", exist_ok=True)    
+    os.makedirs(f"{out}/individual_linear_args/", exist_ok=True)
     logger = MemoryLogger(__name__, log_file=f"{out}/logs/add_individual_nodes.log")
 
     logger.info("Loading linear ARG")
@@ -815,7 +836,7 @@ def add_individuals_to_linarg(out, mount_point, partition_identifiers, partition
     temp = LinearARG.read(f"{mount_point}{out}/linear_args/{partition_identifier}.h5", block=block_name)
     t2 = time.time()
     logger.info(f"Linear ARG loaded in {np.round(t2 - t1, 3)} seconds")
-    
+
     logger.info("Adding individual nodes to the linear ARG")
     t3 = time.time()
     linarg = temp.add_individual_nodes()
@@ -825,20 +846,21 @@ def add_individuals_to_linarg(out, mount_point, partition_identifiers, partition
     logger.info("Saving linear ARG")
     block_info = {
         "chrom": block_name.split(":")[0],
-        "start": block_name.split(":")[1].split('-')[0],
-        "end": block_name.split(":")[1].split('-')[1],
+        "start": block_name.split(":")[1].split("-")[0],
+        "end": block_name.split(":")[1].split("-")[1],
     }
-    
+
     linarg.write(f"{out}/individual_linear_args/{partition_identifier}", block_info=block_info)
-    
+
     logger.info("Computing linear ARG stats")
     get_linarg_individual_stats(out, mount_point, partition_identifiers, partition_identifier, linarg)
 
 
 def get_linarg_individual_stats(out, mount_point, partition_identifiers, partition_identifier, linarg=None):
-    
     if linarg is None:
-        linarg = LinearARG.read(f"{out}/individual_linear_args/{partition_identifier}.h5", block=partition_identifier.split("_")[1])
+        linarg = LinearARG.read(
+            f"{out}/individual_linear_args/{partition_identifier}.h5", block=partition_identifier.split("_")[1]
+        )
 
     linarg.flip = np.zeros(linarg.shape[1], dtype=bool)
 
