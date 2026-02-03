@@ -24,21 +24,28 @@ def _haseman_elston(grm, data, pheno_cols, covar_cols):
     yresid /= np.sqrt(np.sum(yresid**2, axis=0) / num_nonmissing)  # ||y_resid||^2 == num_nonmissing
 
     C = np.sum(grm.dot(yresid) * yresid, axis=0)
+    E = np.sum(yresid * yresid, axis=0)
     N = grm.shape[0]
     grm_trace = np.trace(grm)
     grm_sq_trace = np.trace(grm @ grm)
 
     # construct linear equations to solve
     LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, N]])
-    RHS = np.vstack([C, N * np.ones_like(C)])
+    RHS = np.vstack([C, E])
+    # print(f"HE | LHS = {LHS} | RHS = {RHS}")
     solution = np.linalg.solve(LHS, RHS)
-    return solution
+
+    s2g = solution[0, :] * grm_trace
+    s2e = solution[1, :] * N
+    heritability = s2g / (s2g + s2e)
+
+    return heritability
 
 
 @pytest.mark.parametrize("h2g", (0.05, 0.5, 0.9))
-@pytest.mark.parametrize("estimator", ("hutch++",))  # ("hutchinson", "hutch++", "xnystrace"))
+@pytest.mark.parametrize("estimator", ("hutchinson", "hutch++", "xnystrace"))
 @pytest.mark.parametrize("sampler", ("normal", "sphere", "rademacher"))
-@pytest.mark.parametrize("num_matvecs", (50, 10, 5))
+@pytest.mark.parametrize("num_matvecs", (25, 10, 5))
 def test_rhe(h2g, estimator, sampler, num_matvecs):
     hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
     rng = np.random.default_rng(SEED)
@@ -47,7 +54,7 @@ def test_rhe(h2g, estimator, sampler, num_matvecs):
     with ParallelOperator.from_hdf5(hdf5_path, num_processes=2) as genotypes:
         n, m = genotypes.shape
         fraction_causal = 1
-        dgenotypes = get_diploid_operator(genotypes)
+        dgenotypes = get_diploid_operator(genotypes.normalized) / np.sqrt(2.0)
 
         # Simulate phenotype
         y, beta = simulate_phenotype(
@@ -74,7 +81,7 @@ def test_rhe(h2g, estimator, sampler, num_matvecs):
         # Extract genotype matrix to compute GRM the ol' fashioned way, for comparison
         G = dgenotypes @ np.eye(dgenotypes.shape[1])
         af = G.mean(axis=0) / 2.0
-        G_std = (G - 2 * af) / (2 * af * (1.0 - af))
+        G_std = (G - 2 * af) / np.sqrt(2 * af * (1.0 - af))
         G_std[np.isnan(G_std)] = 0
         grm_direct = G_std @ G_std.T / G.shape[1]
 
@@ -94,9 +101,9 @@ def test_rhe(h2g, estimator, sampler, num_matvecs):
             seed=rng,
         )
         # Compare with exact computation using GRM matrix
+        observed = observed.get_column("h2g").to_numpy()
         expected = _haseman_elston(grm_direct, df_pheno.lazy(), pheno_cols, covar_cols)
         print(f"h2g = {h2g} | estimator = {estimator} | sampler = {sampler} | num_matvecs = {num_matvecs}")
-        print(observed)
-        print(expected[0, :] / np.sum(expected, axis=0))
+        print(f"\tobserved = {observed} | expected = {expected}")
 
     return

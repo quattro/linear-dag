@@ -49,8 +49,9 @@ def randomized_haseman_elston(
     yresid, covariates = _prep_for_h2_estimation(left_op, right_op, phenotypes, covariates)
 
     # length here represent N in haplotype space, we need to account for this otherwise wrong results!
-    N = len(yresid) // 2  # assumes diploid!!
+    N = len(yresid)
     grm = right_op @ grm @ right_op.T
+    grm = 0.5 * (left_op @ grm @ left_op.T)  # assumes diploid; comes from the normalization term being pq, not 2pq
 
     if num_matvecs > N:
         raise ValueError(f"num_matvecs={num_matvecs} should be << N={N}")
@@ -85,7 +86,10 @@ def randomized_haseman_elston(
     solution = np.linalg.solve(LHS, RHS)
 
     # compute the (co)variance of our estimates
-    var_s2g, var_s2e, covariances = _compute_err_variance(grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs)
+    # var_s2g, var_s2e, covariances = _compute_err_variance(grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs)
+    var_s2g, var_s2e, covariances = _compute_err_variance_vectorized(
+        grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs
+    )
 
     # we define h2g: = a * Tr(K) / (a * Tr(K) + b * Tr(I)), where a = solution[0] and b = solution[1]
     # this handles any possible rescaling of the 'grm' like object to compute the correct total genetic variance
@@ -139,8 +143,8 @@ def _prep_for_h2_estimation(
     two_n = np.sum(rows_matched_per_col > 0)
     assert two_n == 2 * np.sum(cols_matched_per_row > 0)
 
-    covariates = left_op.T @ covariates
-    phenotypes = left_op.T @ phenotypes
+    # covariates = left_op.T @ covariates
+    # phenotypes = left_op.T @ phenotypes
 
     # Handle missingness
     covariates = impute_missing_with_mean(covariates)
@@ -475,3 +479,82 @@ def _compute_err_variance(
         covariances.append(cov_ge)
 
     return np.array(var_s2g), np.array(var_s2e), np.array(covariances)
+
+
+def _compute_err_variance_vectorized(
+    grm,
+    yresid: np.ndarray,  # (n, m)
+    solutions: np.ndarray,  # (2, m), rows: [s2g, s2e]
+    grm_sq_trace: float,
+    grm_trace: float,
+    num_matvecs: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Vectorized version of _compute_err_variance:
+    uses 3 matmat calls total and columnwise dot products.
+
+    Returns:
+        var_s2g: (m,)
+        var_s2e: (m,)
+        cov_ge:  (m,)
+    """
+    Y = yresid
+    n, m = Y.shape
+    dtype = Y.dtype
+
+    # Scalars / constants
+    denom = n * grm_sq_trace - grm_trace**2
+    denom2 = denom * denom
+    n2 = n * n
+
+    # Traitwise params (shape (m,))
+    s2g = solutions[0].astype(dtype, copy=False)
+    s2e = solutions[1].astype(dtype, copy=False)
+
+    # Broadcast helpers (shape (1, m)) for columnwise scaling
+    s2g_row = s2g[None, :]
+    s2e_row = s2e[None, :]
+
+    # --- 1) KY = K Y
+    KY = grm.matmat(Y)  # (n, m)
+
+    # resid operator R = n*K - tr(K) I, applied to Y:
+    # Proj = RY = n*(KY) - tr(K)*Y
+    Proj = n * KY - grm_trace * Y  # (n, m)
+
+    # --- 2) KProj = K (RY)
+    KProj = grm.matmat(Proj)  # (n, m)
+
+    # V(Proj) = s2g*KProj + s2e*Proj
+    VProj = s2g_row * KProj + s2e_row * Proj  # (n, m)
+
+    # term1_j = 2 * Proj[:,j]^T VProj[:,j]
+    term1 = 2.0 * np.einsum("ij,ij->j", Proj, VProj)  # (m,)
+
+    # --- 3) Tmp = VY = s2g*KY + s2e*Y
+    Tmp = s2g_row * KY + s2e_row * Y  # (n, m)
+
+    # KTmp = K (VY)
+    KTmp = grm.matmat(Tmp)  # (n, m)
+
+    # Rtmp = R(VY) = n*KTmp - tr(K)*Tmp
+    Rtmp = n * KTmp - grm_trace * Tmp  # (n, m)
+
+    # covUW_hat_j = 2 * y_j^T Rtmp_j
+    covUW_hat = 2.0 * np.einsum("ij,ij->j", Y, Rtmp)  # (m,)
+
+    # term2 (variance due to tr(K^2) estimate)
+    term2 = (s2g**2) * (grm_sq_trace / num_matvecs)  # (m,)
+
+    # tr(V^2) and varW_hat
+    trV2 = (s2g**2) * grm_sq_trace + 2.0 * s2g * s2e * grm_trace + (s2e**2) * n
+    varW_hat = 2.0 * trV2  # (m,)
+
+    # Outputs
+    var_s2g = (term1 + term2) / denom2
+
+    var_s2e = (grm_trace**2 / (n2 * denom2)) * term1 + varW_hat / n2 - (2.0 * grm_trace / (n2 * denom)) * covUW_hat
+
+    cov_ge = covUW_hat / (denom * n) - (grm_trace / n) * term1 / denom2
+
+    return var_s2g, var_s2e, cov_ge

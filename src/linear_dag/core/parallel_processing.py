@@ -10,17 +10,16 @@ from typing import Callable, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import polars as pl
-import h5py
 
 from scipy.sparse import diags
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 from .lineararg import (
+    compute_filtered_variant_count,
+    compute_variant_filter_mask,
     LinearARG,
     list_blocks,
     list_iids,
-    compute_filtered_variant_count,
-    compute_variant_filter_mask,
 )
 
 FLAGS = {
@@ -395,14 +394,11 @@ class ParallelOperator(LinearOperator):
         linargs = [LinearARG.read(hdf5_file, block) for block in blocks]
 
         # Apply variant filtering
-        needs_filtering = (
-            maf_log10_threshold is not None
-            or bed_regions is not None
-        )
+        needs_filtering = maf_log10_threshold is not None or bed_regions is not None
         if needs_filtering:
             maf_threshold = 10**maf_log10_threshold if maf_log10_threshold is not None else 0.0
             bed_maf_threshold = 10**bed_maf_log10_threshold if bed_maf_log10_threshold is not None else 0.0
-            
+
             for linarg, block in zip(linargs, blocks):
                 mask = compute_variant_filter_mask(
                     hdf5_file,
@@ -514,6 +510,7 @@ class ParallelOperator(LinearOperator):
         bed_regions = None
         if bed_file is not None:
             from linear_dag.bed_io import read_bed
+
             bed_regions = read_bed(bed_file)
 
         # Compute filtered variant counts
@@ -535,8 +532,14 @@ class ParallelOperator(LinearOperator):
         }
 
         manager = _ManagerFactory.create_manager(
-            cls._worker, hdf5_file, num_processes, block_metadata, shm_specification,
-            maf_log10_threshold, bed_regions, bed_maf_log10_threshold
+            cls._worker,
+            hdf5_file,
+            num_processes,
+            block_metadata,
+            shm_specification,
+            maf_log10_threshold,
+            bed_regions,
+            bed_maf_log10_threshold,
         )
         manager.start_workers(FLAGS["wait"])
 
@@ -611,9 +614,6 @@ class GRMOperator(LinearOperator):
             )
         result = np.empty((self.shape[0], k), dtype=np.float32)
 
-        with self._output_data_handle as output_data:
-            output_data.fill(0)
-
         # Process max_num_traits columns at a time
         for start in range(0, k, self._max_num_traits):
             end = min(start + self._max_num_traits, k)
@@ -621,6 +621,9 @@ class GRMOperator(LinearOperator):
             self._num_traits.value = end - start
             with self._input_data_handle as input_data:
                 input_data[: end - start, :] = x[:, start:end].T
+
+            with self._output_data_handle as output_data:
+                output_data.fill(0)
 
             self._manager.start_workers(FLAGS["matmat"])
             self._manager.await_workers()
