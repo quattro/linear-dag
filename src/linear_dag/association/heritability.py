@@ -98,6 +98,15 @@ def randomized_haseman_elston(
     # compute y_j' y_j for each y_j \in y
     E = np.sum(yresid * yresid, axis=0)
 
+    print(f"[DEBUG] Trace estimates and quadratic forms")
+    print(f"  grm_trace (Tr(K)): {grm_trace}")
+    print(f"  grm_sq_trace (Tr(K^2)): {grm_sq_trace}")
+    print(f"  C (y'Ky): {C}")
+    print(f"  E (y'y): {E}")
+    print(f"  N: {N}")
+    print(f"  Tr(K)/N ratio: {grm_trace/N}")
+    print(f"  Tr(K^2)/N ratio: {grm_sq_trace/N}")
+
     # construct linear equations to solve
     LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, N]])
     RHS = np.vstack([C, E])
