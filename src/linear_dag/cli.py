@@ -393,6 +393,15 @@ def _estimate_h2g(args):
         args.num_processes,
         logger,
     )
+
+    # DEBUG logging
+    n_blocks = len(block_metadata)
+    n_variants = block_metadata.get_column("n_variants").sum() if "n_variants" in block_metadata.columns else "unknown"
+    print(f"[DEBUG] Block metadata")
+    print(f"  n_blocks: {n_blocks}")
+    print(f"  n_variants (total): {n_variants}")
+    print(f"  columns: {block_metadata.columns}")
+
     logger.info("Creating parallel operator")
     with GRMOperator.from_hdf5(args.linarg_path, num_processes=args.num_processes, alpha=-1.0) as grm:
         logger.info("Estimating SNP heritability")
