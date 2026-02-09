@@ -48,8 +48,16 @@ def randomized_haseman_elston(
     covariates = data.select(covar_cols).collect().to_numpy()
     yresid, covariates = _prep_for_h2_estimation(left_op, right_op, phenotypes, covariates)
 
+    # DEBUG logging
+    print(f"[DEBUG] After _prep_for_h2_estimation")
+    print(f"  yresid shape: {yresid.shape}")
+    print(f"  covariates shape: {covariates.shape}")
+
     # length here represent N in haplotype space, we need to account for this otherwise wrong results!
     N = len(yresid)
+
+    print(f"  N: {N}")
+
     grm = right_op @ grm @ right_op.T
     grm = 0.5 * (left_op @ grm @ left_op.T)  # assumes diploid; comes from the normalization term being pq, not 2pq
 
@@ -59,12 +67,22 @@ def randomized_haseman_elston(
     # set up for randomized estimator
     generator = np.random.default_rng(seed=seed)
     estimator = _construct_estimator(trace_est)
-    sampler = _construct_sampler(sampler, generator)
+    sampler_func = _construct_sampler(sampler, generator)
+
+    print(f"[DEBUG] Estimator / sampler setup")
+    print(f"  num_matvecs: {num_matvecs}")
+    print(f"  trace_est: {trace_est}")
+    print(f"  sampler: {sampler_func}")
 
     # wrap the probe-sampler in a residualizer
     # these should be independent in expectation, but it's not much overhead to residualize for exact independence
     def _resid_sampler(n, k):
-        omega = sampler(n, k)
+        omega = sampler_func(n, k)
+
+        print(f"[DEBUG] _resid_sampler called")
+        print(f"  n: {n} k: {k}")
+        print(f"  omega shape: {omega.shape}")
+        print(f"  covariates shape: {covariates.shape}")
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
