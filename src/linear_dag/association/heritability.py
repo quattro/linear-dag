@@ -112,11 +112,23 @@ def randomized_haseman_elston(
     RHS = np.vstack([C, E])
     solution = np.linalg.solve(LHS, RHS)
 
+    print(f"[DEBUG] Linear system")
+    print(f"  LHS:\n    {LHS}")
+    print(f"  RHS: {RHS.T}")
+    print(f"  solution (raw): {solution.T}")
+    print(f"  solution[0] (s2g coefficient): {solution[0]}")
+    print(f"  solution[1] (s2e coefficient): {solution[1]}")
+
     # compute the (co)variance of our estimates
     # var_s2g, var_s2e, covariances = _compute_err_variance(grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs)
     var_s2g, var_s2e, covariances = _compute_err_variance_vectorized(
         grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs
     )
+
+    print(f"[DEBUG] Variance estimates (before scaling)")
+    print(f"  var_s2g: {var_s2g}")
+    print(f"  var_s2e: {var_s2e}")
+    print(f"  covariances: {covariances}")
 
     # we define h2g: = a * Tr(K) / (a * Tr(K) + b * Tr(I)), where a = solution[0] and b = solution[1]
     # this handles any possible rescaling of the 'grm' like object to compute the correct total genetic variance
@@ -124,22 +136,34 @@ def randomized_haseman_elston(
     s2g = solution[0, :] * grm_trace
     s2e = solution[1, :] * N
     heritability = s2g / (s2g + s2e)
-    var_s2g = (grm_trace**2) * var_s2g
-    var_s2e = (N**2) * var_s2e
-    covariances = (grm_trace * N) * covariances
+    var_s2g_scaled = (grm_trace**2) * var_s2g
+    var_s2e_scaled = (N**2) * var_s2e
+    covariances_scaled = (grm_trace * N) * covariances
+
+    print(f"[DEBUG] Final estimates")
+    print(f"  s2g (= solution[0] * Tr(K)): {s2g}")
+    print(f"  s2e (= solution[1] * N): {s2e}")
+    print(f"  s2g + s2e: {s2g + s2e}")
+    print(f"  heritability (= s2g / (s2g + s2e)): {heritability}")
+    print(f"  var_s2g (scaled): {var_s2g_scaled}")
+    print(f"  var_s2e (scaled): {var_s2e_scaled}")
 
     # approx delta method to compute std err of h2g
-    numer = (s2e**2) * var_s2g + (s2g**2) * var_s2e - 2 * s2g * s2e * covariances
+    numer = (s2e**2) * var_s2g_scaled + (s2g**2) * var_s2e_scaled - 2 * s2g * s2e * covariances_scaled
     denom = (s2g + s2e) ** 4
     var_h2g = numer / denom
+
+    print(f"[DEBUG] SE calculation (delta method)")
+    print(f"  var_h2g: {var_h2g}")
+    print(f"  se_h2g: {np.sqrt(var_h2g)}")
 
     df_result = pl.DataFrame(
         {
             "phenotype": pheno_cols,
             "s2g": s2g,
-            "s2g.se": np.sqrt(var_s2g),
+            "s2g.se": np.sqrt(var_s2g_scaled),
             "s2e": s2e,
-            "s2e.se": np.sqrt(var_s2e),
+            "s2e.se": np.sqrt(var_s2e_scaled),
             "h2g": heritability,
             "h2g.se": np.sqrt(var_h2g),
         }
