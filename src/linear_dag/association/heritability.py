@@ -146,6 +146,9 @@ def _prep_for_h2_estimation(
     # covariates = left_op.T @ covariates
     # phenotypes = left_op.T @ phenotypes
 
+    # Make a copy since we modify phenotypes in-place below
+    phenotypes = phenotypes.copy()
+
     # Handle missingness
     covariates = impute_missing_with_mean(covariates)
     is_missing = np.isnan(phenotypes)
