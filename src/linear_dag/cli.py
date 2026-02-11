@@ -403,7 +403,7 @@ def _estimate_h2g(args):
     print(f"  columns: {block_metadata.columns}")
 
     logger.info("Creating parallel operator")
-    with GRMOperator.from_hdf5(args.linarg_path, num_processes=args.num_processes, alpha=-1.0) as grm:
+    with GRMOperator.from_hdf5(args.linarg_path, num_processes=args.num_processes, alpha=-1.0, block_metadata=block_metadata) as grm:
         logger.info("Estimating SNP heritability")
         results = randomized_haseman_elston(
             grm,
