@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import re
+import shlex
 import sys
 import time
 
@@ -80,61 +81,9 @@ title = """                            @@@@
 @@@@@                @@@@                                                          @@@@"""
 
 
-def _construct_cmd_string(args, parser):
-    """internal helper function to construct a visually pleasing string of the command line arguments.
-    it relies on a few class definitions internal to argparse and may be brittle in the future, but likely years on
-    from now...
-    """
-
-    pos_args = []
-    options = []
-
-    sub_args = []
-    sub_options = []
-    NUM_SPACE = 4
-
-    def _add(name, value, action, args, options, level=1):
-        spacer = " " * NUM_SPACE * level
-        if isinstance(action, argparse._StoreAction):
-            if action.option_strings:
-                if value is not None and (action.required or value != action.default):
-                    cmd_style_name = name.replace("_", "-")
-                    options.append(spacer + f"--{cmd_style_name} {value}")
-            elif action.required:
-                args.append(spacer + str(value))
-        elif isinstance(action, argparse._StoreTrueAction):
-            if value:
-                options.append(spacer + f"--{name}")
-        elif isinstance(action, _SplitAction):
-            if value is not None:
-                cmd_style_name = name.replace("_", "-")
-                values = ",".join(value)
-                options.append(spacer + f"--{cmd_style_name} {values}")
-
-        return args, options
-
-    for action in parser._actions:
-        if isinstance(action, argparse._HelpAction):
-            continue
-        name = action.dest
-        if isinstance(action, argparse._SubParsersAction):
-            value = getattr(args, name)
-            sub_cmd = value
-            subp = action.choices[value]
-            for sub_action in subp._actions:
-                if isinstance(sub_action, argparse._HelpAction):
-                    continue
-                sub_name = sub_action.dest
-                sub_value = getattr(args, sub_name)
-                sub_args, sub_options = _add(sub_name, sub_value, sub_action, sub_args, sub_options, level=2)
-        else:
-            value = getattr(args, name)
-            pos_args, options = _add(name, value, action, pos_args, options, level=1)
-
-    fmt_options = os.linesep.join(options)
-    fmt_sub_args = os.linesep.join(sub_args + sub_options)
-
-    return f"kodama {sub_cmd}" + os.linesep + os.linesep.join([fmt_sub_args, fmt_options])
+def _construct_cmd_string(argv: list[str]) -> str:
+    """Return a shell-escaped command string that can be copied and executed verbatim."""
+    return shlex.join(["kodama", *[str(arg) for arg in argv]])
 
 
 class _SplitAction(argparse.Action):
@@ -606,6 +555,7 @@ def _step5(args):
 
 
 def _main(args):
+    raw_argv = [str(arg) for arg in args]
     argp = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -861,7 +811,7 @@ def _main(args):
     args = argp.parse_args(args)
 
     # pull passed arguments/options as a string for printing
-    cmd_str = _construct_cmd_string(args, argp)
+    cmd_str = _construct_cmd_string(raw_argv)
 
     # fun!
     version = _resolve_cli_version()
@@ -984,7 +934,14 @@ def _create_common_parser(subp, name, help):
 
 
 def run_cli():
-    return _main(sys.argv[1:])
+    try:
+        return _main(sys.argv[1:])
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 1
+    except Exception as exc:
+        # Explicit exit-code contract for runtime failures in CLI usage.
+        sys.stderr.write(f"error: {exc}{os.linesep}")
+        return 1
 
 
 def _resolve_cli_version() -> str:
@@ -1002,4 +959,4 @@ def _remove_cli_handlers(log: logging.Logger) -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(_main(sys.argv[1:]))
+    sys.exit(run_cli())

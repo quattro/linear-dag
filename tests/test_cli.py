@@ -1,3 +1,5 @@
+import shlex
+
 from argparse import Namespace
 from pathlib import Path
 
@@ -358,3 +360,35 @@ def test_cli_help_includes_argument_groups(capsys):
     assert "Input:" in score_help
     assert "Block Selection:" in score_help
     assert "Execution and Output:" in score_help
+
+
+def test_construct_cmd_string_is_copy_paste_executable():
+    argv = [
+        "multi-step-compress",
+        "step1",
+        "--job-metadata",
+        "job metadata.tsv",
+        "--small-job-id",
+        "3",
+    ]
+    cmd_str = cli._construct_cmd_string(argv)
+    assert shlex.split(cmd_str) == ["kodama", *argv]
+
+
+def test_run_cli_maps_system_exit_to_explicit_code(monkeypatch):
+    def _fake_main(_args):
+        raise SystemExit(2)
+
+    monkeypatch.setattr(cli, "_main", _fake_main)
+    monkeypatch.setattr(cli.sys, "argv", ["kodama", "assoc"])
+    assert cli.run_cli() == 2
+
+
+def test_run_cli_runtime_error_returns_one_and_stderr(monkeypatch, capsys):
+    def _fake_main(_args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli, "_main", _fake_main)
+    monkeypatch.setattr(cli.sys, "argv", ["kodama", "assoc"])
+    assert cli.run_cli() == 1
+    assert "error: boom" in capsys.readouterr().err
