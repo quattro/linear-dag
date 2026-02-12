@@ -227,22 +227,12 @@ def _prs(args):
     logger.info("Getting blocks")
     block_metadata = list_blocks(args.linarg_path)
     block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
+    block_metadata = _require_block_metadata(block_metadata, args.linarg_path, command_name="score")
     result = run_prs(args.linarg_path, args.beta_path, block_metadata, args.score_cols, args.num_processes, logger)
     logger.info("Writing results")
     result.write_csv(f"{args.out}.tsv", separator="\t")
     logger.info(f"Finished in {time.time() - t:.2f} seconds")
     return
-
-
-###############################
-# Multiprocessing helpers
-###############################
-
-_linarg_path: str | None = None
-_pheno_cols: list[str] | None = None
-_covar_cols: list[str] | None = None
-_phenotypes: pl.DataFrame | None = None
-_out_prefix: str | None = None
 
 
 def _assoc_scan(args):
@@ -264,9 +254,6 @@ def _assoc_scan(args):
         logger,
     )
 
-    # Ensure output directory exists (args.out used as directory prefix)
-    os.makedirs(args.out, exist_ok=True)
-
     t = time.time()
     # Start loading variant info asynchronously; only await when needed later
     block_names = block_metadata.get_column("block_name").to_list()
@@ -282,92 +269,87 @@ def _assoc_scan(args):
         )
         logger.info("Started loading variant info")
 
-    # Run parallel GWAS
-    if args.repeat_covar:
-        logger.info("Running GWAS per phenotype without reusing covariates (--repeat-covar)")
-        with ParallelOperator.from_hdf5(
-            args.linarg_path,
-            num_processes=args.num_processes,
-            block_metadata=block_metadata,
-            max_num_traits=1 + len(covar_cols),
-            maf_log10_threshold=args.maf_log10_threshold,
-            bed_file=args.bed,
-            bed_maf_log10_threshold=args.bed_maf_log10_threshold,
-        ) as genotypes:
-            per_results: list[pl.LazyFrame] = []
-            for ph in pheno_cols:
-                logger.info(f"Processing phenotype: {ph}")
-                phenotype_missing_dropped = phenotypes.drop_nulls(ph)  # drop rows with missing phenotype values
-                res_ph = run_gwas(
+    try:
+        # Run parallel GWAS
+        if args.repeat_covar:
+            logger.info("Running GWAS per phenotype without reusing covariates (--repeat-covar)")
+            with ParallelOperator.from_hdf5(
+                args.linarg_path,
+                num_processes=args.num_processes,
+                block_metadata=block_metadata,
+                max_num_traits=1 + len(covar_cols),
+                maf_log10_threshold=args.maf_log10_threshold,
+                bed_file=args.bed,
+                bed_maf_log10_threshold=args.bed_maf_log10_threshold,
+            ) as genotypes:
+                per_results: list[pl.LazyFrame] = []
+                for ph in pheno_cols:
+                    logger.info(f"Processing phenotype: {ph}")
+                    phenotype_missing_dropped = phenotypes.drop_nulls(ph)  # drop rows with missing phenotype values
+                    res_ph = run_gwas(
+                        genotypes,
+                        phenotype_missing_dropped.lazy(),
+                        pheno_cols=[ph],
+                        covar_cols=covar_cols,
+                        variant_info=None,
+                        assume_hwe=not args.no_hwe,
+                        logger=logger,
+                        in_place_op=True,
+                        detach_arrays=True,
+                        recompute_AC=args.recompute_ac,
+                    )
+                    res_ph = res_ph.select([f"{ph}_BETA", f"{ph}_SE"])
+                    per_results.append(res_ph)
+
+                result: pl.LazyFrame = pl.concat(per_results, how="horizontal")
+
+                # If variant info was requested, await its loading
+                if vinfo_future is not None:
+                    v_info = vinfo_future.result()
+                    logger.info(f"Variant info loaded after {time.time() - t_vinfo:.2f} seconds")
+                    result = pl.concat([v_info, result], how="horizontal")
+
+                logger.info("Starting to write results")
+                result.collect().write_parquet(f"{args.out}.parquet", compression="lz4")
+                logger.info(f"Results written to {args.out}.parquet")
+        else:
+            if args.recompute_ac:
+                max_num_traits = 2 * len(pheno_cols) + len(covar_cols)
+            else:
+                max_num_traits = len(pheno_cols) + len(covar_cols)
+
+            with ParallelOperator.from_hdf5(
+                args.linarg_path,
+                num_processes=args.num_processes,
+                block_metadata=block_metadata,
+                max_num_traits=max_num_traits,
+                maf_log10_threshold=args.maf_log10_threshold,
+                bed_file=args.bed,
+                bed_maf_log10_threshold=args.bed_maf_log10_threshold,
+            ) as genotypes:
+                result: pl.LazyFrame = run_gwas(
                     genotypes,
-                    phenotype_missing_dropped.lazy(),
-                    pheno_cols=[ph],
+                    phenotypes.lazy(),
+                    pheno_cols=pheno_cols,
                     covar_cols=covar_cols,
                     variant_info=None,
                     assume_hwe=not args.no_hwe,
                     logger=logger,
                     in_place_op=True,
-                    detach_arrays=True,
                     recompute_AC=args.recompute_ac,
                 )
-                res_ph = res_ph.select([f"{ph}_BETA", f"{ph}_SE"])
-                per_results.append(res_ph)
 
-            result: pl.LazyFrame = pl.concat(per_results, how="horizontal")
-
-            # If variant info was requested, await its loading
-            if vinfo_future is not None:
-                v_info = vinfo_future.result()
-                logger.info(f"Variant info loaded after {time.time() - t_vinfo:.2f} seconds")
-                result = pl.concat([v_info, result], how="horizontal")
-                if _vinfo_executor is not None:
-                    _vinfo_executor.shutdown(wait=False)
-
-            logger.info("Starting to write results")
-            result.collect().write_parquet(f"{args.out}.parquet", compression="lz4")
-            logger.info(f"Results written to {args.out}.parquet")
-
-            genotypes.shutdown()
-            logger.info("Shut down parallel operator")
-    else:
-        if args.recompute_ac:
-            max_num_traits = 2 * len(pheno_cols) + len(covar_cols)
-        else:
-            max_num_traits = len(pheno_cols) + len(covar_cols)
-
-        with ParallelOperator.from_hdf5(
-            args.linarg_path,
-            num_processes=args.num_processes,
-            block_metadata=block_metadata,
-            max_num_traits=max_num_traits,
-            maf_log10_threshold=args.maf_log10_threshold,
-            bed_file=args.bed,
-            bed_maf_log10_threshold=args.bed_maf_log10_threshold,
-        ) as genotypes:
-            result: pl.LazyFrame = run_gwas(
-                genotypes,
-                phenotypes.lazy(),
-                pheno_cols=pheno_cols,
-                covar_cols=covar_cols,
-                variant_info=None,
-                assume_hwe=not args.no_hwe,
-                logger=logger,
-                in_place_op=True,
-                recompute_AC=args.recompute_ac,
-            )
-            genotypes.shutdown()
-            logger.info("Shut down parallel operator")
-
-            # If variant info was requested, await its loading
-            if vinfo_future is not None:
-                v_info = vinfo_future.result()
-                logger.info(f"Variant info loaded after {time.time() - t_vinfo:.2f} seconds")
-                result = pl.concat([v_info, result], how="horizontal")
-                if _vinfo_executor is not None:
-                    _vinfo_executor.shutdown(wait=False)
-            logger.info("Starting to write results")
-            result.collect().write_parquet(f"{args.out}.parquet", compression="lz4")
-            logger.info(f"Results written to {args.out}.parquet")
+                # If variant info was requested, await its loading
+                if vinfo_future is not None:
+                    v_info = vinfo_future.result()
+                    logger.info(f"Variant info loaded after {time.time() - t_vinfo:.2f} seconds")
+                    result = pl.concat([v_info, result], how="horizontal")
+                logger.info("Starting to write results")
+                result.collect().write_parquet(f"{args.out}.parquet", compression="lz4")
+                logger.info(f"Results written to {args.out}.parquet")
+    finally:
+        if _vinfo_executor is not None:
+            _vinfo_executor.shutdown(wait=False)
 
     logger.info(f"Finished in {time.time() - t:.2f} seconds")
 
@@ -433,17 +415,13 @@ def _prep_data(
     logger.info("Getting blocks")
     block_metadata = list_blocks(linarg_path)
     block_metadata = _filter_blocks(block_metadata, chromosomes=chromosomes, block_names=block_names)
+    block_metadata = _require_block_metadata(block_metadata, linarg_path, command_name="assoc/rhe")
 
     if num_processes is not None and num_processes < 1:
         raise ValueError(f"num_processes must be greater than zero, got {num_processes}")
 
     logger.info("Loading phenotypes")
-    if pheno_names is not None:
-        columns = pheno_names
-    elif pheno_col_nums is not None:
-        columns = pheno_col_nums
-    else:
-        columns = None
+    columns = _select_columns(pheno_names, pheno_col_nums)
     phenotypes = _read_pheno_or_covar(pheno, columns)
     pheno_cols = [x for x in phenotypes.columns if x != "iid"]
 
@@ -452,12 +430,7 @@ def _prep_data(
 
     if covar is not None:
         logger.info("Loading covariates")
-        if covar_names is not None:
-            columns = covar_names
-        elif covar_col_nums is not None:
-            columns = covar_col_nums
-        else:
-            columns = None
+        columns = _select_columns(covar_names, covar_col_nums)
         covars = _read_pheno_or_covar(covar, columns)
         covar_cols = ["i0"] + [x for x in covars.columns if x != "iid"]
 
@@ -476,6 +449,8 @@ def _filter_blocks(
     block_metadata: pl.DataFrame, chromosomes: list | None = None, block_names: list | None = None
 ) -> pl.DataFrame:
     """Helper to filter blocks by a list of chromosomes or block names."""
+    if block_metadata is None:
+        return None
     if block_names is not None and chromosomes is not None:
         raise ValueError("Specify either block_names or chromosomes, not both.")
     if block_names is not None:
@@ -485,7 +460,40 @@ def _filter_blocks(
     return block_metadata
 
 
+def _select_columns(
+    names: Optional[list[str]],
+    col_nums: Optional[list[int]],
+) -> Optional[Union[list[str], list[int]]]:
+    if names is not None:
+        return names
+    if col_nums is not None:
+        return col_nums
+    return None
+
+
+def _require_block_metadata(
+    block_metadata: Optional[pl.DataFrame],
+    linarg_path: Union[str, PathLike],
+    command_name: str,
+) -> pl.DataFrame:
+    if block_metadata is not None and block_metadata.height > 0:
+        return block_metadata
+    raise ValueError(
+        (
+            f"No block metadata found in '{linarg_path}'. "
+            f"The '{command_name}' workflow requires block-based LinearARG files. "
+            "This file may have been written without block groups (for example, via `compress` without `--region`). "
+            "Recreate the file with block metadata before running this command."
+        )
+    )
+
+
 def _compress(args):
+    logger = MemoryLogger(__name__)
+    if args.region is None:
+        logger.info(
+            "No --region was provided to `compress`; output may lack block metadata required by assoc/rhe/score."
+        )
     compress_vcf(
         input_vcf=args.vcf_path,
         output_h5=args.output_h5,
@@ -688,11 +696,12 @@ def _main(args):
     compress_p.add_argument(
         "--add-individual-nodes", action="store_true", help="Add individual nodes for Hardy Weinberg calculations."
     )
-    compress_p.add_argument("--region", help="Genomic region of the form chrN:start-end")
+    compress_p.add_argument(
+        "--region",
+        help=("Genomic region of the form chrN:start-end. Supplying this preserves block metadata for downstream CLI."),
+    )
     compress_p.add_argument("--out", default="kodama", help="Location to save result files.")
     compress_p.set_defaults(func=_compress)
-
-    prs_p = _create_common_parser(subp, "prs", help="Run PRS")
 
     #### multi-step compress pipeline ####
     msc_p = subp.add_parser("multi-step-compress", help="Run one of the multi-step compress stages.")
@@ -800,7 +809,7 @@ def _main(args):
     cmd_str = _construct_cmd_string(args, argp)
 
     # fun!
-    version = f"v{metadata.version('linear_dag')}"
+    version = _resolve_cli_version()
     # title is len 87 + 4 spaces on 'indent'
     buff_size = (87 + 22 + 4 - len(version)) // 2
     version = (" " * buff_size) + version + (" " * buff_size)
@@ -818,6 +827,9 @@ def _main(args):
         log.setLevel(logging.INFO)
     fmt = logging.Formatter(fmt=log_format, datefmt=date_format)
     log.propagate = False
+    _remove_cli_handlers(log)
+
+    cli_handlers: list[logging.Handler] = []
 
     if not args.quiet:
         sys.stdout.write(masthead)
@@ -825,7 +837,9 @@ def _main(args):
         sys.stdout.write("Starting log..." + os.linesep)
         stdout_handler = logging.StreamHandler(sys.stdout)
         stdout_handler.setFormatter(fmt)
+        stdout_handler._linear_dag_cli_handler = True
         log.addHandler(stdout_handler)
+        cli_handlers.append(stdout_handler)
 
     # setup log file, but write PLINK-style command first
     if hasattr(args, "out") and args.out:
@@ -836,35 +850,21 @@ def _main(args):
 
         disk_handler = logging.StreamHandler(disk_log_stream)
         disk_handler.setFormatter(fmt)
+        disk_handler._linear_dag_cli_handler = True
         log.addHandler(disk_handler)
+        cli_handlers.append(disk_handler)
 
-    # launch w/e task was selected
-    if hasattr(args, "func"):
-        args.func(args)
-    else:
-        argp.print_help()
-
-    return 0
-
-
-def _create_common_build_parser(subp, name, help, include_partition: bool = False):
-    common_b_p = subp.add_parser(name, help=help)
-    common_b_p.add_argument(
-        "linarg_dir",
-        help="Directory to store linear ARG outputs (must be the same for Steps 1-3)",
-    )
-    common_b_p.add_argument(
-        "--load-dir",
-        default="",
-        help="Directory to load data.",
-    )
-    if include_partition:
-        common_b_p.add_argument(
-            "--partition-identifier",
-            help="Partition identifier in the form {paritition_number}_{region}",
-        )
-    common_b_p.add_argument("--out", default="kodama", help="Location to save result files.")
-    return common_b_p
+    try:
+        # launch w/e task was selected
+        if hasattr(args, "func"):
+            args.func(args)
+        else:
+            argp.print_help()
+        return 0
+    finally:
+        for handler in cli_handlers:
+            log.removeHandler(handler)
+            handler.close()
 
 
 def _create_common_parser(subp, name, help):
@@ -921,6 +921,20 @@ def _create_common_parser(subp, name, help):
 
 def run_cli():
     return _main(sys.argv[1:])
+
+
+def _resolve_cli_version() -> str:
+    try:
+        return f"v{metadata.version('linear_dag')}"
+    except metadata.PackageNotFoundError:
+        return "vunknown"
+
+
+def _remove_cli_handlers(log: logging.Logger) -> None:
+    for handler in list(log.handlers):
+        if getattr(handler, "_linear_dag_cli_handler", False):
+            log.removeHandler(handler)
+            handler.close()
 
 
 if __name__ == "__main__":

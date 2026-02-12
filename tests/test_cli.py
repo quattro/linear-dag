@@ -2,9 +2,10 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+import pytest
 
 from linear_dag import cli
-from linear_dag.core.lineararg import list_blocks, load_variant_info
+from linear_dag.core.lineararg import load_variant_info
 from linear_dag.core.parallel_processing import ParallelOperator
 
 TEST_DATA_DIR = Path(__file__).parent / "testdata"
@@ -169,3 +170,18 @@ def test_cli_assoc_repeat_covar_smoke(tmp_path: Path):
     df = pl.read_parquet(out_parquet)
     expected_cols = {"height_BETA", "height_SE", "bmi_BETA", "bmi_SE"}
     assert expected_cols.issubset(set(df.columns))
+
+
+def test_cli_version_fallback(monkeypatch):
+    def _raise_missing(_dist_name: str):
+        raise cli.metadata.PackageNotFoundError
+
+    monkeypatch.setattr(cli.metadata, "version", _raise_missing)
+    assert cli._resolve_cli_version() == "vunknown"
+
+
+def test_prep_data_requires_block_metadata():
+    linarg_path = TEST_DATA_DIR / "tiny.ma.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    with pytest.raises(ValueError, match="No block metadata found"):
+        cli._prep_data(str(linarg_path), str(pheno_path))
