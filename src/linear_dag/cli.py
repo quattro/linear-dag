@@ -96,13 +96,12 @@ def _construct_cmd_string(args, parser):
     def _add(name, value, action, args, options, level=1):
         spacer = " " * NUM_SPACE * level
         if isinstance(action, argparse._StoreAction):
-            if action.required:
+            if action.option_strings:
+                if value is not None and (action.required or value != action.default):
+                    cmd_style_name = name.replace("_", "-")
+                    options.append(spacer + f"--{cmd_style_name} {value}")
+            elif action.required:
                 args.append(spacer + str(value))
-            elif action.option_strings:
-                if value is not None:
-                    if value != action.default:
-                        cmd_style_name = name.replace("_", "-")
-                        options.append(spacer + f"--{cmd_style_name} {value}")
         elif isinstance(action, argparse._StoreTrueAction):
             if value:
                 options.append(spacer + f"--{name}")
@@ -224,11 +223,21 @@ def _read_pheno_or_covar(
 def _prs(args):
     t = time.time()
     logger = MemoryLogger(__name__)
-    logger.info("Getting blocks")
-    block_metadata = list_blocks(args.linarg_path)
-    block_metadata = _filter_blocks(block_metadata, chromosomes=args.chromosomes, block_names=args.block_names)
-    block_metadata = _require_block_metadata(block_metadata, args.linarg_path, command_name="score")
-    result = run_prs(args.linarg_path, args.beta_path, block_metadata, args.score_cols, args.num_processes, logger)
+    if not args.linarg_path:
+        raise ValueError("`--linarg-path` is required for score.")
+    if not args.beta_path:
+        raise ValueError("`--beta-path` is required for score.")
+    if not args.score_cols:
+        raise ValueError("`--score-cols` is required for score.")
+    num_processes = _validate_num_processes(args.num_processes)
+    block_metadata = _load_required_block_metadata(
+        args.linarg_path,
+        chromosomes=args.chromosomes,
+        block_names=args.block_names,
+        command_name="score",
+        logger=logger,
+    )
+    result = run_prs(args.linarg_path, args.beta_path, block_metadata, args.score_cols, num_processes, logger)
     logger.info("Writing results")
     result.write_csv(f"{args.out}.tsv", separator="\t")
     logger.info(f"Finished in {time.time() - t:.2f} seconds")
@@ -273,15 +282,12 @@ def _assoc_scan(args):
         # Run parallel GWAS
         if args.repeat_covar:
             logger.info("Running GWAS per phenotype without reusing covariates (--repeat-covar)")
-            with ParallelOperator.from_hdf5(
-                args.linarg_path,
-                num_processes=args.num_processes,
-                block_metadata=block_metadata,
+            operator_kwargs = _build_parallel_operator_kwargs(
+                args,
+                block_metadata,
                 max_num_traits=1 + len(covar_cols),
-                maf_log10_threshold=args.maf_log10_threshold,
-                bed_file=args.bed,
-                bed_maf_log10_threshold=args.bed_maf_log10_threshold,
-            ) as genotypes:
+            )
+            with ParallelOperator.from_hdf5(args.linarg_path, **operator_kwargs) as genotypes:
                 per_results: list[pl.LazyFrame] = []
                 for ph in pheno_cols:
                     logger.info(f"Processing phenotype: {ph}")
@@ -318,15 +324,12 @@ def _assoc_scan(args):
             else:
                 max_num_traits = len(pheno_cols) + len(covar_cols)
 
-            with ParallelOperator.from_hdf5(
-                args.linarg_path,
-                num_processes=args.num_processes,
-                block_metadata=block_metadata,
+            operator_kwargs = _build_parallel_operator_kwargs(
+                args,
+                block_metadata,
                 max_num_traits=max_num_traits,
-                maf_log10_threshold=args.maf_log10_threshold,
-                bed_file=args.bed,
-                bed_maf_log10_threshold=args.bed_maf_log10_threshold,
-            ) as genotypes:
+            )
+            with ParallelOperator.from_hdf5(args.linarg_path, **operator_kwargs) as genotypes:
                 result: pl.LazyFrame = run_gwas(
                     genotypes,
                     phenotypes.lazy(),
@@ -375,8 +378,14 @@ def _estimate_h2g(args):
         args.num_processes,
         logger,
     )
+    num_processes = args.num_processes
     logger.info("Creating parallel operator")
-    with GRMOperator.from_hdf5(args.linarg_path, num_processes=args.num_processes, alpha=-1.0) as grm:
+    with GRMOperator.from_hdf5(
+        args.linarg_path,
+        num_processes=num_processes,
+        alpha=-1.0,
+        block_metadata=block_metadata,
+    ) as grm:
         logger.info("Estimating SNP heritability")
         results = randomized_haseman_elston(
             grm,
@@ -412,13 +421,14 @@ def _prep_data(
     if logger is None:
         logger = MemoryLogger(__name__)
 
-    logger.info("Getting blocks")
-    block_metadata = list_blocks(linarg_path)
-    block_metadata = _filter_blocks(block_metadata, chromosomes=chromosomes, block_names=block_names)
-    block_metadata = _require_block_metadata(block_metadata, linarg_path, command_name="assoc/rhe")
-
-    if num_processes is not None and num_processes < 1:
-        raise ValueError(f"num_processes must be greater than zero, got {num_processes}")
+    _validate_num_processes(num_processes)
+    block_metadata = _load_required_block_metadata(
+        linarg_path,
+        chromosomes=chromosomes,
+        block_names=block_names,
+        command_name="assoc/rhe",
+        logger=logger,
+    )
 
     logger.info("Loading phenotypes")
     columns = _select_columns(pheno_names, pheno_col_nums)
@@ -469,6 +479,40 @@ def _select_columns(
     if col_nums is not None:
         return col_nums
     return None
+
+
+def _validate_num_processes(num_processes: Optional[int]) -> Optional[int]:
+    if num_processes is not None and num_processes < 1:
+        raise ValueError(f"num_processes must be greater than zero, got {num_processes}")
+    return num_processes
+
+
+def _load_required_block_metadata(
+    linarg_path: Union[str, PathLike],
+    chromosomes: Optional[list[str]],
+    block_names: Optional[list[str]],
+    command_name: str,
+    logger: MemoryLogger,
+) -> pl.DataFrame:
+    logger.info("Getting blocks")
+    block_metadata = list_blocks(linarg_path)
+    block_metadata = _filter_blocks(block_metadata, chromosomes=chromosomes, block_names=block_names)
+    return _require_block_metadata(block_metadata, linarg_path, command_name=command_name)
+
+
+def _build_parallel_operator_kwargs(
+    args: argparse.Namespace,
+    block_metadata: pl.DataFrame,
+    max_num_traits: int,
+) -> dict[str, Union[int, float, str, pl.DataFrame, None]]:
+    return {
+        "num_processes": _validate_num_processes(args.num_processes),
+        "block_metadata": block_metadata,
+        "max_num_traits": max_num_traits,
+        "maf_log10_threshold": args.maf_log10_threshold,
+        "bed_file": args.bed,
+        "bed_maf_log10_threshold": args.bed_maf_log10_threshold,
+    }
 
 
 def _require_block_metadata(
@@ -573,33 +617,42 @@ def _main(args):
     # build association scan parser from 'common' parser
     assoc_p = _create_common_parser(subp, "assoc", help="Perform an association scan using the linear ARG.")
     assoc_p.set_defaults(func=_assoc_scan)
-    assoc_p.add_argument(
+    assoc_model_group = assoc_p.add_argument_group("Association Model")
+    assoc_model_group.add_argument(
         "--no-hwe",
         action="store_true",
         help="Do not assume Hardy-Weinberg equilibrium (requires individual nodes in the ARG).",
     )
-    assoc_p.add_argument(
-        "--no-variant-info",
-        action="store_true",
-        help="Do not include variant metadata columns (CHROM, POS, ID, REF, ALT) in output.",
-    )
-    assoc_p.add_argument(
-        "--all-variant-info",
-        action="store_true",
-        help="Include all variant metadata columns (CHROM, POS, ID, REF, ALT) in output. Default is ID only.",
-    )
-    assoc_p.add_argument(
+    assoc_model_group.add_argument(
         "--repeat-covar",
         action="store_true",
         help=("Run phenotypes one at a time inside the parallel operator, repeating covariate projections. "),
     )
-    assoc_p.add_argument(
+    assoc_model_group.add_argument(
+        "--recompute-ac",
+        action="store_true",
+        help=("Recompute allele counts."),
+    )
+
+    assoc_variant_group = assoc_p.add_argument_group("Variant Output and Filtering")
+    variant_info_group = assoc_variant_group.add_mutually_exclusive_group(required=False)
+    variant_info_group.add_argument(
+        "--no-variant-info",
+        action="store_true",
+        help="Do not include variant metadata columns (CHROM, POS, ID, REF, ALT) in output.",
+    )
+    variant_info_group.add_argument(
+        "--all-variant-info",
+        action="store_true",
+        help="Include all variant metadata columns (CHROM, POS, ID, REF, ALT) in output. Default is ID only.",
+    )
+    assoc_variant_group.add_argument(
         "--maf-log10-threshold",
         type=int,
         default=None,
         help=("MAF log10 threshold for variants outside BED regions (e.g., -2 for MAF > 0.01)."),
     )
-    assoc_p.add_argument(
+    assoc_variant_group.add_argument(
         "--bed",
         type=str,
         default=None,
@@ -609,7 +662,7 @@ def _main(args):
             "variants outside use --maf-log10-threshold."
         ),
     )
-    assoc_p.add_argument(
+    assoc_variant_group.add_argument(
         "--bed-maf-log10-threshold",
         type=int,
         default=None,
@@ -618,33 +671,29 @@ def _main(args):
             "Only used when --bed is specified."
         ),
     )
-    assoc_p.add_argument(
-        "--recompute-ac",
-        action="store_true",
-        help=("Recompute allele counts."),
-    )
 
     # build h2g estimation parser from 'common' parser, but add additional options for RHE
     rhe_p = _create_common_parser(subp, "rhe", help="Estimate SNP heritability using linear ARG")
-    rhe_p.add_argument(
+    rhe_group = rhe_p.add_argument_group("RHE Estimator")
+    rhe_group.add_argument(
         "--num-matvecs",
         type=int,
         default=100,
         help="Number of matrix-vector products to perform.",
     )
-    rhe_p.add_argument(
+    rhe_group.add_argument(
         "--estimator",
         choices=["hutchinson", "hutch++", "xnystrace"],
         default="xnystrace",
         help="The stochastic trace estimator algorithm.",
     )
-    rhe_p.add_argument(
+    rhe_group.add_argument(
         "--sampler",
         choices=["normal", "sphere", "rademacher"],
         default="normal",
         help="The distribution for sampling vector/probes.",
     )
-    rhe_p.add_argument(
+    rhe_group.add_argument(
         "--seed",
         type=int,
         help="PRNG seed for reproducibility.",
@@ -652,31 +701,37 @@ def _main(args):
     rhe_p.set_defaults(func=_estimate_h2g)
 
     prs_p = subp.add_parser("score", help="Score individuals using linear ARG")
-    prs_p.add_argument("--linarg-path", help="Path to linear ARG (.h5 file)")
-    prs_p.add_argument("--beta-path", help="Path to file with betas (tab-delimited).")
-    prs_p.add_argument(
+    prs_input_group = prs_p.add_argument_group("Input")
+    prs_input_group.add_argument("--linarg-path", required=True, help="Path to linear ARG (.h5 file)")
+    prs_input_group.add_argument("--beta-path", required=True, help="Path to file with betas (tab-delimited).")
+    prs_input_group.add_argument(
         "--score-cols",
+        required=True,
         nargs="+",
         help="Which columns to perform the prs on in beta_path.",
     )
-    prs_p.add_argument(
+
+    prs_selection_group = prs_p.add_argument_group("Block Selection")
+    prs_selection_group.add_argument(
         "--chromosomes",
         type=str,
         nargs="+",
         help="Which chromosomes to run the PRS on. Defaults to all chromosomes.",
     )
-    prs_p.add_argument(
+    prs_selection_group.add_argument(
         "--block-names",
         type=str,
         nargs="+",
         help="Which blocks to run the PRS on. Defaults to all blocks.",
     )
-    prs_p.add_argument(
+
+    prs_exec_group = prs_p.add_argument_group("Execution and Output")
+    prs_exec_group.add_argument(
         "--num-processes",
         type=int,
         help="How many cores to uses. Defaults to all available cores.",
     )
-    prs_p.add_argument("--out", default="kodama", help="Location to save result files.")
+    prs_exec_group.add_argument("--out", default="kodama", help="Location to save result files.")
     prs_p.set_defaults(func=_prs)
 
     compress_p = subp.add_parser(
@@ -869,12 +924,15 @@ def _main(args):
 
 def _create_common_parser(subp, name, help):
     common_p = subp.add_parser(name, help=help)
-    common_p.add_argument("linarg_path", help="Path to linear ARG (.h5 file)")
-    common_p.add_argument(
+    input_group = common_p.add_argument_group("Input")
+    input_group.add_argument("linarg_path", help="Path to linear ARG (.h5 file)")
+    input_group.add_argument(
         "pheno",
         help="Path to phenotype file (tab-delimited). Must contain IID-like column (e.g., `iid`, `IID`, `#iid`, etc.).",
     )
-    assoc_p_pgroup = common_p.add_mutually_exclusive_group(required=False)
+
+    column_group = common_p.add_argument_group("Phenotype and Covariate Columns")
+    assoc_p_pgroup = column_group.add_mutually_exclusive_group(required=False)
     assoc_p_pgroup.add_argument(
         "--pheno-name",
         nargs="+",
@@ -888,11 +946,11 @@ def _create_common_parser(subp, name, help):
         type=int,
         help="Phenotype column number or numbers (comma/space delimited)",
     )
-    common_p.add_argument(
+    column_group.add_argument(
         "--covar",
         help="Path to covariate file (tab-delimited). Must contain IID-like column (e.g., `iid`, `IID`, `#iid`, etc.).",
     )
-    assoc_p_cgroup = common_p.add_mutually_exclusive_group(required=False)
+    assoc_p_cgroup = column_group.add_mutually_exclusive_group(required=False)
     assoc_p_cgroup.add_argument(
         "--covar-name",
         nargs="+",
@@ -906,16 +964,22 @@ def _create_common_parser(subp, name, help):
         type=int,
         help="Covariate column number or numbers (comma/space delimited)",
     )
-    common_p.add_argument(
+
+    selection_group = common_p.add_argument_group("Block Selection")
+    selection_group.add_argument(
         "--chromosomes", type=str, nargs="+", help="Which chromosomes to include. Defaults to all chromosomes."
     )
-    common_p.add_argument("--block-names", type=str, nargs="+", help="Which blocks to include. Defaults to all blocks.")
-    common_p.add_argument(
+    selection_group.add_argument(
+        "--block-names", type=str, nargs="+", help="Which blocks to include. Defaults to all blocks."
+    )
+
+    execution_group = common_p.add_argument_group("Execution and Output")
+    execution_group.add_argument(
         "--num-processes",
         type=int,
         help="How many cores to uses. Defaults to all available cores.",
     )
-    common_p.add_argument("--out", default="kodama", help="Location to save result files.")
+    execution_group.add_argument("--out", default="kodama", help="Location to save result files.")
     return common_p
 
 

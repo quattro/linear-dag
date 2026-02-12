@@ -1,3 +1,4 @@
+from argparse import Namespace
 from pathlib import Path
 
 import numpy as np
@@ -185,3 +186,175 @@ def test_prep_data_requires_block_metadata():
     pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
     with pytest.raises(ValueError, match="No block metadata found"):
         cli._prep_data(str(linarg_path), str(pheno_path))
+
+
+class _DummyContext:
+    def __init__(self, value):
+        self._value = value
+
+    def __enter__(self):
+        return self._value
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
+def test_validate_num_processes_rejects_non_positive():
+    with pytest.raises(ValueError, match="num_processes must be greater than zero"):
+        cli._validate_num_processes(0)
+    assert cli._validate_num_processes(None) is None
+    assert cli._validate_num_processes(2) == 2
+
+
+def test_assoc_parallel_operator_kwargs_consistent_across_modes(tmp_path: Path, monkeypatch):
+    block_metadata = pl.DataFrame(
+        {
+            "block_name": ["1:0-100"],
+            "chrom": ["1"],
+            "n_samples": [2],
+            "n_variants": [4],
+            "n_entries": [8],
+        }
+    )
+    phenotypes = pl.DataFrame(
+        {
+            "iid": ["id1", "id2"],
+            "trait1": [0.1, 0.2],
+            "trait2": [0.3, 0.4],
+            "i0": [1.0, 1.0],
+        }
+    )
+
+    def _fake_prep_data(*_args, **_kwargs):
+        return block_metadata, ["i0"], ["trait1", "trait2"], phenotypes
+
+    captured_kwargs = []
+
+    def _fake_from_hdf5(_cls, _linarg_path, **kwargs):
+        captured_kwargs.append(kwargs)
+        return _DummyContext(object())
+
+    def _fake_run_gwas(_genotypes, _data, pheno_cols, **_kwargs):
+        columns = {}
+        for pheno_name in pheno_cols:
+            columns[f"{pheno_name}_BETA"] = [0.1]
+            columns[f"{pheno_name}_SE"] = [0.2]
+        return pl.DataFrame(columns).lazy()
+
+    monkeypatch.setattr(cli, "_prep_data", _fake_prep_data)
+    monkeypatch.setattr(cli.ParallelOperator, "from_hdf5", classmethod(_fake_from_hdf5))
+    monkeypatch.setattr(cli, "run_gwas", _fake_run_gwas)
+
+    args = Namespace(
+        linarg_path="dummy.h5",
+        pheno="dummy.tsv",
+        pheno_name=None,
+        pheno_col_nums=None,
+        covar=None,
+        covar_name=None,
+        covar_col_nums=None,
+        chromosomes=None,
+        block_names=None,
+        num_processes=3,
+        no_variant_info=True,
+        all_variant_info=False,
+        no_hwe=False,
+        repeat_covar=True,
+        recompute_ac=False,
+        maf_log10_threshold=-2,
+        bed="regions.bed",
+        bed_maf_log10_threshold=-4,
+        out=str(tmp_path / "assoc_repeat"),
+    )
+    cli._assoc_scan(args)
+
+    args.repeat_covar = False
+    args.out = str(tmp_path / "assoc_default")
+    cli._assoc_scan(args)
+
+    assert len(captured_kwargs) == 2
+    repeat_kwargs, default_kwargs = captured_kwargs
+
+    assert repeat_kwargs["num_processes"] == default_kwargs["num_processes"] == 3
+    assert repeat_kwargs["maf_log10_threshold"] == default_kwargs["maf_log10_threshold"] == -2
+    assert repeat_kwargs["bed_file"] == default_kwargs["bed_file"] == "regions.bed"
+    assert repeat_kwargs["bed_maf_log10_threshold"] == default_kwargs["bed_maf_log10_threshold"] == -4
+    assert repeat_kwargs["block_metadata"].to_dicts() == default_kwargs["block_metadata"].to_dicts()
+    assert repeat_kwargs["max_num_traits"] == 2
+    assert default_kwargs["max_num_traits"] == 3
+
+
+def test_estimate_h2g_passes_filtered_block_metadata_to_grm_operator(tmp_path: Path, monkeypatch):
+    block_metadata = pl.DataFrame(
+        {
+            "block_name": ["1:0-100"],
+            "chrom": ["1"],
+            "n_samples": [2],
+            "n_variants": [4],
+            "n_entries": [8],
+        }
+    )
+    phenotypes = pl.DataFrame(
+        {
+            "iid": ["id1", "id2"],
+            "trait1": [0.1, 0.2],
+            "i0": [1.0, 1.0],
+        }
+    )
+
+    def _fake_prep_data(*_args, **_kwargs):
+        return block_metadata, ["i0"], ["trait1"], phenotypes
+
+    captured = {}
+
+    def _fake_grm_from_hdf5(_cls, hdf5_file, **kwargs):
+        captured["hdf5_file"] = hdf5_file
+        captured.update(kwargs)
+        return _DummyContext(object())
+
+    def _fake_randomized_he(*_args, **_kwargs):
+        return pl.DataFrame({"trait": ["trait1"], "h2g": [0.2]})
+
+    monkeypatch.setattr(cli, "_prep_data", _fake_prep_data)
+    monkeypatch.setattr(cli.GRMOperator, "from_hdf5", classmethod(_fake_grm_from_hdf5))
+    monkeypatch.setattr(cli, "randomized_haseman_elston", _fake_randomized_he)
+
+    args = Namespace(
+        linarg_path="dummy.h5",
+        pheno="dummy.tsv",
+        pheno_name=None,
+        pheno_col_nums=None,
+        covar=None,
+        covar_name=None,
+        covar_col_nums=None,
+        chromosomes=["1"],
+        block_names=None,
+        num_processes=4,
+        num_matvecs=10,
+        estimator="xnystrace",
+        sampler="normal",
+        seed=0,
+        out=str(tmp_path / "rhe"),
+    )
+    cli._estimate_h2g(args)
+
+    assert captured["hdf5_file"] == "dummy.h5"
+    assert captured["num_processes"] == 4
+    assert captured["alpha"] == -1.0
+    assert captured["block_metadata"].to_dicts() == block_metadata.to_dicts()
+
+
+def test_cli_help_includes_argument_groups(capsys):
+    with pytest.raises(SystemExit):
+        cli._main(["assoc", "--help"])
+    assoc_help = capsys.readouterr().out
+    assert "Association Model:" in assoc_help
+    assert "Variant Output and Filtering:" in assoc_help
+    assert "Phenotype and Covariate Columns:" in assoc_help
+
+    with pytest.raises(SystemExit):
+        cli._main(["score", "--help"])
+    score_help = capsys.readouterr().out
+    assert "Input:" in score_help
+    assert "Block Selection:" in score_help
+    assert "Execution and Output:" in score_help
