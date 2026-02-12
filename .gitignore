@@ -84,6 +84,8 @@ docs/_rst/*
 docs/_build/*
 cover/*
 site/
+!docs/site/
+!docs/site/**
 MANIFEST
 
 # Luke's stuff
