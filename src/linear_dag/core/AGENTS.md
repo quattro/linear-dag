@@ -33,4 +33,3 @@ This domain owns graph construction, sparse operator behavior, HDF5 persistence,
 - `src/linear_dag/core/parallel_processing.py` - process orchestration and shared-memory operators
 - `src/linear_dag/core/linear_arg_inference.py` - graph inference from genotype matrices
 - `src/linear_dag/core/operators.py` - merge and pairing operators
-- `src/linear_dag/core/grm_parallel.py` - GRM parallel operator

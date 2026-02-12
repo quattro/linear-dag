@@ -9,7 +9,18 @@ from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 def get_inner_merge_operators(row_ids: pl.Series, col_ids: pl.Series) -> Tuple[LinearOperator, LinearOperator]:
     """
-    Returns a pair of LinearOperators that merge row_ids and col_ids into a shared space.
+    Build left/right merge operators that align two ID vectors into a shared inner-join space.
+
+    **Arguments:**
+    - `row_ids`: Row identifiers to map from.
+    - `col_ids`: Column identifiers to map to.
+
+    **Returns:**
+    - Tuple `(row_operator, col_operator)` where
+      `row_operator @ col_operator` yields the inner-join merge matrix.
+
+    **Raises:**
+    - `TypeError`: If `row_ids` and `col_ids` have different dtypes.
     """
     if row_ids.dtype != col_ids.dtype:
         raise TypeError("Data types of row_ids and col_ids must match")
@@ -36,20 +47,48 @@ def get_inner_merge_operators(row_ids: pl.Series, col_ids: pl.Series) -> Tuple[L
 
 def get_merge_operator(row_ids: pl.Series, col_ids: pl.Series) -> LinearOperator:
     """
-    Returns a LinearOperator representing the matrix of size (len(row_ids), len(col_ids))
-    with a one in entry (i,j) if row_ids[i] == col_ids[j] and a zero otherwise.
+    Build a sparse merge operator between two identifier vectors.
+
+    **Arguments:**
+    - `row_ids`: Row identifiers to map from.
+    - `col_ids`: Column identifiers to map to.
+
+    **Returns:**
+    - Linear operator `M` with `M[i, j] = 1` when `row_ids[i] == col_ids[j]`.
+
+    **Raises:**
+    - `TypeError`: If `row_ids` and `col_ids` have different dtypes.
     """
     row_matrix, col_matrix = get_inner_merge_operators(row_ids, col_ids)
     return row_matrix @ col_matrix
 
 
 def get_row_filter_operator(merge_operator: LinearOperator):
-    """Given a merge operator, returns a LinearOperator that filters out
-    rows with zero matching columns."""
+    """Build a row filter that keeps rows with at least one merge match.
+
+    **Arguments:**
+    - `merge_operator`: Merge operator from `get_merge_operator`.
+
+    **Returns:**
+    - Linear operator that selects matched rows.
+    """
     num_matches = merge_operator @ np.ones(merge_operator.shape[1])
     return aslinearoperator(eye(num_matches > 0))
 
+
 def get_pairing_matrix(two_n: int) -> LinearOperator:
+    """Build a diploid-pairing matrix that sums adjacent haplotype rows.
+
+    **Arguments:**
+    - `two_n`: Number of haplotype rows. Must be even.
+
+    **Returns:**
+    - CSR matrix with shape `(two_n // 2, two_n)` mapping adjacent haplotypes
+      to diploid rows.
+
+    **Raises:**
+    - `ValueError`: If `two_n` is odd.
+    """
     if two_n % 2 != 0:
         raise ValueError("Number of rows in haploid_operator must be even")
     data = np.ones(two_n, dtype=np.int32)
@@ -58,12 +97,19 @@ def get_pairing_matrix(two_n: int) -> LinearOperator:
     pairing_matrix = csr_matrix((data, indices, indptr), shape=(two_n // 2, two_n))
     return pairing_matrix
 
+
 def get_diploid_operator(haploid_operator: LinearOperator) -> LinearOperator:
     """
-    Returns a LinearOperator representing the diploid genotype matrix.
-    Assumes that consecutive rows of the haploid_operator are for the same individual.
-    If the input operator is normalized and it is desired for the output to also be
-    be normalized, divide the output by sqrt(2).
+    Convert a haploid genotype operator into a diploid operator by pairing adjacent rows.
+
+    **Arguments:**
+    - `haploid_operator`: Haploid operator with rows ordered as adjacent haplotype pairs.
+
+    **Returns:**
+    - Diploid operator with half as many rows.
+
+    **Raises:**
+    - `ValueError`: If the haploid row count is odd.
     """
     two_n = haploid_operator.shape[0]
     return aslinearoperator(get_pairing_matrix(two_n)) @ haploid_operator
@@ -72,8 +118,18 @@ def get_diploid_operator(haploid_operator: LinearOperator) -> LinearOperator:
 def estimate_column_variance(
     operator: LinearOperator, num_samples: int = 1000, seed: Optional[int] = None
 ) -> np.ndarray:
-    """Estimates the variance of each column of a LinearOperator over
-    a subset of rows of size num_samples.
+    """Estimate per-column variance using a random subset of rows.
+
+    **Arguments:**
+    - `operator`: Linear operator to sample.
+    - `num_samples`: Number of rows sampled without replacement.
+    - `seed`: Optional RNG seed for reproducibility.
+
+    **Returns:**
+    - Column variance estimates.
+
+    **Raises:**
+    - `ValueError`: If `num_samples` exceeds number of rows in `operator`.
     """
     n, _ = operator.shape
     np.random.seed(seed)

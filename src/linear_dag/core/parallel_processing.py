@@ -43,15 +43,15 @@ def _compute_filtered_variant_counts(
 ) -> pl.DataFrame:
     """Compute number of variants per block that meet filter criteria.
 
-    Args:
-        block_metadata: DataFrame with block information
-        hdf5_file: Path to HDF5 file
-        maf_log10_threshold: log10 of MAF threshold for variants outside BED regions
-        bed_regions: Optional DataFrame with BED regions (chrom, chromStart, chromEnd)
-        bed_maf_log10_threshold: log10 of MAF threshold for variants inside BED regions
+    **Arguments:**
+    - `block_metadata`: Block metadata table.
+    - `hdf5_file`: Path to HDF5 file.
+    - `maf_log10_threshold`: `log10` MAF threshold outside BED regions.
+    - `bed_regions`: Optional BED regions dataframe.
+    - `bed_maf_log10_threshold`: `log10` MAF threshold inside BED regions.
 
-    Returns:
-        Updated block_metadata with filtered n_variants
+    **Returns:**
+    - `block_metadata` with `n_variants` replaced by filtered counts.
     """
     maf_threshold = 10**maf_log10_threshold if maf_log10_threshold is not None else 0.0
     bed_maf_threshold = 10**bed_maf_log10_threshold if bed_maf_log10_threshold is not None else 0.0
@@ -121,11 +121,6 @@ class _ParallelManager:
     """Manager for coordinating parallel worker processes using shared memory."""
 
     def __init__(self, num_processes: int, object_specification: Dict[str, Tuple[Tuple[int, ...], Type[np.generic]]]):
-        """
-        Args:
-            num_processes: Number of worker processes.
-            object_specification: Dict mapping name to (shape, dtype) for shared arrays.
-        """
         self.num_processes = num_processes
         self.flags = [Value("i", 0) for _ in range(num_processes)]
         self.processes: List[Process] = []
@@ -172,9 +167,12 @@ class _ParallelManager:
     def add_process(self, target: Callable, args: Tuple) -> None:
         """Add a worker process.
 
-        Args:
-            target: Function to run in process
-            args: Arguments to pass to target function
+        **Arguments:**
+        - `target`: Worker entrypoint.
+        - `args`: Positional arguments passed to `target`.
+
+        **Returns:**
+        - `None`.
         """
         # Pass the dictionary of handles to the worker
         process = Process(target=target, args=(self.handles, self.num_traits, *args))
@@ -203,19 +201,18 @@ class _ParallelManager:
 
 @dataclass
 class ParallelOperator(LinearOperator):
-    """A linear operator representing the normalized genotype
-    matrix (zero mean/unit variance) and supporting
-    matrix multiplication.
+    """Parallel genotype linear operator backed by blockwise shared-memory workers.
 
-    Attributes:
-        _manager: ParallelManager instance that coordinates worker processes
-        _sample_data_handle: _SharedArrayHandle  # Handle to shared sample data
-        _variant_data_handle: _SharedArrayHandle # Handle to shared variant data
-        _num_traits: Value
-        _max_num_traits: int
-        shape: Shape of the operator
-        dtype: Data type
-        iids: individual IDs
+    This class exposes the same algebraic interface as ``LinearARG`` while
+    distributing block computation across worker processes.
+
+    !!! Example
+        ```python
+        with ParallelOperator.from_hdf5("example.h5", num_processes=2) as op:
+            x = np.ones((op.shape[1], 1), dtype=np.float32)
+            y = op @ x
+        ```
+
     """
 
     _manager: _ParallelManager
@@ -244,10 +241,22 @@ class ParallelOperator(LinearOperator):
 
     @property
     def num_samples(self):
+        """Return number of sample rows in the operator.
+
+        **Returns:**
+
+        - Integer sample count.
+        """
         return self.shape[0]
 
     @property
     def n_individuals(self):
+        """Return inferred diploid individual count.
+
+        **Returns:**
+
+        - Integer `num_samples // 2`.
+        """
         return self.num_samples // 2
 
     def borrow_variant_data_view(self) -> np.ndarray:
@@ -319,6 +328,21 @@ class ParallelOperator(LinearOperator):
         return result
 
     def number_of_heterozygotes(self, individuals_to_include: Optional[np.ndarray] = None):
+        """Count heterozygotes per variant for selected individuals.
+
+        **Arguments:**
+
+        - `individuals_to_include`: optional boolean mask over individuals.
+
+        **Returns:**
+
+        - Integer array of shape `(n_variants, n_traits)` with heterozygote counts.
+
+        **Raises:**
+
+        - `ValueError`: if mask shape does not match `n_individuals`.
+        - `TypeError`: if mask dtype is not boolean.
+        """
         if individuals_to_include is None:
             individuals_to_include = np.ones((self.n_individuals, 1), dtype=np.bool_)
         if individuals_to_include.ndim == 1:
@@ -354,12 +378,21 @@ class ParallelOperator(LinearOperator):
 
     @cached_property
     def allele_frequencies(self) -> np.ndarray:
+        """Compute allele frequencies from the operator matrix.
+
+        **Returns:**
+
+        - NumPy array of per-variant allele frequencies.
+        """
         return (np.ones(self.shape[0], dtype=np.int32) @ self) / self.shape[0]
 
     @property
     def mean_centered(self) -> LinearOperator:
-        """
-        Returns a linear operator representing the mean-centered genotype matrix
+        """Return mean-centered genotype operator.
+
+        **Returns:**
+
+        - `LinearOperator` with per-variant means removed.
         """
         mean = aslinearoperator(np.ones((self.shape[0], 1), dtype=np.float32)) @ aslinearoperator(
             self.allele_frequencies
@@ -368,9 +401,11 @@ class ParallelOperator(LinearOperator):
 
     @property
     def normalized(self) -> LinearOperator:
-        """
-        Returns a linear operator representing the normalized genotype matrix
-        whose columns have mean zero and variance one
+        """Return normalized genotype operator.
+
+        **Returns:**
+
+        - `LinearOperator` with mean-zero, variance-scaled columns.
         """
         pq = self.allele_frequencies * (1 - self.allele_frequencies)
         pq[pq == 0] = 1
@@ -491,17 +526,24 @@ class ParallelOperator(LinearOperator):
     ) -> ParallelOperator:
         """Create a ParallelOperator from a metadata file.
 
-        Args:
-            hdf5_file: Path to HDF5 file
-            num_processes: Number of processes to use; None -> use all available cores
-            max_num_traits: Width of shared memory array for matmat operations
-            maf_log10_threshold: x s.t. variants outside BED with MAF < 10^x are dropped
-            block_metadata: Metadata for blocks to be used; use this to select subset of blocks
-            bed_file: Optional path to BED file defining regions of interest
-            bed_maf_log10_threshold: x s.t. variants inside BED with MAF < 10^x are dropped
+        !!! info
+            MAF and BED filtering are applied during construction, so the returned
+            operator shape reflects post-filtered variants.
 
-        Returns:
-            ParallelOperator instance
+        **Arguments:**
+        - `hdf5_file`: Path to HDF5 file.
+        - `num_processes`: Number of workers; `None` uses available CPUs bounded by block count.
+        - `max_num_traits`: Chunk width for shared-memory matmat/rmatmat.
+        - `maf_log10_threshold`: Keep non-BED variants with MAF greater than `10**x`.
+        - `block_metadata`: Optional pre-filtered block metadata.
+        - `bed_file`: Optional BED file path.
+        - `bed_maf_log10_threshold`: Keep BED variants with MAF greater than `10**x`.
+
+        **Returns:**
+        - Configured `ParallelOperator`.
+
+        **Raises:**
+        - `RuntimeError`: If any worker signals an error while initializing/awaiting.
         """
         if block_metadata is None:
             block_metadata = list_blocks(hdf5_file)
@@ -562,19 +604,18 @@ class ParallelOperator(LinearOperator):
 
 @dataclass
 class GRMOperator(LinearOperator):
-    """A linear operator representing the GRM and supporting
-    matrix multiplication.
+    """Parallel genetic relatedness matrix (GRM) operator.
 
-    Attributes:
-        _manager: ParallelManager instance that coordinates worker processes
-        _input_data_handle: _SharedArrayHandle  # Handle to shared sample data
-        _output_data_handle: _SharedArrayHandle  # Handle to shared sample data
-        _num_traits: Value
-        _alpha: Value
-        _max_num_traits: int
-        shape: Shape of the operator
-        dtype: Data type
-        iids: individual IDs
+    This operator computes blockwise contributions to ``X K X^T`` using shared
+    worker processes and exposes the result as a ``LinearOperator``.
+
+    !!! Example
+        ```python
+        with GRMOperator.from_hdf5("example.h5", num_processes=2, alpha=-1.0) as grm:
+            x = np.ones((grm.shape[1], 1), dtype=np.float32)
+            y = grm @ x
+        ```
+
     """
 
     _manager: _ParallelManager
@@ -600,10 +641,22 @@ class GRMOperator(LinearOperator):
 
     @property
     def num_samples(self):
+        """Return number of samples used by this GRM operator.
+
+        **Returns:**
+
+        - Integer sample count.
+        """
         return self.shape[0]
 
     @property
     def alpha(self):
+        """Return current alpha parameter for GRM weighting.
+
+        **Returns:**
+
+        - Floating-point alpha value.
+        """
         return self._alpha.value
 
     def _matmat(self, x):
@@ -703,13 +756,18 @@ class GRMOperator(LinearOperator):
     ) -> GRMOperator:
         """Create a GRMOperator from a metadata file.
 
-        Args:
-            metadata_path: Path to metadata file
-            num_processes: Number of processes to use; None -> use all available cores
-            alpha: Alpha parameter for GRM computation
+        **Arguments:**
+        - `hdf5_file`: Path to HDF5 file.
+        - `num_processes`: Number of workers; `None` uses available CPUs bounded by block count.
+        - `alpha`: Alpha parameter used in GRM diagonal weighting.
+        - `max_num_traits`: Chunk width for shared-memory matmat.
+        - `block_metadata`: Optional pre-filtered block metadata.
 
-        Returns:
-            GRMOperator instance
+        **Returns:**
+        - Configured `GRMOperator`.
+
+        **Raises:**
+        - `RuntimeError`: If any worker signals an error while initializing/awaiting.
         """
         if block_metadata is None:
             block_metadata = list_blocks(hdf5_file)
