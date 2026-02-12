@@ -507,7 +507,7 @@ class LinearARG(LinearOperator):
                     else:
                         destination.create_dataset(
                             field,
-                            data=np.array(variant_info[field], dtype=object),
+                            data=np.array(variant_info[field].fill_null("."), dtype=object),
                             dtype=h5py.string_dtype(encoding="utf-8"),
                             compression=compression_option,
                             shuffle=True,
@@ -618,7 +618,7 @@ class LinearARG(LinearOperator):
                             compression=get_blosc_filter(pos_data),
                         )
                     else:
-                        str_data = np.array(variant_info[field], dtype=object)
+                        str_data = np.array(variant_info[field].fill_null("."), dtype=object)
                         destination.create_dataset(
                             field,
                             data=str_data,
