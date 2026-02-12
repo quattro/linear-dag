@@ -32,3 +32,5 @@ linarg = LinearARG.from_vcf("data/example.vcf.gz")
 x = linarg @ np.ones(linarg.shape[1])
 print(x.shape)
 ```
+
+Use `list_blocks("path/to/file.h5")` when an HDF5 file contains multiple genomic blocks and you need block-level selection.

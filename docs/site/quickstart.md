@@ -25,3 +25,5 @@ kodama compress data/example.vcf.gz output/example.h5 --out output/example
 # Run GWAS
 kodama assoc output/example.h5 phenotypes.tsv --pheno-name trait --covar covars.tsv --covar-name intercept
 ```
+
+Use `kodama <subcommand> --help` on each command to inspect optional block-selection and execution flags.

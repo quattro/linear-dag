@@ -28,3 +28,5 @@ kodama score --linarg-path output/data.h5 --beta-path betas.tsv --score-cols bet
 # Run partitioning stage for large datasets
 kodama multi-step-compress step0 --vcf-metadata vcf_metadata.txt --partition-size 20000000 --n-small-blocks 20 --out out_dir
 ```
+
+Use `--help` on each subcommand to inspect required files, IID/column conventions, and optional filtering flags.
