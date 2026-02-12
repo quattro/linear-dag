@@ -21,7 +21,8 @@ Provides dimensionality-reduction entry points for population structure analysis
 
 ## Invariants
 - `linarg.normalized` is the expected numeric basis for both PCA and SVD calls.
-- Returned vectors/values follow SciPy conventions (including potential complex dtype in eigensolvers).
+- `pca` returns real-valued eigenpairs from a symmetric solver, with eigenvalues sorted descending.
+- `svd` returns singular values sorted descending, with vectors re-ordered to match.
 - This domain should remain thin: orchestration and IO stay outside `structure`.
 
 ## Key Files

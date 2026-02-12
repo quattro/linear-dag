@@ -13,7 +13,7 @@ Execute a 4-phase `src/` review/remediation plan with immediate priority on CLI 
 - `phase_01.md` (CLI): active and partially completed.
 - `phase_02.md` (Core): active and partially completed.
 - `phase_03.md` (Association): active and partially completed.
-- `phase_04.md` (Structure + consolidation): queued.
+- `phase_04.md` (Structure + consolidation): active and partially completed.
 
 ## Work Completed So Far
 - Produced severity-ranked review findings for `cli`, `core`, `association`, and `structure`.
@@ -41,16 +41,25 @@ Execute a 4-phase `src/` review/remediation plan with immediate priority on CLI 
 - Added association-focused regression tests in `tests/test_association.py`:
   - `test_run_gwas_non_hwe_requires_heterozygote_counter`
   - `test_get_gwas_beta_se_returns_four_arrays`
+- Implemented structure fixes in `src/linear_dag/structure/infer.py`:
+  - switched PCA to `eigsh` for symmetric GRM solving
+  - added explicit rank/type validation for `k` in both `pca` and `svd`
+  - made returned spectral values/vectors deterministic via descending sort
+- Added structure-focused regression tests in `tests/test_structure.py`:
+  - `test_svd_returns_sorted_singular_values`
+  - `test_pca_returns_sorted_real_eigenpairs`
+  - `test_structure_rank_validation`
 
 ## Verification Notes
 - Compile checks for updated files completed.
 - Targeted runtime checks completed for new CLI guard and version fallback behavior.
 - Targeted runtime checks completed for core regression scenarios.
 - Targeted runtime checks completed for association non-HWE guard and `get_gwas_beta_se` output contract.
+- Targeted runtime checks completed for structure solver/ordering and rank-validation behavior.
 - Full pytest run is still pending in a non-restricted runtime (sandbox constraints cause abnormal `pytest` termination and shared-memory multiprocessing limits in this environment).
 
 ## Next Steps
 1. Re-run CLI test suite in a runtime that allows multiprocessing shared memory.
-2. Re-run core and association targeted pytest cases in a non-restricted runtime.
-3. Finish any remaining `phase_03.md` remediation/validation tasks.
-4. Execute `phase_04.md` remediation work and finalize.
+2. Re-run core, association, and structure targeted pytest cases in a non-restricted runtime.
+3. Run any additional deep-dive module reviews requested after phase completion.
+4. Finalize remediation summary across all four phases.
