@@ -1,3 +1,4 @@
+import argparse
 import shlex
 
 from argparse import Namespace
@@ -363,7 +364,17 @@ def test_cli_help_includes_argument_groups(capsys):
 
 
 def test_construct_cmd_string_is_copy_paste_executable():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-v", "--verbose", action="store_true", default=False)
+    subparsers = parser.add_subparsers(dest="cmd", required=True)
+    msc = subparsers.add_parser("multi-step-compress")
+    msc_subparsers = msc.add_subparsers(dest="subcmd", required=True)
+    step1 = msc_subparsers.add_parser("step1")
+    step1.add_argument("--job-metadata", required=True)
+    step1.add_argument("--small-job-id", required=True, type=int)
+
     argv = [
+        "-v",
         "multi-step-compress",
         "step1",
         "--job-metadata",
@@ -371,8 +382,18 @@ def test_construct_cmd_string_is_copy_paste_executable():
         "--small-job-id",
         "3",
     ]
-    cmd_str = cli._construct_cmd_string(argv)
-    assert shlex.split(cmd_str) == ["kodama", *argv]
+    parsed = parser.parse_args(argv)
+    cmd_str = cli._construct_cmd_string(argv, parser, parsed)
+
+    lines = cmd_str.splitlines()
+    assert lines[0] == "kodama -v multi-step-compress step1 \\"
+    assert lines[1].startswith("\t\t--job-metadata")
+    assert lines[1].endswith(" \\")
+    assert lines[2].startswith("\t\t--small-job-id 3")
+
+    executable = cmd_str.replace("\\\n", " ")
+    reconstructed_args = shlex.split(executable)[1:]
+    assert parser.parse_args(reconstructed_args) == parsed
 
 
 def test_run_cli_maps_system_exit_to_explicit_code(monkeypatch):

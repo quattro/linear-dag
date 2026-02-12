@@ -81,9 +81,119 @@ title = """                            @@@@
 @@@@@                @@@@                                                          @@@@"""
 
 
-def _construct_cmd_string(argv: list[str]) -> str:
-    """Return a shell-escaped command string that can be copied and executed verbatim."""
-    return shlex.join(["kodama", *[str(arg) for arg in argv]])
+def _construct_cmd_string(argv: list[str], parser: argparse.ArgumentParser, parsed_args: argparse.Namespace) -> str:
+    """Pretty-print an executable command with positional args on line 1 and indented options."""
+
+    def _selected_subparsers() -> list[tuple[argparse.ArgumentParser, int]]:
+        selected: list[tuple[argparse.ArgumentParser, int]] = []
+        current = parser
+        depth = 0
+        while True:
+            sub_action = next(
+                (a for a in current._actions if isinstance(a, argparse._SubParsersAction)),
+                None,
+            )
+            if sub_action is None:
+                break
+            sub_name = getattr(parsed_args, sub_action.dest, None)
+            if sub_name is None:
+                break
+            next_parser = sub_action.choices.get(sub_name)
+            if next_parser is None:
+                break
+            depth += 1
+            selected.append((next_parser, depth))
+            current = next_parser
+        return selected
+
+    def _subcommand_names() -> list[str]:
+        names: list[str] = []
+        current = parser
+        while True:
+            sub_action = next(
+                (a for a in current._actions if isinstance(a, argparse._SubParsersAction)),
+                None,
+            )
+            if sub_action is None:
+                break
+            sub_name = getattr(parsed_args, sub_action.dest, None)
+            if sub_name is None:
+                break
+            names.append(str(sub_name))
+            next_parser = sub_action.choices.get(sub_name)
+            if next_parser is None:
+                break
+            current = next_parser
+        return names
+
+    def _first_option_string(action: argparse.Action) -> str:
+        long_opts = [opt for opt in action.option_strings if opt.startswith("--")]
+        if long_opts:
+            return long_opts[0]
+        return action.option_strings[0]
+
+    def _optional_tokens(action: argparse.Action) -> list[str]:
+        value = getattr(parsed_args, action.dest, None)
+        if isinstance(action, argparse._StoreTrueAction):
+            return [_first_option_string(action)] if bool(value) else []
+        if isinstance(action, argparse._StoreFalseAction):
+            default_value = action.default if action.default is not argparse.SUPPRESS else True
+            if value != default_value:
+                return [_first_option_string(action)]
+            return []
+
+        if value is None:
+            return []
+        if not action.required and action.default is not argparse.SUPPRESS and value == action.default:
+            return []
+
+        option_name = _first_option_string(action)
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return []
+            return [option_name, *[str(v) for v in value]]
+        return [option_name, str(value)]
+
+    selected_subparsers = _selected_subparsers()
+
+    # Global options stay on the first line to preserve valid argparse ordering.
+    global_option_tokens: list[str] = []
+    for action in parser._actions:
+        if isinstance(action, (argparse._HelpAction, argparse._SubParsersAction)) or not action.option_strings:
+            continue
+        global_option_tokens.extend(_optional_tokens(action))
+
+    sub_positional_tokens: list[str] = []
+    sub_option_lines: list[tuple[int, list[str]]] = []
+    for subparser, depth in selected_subparsers:
+        for action in subparser._actions:
+            if isinstance(action, argparse._HelpAction):
+                continue
+            if isinstance(action, argparse._SubParsersAction):
+                continue
+            value = getattr(parsed_args, action.dest, None)
+            if action.option_strings:
+                tokens = _optional_tokens(action)
+                if tokens:
+                    sub_option_lines.append((depth, tokens))
+            elif value is not None:
+                if isinstance(value, (list, tuple)):
+                    sub_positional_tokens.extend([str(v) for v in value])
+                else:
+                    sub_positional_tokens.append(str(value))
+
+    line1_tokens = ["kodama", *global_option_tokens, *_subcommand_names(), *sub_positional_tokens]
+    line1 = shlex.join(line1_tokens)
+
+    if not sub_option_lines:
+        return line1
+
+    lines = [line1 + " \\"]
+    for idx, (depth, tokens) in enumerate(sub_option_lines):
+        continuation = " \\" if idx < len(sub_option_lines) - 1 else ""
+        indent = "\t" * depth
+        lines.append(f"{indent}{shlex.join(tokens)}{continuation}")
+    return os.linesep.join(lines)
 
 
 class _SplitAction(argparse.Action):
@@ -811,7 +921,7 @@ def _main(args):
     args = argp.parse_args(args)
 
     # pull passed arguments/options as a string for printing
-    cmd_str = _construct_cmd_string(raw_argv)
+    cmd_str = _construct_cmd_string(raw_argv, argp, args)
 
     # fun!
     version = _resolve_cli_version()
