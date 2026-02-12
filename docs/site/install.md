@@ -20,3 +20,11 @@ pip install .
 python -c "import linear_dag; print(linear_dag.__version__)"
 kodama --help
 ```
+
+## Build docs locally
+
+```bash
+uv sync --extra docs
+uv run mkdocs serve
+uv run mkdocs build
+```

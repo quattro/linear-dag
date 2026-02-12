@@ -20,3 +20,11 @@ uv run pytest
 git add <files>
 git commit -m "feat: describe your change"
 ```
+
+## Build docs locally
+
+```bash
+uv sync --extra docs
+uv run mkdocs serve
+uv run mkdocs build
+```
