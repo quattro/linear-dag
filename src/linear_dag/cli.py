@@ -546,6 +546,35 @@ def _validate_num_processes(num_processes: Optional[int]) -> Optional[int]:
     return num_processes
 
 
+def _warn_if_num_processes_exceeds_available(
+    num_processes: Optional[int],
+    logger: logging.Logger,
+    available_cpus: Optional[int] = None,
+) -> None:
+    if num_processes is None:
+        return
+    if available_cpus is None:
+        available_cpus = os.cpu_count()
+    if available_cpus is None or num_processes <= available_cpus:
+        return
+
+    # CLI log format expects `memory_usage`; provide it for warning records too.
+    memory_usage_mb = 0.0
+    try:
+        import psutil
+
+        memory_usage_mb = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+    except Exception:
+        pass
+
+    logger.warning(
+        "`--num-processes` (%d) exceeds available CPUs (%d); performance may degrade due to oversubscription.",
+        num_processes,
+        available_cpus,
+        extra={"memory_usage": memory_usage_mb},
+    )
+
+
 def _load_required_block_metadata(
     linarg_path: Union[str, PathLike],
     chromosomes: Optional[list[str]],
@@ -970,6 +999,9 @@ def _main(args):
         cli_handlers.append(disk_handler)
 
     try:
+        if hasattr(args, "num_processes"):
+            _warn_if_num_processes_exceeds_available(getattr(args, "num_processes"), log)
+
         # launch w/e task was selected
         if hasattr(args, "func"):
             args.func(args)

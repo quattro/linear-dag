@@ -1,4 +1,5 @@
 import argparse
+import logging
 import shlex
 
 from argparse import Namespace
@@ -207,6 +208,20 @@ def test_validate_num_processes_rejects_non_positive():
         cli._validate_num_processes(0)
     assert cli._validate_num_processes(None) is None
     assert cli._validate_num_processes(2) == 2
+
+
+def test_warn_if_num_processes_exceeds_available_emits_warning(caplog):
+    logger = logging.getLogger("linear_dag.cli.test")
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        cli._warn_if_num_processes_exceeds_available(8, logger, available_cpus=4)
+    assert any("exceeds available CPUs (4)" in rec.message for rec in caplog.records)
+
+
+def test_warn_if_num_processes_exceeds_available_no_warning_when_within_limit(caplog):
+    logger = logging.getLogger("linear_dag.cli.test")
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        cli._warn_if_num_processes_exceeds_available(4, logger, available_cpus=4)
+    assert not caplog.records
 
 
 def test_assoc_parallel_operator_kwargs_consistent_across_modes(tmp_path: Path, monkeypatch):
