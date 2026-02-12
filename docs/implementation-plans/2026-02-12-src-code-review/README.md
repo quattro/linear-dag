@@ -12,7 +12,7 @@ Execute a 4-phase `src/` review/remediation plan with immediate priority on CLI 
 ## Current Status
 - `phase_01.md` (CLI): active and partially completed.
 - `phase_02.md` (Core): active and partially completed.
-- `phase_03.md` (Association): queued.
+- `phase_03.md` (Association): active and partially completed.
 - `phase_04.md` (Structure + consolidation): queued.
 
 ## Work Completed So Far
@@ -34,15 +34,23 @@ Execute a 4-phase `src/` review/remediation plan with immediate priority on CLI 
   - `test_lineararg_copy_independent_arrays`
   - `test_add_individual_nodes_propagates_explicit_sex`
   - `test_list_blocks_handles_non_numeric_chromosomes`
+- Implemented association fixes in `src/linear_dag/association/gwas.py`:
+  - hardened non-HWE guardrails to require `n_individuals`, `iids`, and `number_of_heterozygotes()`
+  - removed redundant `data.select(...).collect()` calls in `run_gwas` by collecting required inputs once
+  - corrected `get_gwas_beta_se` return-contract docs/types to match runtime behavior
+- Added association-focused regression tests in `tests/test_association.py`:
+  - `test_run_gwas_non_hwe_requires_heterozygote_counter`
+  - `test_get_gwas_beta_se_returns_four_arrays`
 
 ## Verification Notes
 - Compile checks for updated files completed.
 - Targeted runtime checks completed for new CLI guard and version fallback behavior.
 - Targeted runtime checks completed for core regression scenarios.
+- Targeted runtime checks completed for association non-HWE guard and `get_gwas_beta_se` output contract.
 - Full pytest run is still pending in a non-restricted runtime (sandbox constraints cause abnormal `pytest` termination and shared-memory multiprocessing limits in this environment).
 
 ## Next Steps
 1. Re-run CLI test suite in a runtime that allows multiprocessing shared memory.
-2. Finish remaining `phase_02.md` remediation/validation tasks.
-3. Execute `phase_03.md` remediation work.
+2. Re-run core and association targeted pytest cases in a non-restricted runtime.
+3. Finish any remaining `phase_03.md` remediation/validation tasks.
 4. Execute `phase_04.md` remediation work and finalize.

@@ -1,6 +1,6 @@
 # src Review Implementation Plan
 
-**Goal:** Execute a source-level code review for the association/statistics layer and produce a severity-ranked findings report.
+**Goal:** Execute a source-level code review for the association/statistics layer and implement high-impact fixes with regression coverage.
 
 **Architecture:** Review `src/linear_dag/association` for algorithmic assumptions, data-alignment guards, and API contracts crossing into core operators and CLI execution.
 
@@ -12,17 +12,39 @@
 
 **Last updated:** 2026-02-12
 
-**Status:** Queued (review findings captured; remediation not started)
+**Status:** Active and partially completed (review + selected association remediation implemented)
 
 ---
 
 ## Plan Revision (2026-02-12)
 
-Execution priority has moved to CLI-first hardening. This phase remains valid and is sequenced after core remediation work.
+Execution priority moved to CLI-first hardening and then core remediation. Association work is now active with targeted changes aligned to current goals:
+- reduce redundant code in hot association paths
+- streamline data processing for `run_gwas`
+- keep failure behavior and logging at the existing boundary contracts
 
 Current state:
 - Association review findings were produced.
-- No association remediation changes have been applied yet in this phase.
+- Selected remediation changes are now implemented in `gwas.py` with focused tests.
+
+---
+
+## Implementation Status
+
+Completed implementation in this phase:
+- Hardened non-HWE preconditions via `_validate_non_hwe_genotypes(...)` so `run_gwas(..., assume_hwe=False)` fails early unless `genotypes` exposes `n_individuals`, `iids`, and `number_of_heterozygotes()`.
+- Removed redundant `data.select(...).collect()` calls in `run_gwas` by collecting required `iid`/phenotype/covariate columns once and reusing them.
+- Corrected `get_gwas_beta_se` return contract annotation/docstring to match runtime behavior (`beta`, `var_numerator`, `var_denominator`, `allele_counts`).
+
+Completed test/verification work in this phase:
+- Added focused association regression tests in `tests/test_association.py`:
+  - `test_run_gwas_non_hwe_requires_heterozygote_counter`
+  - `test_get_gwas_beta_se_returns_four_arrays`
+- Verified Python compilation for updated files.
+- Verified new behavior with targeted manual runtime checks that exercise the new guard and return-shape contract.
+
+Known verification gap:
+- `pytest` in this environment exits abnormally with code `-1` and no diagnostics, so direct pytest execution remains pending in a non-restricted runtime.
 
 ---
 
@@ -41,6 +63,8 @@ This phase implements and tests:
 ### Task 1: Build association contract map
 
 **Verifies:** src-review.AC3.1
+
+**Status:** Completed
 
 **Files:**
 - Read: `src/linear_dag/association/__init__.py`
@@ -64,6 +88,8 @@ This phase implements and tests:
 
 **Verifies:** src-review.AC3.1, src-review.AC3.2, src-review.AC3.3
 
+**Status:** Completed
+
 **Files:**
 - Read: `src/linear_dag/association/gwas.py`
 - Read: `src/linear_dag/core/parallel_processing.py`
@@ -74,8 +100,8 @@ This phase implements and tests:
 - Rank issues by user-facing failure mode.
 
 **Verification:**
-- Run: `nl -ba src/linear_dag/association/gwas.py | sed -n '178,236p'`
-- Run: `nl -ba src/linear_dag/core/parallel_processing.py | sed -n '463,490p'`
+- Run: `nl -ba src/linear_dag/association/gwas.py | sed -n '188,270p'`
+- Run: `nl -ba src/linear_dag/core/parallel_processing.py | sed -n '250,350p'`
 - Expected: Evidence for guard-check correctness and runtime behavior.
 
 **Commit:** `N/A (review phase, no code changes expected)`
@@ -85,6 +111,8 @@ This phase implements and tests:
 ### Task 3: Write association review section
 
 **Verifies:** src-review.AC3.1, src-review.AC3.2, src-review.AC3.3
+
+**Status:** Completed
 
 **Files:**
 - Create: `review output in assistant response` (Association section)
@@ -99,3 +127,47 @@ This phase implements and tests:
 
 **Commit:** `N/A (review phase, no code changes expected)`
 <!-- END_TASK_3 -->
+
+<!-- START_TASK_4 -->
+### Task 4: Implement association guard and streamlining fixes in `gwas.py`
+
+**Verifies:** src-review.AC3.2, src-review.AC3.3
+
+**Status:** Completed
+
+**Files:**
+- Modify: `src/linear_dag/association/gwas.py`
+
+**Implementation:**
+- Added explicit non-HWE boundary validation for required genotype capabilities.
+- Removed redundant data collection calls by reusing one collected association input frame.
+- Corrected `get_gwas_beta_se` return contract docs/types to match runtime outputs.
+
+**Verification:**
+- Run: `python -m compileall -q src/linear_dag/association/gwas.py`
+- Expected: no syntax errors.
+
+**Commit:** `N/A (no commit requested yet for this phase)`
+<!-- END_TASK_4 -->
+
+<!-- START_TASK_5 -->
+### Task 5: Add focused regression tests for association guard and return contract
+
+**Verifies:** src-review.AC3.1, src-review.AC3.3
+
+**Status:** Completed
+
+**Files:**
+- Modify: `tests/test_association.py`
+
+**Implementation:**
+- Added low-overhead regression test for non-HWE guardrail behavior.
+- Added low-overhead regression test for `get_gwas_beta_se` output contract.
+
+**Verification:**
+- Run: `python -m compileall -q tests/test_association.py`
+- Run: `pytest -q tests/test_association.py -k "non_hwe_requires_heterozygote_counter or returns_four_arrays"`
+- Expected: new tests pass (note: pytest currently exits `-1` in this environment; equivalent manual runtime checks passed).
+
+**Commit:** `N/A (no commit requested yet for this phase)`
+<!-- END_TASK_5 -->

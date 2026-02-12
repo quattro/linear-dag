@@ -1,5 +1,4 @@
 import logging
-from operator import concat
 import time
 
 from typing import Optional
@@ -20,6 +19,17 @@ from .util import (
 )
 
 
+def _validate_non_hwe_genotypes(genotypes: LinearOperator) -> None:
+    n_individuals = getattr(genotypes, "n_individuals", None)
+    has_iids = getattr(genotypes, "iids", None) is not None
+    has_heterozygote_counter = callable(getattr(genotypes, "number_of_heterozygotes", None))
+
+    if n_individuals is None or not has_iids or not has_heterozygote_counter:
+        raise ValueError(
+            "If assume_hwe is False, genotypes must expose n_individuals, iids, and number_of_heterozygotes()."
+        )
+
+
 def get_gwas_beta_se(
     genotypes: LinearOperator,
     right_op: LinearOperator,
@@ -30,13 +40,13 @@ def get_gwas_beta_se(
     num_heterozygotes: np.ndarray | None = None,
     in_place_op: bool = False,
     logger: Optional[logging.Logger] = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute GWAS effect sizes and SEs in per-allele units.
     - Assumes the first column of `covariates` is all-ones.
     - If `num_heterozygotes` is None, assumes HWE for the denominator.
 
-    Returns (beta, se, allele_counts).
+    Returns (beta, var_numerator, var_denominator, allele_counts).
     """
     if logger:
         logger.info(
@@ -94,20 +104,21 @@ def get_gwas_beta_se(
         )
 
     # avoid numerical issues for variants with no variance
-    numerically_zero = 1e-4 # typical nonzero values > 1
+    numerically_zero = 1e-4  # typical nonzero values > 1
     denominator[denominator < numerically_zero] = np.nan
     beta /= denominator
 
     if logger:
-        logger.info(f"got beta")
+        logger.info("got beta")
 
-    var_numerator = np.sum(y_concat[:, :num_traits]**2, axis=0) \
-        / (num_nonmissing - 2*num_covariates).astype(np.float32)
+    var_numerator = np.sum(y_concat[:, :num_traits] ** 2, axis=0) / (num_nonmissing - 2 * num_covariates).astype(
+        np.float32
+    )
 
     assert y_concat.dtype == np.float32
     assert var_numerator.dtype == np.float32
     if logger:
-        logger.info(f"got var numerator")
+        logger.info("got var numerator")
     return beta, var_numerator, denominator, allele_counts
 
 
@@ -158,9 +169,7 @@ def _format_sumstats(
     for k, name in enumerate(pheno_cols):
         se_name = f"{name}_SE"
         denom_col = f"{name}_VAR_DENOM" if recompute_AC else "VAR_DENOMINATOR"
-        exprs.append(
-            (pl.lit(float(var_numerator[k])) / pl.col(denom_col)).sqrt().cast(pl.Float32).alias(se_name)
-        )
+        exprs.append((pl.lit(float(var_numerator[k])) / pl.col(denom_col)).sqrt().cast(pl.Float32).alias(se_name))
     df = df.with_columns(exprs)
 
     # Order columns grouped by phenotype (variant_info first). Do not include LOG10P by default.
@@ -196,14 +205,17 @@ def run_gwas(
     if logger:
         logger.info(f"run_gwas: assume_hwe={assume_hwe}; n_pheno={len(pheno_cols)} n_covar={len(covar_cols)}")
 
-    if not assume_hwe and not hasattr(genotypes, "n_individuals"):
-        raise ValueError("If assume_hwe is False, genotypes must be a linear ARG with individual nodes.")
+    if not assume_hwe:
+        _validate_non_hwe_genotypes(genotypes)
 
-    if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
+    selected_data = data.select(["iid", *pheno_cols, *covar_cols]).collect()
+    data_iids = selected_data.select("iid").cast(pl.Utf8).to_series()
+
+    if not np.allclose(selected_data.select(covar_cols[0]).to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
 
     left_op, right_op = get_inner_merge_operators(
-        data.select("iid").cast(pl.Utf8).collect().to_series(), genotypes.iids
+        data_iids, genotypes.iids
     )  # data iids to shared iids, shared iids to genotypes iids
     if left_op.shape[1] == 0:
         raise ValueError("Merge failed between genotype and phenotype data")
@@ -211,14 +223,16 @@ def run_gwas(
     if assume_hwe:
         num_heterozygotes = None
     else:
-        # assumes diploid``
-        individuals_to_include = np.isin(genotypes.iids[::2], data.select("iid").collect().to_numpy().astype(str))
+        # assumes diploid
+        data_iid_array = data_iids.to_numpy().astype(str, copy=False)
+        genotype_iids = np.asarray(genotypes.iids[::2]).astype(str, copy=False)
+        individuals_to_include = np.isin(genotype_iids, data_iid_array)
         num_heterozygotes = genotypes.number_of_heterozygotes(individuals_to_include)
     if logger:
         logger.info(f"carrier handling: {'HWE assumed' if assume_hwe else 'using explicit num_heterozygotes'}")
 
-    phenotypes = data.select(pheno_cols).cast(pl.Float32).collect().to_numpy()
-    covariates = data.select(covar_cols).cast(pl.Float32).collect().to_numpy()
+    phenotypes = selected_data.select(pheno_cols).cast(pl.Float32).to_numpy()
+    covariates = selected_data.select(covar_cols).cast(pl.Float32).to_numpy()
     if logger:
         logger.info(f"loaded arrays: phenotypes={phenotypes.shape} covariates={covariates.shape}")
 
@@ -255,7 +269,8 @@ def run_gwas(
         variant_info = pl.LazyFrame()
 
     variant_info = variant_info.with_columns(
-            pl.Series("A1FREQ", allele_counts.ravel() / genotypes.shape[0]).cast(pl.Float32))
+        pl.Series("A1FREQ", allele_counts.ravel() / genotypes.shape[0]).cast(pl.Float32)
+    )
 
     if num_heterozygotes is not None:
         variant_info = variant_info.with_columns(
@@ -283,10 +298,9 @@ def run_gwas(
     return result
 
 
-def simple_gwas(genotypes: np.ndarray,
-                phenotypes: np.ndarray,
-                covariates: np.ndarray,
-                ploidy: int = 1) -> tuple[np.ndarray, np.ndarray]:
+def simple_gwas(
+    genotypes: np.ndarray, phenotypes: np.ndarray, covariates: np.ndarray, ploidy: int = 1
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Simple GWAS implementation for testing purposes.
     Regresses phenotypes on genotypes residualized on covariates,
@@ -297,7 +311,7 @@ def simple_gwas(genotypes: np.ndarray,
     (2n - p) / 2.
     """
 
-    nan_rows = np.isnan(phenotypes[:,0]).ravel()
+    nan_rows = np.isnan(phenotypes[:, 0]).ravel()
     genotypes = genotypes[~nan_rows, :]
     phenotypes = phenotypes[~nan_rows]
     covariates = covariates[~nan_rows, :]
@@ -315,7 +329,7 @@ def simple_gwas(genotypes: np.ndarray,
     XtX[XtX < 1e-6] = np.nan
     beta = XtY / XtX[:, None]
 
-    s_yy = np.sum(yr * yr, axis=0) / (yr.shape[0] - ploidy*C.shape[1])
+    s_yy = np.sum(yr * yr, axis=0) / (yr.shape[0] - ploidy * C.shape[1])
     se = np.sqrt(s_yy / XtX[:, None])
 
     return beta, se
