@@ -12,14 +12,17 @@ def get_inner_merge_operators(row_ids: pl.Series, col_ids: pl.Series) -> Tuple[L
     Build left/right merge operators that align two ID vectors into a shared inner-join space.
 
     **Arguments:**
+
     - `row_ids`: Row identifiers to map from.
     - `col_ids`: Column identifiers to map to.
 
     **Returns:**
+
     - Tuple `(row_operator, col_operator)` where
       `row_operator @ col_operator` yields the inner-join merge matrix.
 
     **Raises:**
+
     - `TypeError`: If `row_ids` and `col_ids` have different dtypes.
     """
     if row_ids.dtype != col_ids.dtype:
@@ -50,13 +53,16 @@ def get_merge_operator(row_ids: pl.Series, col_ids: pl.Series) -> LinearOperator
     Build a sparse merge operator between two identifier vectors.
 
     **Arguments:**
+
     - `row_ids`: Row identifiers to map from.
     - `col_ids`: Column identifiers to map to.
 
     **Returns:**
+
     - Linear operator `M` with `M[i, j] = 1` when `row_ids[i] == col_ids[j]`.
 
     **Raises:**
+
     - `TypeError`: If `row_ids` and `col_ids` have different dtypes.
     """
     row_matrix, col_matrix = get_inner_merge_operators(row_ids, col_ids)
@@ -67,9 +73,11 @@ def get_row_filter_operator(merge_operator: LinearOperator):
     """Build a row filter that keeps rows with at least one merge match.
 
     **Arguments:**
+
     - `merge_operator`: Merge operator from `get_merge_operator`.
 
     **Returns:**
+
     - Linear operator that selects matched rows.
     """
     num_matches = merge_operator @ np.ones(merge_operator.shape[1])
@@ -80,13 +88,16 @@ def get_pairing_matrix(two_n: int) -> LinearOperator:
     """Build a diploid-pairing matrix that sums adjacent haplotype rows.
 
     **Arguments:**
+
     - `two_n`: Number of haplotype rows. Must be even.
 
     **Returns:**
+
     - CSR matrix with shape `(two_n // 2, two_n)` mapping adjacent haplotypes
       to diploid rows.
 
     **Raises:**
+
     - `ValueError`: If `two_n` is odd.
     """
     if two_n % 2 != 0:
@@ -103,12 +114,15 @@ def get_diploid_operator(haploid_operator: LinearOperator) -> LinearOperator:
     Convert a haploid genotype operator into a diploid operator by pairing adjacent rows.
 
     **Arguments:**
+
     - `haploid_operator`: Haploid operator with rows ordered as adjacent haplotype pairs.
 
     **Returns:**
+
     - Diploid operator with half as many rows.
 
     **Raises:**
+
     - `ValueError`: If the haploid row count is odd.
     """
     two_n = haploid_operator.shape[0]
@@ -121,14 +135,17 @@ def estimate_column_variance(
     """Estimate per-column variance using a random subset of rows.
 
     **Arguments:**
+
     - `operator`: Linear operator to sample.
     - `num_samples`: Number of rows sampled without replacement.
     - `seed`: Optional RNG seed for reproducibility.
 
     **Returns:**
+
     - Column variance estimates.
 
     **Raises:**
+
     - `ValueError`: If `num_samples` exceeds number of rows in `operator`.
     """
     n, _ = operator.shape

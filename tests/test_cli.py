@@ -378,6 +378,30 @@ def test_cli_help_includes_argument_groups(capsys):
     assert "Execution and Output:" in score_help
 
 
+def test_attach_variant_info_joins_with_explicit_row_alignment():
+    association_results = pl.DataFrame(
+        {
+            "height_BETA": [0.1, 0.2],
+            "height_SE": [0.01, 0.02],
+        }
+    ).lazy()
+    variant_info = pl.DataFrame({"ID": [b"v1", b"v2"]}).lazy()
+
+    out = cli._attach_variant_info(association_results, variant_info).collect()
+
+    assert out.columns == ["ID", "height_BETA", "height_SE"]
+    assert out["ID"].to_list() == [b"v1", b"v2"]
+    assert out["height_BETA"].to_list() == [0.1, 0.2]
+
+
+def test_attach_variant_info_rejects_row_count_mismatch():
+    association_results = pl.DataFrame({"height_BETA": [0.1, 0.2]}).lazy()
+    variant_info = pl.DataFrame({"ID": [b"v1"]}).lazy()
+
+    with pytest.raises(ValueError, match="Variant metadata alignment failed"):
+        cli._attach_variant_info(association_results, variant_info).collect()
+
+
 def test_construct_cmd_string_is_copy_paste_executable():
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--verbose", action="store_true", default=False)

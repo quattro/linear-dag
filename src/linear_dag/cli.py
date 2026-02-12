@@ -372,7 +372,7 @@ def _assoc_scan(args):
                 if vinfo_future is not None:
                     v_info = vinfo_future.result()
                     logger.info(f"Variant info loaded after {time.time() - t_vinfo:.2f} seconds")
-                    result = pl.concat([v_info, result], how="horizontal")
+                    result = _attach_variant_info(result, v_info, logger=logger)
 
                 logger.info("Starting to write results")
                 result.collect().write_parquet(f"{args.out}.parquet", compression="lz4")
@@ -405,7 +405,7 @@ def _assoc_scan(args):
                 if vinfo_future is not None:
                     v_info = vinfo_future.result()
                     logger.info(f"Variant info loaded after {time.time() - t_vinfo:.2f} seconds")
-                    result = pl.concat([v_info, result], how="horizontal")
+                    result = _attach_variant_info(result, v_info, logger=logger)
                 logger.info("Starting to write results")
                 result.collect().write_parquet(f"{args.out}.parquet", compression="lz4")
                 logger.info(f"Results written to {args.out}.parquet")
@@ -601,6 +601,45 @@ def _build_parallel_operator_kwargs(
         "bed_file": args.bed,
         "bed_maf_log10_threshold": args.bed_maf_log10_threshold,
     }
+
+
+def _attach_variant_info(
+    association_results: pl.LazyFrame,
+    variant_info: pl.LazyFrame,
+    logger: Optional[MemoryLogger] = None,
+) -> pl.LazyFrame:
+    """Attach variant metadata to association results using an explicit alignment join.
+
+    This enforces equal cardinality before joining to avoid silent misalignment that can
+    happen with horizontal concatenation when upstream filtering differs.
+    """
+    result_count = association_results.select(pl.len()).collect().item(0, 0)
+    metadata_count = variant_info.select(pl.len()).collect().item(0, 0)
+    if result_count != metadata_count:
+        raise ValueError(
+            (
+                "Variant metadata alignment failed: association results and variant metadata "
+                f"have different row counts ({result_count} vs {metadata_count}). "
+                "This usually indicates mismatched variant filtering between operator and metadata paths."
+            )
+        )
+
+    if logger is not None:
+        logger.info(f"Aligning variant metadata via row-index join ({result_count} rows)")
+
+    metadata_cols = variant_info.collect_schema().names()
+    result_cols = association_results.collect_schema().names()
+    join_key = "__variant_row"
+    return (
+        variant_info.with_row_index(join_key)
+        .join(
+            association_results.with_row_index(join_key),
+            on=join_key,
+            how="inner",
+        )
+        .drop(join_key)
+        .select([*metadata_cols, *result_cols])
+    )
 
 
 def _require_block_metadata(
@@ -1076,6 +1115,20 @@ def _create_common_parser(subp, name, help):
 
 
 def run_cli():
+    """Execute the CLI entrypoint with explicit exit-code behavior.
+
+    !!! info
+
+        Exit-code policy:
+        - `0`: Successful command execution.
+        - `1`: Runtime failure after parsing.
+        - `2`: Argument parsing/usage errors (from argparse `SystemExit`).
+
+    **Returns:**
+
+    - Integer process exit code.
+    """
+
     try:
         return _main(sys.argv[1:])
     except SystemExit as exc:

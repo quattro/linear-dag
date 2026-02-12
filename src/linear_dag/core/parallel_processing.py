@@ -44,6 +44,7 @@ def _compute_filtered_variant_counts(
     """Compute number of variants per block that meet filter criteria.
 
     **Arguments:**
+
     - `block_metadata`: Block metadata table.
     - `hdf5_file`: Path to HDF5 file.
     - `maf_log10_threshold`: `log10` MAF threshold outside BED regions.
@@ -51,6 +52,7 @@ def _compute_filtered_variant_counts(
     - `bed_maf_log10_threshold`: `log10` MAF threshold inside BED regions.
 
     **Returns:**
+
     - `block_metadata` with `n_variants` replaced by filtered counts.
     """
     maf_threshold = 10**maf_log10_threshold if maf_log10_threshold is not None else 0.0
@@ -168,10 +170,12 @@ class _ParallelManager:
         """Add a worker process.
 
         **Arguments:**
+
         - `target`: Worker entrypoint.
         - `args`: Positional arguments passed to `target`.
 
         **Returns:**
+
         - `None`.
         """
         # Pass the dictionary of handles to the worker
@@ -203,10 +207,12 @@ class _ParallelManager:
 class ParallelOperator(LinearOperator):
     """Parallel genotype linear operator backed by blockwise shared-memory workers.
 
-    This class exposes the same algebraic interface as ``LinearARG`` while
-    distributing block computation across worker processes.
+    This class exposes the same algebraic interface as
+    [`linear_dag.core.lineararg.LinearARG`][] while distributing block
+    computation across worker processes.
 
     !!! Example
+
         ```python
         with ParallelOperator.from_hdf5("example.h5", num_processes=2) as op:
             x = np.ones((op.shape[1], 1), dtype=np.float32)
@@ -531,6 +537,7 @@ class ParallelOperator(LinearOperator):
             operator shape reflects post-filtered variants.
 
         **Arguments:**
+
         - `hdf5_file`: Path to HDF5 file.
         - `num_processes`: Number of workers; `None` uses available CPUs bounded by block count.
         - `max_num_traits`: Chunk width for shared-memory matmat/rmatmat.
@@ -540,9 +547,11 @@ class ParallelOperator(LinearOperator):
         - `bed_maf_log10_threshold`: Keep BED variants with MAF greater than `10**x`.
 
         **Returns:**
+
         - Configured `ParallelOperator`.
 
         **Raises:**
+
         - `RuntimeError`: If any worker signals an error while initializing/awaiting.
         """
         if block_metadata is None:
@@ -606,10 +615,13 @@ class ParallelOperator(LinearOperator):
 class GRMOperator(LinearOperator):
     """Parallel genetic relatedness matrix (GRM) operator.
 
-    This operator computes blockwise contributions to ``X K X^T`` using shared
-    worker processes and exposes the result as a ``LinearOperator``.
+    This operator computes blockwise contributions to $X K X^\\top$, where
+    $X$ is the genotype operator from
+    [`linear_dag.core.lineararg.LinearARG`][] and $K$ is a diagonal
+    weighting matrix induced by allele-frequency scaling.
 
     !!! Example
+
         ```python
         with GRMOperator.from_hdf5("example.h5", num_processes=2, alpha=-1.0) as grm:
             x = np.ones((grm.shape[1], 1), dtype=np.float32)
@@ -757,6 +769,7 @@ class GRMOperator(LinearOperator):
         """Create a GRMOperator from a metadata file.
 
         **Arguments:**
+
         - `hdf5_file`: Path to HDF5 file.
         - `num_processes`: Number of workers; `None` uses available CPUs bounded by block count.
         - `alpha`: Alpha parameter used in GRM diagonal weighting.
@@ -764,9 +777,11 @@ class GRMOperator(LinearOperator):
         - `block_metadata`: Optional pre-filtered block metadata.
 
         **Returns:**
-        - Configured `GRMOperator`.
+
+        - Configured [`linear_dag.core.parallel_processing.GRMOperator`][].
 
         **Raises:**
+
         - `RuntimeError`: If any worker signals an error while initializing/awaiting.
         """
         if block_metadata is None:

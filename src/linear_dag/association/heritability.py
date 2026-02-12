@@ -27,16 +27,41 @@ def randomized_haseman_elston(
     seed: Optional[Union[int, Generator]] = None,
     logger: Optional[logging.Logger] = None,
 ) -> pl.DataFrame:
-    """
-    Implementation of the RHE algorithm from:
-        Pazokitoroudi, A. et al. Efficient variance components analysis across millions of genomes.
-        Nat Commun 11, 4020 (2020). https://doi.org/10.1038/s41467-020-17576-9
-    Notation below follows Methods section of this paper.
+    """Estimate SNP heritability with randomized Haseman-Elston regression.
 
-    :param grm: GRM operator
-    :param y: phenotype vector
-    :param b: number of random vectors to use when estimating Tr(GRM^2)
-    :return: the heritability estimate
+    Implementation follows Pazokitoroudi et al. (2020), Nature Communications
+    11:4020, https://doi.org/10.1038/s41467-020-17576-9.
+
+    !!! info
+
+        The estimator solves moment equations built from stochastic trace
+        estimates, including $\\mathrm{tr}(K)$ and
+        $\\mathrm{tr}(K^2)$, where $K$ is the GRM operator.
+
+    **Arguments:**
+
+    - `grm`: Genetic relatedness operator, typically
+      [`linear_dag.core.parallel_processing.GRMOperator`][] or another
+      compatible `LinearOperator` with `iids`.
+    - `data`: Input phenotype/covariate table containing IID labels.
+    - `pheno_cols`: Phenotype columns to estimate.
+    - `covar_cols`: Covariate columns; first column must be an intercept.
+    - `num_matvecs`: Number of probe vectors for randomized trace estimation.
+    - `trace_est`: Trace-estimator choice (`hutchinson`, `hutch++`,
+      `xnystrace`).
+    - `sampler`: Probe distribution (`normal`, `sphere`, `rademacher`).
+    - `seed`: Optional random seed or generator for probe sampling.
+    - `logger`: Optional logger for diagnostics.
+
+    **Returns:**
+
+    - `polars.DataFrame` with per-phenotype estimates for `s2g`, `s2e`, `h2g`,
+      and their standard errors.
+
+    **Raises:**
+
+    - `ValueError`: If covariates are missing an intercept, if merge alignment
+      is invalid, or if `num_matvecs` exceeds sample count.
     """
 
     if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
@@ -489,14 +514,18 @@ def _compute_err_variance_vectorized(
     grm_trace: float,
     num_matvecs: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Vectorized version of _compute_err_variance:
-    uses 3 matmat calls total and columnwise dot products.
+    """Vectorized version of `_compute_err_variance`.
 
-    Returns:
-        var_s2g: (m,)
-        var_s2e: (m,)
-        cov_ge:  (m,)
+    !!! info
+
+        Uses three `matmat` calls total, then computes traitwise dot products
+        with vectorized einsum reductions.
+
+    **Returns:**
+
+    - `var_s2g`: Array with shape `(m,)`.
+    - `var_s2e`: Array with shape `(m,)`.
+    - `cov_ge`: Array with shape `(m,)`.
     """
     Y = yresid
     n, m = Y.shape

@@ -37,9 +37,10 @@ from .solve import (
 class LinearARG(LinearOperator):
     """Sparse linear-operator representation of a linear ARG.
 
-    This class wraps the graph adjacency matrix and variant/sample indexing needed
-    to expose genotype operations through the ``scipy.sparse.linalg.LinearOperator``
-    interface.
+    This [`linear_dag.core.lineararg.LinearARG`][] class wraps the graph
+    adjacency matrix and variant/sample indexing needed to expose genotype
+    operations through the
+    `scipy.sparse.linalg.LinearOperator` interface.
 
     !!! Example
         ```python
@@ -93,7 +94,8 @@ class LinearARG(LinearOperator):
 
         **Raises:**
 
-        - `ValueError`: if this `LinearARG` has no individual nodes.
+        - `ValueError`: if this [`linear_dag.core.lineararg.LinearARG`][] has no
+          individual nodes.
         """
         if self.n_individuals is None:
             raise ValueError("The linear ARG does not have individual nodes. Try running add_individual_nodes first.")
@@ -127,9 +129,10 @@ class LinearARG(LinearOperator):
         sex: Optional[npt.NDArray[np.int32]] = None,
         verbosity: int = 0,
     ):
-        """Infer a ``LinearARG`` from phased genotypes.
+        """Infer a [`linear_dag.core.lineararg.LinearARG`][] from phased genotypes.
 
         **Arguments:**
+
         - `genotypes`: CSC matrix of phased haploid genotypes with shape `(n_samples, n_variants)`.
         - `flip`: Boolean per-variant mask indicating allele flips.
         - `variant_info`: Optional Polars dataframe with variant metadata.
@@ -139,9 +142,11 @@ class LinearARG(LinearOperator):
         - `verbosity`: Verbosity level for timing/progress output.
 
         **Returns:**
-        - Inferred `LinearARG` instance.
+
+        - Inferred [`linear_dag.core.lineararg.LinearARG`][] instance.
 
         **Raises:**
+
         - `TypeError`: Propagated from inference if `genotypes` is not CSC.
         """
         import time
@@ -197,9 +202,10 @@ class LinearARG(LinearOperator):
         snps_only: bool = False,
         remove_multiallelics: bool = False,
     ) -> Union[tuple, "LinearARG"]:
-        """Read a VCF and infer a ``LinearARG``.
+        """Read a VCF and infer a [`linear_dag.core.lineararg.LinearARG`][].
 
         **Arguments:**
+
         - `path`: Path to VCF/BCF input.
         - `phased`: Whether the input genotypes are phased.
         - `region`: Optional region string passed to VCF reader.
@@ -212,9 +218,13 @@ class LinearARG(LinearOperator):
         - `remove_multiallelics`: Whether to remove multi-allelic sites.
 
         **Returns:**
-        - `LinearARG` or `(LinearARG, csc_matrix)` when `return_genotypes` is `True`.
+
+        - [`linear_dag.core.lineararg.LinearARG`][] or a tuple of
+          ([`linear_dag.core.lineararg.LinearARG`][], `csc_matrix`) when
+          `return_genotypes` is `True`.
 
         **Raises:**
+
         - `ValueError`: If no valid variants are found in the VCF after filtering.
         """
         import time
@@ -355,8 +365,10 @@ class LinearARG(LinearOperator):
         """Count carriers for each variant in selected individuals.
 
         !!! info
+
             For flipped variants, this method reports carrier counts after applying
-            the flip convention used by this `LinearARG`.
+            the flip convention used by this
+            [`linear_dag.core.lineararg.LinearARG`][].
 
         **Arguments:**
 
@@ -404,10 +416,12 @@ class LinearARG(LinearOperator):
         Get carriers for a subset of variants specified by variant_indices.
 
         **Arguments:**
+
         - `variant_indices`: Indices into the variant dimension (`0` to `shape[1]-1`).
         - `unphased`: Whether to collapse paired haplotypes into diploid carriers.
 
         **Returns:**
+
         - CSC matrix of shape `(n_samples, len(variant_indices))` indicating carriers.
         """
         variant_node_indices = self.variant_indices[variant_indices]
@@ -422,7 +436,7 @@ class LinearARG(LinearOperator):
         return carriers
 
     def remove_samples(self, iids_to_remove: npt.ArrayLike):
-        """Create a new `LinearARG` with selected sample IDs removed.
+        """Create a new [`linear_dag.core.lineararg.LinearARG`][] with selected sample IDs removed.
 
         **Arguments:**
 
@@ -430,7 +444,7 @@ class LinearARG(LinearOperator):
 
         **Returns:**
 
-        - New `LinearARG` with updated adjacency and metadata.
+        - New [`linear_dag.core.lineararg.LinearARG`][] with updated adjacency and metadata.
         """
         sample_mask = np.isin(self.iids, iids_to_remove)
         sample_indices_to_remove = np.where(sample_mask)[0]
@@ -572,11 +586,11 @@ class LinearARG(LinearOperator):
         return v if other.ndim == 1 else v.reshape(-1, 1)
 
     def copy(self) -> "LinearARG":
-        """Create a deep copy of this `LinearARG`.
+        """Create a deep copy of this [`linear_dag.core.lineararg.LinearARG`][].
 
         **Returns:**
 
-        - New `LinearARG` with copied sparse data and metadata.
+        - New [`linear_dag.core.lineararg.LinearARG`][] with copied sparse data and metadata.
         """
         copied = LinearARG(
             A=self.A.copy(),
@@ -601,18 +615,21 @@ class LinearARG(LinearOperator):
         compression_option: str = "gzip",
         save_allele_counts: bool = True,
     ):
-        """Writes LinearARG to disk.
+        """Write [`linear_dag.core.lineararg.LinearARG`][] data to disk.
 
         **Arguments:**
+
         - `h5_fname`: Base path/prefix used for output files.
         - `block_info`: Optional dictionary with keys `chrom`, `start`, and `end`.
         - `compression_option`: HDF5 compression option.
         - `save_allele_counts`: Whether to persist precomputed allele counts.
 
         **Returns:**
+
         - `None`.
 
         **Raises:**
+
         - `FileExistsError`: If writing a non-block file and the output already exists.
         """
 
@@ -699,18 +716,19 @@ class LinearARG(LinearOperator):
         codec: str = "zstd",
         level: int = 5,
     ):
-        """Writes LinearARG to disk with Blosc compression for faster reads.
+        """Write [`linear_dag.core.lineararg.LinearARG`][] data with Blosc compression.
 
         This method uses Blosc compression (default: Zstd level 5 with bitshuffle)
         which provides 2-3x faster read performance compared to gzip while maintaining
         good compression ratios. Files written with this method can be read normally
-        using LinearARG.read().
+        using [`linear_dag.core.lineararg.LinearARG.read`][].
 
         !!! info
             Reading Blosc-compressed files requires `hdf5plugin` to be installed
             in the runtime environment.
 
         **Arguments:**
+
         - `h5_fname`: Base path/prefix used for output files.
         - `block_info`: Optional dictionary with keys `chrom`, `start`, and `end`.
         - `save_threshold`: Whether to save threshold summary attributes.
@@ -718,9 +736,11 @@ class LinearARG(LinearOperator):
         - `level`: Blosc compression level (`0-9`).
 
         **Returns:**
+
         - `None`.
 
         **Raises:**
+
         - `ImportError`: If `hdf5plugin` is unavailable.
         - `FileExistsError`: If writing a non-block file and the output already exists.
         """
@@ -820,10 +840,12 @@ class LinearARG(LinearOperator):
         """Reads variant info from provided HDF5 file.
 
         **Arguments:**
+
         - `h5_fname`: Base path/prefix of the HDF5 file.
         - `block`: Optional block/group name.
 
         **Returns:**
+
         - LazyFrame containing `CHROM`, `POS`, `ID`, `REF`, and `ALT`.
         """
         fname = h5_fname if str(h5_fname).endswith(".h5") else str(h5_fname) + ".h5"
@@ -848,21 +870,25 @@ class LinearARG(LinearOperator):
         block: Optional[str] = None,
         load_metadata: bool = False,
     ) -> "LinearARG":
-        """Reads LinearARG data from provided PLINK2 formatted files.
+        """Read [`linear_dag.core.lineararg.LinearARG`][] data from HDF5 files.
+
+        !!! info
+
+            If `hdf5plugin` is unavailable, Blosc-compressed files may fail to
+            load even though gzip/lzf-backed files can still be read.
 
         **Arguments:**
+
         - `h5_fname`: Base path/prefix of the HDF5 file.
         - `block`: Optional block/group name.
         - `load_metadata`: Whether to load variant metadata into `variants`.
 
         **Returns:**
-        - A `LinearARG` object.
 
-        !!! info
-            If `hdf5plugin` is unavailable, Blosc-compressed files may fail to
-            load even though gzip/lzf-backed files can still be read.
+        - A [`linear_dag.core.lineararg.LinearARG`][] object.
 
         **Raises:**
+
         - `ValueError`: If required datasets (e.g. `iids`) are missing.
         """
         import importlib.util as iu
@@ -916,9 +942,11 @@ class LinearARG(LinearOperator):
         """Filter variants to those with minor allele frequency above a threshold.
 
         **Arguments:**
+
         - `maf_threshold`: MAF cutoff (for example `0.01` for 1%).
 
         **Returns:**
+
         - `None`. The instance is mutated in-place.
         """
         af = self.allele_frequencies
@@ -931,12 +959,15 @@ class LinearARG(LinearOperator):
         """Filter variants using a boolean keep-mask.
 
         **Arguments:**
+
         - `mask`: Boolean array with length equal to `len(self.variant_indices)`.
 
         **Returns:**
+
         - `None`. The instance is mutated in-place.
 
         **Raises:**
+
         - `ValueError`: If `mask` length does not match number of variants.
         """
         if len(mask) != len(self.variant_indices):
@@ -952,14 +983,18 @@ class LinearARG(LinearOperator):
         """Filter variants to BED-overlapping variants above a MAF threshold.
 
         **Arguments:**
+
         - `bed_regions`: DataFrame with columns `chrom`, `chromStart`, `chromEnd`.
         - `maf_threshold`: MAF threshold applied to BED-overlapping variants.
 
         **Returns:**
+
         - `None`. The instance is mutated in-place.
 
         **Raises:**
-        - `ValueError`: If variant metadata is not available on this `LinearARG`.
+
+        - `ValueError`: If variant metadata is not available on this
+          [`linear_dag.core.lineararg.LinearARG`][].
         """
         if self.variants is None:
             raise ValueError("LinearARG must have variant metadata to filter by BED regions")
@@ -1013,13 +1048,15 @@ class LinearARG(LinearOperator):
         return np.max(self.nonunique_indices) + 1
 
     def add_individual_nodes(self, sex: npt.NDArray[np.uint] = None) -> "LinearARG":
-        """Create a new ``LinearARG`` with explicit individual nodes added.
+        """Create a new [`linear_dag.core.lineararg.LinearARG`][] with individual nodes.
 
         **Arguments:**
+
         - `sex`: Optional per-individual sex coding used to choose haploid vs diploid attachment.
 
         **Returns:**
-        - New `LinearARG` instance that includes individual nodes.
+
+        - New [`linear_dag.core.lineararg.LinearARG`][] instance that includes individual nodes.
         """
         A, individual_indices = add_individuals_to_graph(self.A, self.sample_indices, sex=sex)
         individuals_graph = DiGraph.from_csr(A)  # edges are defined the other way around
@@ -1044,9 +1081,11 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
     """List HDF5 block groups and their metadata attributes.
 
     **Arguments:**
+
     - `h5_fname`: Path to HDF5 file (`.h5` suffix is optional).
 
     **Returns:**
+
     - Polars DataFrame with one row per block, sorted by chromosome/start.
       Returns `None` when no block groups are present.
     """
@@ -1100,12 +1139,15 @@ def list_iids(h5_fname: Union[str, PathLike]) -> pl.Series:
     """Load IID labels from the root of a linear-ARG HDF5 file.
 
     **Arguments:**
+
     - `h5_fname`: Path to HDF5 file (`.h5` suffix is optional).
 
     **Returns:**
+
     - Polars Series named `iids`.
 
     **Raises:**
+
     - `ValueError`: If the `iids` dataset is missing.
     """
     if not str(h5_fname).endswith(".h5"):
@@ -1125,14 +1167,16 @@ def variants_in_bed_regions(
 ) -> npt.NDArray[np.bool_]:
     """Return a mask for variants that fall inside any BED interval.
 
-    BED coordinates are interpreted as 0-based half-open ranges ``[start, end)``.
+    BED coordinates are interpreted as 0-based half-open ranges `[start, end)`.
 
     **Arguments:**
+
     - `chrom`: Chromosome label per variant.
     - `pos`: Position per variant.
     - `bed_regions`: DataFrame with columns `chrom`, `chromStart`, `chromEnd`.
 
     **Returns:**
+
     - Boolean mask with `True` for variants inside at least one BED interval.
     """
     mask = np.zeros(len(pos), dtype=bool)
@@ -1166,6 +1210,7 @@ def compute_variant_filter_mask(
       - Variants outside BED regions: include if MAF > maf_threshold
 
     **Arguments:**
+
     - `hdf5_file`: Path to HDF5 file.
     - `block_name`: Block/group name to process.
     - `maf_threshold`: MAF threshold outside BED regions.
@@ -1173,9 +1218,11 @@ def compute_variant_filter_mask(
     - `bed_maf_threshold`: MAF threshold inside BED regions.
 
     **Returns:**
+
     - Boolean inclusion mask with one entry per variant.
 
     **Raises:**
+
     - `KeyError`: If the requested block or required datasets are missing.
     """
     with h5py.File(hdf5_file, "r") as f:
@@ -1206,6 +1253,7 @@ def compute_filtered_variant_count(
     """Compute the number of variants that pass the filter criteria.
 
     **Arguments:**
+
     - `hdf5_file`: Path to HDF5 file.
     - `block_name`: Block/group name to process.
     - `maf_threshold`: MAF threshold outside BED regions.
@@ -1213,6 +1261,7 @@ def compute_filtered_variant_count(
     - `bed_maf_threshold`: MAF threshold inside BED regions.
 
     **Returns:**
+
     - Number of variants that pass the active filter logic.
     """
     mask = compute_variant_filter_mask(hdf5_file, block_name, maf_threshold, bed_regions, bed_maf_threshold)
@@ -1228,15 +1277,18 @@ def load_variant_info(
     """Load and optionally MAF-filter variant metadata across selected blocks.
 
     **Arguments:**
+
     - `h5_fname`: Path to HDF5 file (`.h5` suffix is optional).
     - `block_names`: Optional block names to include. Defaults to all blocks.
     - `columns`: One of `"id_only"`, `"no_id"`, or `"all"`.
     - `maf_threshold`: Optional MAF cutoff used per block before concatenation.
 
     **Returns:**
+
     - Polars `LazyFrame` with requested columns.
 
     **Raises:**
+
     - `KeyError`: If selected blocks or required datasets are missing.
     """
     if not str(h5_fname).endswith(".h5"):
@@ -1308,15 +1360,17 @@ def add_individuals_to_graph(
 ) -> tuple:
     """Add individual nodes that connect to their constituent sample haplotypes.
 
-    Assumes each individual corresponds to adjacent haplotypes in ``samples_idx``.
-    If ``sex`` is provided, entries with value ``1`` are treated as haploid.
+    Assumes each individual corresponds to adjacent haplotypes in `samples_idx`.
+    If `sex` is provided, entries with value `1` are treated as haploid.
 
     **Arguments:**
+
     - `A`: Existing adjacency matrix.
     - `samples_idx`: Sample-node indices in haplotype order.
     - `sex`: Optional per-individual sex coding array.
 
     **Returns:**
+
     - Tuple `(A_updated, individual_indices)`.
     """
     A_csr = csr_matrix(A)
@@ -1354,14 +1408,17 @@ def remove_degree_zero_nodes(
     """Remove degree-zero internal nodes while keeping variant/sample nodes.
 
     **Arguments:**
+
     - `A`: Input adjacency matrix.
     - `variant_indices`: Variant-node indices that must be retained.
     - `sample_indices`: Sample-node indices that must be retained.
 
     **Returns:**
+
     - Tuple `(A_filtered, variant_indices_reindexed, sample_indices_reindexed)`.
 
     **Raises:**
+
     - `AssertionError`: If provided indices are out of bounds.
     """
     node_degree = A.getnnz(axis=0) + A.getnnz(axis=1)
@@ -1390,11 +1447,13 @@ def make_triangular(
     Sample/leaf nodes are placed at the tail in reverse sample order.
 
     **Arguments:**
+
     - `A`: Input adjacency matrix.
     - `variant_indices`: Variant-node indices for `A`.
     - `sample_indices`: Sample-node indices for `A`.
 
     **Returns:**
+
     - Tuple `(A_triangular, variant_indices_reordered)`.
     """
     A_csr = csr_matrix(A)

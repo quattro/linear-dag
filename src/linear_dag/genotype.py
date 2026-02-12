@@ -24,6 +24,40 @@ def read_vcf(
     remove_multiallelics: bool = False,
     sex: np.array = None,
 ):
+    """Load genotype calls from a VCF/BCF region into sparse CSC format.
+
+    !!! info
+
+        When `sex` is provided, male haplotypes are treated as haploid on sex
+        chromosomes and non-binary haplotype calls after filtering raise an
+        assertion error.
+
+    **Arguments:**
+
+    - `path`: Input VCF/BCF path.
+    - `phased`: If `True`, read phased haplotypes; otherwise read diploid genotype types.
+    - `region`: Optional region string (`chrom:start-end`) for targeted loading.
+    - `flip_minor_alleles`: If `True`, flips variants with allele frequency > 0.5.
+    - `samples`: Optional sample IDs to include.
+    - `maf_filter`: Optional MAF threshold for variant filtering.
+    - `remove_indels`: If `True`, skip indel records.
+    - `remove_multiallelics`: If `True`, skip multiallelic variants.
+    - `sex`: Optional sex vector (`0` female / `1` male) for ploidy-aware filtering.
+
+    **Returns:**
+
+    - Tuple `(genotypes, flip, variant_info, iids)` where:
+      - `genotypes` is a CSC matrix with samples/haplotypes on rows and variants on columns.
+      - `flip` is a boolean array identifying minor-allele flips.
+      - `variant_info` is a polars DataFrame with VCF metadata.
+      - `iids` is the sample ID list from the VCF.
+    - If no variants pass filters, returns `(None, None, None, None)`.
+
+    **Raises:**
+
+    - `ValueError`: If `samples` is provided but none are present in the VCF.
+    """
+
     def _update_dict_from_vcf(var: cv.Variant, data: DefaultDict[str, list]) -> DefaultDict[str, list]:
         data["CHROM"].append(var.CHROM)
         data["POS"].append(var.POS)
@@ -140,6 +174,32 @@ def load_genotypes(
     rsq_threshold: Optional[float] = None,
     skiprows: int = 0,
 ) -> tuple[csc_matrix, NDArray, NDArray]:
+    """Load genotype matrix data from `<prefix>.mtx` or `<prefix>.txt`.
+
+    !!! info
+
+        This helper prints the number of retained variants and is primarily used by
+        compression/inference flows, not end-user CLI output.
+
+    **Arguments:**
+
+    - `input_file_prefix`: Prefix used to locate genotype files.
+    - `flip_minor_alleles`: Whether to flip variants with frequency > 0.5.
+    - `maf_threshold`: Optional minor-allele-frequency cutoff.
+    - `rsq_threshold`: Optional dosage-to-hardcall correlation cutoff.
+    - `skiprows`: Number of rows to skip when loading text genotype files.
+
+    **Returns:**
+
+    - Tuple `(genotypes, kept_variants, flipped_variants)` where `genotypes` is the
+      filtered CSC matrix, `kept_variants` are original variant indices retained, and
+      `flipped_variants` are indices flipped after filtering (or `None`).
+
+    **Raises:**
+
+    - `FileNotFoundError`: If neither `<prefix>.mtx` nor `<prefix>.txt` exists.
+    """
+
     mtx_file = f"{input_file_prefix}.mtx"
     txt_file = f"{input_file_prefix}.txt"
     if os.path.exists(mtx_file):
@@ -180,6 +240,18 @@ def load_genotypes(
 
 
 def compute_af(genotypes: csc_matrix, ploidy: int = 1) -> NDArray:
+    """Compute allele frequencies for each genotype column.
+
+    **Arguments:**
+
+    - `genotypes`: Genotype matrix with variants on columns.
+    - `ploidy`: Ploidy scaling factor used to normalize column sums.
+
+    **Returns:**
+
+    - NumPy array of allele frequencies for each variant column.
+    """
+
     n, p = genotypes.shape
 
     column_sums = genotypes.sum(axis=0)
@@ -192,6 +264,20 @@ def compute_af(genotypes: csc_matrix, ploidy: int = 1) -> NDArray:
 
 
 def flip_alleles(genotypes: csc_matrix, ploidy: int = 1) -> tuple[csc_matrix, NDArray]:
+    """Flip variants with alternate-allele frequency above 0.5.
+
+    **Arguments:**
+
+    - `genotypes`: Input CSC genotype matrix.
+    - `ploidy`: Ploidy scaling used for allele-frequency computation.
+
+    **Returns:**
+
+    - Tuple `(flipped_genotypes, flipped_indices)` where `flipped_genotypes` is a
+      CSC matrix after allele flipping and `flipped_indices` are variant indices that
+      were flipped.
+    """
+
     n, p = genotypes.shape
 
     # Calculate allele frequencies
@@ -215,6 +301,20 @@ def flip_alleles(genotypes: csc_matrix, ploidy: int = 1) -> tuple[csc_matrix, ND
 
 
 def apply_maf_threshold(genotypes: csc_matrix, ploidy: int = 1, threshold: float = 0.0) -> tuple[csc_matrix, NDArray]:
+    """Filter genotype columns by minor-allele-frequency threshold.
+
+    **Arguments:**
+
+    - `genotypes`: Input CSC genotype matrix.
+    - `ploidy`: Ploidy scaling used for allele-frequency computation.
+    - `threshold`: Strict MAF cutoff (`maf > threshold` retained).
+
+    **Returns:**
+
+    - Tuple `(filtered_genotypes, kept_indices)` where `kept_indices` are the
+      original variant column positions retained after filtering.
+    """
+
     # Calculate allele frequencies
     af = compute_af(genotypes, ploidy)
 
@@ -229,6 +329,19 @@ def apply_maf_threshold(genotypes: csc_matrix, ploidy: int = 1, threshold: float
 
 
 def binarize(genotypes: csc_matrix, r2_threshold: float = 0.0) -> tuple[csc_matrix, NDArray]:
+    """Round dosages to hard calls and filter variants by dosage-call correlation.
+
+    **Arguments:**
+
+    - `genotypes`: Input CSC genotype matrix containing dosages.
+    - `r2_threshold`: Minimum correlation between dosage and rounded hard calls.
+
+    **Returns:**
+
+    - Tuple `(discretized_genotypes, kept_indices)` where `kept_indices` are
+      original variant column positions retained after thresholding.
+    """
+
     n, p = genotypes.shape
     discretized_genotypes = np.rint(genotypes).astype(int)
 

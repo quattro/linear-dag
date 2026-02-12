@@ -30,8 +30,23 @@ def compress_vcf(
     remove_multiallelics: bool = False,
     add_individual_nodes: bool = False,
 ):
-    """
-    Compress a VCF file into a LinearARG HDF5 file.
+    """Compress a VCF file into a [`linear_dag.core.lineararg.LinearARG`][] HDF5 file.
+
+    **Arguments:**
+
+    - `input_vcf`: Input VCF/BCF path.
+    - `output_h5`: Output HDF5 destination.
+    - `region`: Optional `chrom:start-end` region string.
+    - `keep_path`: Optional file containing sample IDs to keep.
+    - `flip_minor_alleles`: Whether to minor-allele flip genotypes while loading.
+    - `maf_filter`: Optional MAF filter during VCF loading.
+    - `remove_indels`: Whether to remove indel variants.
+    - `remove_multiallelics`: Whether to remove multiallelic sites.
+    - `add_individual_nodes`: Whether to append individual nodes before writing.
+
+    **Returns:**
+
+    - `None`.
     """
     logger = MemoryLogger(__name__)
     logger.info("Starting compression")
@@ -173,6 +188,21 @@ def msc_step1(
     jobs_metadata: Union[str, PathLike],
     small_job_id: int,
 ):
+    """Run multi-step compression step 1 for one small partition.
+
+    This step materializes the genotype matrix and forward/backward graph for the
+    selected small job.
+
+    **Arguments:**
+
+    - `jobs_metadata`: Path to `job_metadata.parquet` emitted by `msc_step0`.
+    - `small_job_id`: Small-partition job identifier.
+
+    **Returns:**
+
+    - `None`.
+    """
+
     job_meta = pl.read_parquet(jobs_metadata)
     job = job_meta.filter(pl.col("small_job_id") == small_job_id)
     vcf_path = job["vcf_path"].item()
@@ -216,6 +246,24 @@ def msc_step2(
     jobs_metadata: Union[str, PathLike],
     small_job_id: int,
 ):
+    """Run multi-step compression step 2 for one small partition.
+
+    This step builds the brick graph partition from step-1 forward/backward output.
+
+    **Arguments:**
+
+    - `jobs_metadata`: Path to `job_metadata.parquet` emitted by `msc_step0`.
+    - `small_job_id`: Small-partition job identifier.
+
+    **Returns:**
+
+    - `None`.
+
+    **Raises:**
+
+    - `FileNotFoundError`: If required step-1 artifacts are missing.
+    """
+
     job_meta = pl.read_parquet(jobs_metadata)
     job = job_meta.filter(pl.col("small_job_id") == small_job_id)
     region = job["small_region"].item()
@@ -241,6 +289,25 @@ def msc_step3(
     jobs_metadata: Union[str, PathLike],
     large_job_id: int,
 ):
+    """Run multi-step compression step 3 for one large partition.
+
+    This step merges small brick-graph partitions and infers a large-partition
+    [`linear_dag.core.lineararg.LinearARG`][].
+
+    **Arguments:**
+
+    - `jobs_metadata`: Path to `job_metadata.parquet` emitted by `msc_step0`.
+    - `large_job_id`: Large-partition job identifier.
+
+    **Returns:**
+
+    - `None`.
+
+    **Raises:**
+
+    - `FileNotFoundError`: If required step-2 brick-graph artifacts are missing.
+    """
+
     job_meta = pl.read_parquet(jobs_metadata)
     jobs = job_meta.filter(pl.col("large_job_id") == large_job_id)
     large_region = jobs["large_region"].to_list()[0]
@@ -285,6 +352,25 @@ def msc_step4(
     jobs_metadata: Union[str, PathLike],
     large_job_id: int,
 ):
+    """Run multi-step compression step 4 for one large partition.
+
+    This step adds individual nodes to the large-partition
+    [`linear_dag.core.lineararg.LinearARG`][] built in step 3.
+
+    **Arguments:**
+
+    - `jobs_metadata`: Path to `job_metadata.parquet` emitted by `msc_step0`.
+    - `large_job_id`: Large-partition job identifier.
+
+    **Returns:**
+
+    - `None`.
+
+    **Raises:**
+
+    - `FileNotFoundError`: If required step-2 brick-graph artifacts are missing.
+    """
+
     job_meta = pl.read_parquet(jobs_metadata)
     jobs = job_meta.filter(pl.col("large_job_id") == large_job_id)
     large_region = jobs["large_region"].to_list()[0]
@@ -327,11 +413,15 @@ def msc_step4(
 def msc_step5(
     jobs_metadata: Union[str, PathLike],
 ):
-    """
-    Merge multiple LinearARG HDF5 files into a single file.
+    """Merge multiple [`linear_dag.core.lineararg.LinearARG`][] HDF5 files.
 
-    Args:
-        jobs_metadata: Path to the jobs metadata parquet file
+    **Arguments:**
+
+    - `jobs_metadata`: Path to the jobs metadata parquet file.
+
+    **Returns:**
+
+    - `None`.
     """
     params = pl.read_parquet_metadata(jobs_metadata)
     mount_point = params["mount_point"]
@@ -363,6 +453,32 @@ def final_merge(
     logger,
     individual=False,
 ):
+    """Merge partitioned [`linear_dag.core.lineararg.LinearARG`][] HDF5 files.
+
+    !!! info
+
+        Each non-empty partition is validated with its stats sidecar before merge.
+        Merge fails fast if allele-count checks do not pass.
+
+    **Arguments:**
+
+    - `out`: Output directory containing partition artifacts.
+    - `mount_point`: Optional mount prefix used for reading partition files.
+    - `partition_identifiers`: Partition IDs to merge.
+    - `logger`: Logger used for progress reporting.
+    - `individual`: If `True`, merge individual-node
+      [`linear_dag.core.lineararg.LinearARG`][] partitions.
+
+    **Returns:**
+
+    - `None`.
+
+    **Raises:**
+
+    - `FileNotFoundError`: If a required partition/stat file is missing.
+    - `ValueError`: If allele-count checks fail or no IID dataset is found.
+    """
+
     non_empty_partition_identifiers = []
 
     # check that all linear ARGs have been inferred and are correct
@@ -371,7 +487,7 @@ def final_merge(
         linarg_path = f"{mount_point}{out}/linear_args/{part_id}.h5"
         if not os.path.exists(linarg_path):
             raise FileNotFoundError(
-                f"Linear ARG not found: {linarg_path}. " "Please run step 4 on all partitions before step 5."
+                f"Linear ARG not found: {linarg_path}. Please run step 4 on all partitions before step 5."
             )
         with h5py.File(f"{mount_point}{out}/linear_args/{part_id}.h5", "r") as f:
             is_empty = f.attrs.get("is_empty", False)
@@ -380,7 +496,7 @@ def final_merge(
         non_empty_partition_identifiers.append(part_id)
         if not os.path.exists(stats_path):
             raise FileNotFoundError(
-                f"Stats file not found: {stats_path}. " "Please run step 4 on all partitions before step 5."
+                f"Stats file not found: {stats_path}. Please run step 4 on all partitions before step 5."
             )
         if not is_allele_count_correct(stats_path):
             raise ValueError(f"Allele counts do not match for partition {part_id}.")
@@ -528,13 +644,17 @@ def make_genotype_matrix(
 
 
 def run_forward_backward(out, mount_point, partition_identifier):
-    """
-    Run the forward and backward brick graph algorithms on the genotype matrix.
+    """Run forward/backward brick-graph construction for one partition.
 
-    Args:
-        out: Output directory
-        mount_point: Mount point for cloud storage (empty string if local)
-        partition_identifier: Identifier for the partition being processed
+    **Arguments:**
+
+    - `out`: Output directory for logs and graph artifacts.
+    - `mount_point`: Optional mount prefix for remote/object storage.
+    - `partition_identifier`: Partition key used to locate genotype inputs.
+
+    **Returns:**
+
+    - `None`. Writes forward/backward graph files and logs to disk.
     """
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/forward_backward_graphs/", exist_ok=True)
@@ -810,6 +930,17 @@ def get_linarg_stats(out, mount_point, partition_identifiers, partition_identifi
 
 
 def is_allele_count_correct(stats_file_path):
+    """Read a stats sidecar file and return whether allele-count validation passed.
+
+    **Arguments:**
+
+    - `stats_file_path`: Path to `*_stats.txt` file written by pipeline steps.
+
+    **Returns:**
+
+    - `True` when `correct_allele_counts` is present and set to true, else `False`.
+    """
+
     with open(stats_file_path, "r") as f:
         # Read header and data lines
         header = f.readline().strip().split()
@@ -825,6 +956,20 @@ def is_allele_count_correct(stats_file_path):
 
 
 def add_individuals_to_linarg(out, mount_point, partition_identifiers, partition_identifier):
+    """Load a partition [`linear_dag.core.lineararg.LinearARG`][], add individual nodes, and write output stats.
+
+    **Arguments:**
+
+    - `out`: Output directory containing partition artifacts.
+    - `mount_point`: Optional mount prefix for input partition reads.
+    - `partition_identifiers`: Small-partition IDs used for downstream stats checks.
+    - `partition_identifier`: Large-partition identifier being processed.
+
+    **Returns:**
+
+    - `None`.
+    """
+
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/individual_linear_args/", exist_ok=True)
     logger = MemoryLogger(__name__, log_file=f"{out}/logs/add_individual_nodes.log")
@@ -857,6 +1002,22 @@ def add_individuals_to_linarg(out, mount_point, partition_identifiers, partition
 
 
 def get_linarg_individual_stats(out, mount_point, partition_identifiers, partition_identifier, linarg=None):
+    """Compute and persist summary stats for an individual-node [`linear_dag.core.lineararg.LinearARG`][] partition.
+
+    **Arguments:**
+
+    - `out`: Output directory containing partition artifacts.
+    - `mount_point`: Optional mount prefix for genotype matrix reads.
+    - `partition_identifiers`: Small-partition IDs contributing to this partition.
+    - `partition_identifier`: Large-partition identifier being validated.
+    - `linarg`: Optional in-memory [`linear_dag.core.lineararg.LinearARG`][];
+      when omitted, it is loaded from disk.
+
+    **Returns:**
+
+    - `None`.
+    """
+
     if linarg is None:
         linarg = LinearARG.read(
             f"{out}/individual_linear_args/{partition_identifier}.h5", block=partition_identifier.split("_")[1]
@@ -917,6 +1078,27 @@ def get_linarg_individual_stats(out, mount_point, partition_identifiers, partiti
 
 
 def get_carrier_counts(genotypes, sex=None):
+    """Compute per-variant carrier counts at the individual level.
+
+    !!! info
+
+        When `sex` is provided, males (`1`) are treated as haploid and females (`0`)
+        as diploid while constructing the haplotype-to-individual projection matrix.
+
+    **Arguments:**
+
+    - `genotypes`: Haplotype-by-variant sparse genotype matrix.
+    - `sex`: Optional sex vector (`0` female / `1` male).
+
+    **Returns:**
+
+    - NumPy array with number of carriers per variant.
+
+    **Raises:**
+
+    - `AssertionError`: If `sex` is omitted and haplotype count is odd.
+    """
+
     n_haplotypes, n_variants = genotypes.shape
 
     if sex is None:

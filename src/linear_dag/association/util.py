@@ -1,5 +1,5 @@
 import numpy as np
-import time
+
 from scipy.sparse.linalg import LinearOperator
 
 
@@ -7,6 +7,7 @@ def _backslash(A: np.ndarray, b: np.ndarray, lam: float = 1e-5) -> np.ndarray:
     """MATLAB-style backslash"""
     # return np.linalg.solve(A.T @ A, A.T @ b)
     return np.linalg.pinv(A.T @ A, rcond=lam) @ (A.T @ b)
+
 
 def _residualize_phenotypes_mar(
     phenotypes: np.ndarray, covariates: np.ndarray, phenotypes_missing: np.ndarray
@@ -26,9 +27,25 @@ def residualize_phenotypes(
     phenotypes_missing: np.ndarray,
     missingness_threshold_mar: float = 0,
 ) -> np.ndarray:
-    """Residualize phenotypes on covariates. For phenotypes with missingness <=
-    `missingness_threshold_mar, assumes those phenotypes are missing at random
-    with respect to covariates."""
+    """Residualize phenotypes on covariates with missingness-aware handling.
+
+    !!! info
+
+        Phenotypes with missingness below `missingness_threshold_mar` are
+        processed with the MAR approximation; higher-missingness traits are
+        residualized trait-wise on non-missing rows.
+
+    **Arguments:**
+
+    - `phenotypes`: Phenotype matrix of shape `(n_samples, n_traits)`.
+    - `covariates`: Covariate matrix whose first column is typically intercept.
+    - `phenotypes_missing`: Boolean matrix marking missing phenotype entries.
+    - `missingness_threshold_mar`: Maximum missingness fraction for MAR path.
+
+    **Returns:**
+
+    - Residualized phenotype matrix with the same shape as `phenotypes`.
+    """
     residuals = _residualize_phenotypes_mar(phenotypes, covariates, phenotypes_missing)
     for i in range(phenotypes.shape[1]):
         nonmissing = ~phenotypes_missing[:, i]
@@ -39,7 +56,6 @@ def residualize_phenotypes(
     return residuals
 
 
-
 def get_genotype_variance_explained(
     XtC: np.ndarray,
     C: np.ndarray,
@@ -47,21 +63,27 @@ def get_genotype_variance_explained(
     batch_size: int = 100_000,
     lam: float = 1e-5,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Get variance of genotypes explained by covariates:
-            diag(X'C(C'C)^-1C'X) / n
-    where X is the genotype operator, C is the covariate matrix, and diag() extracts the diagonal.
+    """Compute covariate-explained genotype variance terms.
 
-    Args:
-        XtC: X'C
-        C: Covariates matrix, which should include the all-ones annotation except for missing values
-        batch_size: Number of SNPs to process at once to reduce memory usage
-        lam: Regularization parameter for the pseudoinverse
+    !!! info
 
-    Returns:
-        tuple: (total_var_explained, allele_count)
-            total_var_explained: Total variance of genotypes explained by covariates
-            allele_count: Allele count of the genotypes, assuming first column of covariates is all-ones
-                            except for missing values
+        This computes
+        $\\mathrm{diag}(X^\\top C(C^\\top C)^{-1}C^\\top X)$ in batches, where
+        $X$ is genotype dosage and $C$ is the covariate matrix.
+
+    **Arguments:**
+
+    - `XtC`: Matrix product $X^\\top C$.
+    - `C`: Covariate matrix (intercept in first column for standard usage).
+    - `num_heterozygotes`: Optional heterozygote counts for non-HWE denominator
+      adjustment.
+    - `batch_size`: Number of variants to process per batch.
+    - `lam`: Pseudoinverse regularization parameter.
+
+    **Returns:**
+
+    - Tuple `(denominator, allele_counts)` used by downstream association
+      variance calculations.
     """
     num_covar = C.shape[1]
     covariate_inner = C.T @ C
@@ -74,18 +96,17 @@ def get_genotype_variance_explained(
         XtC_batch = XtC[start_idx:end_idx, :num_covar]
         # C_backslash_XtC_batch = np.linalg.solve(covariate_inner, XtC_batch.T).astype(np.float32)
         C_backslash_XtC_batch = (np.linalg.pinv(covariate_inner, rcond=lam) @ XtC_batch.T).astype(np.float32)
-        total_var_explained[start_idx:end_idx] = np.sum(
-            XtC_batch.T * C_backslash_XtC_batch, axis=0
-        ).reshape(-1, 1)
+        total_var_explained[start_idx:end_idx] = np.sum(XtC_batch.T * C_backslash_XtC_batch, axis=0).reshape(-1, 1)
 
     allele_counts = XtC[:, 0:1]
     denominator = allele_counts - total_var_explained
     if num_heterozygotes is not None:  # else assume HWE
         # assumes diploid
         num_homozygotes = (allele_counts - num_heterozygotes.reshape(-1, 1)) / 2
-        denominator = denominator + 2*num_homozygotes - total_var_explained
+        denominator = denominator + 2 * num_homozygotes - total_var_explained
 
     return denominator, allele_counts
+
 
 def get_genotype_variance_explained_recompute_AC(
     XtCD: np.ndarray,
@@ -95,22 +116,26 @@ def get_genotype_variance_explained_recompute_AC(
     batch_size: int = 100_000,
     lam: float = 1e-5,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Get variance of genotypes explained by covariates for each phenotype, using recomputed allele counts
-    for each phenotype.
+    """Compute covariate-explained genotype variance with per-trait AC updates.
 
-    Args:
-        XtCD: X'[C D], where C is the covariates matrix and D is the matrix of indicators for non-missing phenotypes
-        C: Covariates matrix, which should include the all-ones annotation except for missing values
-        num_nonmissing: Number of non-missing observations for each phenotype, equal to the number of nonzeros in
-        each column of D
-        batch_size: Number of SNPs to process at once to reduce memory usage
-        lam: Regularization parameter for the pseudoinverse
+    !!! info
 
-    Returns:
-        tuple: (total_var_explained, allele_count)
-            total_var_explained: Total variance of genotypes explained by covariates
-            allele_count: Allele count of the genotypes, assuming first column of covariates is all-ones
-                            except for missing values
+        Input matrix `XtCD` is partitioned as
+        $[X^\\top C\\;\\;X^\\top D]$, where $D$ encodes non-missing phenotype
+        indicators. This allows trait-specific allele-count recomputation.
+
+    **Arguments:**
+
+    - `XtCD`: Concatenated matrix $[X^\\top C\\;\\;X^\\top D]$.
+    - `C`: Covariate matrix.
+    - `num_heterozygotes`: Optional heterozygote counts for non-HWE adjustment.
+    - `num_nonmissing`: Non-missing counts per trait (column sums of $D$).
+    - `batch_size`: Number of variants processed per chunk.
+    - `lam`: Pseudoinverse regularization parameter.
+
+    **Returns:**
+
+    - Tuple `(denominator, total_allele_counts)` aligned to variant order.
     """
     n, num_covar = C.shape
     if num_covar + len(num_nonmissing) != XtCD.shape[1]:
@@ -119,18 +144,14 @@ def get_genotype_variance_explained_recompute_AC(
     # Flip cases where AF > 0.5 to avoid approximation error when AF~1
     # Denominator is insensitive to allele flipping
     # (1-X)'C == sum(C) - X'C
-    mask = XtCD[:,0] > n/2
+    mask = XtCD[:, 0] > n / 2
     XtCD[mask, :] *= -1
     XtCD[mask, :num_covar] += np.sum(C, axis=0)
     XtCD[mask, num_covar:] += num_nonmissing
 
     # total_var_explained: misleading variable name for in-place operations to work
     total_var_explained, total_allele_counts = get_genotype_variance_explained(
-        XtCD[:,:num_covar],
-        C,
-        None,
-        batch_size,
-        lam
+        XtCD[:, :num_covar], C, None, batch_size, lam
     )
 
     # n * v
@@ -144,7 +165,7 @@ def get_genotype_variance_explained_recompute_AC(
     # one large memory allocation
     denominator = allele_counts.copy() ** 2
     denominator *= (n / num_nonmissing).astype(np.float32)
-    denominator *= (total_var_explained / total_allele_counts.reshape(-1,1) ** 2)
+    denominator *= total_var_explained / total_allele_counts.reshape(-1, 1) ** 2
     np.nan_to_num(denominator, copy=False, nan=0.0)
 
     if num_heterozygotes is None:  # assume HWE
@@ -158,17 +179,12 @@ def get_genotype_variance_explained_recompute_AC(
         num_snps = XtCD.shape[0]
 
         for start_idx in range(0, num_snps, batch_size):
-
             end_idx = min(start_idx + batch_size, num_snps)
 
             batch_homozygotes = num_homozygotes[start_idx:end_idx]
             batch_allele_counts = allele_counts[start_idx:end_idx]
 
-            denominator[start_idx:end_idx] += (
-                batch_allele_counts
-                + 2 * batch_homozygotes * num_nonmissing / n
-            )
-
+            denominator[start_idx:end_idx] += batch_allele_counts + 2 * batch_homozygotes * num_nonmissing / n
 
     # un-flip alleles
     total_allele_counts[mask] = n - total_allele_counts[mask]
@@ -182,17 +198,22 @@ def _get_genotype_variance(
     allele_counts: np.ndarray,
     individuals_to_include: np.ndarray,
 ) -> tuple[np.int64, np.ndarray]:
-    """Get variance of genotypes without assuming HWE: diag(X^TX)
+    """Get genotype variance without Hardy-Weinberg assumptions.
 
-    Args:
-        genotypes: Unnormalized, phased genotypes as a linear ARG with ploidy (i.e. individual nodes)
-        allele_counts: Counts of each allele
-        individuals_to_keep: Non-missing individuals to include in carrier count
+    !!! info
 
-    Returns:
-        tuple: (var_genotypes, num_homozygotes)
-            var_genotypes: variance of genotypes
-            carrier_counts: number of carriers per allele
+        Uses carrier counts to evaluate
+        $\\mathrm{diag}(X^\\top X)$ from individual-level genotype operators.
+
+    **Arguments:**
+
+    - `genotypes`: Unnormalized genotype operator with individual nodes.
+    - `allele_counts`: Per-variant allele counts.
+    - `individuals_to_include`: Indices of non-missing individuals.
+
+    **Returns:**
+
+    - Tuple `(var_genotypes, carrier_counts)` for each variant.
     """
     carrier_counts = genotypes.number_of_carriers(individuals_to_include).reshape(-1, 1)
     assert np.all(allele_counts - carrier_counts >= 0)
@@ -201,7 +222,16 @@ def _get_genotype_variance(
 
 
 def impute_missing_with_mean(data: np.ndarray) -> np.ndarray:
-    """Impute missing values with the mean of the column in place."""
+    """Impute missing entries column-wise with observed means.
+
+    **Arguments:**
+
+    - `data`: Dense matrix that may contain `NaN` values.
+
+    **Returns:**
+
+    - Copy of `data` with missing values replaced by per-column means.
+    """
     data = data.copy()
     for col in range(data.shape[1]):
         is_missing = np.isnan(data[:, col])

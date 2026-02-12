@@ -199,7 +199,8 @@ def run_gwas(
     """
     Linear regression association scan with covariates.
     - `data` must contain `iid`, `pheno_cols`, and `covar_cols` (first covariate is all-ones).
-    - If `assume_hwe` is False, requires a LinearARG with individual nodes.
+    - If `assume_hwe` is False, requires a
+      [`linear_dag.core.lineararg.LinearARG`][] with individual nodes.
     Returns a LazyFrame of per-variant summary statistics.
     """
     if logger:

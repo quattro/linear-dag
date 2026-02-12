@@ -64,6 +64,15 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 - Respect core numerical assumptions:
   - Keep intercept checks for covariates.
   - Keep explicit shape/type validation for operator algebra paths.
+- Keep docstring style consistent with current project conventions:
+  - Use markdown-style sections (for example `**Arguments:**`, `**Returns:**`, `**Raises:**`) with a blank line between a section header and its first list item.
+  - Class docstrings should describe the class and include `!!! Example` blocks; do not enumerate class attributes in class docstrings.
+  - Document only public methods/functions; skip private (`_name`) and dunder (`__name__`) callables.
+  - Place `!!! info` and `!!! Example` blocks in the main description section before any `**Arguments:**`, `**Returns:**`, or `**Raises:**` sections.
+  - Use `!!! info` blocks for non-obvious behavioral constraints that callers should not miss.
+  - Use LaTeX inline notation (`$x$`) for math expressions in docstrings.
+  - When introducing symbols, define what each symbol means near first use.
+  - Use internal references for project types/classes/functions, in the form [`module.symbol`][]. Example: [`linear_dag.core.lineararg.LinearARG`][]
 - For Cython-related changes:
   - Update related `.pyx`/`.pxd` pairs and Python-callable integration points together.
 

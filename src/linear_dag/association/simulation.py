@@ -16,19 +16,38 @@ def simulate_phenotype(
     variant_effect_variance: Optional[np.ndarray] = None,
     seed: Optional[Union[int, SeedSequence, BitGenerator, Generator]] = None,
 ):
-    """
-    Simulates quantitative phenotypes
-        y = X * beta + epsilon
-    with specified heritability, AF-dependent architecture, and polygenicity
-    :param genotypes: linear operator for the genotype matrix, which
-        can be normalized (cols have unit variance) or not (0-1-2 or 0-1 valued).
-    :param heritability: between 0 and 1
-    :param fraction_causal: between 0 and 1
-    :param num_traits: number of phenotypes to simulate
-    :param return_genetic_component: whether to return the genetic component of the phenotype
-    :param return_beta: whether to return the beta vector
-    :param variant_effect_variance: relative effect-size variance for each marker, in units
-        of variance-in-y per variance-in-columns-of-genotypes
+    """Simulate quantitative phenotypes from a genotype linear operator.
+
+    !!! info
+
+        Traits are generated from $y = X\\beta + \\epsilon$, where $X$ is the
+        genotype operator, $\\beta$ are sampled variant effects, and
+        $\\epsilon$ is Gaussian noise scaled to match the requested
+        heritability.
+
+    **Arguments:**
+
+    - `genotypes`: Genotype linear operator with shape
+      `(n_samples, n_variants)`.
+    - `heritability`: Target narrow-sense heritability in `[0, 1]`.
+    - `fraction_causal`: Fraction of variants with non-zero effects.
+    - `num_traits`: Number of traits to simulate.
+    - `return_genetic_component`: If `True`, also return the genetic
+      component `y_bar`.
+    - `return_beta`: If `True`, also return sampled effects `beta`.
+    - `variant_effect_variance`: Optional per-variant scaling for effect-size
+      variance.
+    - `seed`: Optional NumPy-compatible RNG seed or generator.
+
+    **Returns:**
+
+    - Simulated phenotype matrix `y`, or tuples `(y, beta)` / `(y, y_bar)`
+      depending on output flags.
+
+    **Raises:**
+
+    - `ValueError`: If sampled effects produce zero genetic variance and
+      scaling would divide by zero.
     """
     N, M = genotypes.shape
     rng = np.random.default_rng(seed)

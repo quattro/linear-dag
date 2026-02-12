@@ -7,6 +7,16 @@ import psutil
 
 
 class MemoryLogger:
+    """Logger wrapper that injects current RSS memory usage into each log message.
+
+    !!! Example
+
+        ```python
+        logger = MemoryLogger(__name__, log_file="run.log")
+        logger.info("Starting pipeline stage")
+        ```
+    """
+
     def __init__(self, name: str, log_file: Optional[str] = "memory_usage.log"):
         # Configure logging
         self.logger = logging.getLogger(name)
@@ -37,5 +47,15 @@ class MemoryLogger:
         return process.memory_info().rss / 1024 / 1024  # Convert bytes to MB
 
     def info(self, message: str) -> None:
-        """Log info message with memory usage"""
+        """Log an INFO message annotated with the current process memory usage.
+
+        **Arguments:**
+
+        - `message`: Message content to emit.
+
+        **Returns:**
+
+        - `None`.
+        """
+
         self.logger.info(message, extra={"memory_usage": self._get_memory_usage()})
