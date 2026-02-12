@@ -112,7 +112,7 @@ class LinearARG(LinearOperator):
         A_filt, variants_idx_reindexed, samples_idx_reindexed = remove_degree_zero_nodes(A, variants_idx, samples_idx)
         t1 = time.time()
         if verbosity > 0:
-            print(f"  Time: {t1-t0:.3f}s")
+            print(f"  Time: {t1 - t0:.3f}s")
 
         if verbosity > 0:
             print("Making triangular")
@@ -120,7 +120,7 @@ class LinearARG(LinearOperator):
         A_tri, variants_idx_tri = make_triangular(A_filt, variants_idx_reindexed, samples_idx_reindexed)
         t1 = time.time()
         if verbosity > 0:
-            print(f"  Time: {t1-t0:.3f}s")
+            print(f"  Time: {t1 - t0:.3f}s")
 
         if verbosity > 0:
             print("Creating LinearARG object")
@@ -137,7 +137,7 @@ class LinearARG(LinearOperator):
         linarg.calculate_nonunique_indices()
         t1 = time.time()
         if verbosity > 0:
-            print(f"  Time: {t1-t0:.3f}s")
+            print(f"  Time: {t1 - t0:.3f}s")
         return linarg
 
     @staticmethod
@@ -169,7 +169,7 @@ class LinearARG(LinearOperator):
         )
         t1 = time.time()
         if verbosity > 0:
-            print(f"  Time: {t1-t0:.3f}s")
+            print(f"  Time: {t1 - t0:.3f}s")
         if verbosity > 0:
             print(f"Number of variants: {genotypes.shape[1]}")
 
@@ -429,8 +429,21 @@ class LinearARG(LinearOperator):
         return v if other.ndim == 1 else v.reshape(-1, 1)
 
     def copy(self) -> "LinearARG":
-        # return LinearARG(self.A.copy(), self.sample_indices.copy(), self.variants.copy())
-        pass
+        copied = LinearARG(
+            A=self.A.copy(),
+            variant_indices=self.variant_indices.copy(),
+            flip=self.flip.copy(),
+            n_samples=np.int32(self.n_samples),
+            n_individuals=None if self.n_individuals is None else np.int32(self.n_individuals),
+            variants=self.variants.clone() if self.variants is not None else None,
+            iids=self.iids.clone() if self.iids is not None else None,
+            nonunique_indices=None if self.nonunique_indices is None else self.nonunique_indices.copy(),
+            sex=None if self.sex is None else self.sex.copy(),
+        )
+        # Preserve cached allele counts when already materialized.
+        if "allele_counts" in self.__dict__:
+            copied.set_allele_counts(self.allele_counts.copy())
+        return copied
 
     def write(
         self,
@@ -809,7 +822,7 @@ class LinearARG(LinearOperator):
             self.variants,
             iids=self.iids,
             nonunique_indices=None,
-            sex=self.sex,
+            sex=self.sex if sex is None else sex.copy(),
         )
         linarg.calculate_nonunique_indices()
 
@@ -839,9 +852,24 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
         else:  # chr1:start-end
             chrom = block_name.split(":")[0]
             start = block_name.split(":")[1].split("-")[0]
+
+        chrom = str(chrom)
         if chrom.startswith("chr"):
             chrom = chrom[3:]
-        return (int(chrom), int(float(start)))
+
+        try:
+            chrom_key = (0, int(chrom))
+        except ValueError:
+            # Put non-numeric chromosomes (e.g. X/Y/MT) after numeric chromosomes,
+            # and sort lexicographically within that group.
+            chrom_key = (1, chrom)
+
+        try:
+            start_key = int(float(start))
+        except ValueError:
+            start_key = float("inf")
+
+        return (*chrom_key, start_key)
 
     with h5py.File(h5_fname, "r") as f:
         block_names = [b for b in list(f.keys()) if isinstance(f[b], h5py.Group) and b != "iids"]

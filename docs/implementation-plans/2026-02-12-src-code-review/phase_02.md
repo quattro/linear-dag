@@ -12,17 +12,37 @@
 
 **Last updated:** 2026-02-12
 
-**Status:** Queued (review findings captured; remediation not started)
+**Status:** Active and partially completed (review + selected core remediation implemented)
 
 ---
 
 ## Plan Revision (2026-02-12)
 
-Execution priority has moved to CLI-first hardening. This phase remains valid and is next in the remediation queue after CLI validation is fully complete in a non-restricted runtime.
+Execution priority moved to CLI-first hardening; core remediation has now started.
 
 Current state:
 - Core review findings were produced.
-- No core remediation changes have been applied yet in this phase.
+- Selected core remediation changes have been applied in `lineararg.py`.
+
+---
+
+## Implementation Status
+
+Completed implementation in this phase:
+- Implemented `LinearARG.copy()` with deep-copy behavior for matrix/index arrays and metadata fields.
+- Fixed `add_individual_nodes(sex=...)` to preserve explicit `sex` input on returned object.
+- Hardened `list_blocks()` sorting to support non-numeric chromosome names (e.g., `chrX`) without crashing.
+
+Completed test/verification work in this phase:
+- Added focused tests in `tests/test_lineararg.py`:
+  - `test_lineararg_copy_independent_arrays`
+  - `test_add_individual_nodes_propagates_explicit_sex`
+  - `test_list_blocks_handles_non_numeric_chromosomes`
+- Verified behavior via targeted runtime checks for each added test scenario.
+- Verified Python compilation of updated files.
+
+Known verification gap:
+- `pytest` invocation in this environment exits abnormally without diagnostics (`exit -1`), so full suite execution remains pending in a non-restricted runtime.
 
 ---
 
@@ -41,6 +61,8 @@ This phase implements and tests:
 ### Task 1: Build core contract map
 
 **Verifies:** src-review.AC2.1
+
+**Status:** Completed
 
 **Files:**
 - Read: `src/linear_dag/core/__init__.py`
@@ -62,6 +84,8 @@ This phase implements and tests:
 ### Task 2: Perform core defect analysis
 
 **Verifies:** src-review.AC2.1, src-review.AC2.2, src-review.AC2.3
+
+**Status:** Completed
 
 **Files:**
 - Read: `src/linear_dag/core/lineararg.py`
@@ -86,6 +110,8 @@ This phase implements and tests:
 
 **Verifies:** src-review.AC2.1, src-review.AC2.2, src-review.AC2.3
 
+**Status:** Completed
+
 **Files:**
 - Create: `review output in assistant response` (Core section)
 
@@ -99,3 +125,46 @@ This phase implements and tests:
 
 **Commit:** `N/A (review phase, no code changes expected)`
 <!-- END_TASK_3 -->
+
+<!-- START_TASK_4 -->
+### Task 4: Implement core contract fixes in `lineararg.py`
+
+**Verifies:** src-review.AC2.2, src-review.AC2.3
+
+**Status:** Completed
+
+**Files:**
+- Modify: `src/linear_dag/core/lineararg.py`
+
+**Implementation:**
+- Implemented `LinearARG.copy()` (previously unimplemented).
+- Corrected `add_individual_nodes()` to retain explicit sex vector.
+- Updated block-name sorting logic in `list_blocks()` to support non-numeric chromosomes.
+
+**Verification:**
+- Run: `python -m compileall -q src/linear_dag/core/lineararg.py`
+- Expected: no syntax errors.
+
+**Commit:** `N/A (no commit requested yet for this phase)`
+<!-- END_TASK_4 -->
+
+<!-- START_TASK_5 -->
+### Task 5: Add targeted regression tests for core fixes
+
+**Verifies:** src-review.AC2.1, src-review.AC2.3
+
+**Status:** Completed
+
+**Files:**
+- Modify: `tests/test_lineararg.py`
+
+**Implementation:**
+- Added tests for copy semantics, explicit sex propagation, and non-numeric chromosome block sorting.
+
+**Verification:**
+- Run: `python -m compileall -q tests/test_lineararg.py`
+- Expected: no syntax errors.
+- Manual runtime checks executed for all new scenarios.
+
+**Commit:** `N/A (no commit requested yet for this phase)`
+<!-- END_TASK_5 -->

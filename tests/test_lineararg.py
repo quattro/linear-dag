@@ -1,14 +1,16 @@
-import pytest
-from linear_dag.core.lineararg import LinearARG, list_blocks
-from linear_dag.genotype import read_vcf
-import polars as pl
 from pathlib import Path
-from scipy.sparse import csc_matrix
+
+import h5py
 import numpy as np
-from linear_dag.core.parallel_processing import ParallelOperator
+import polars as pl
+
+from linear_dag.core.lineararg import LinearARG, list_blocks
 from linear_dag.core.operators import get_diploid_operator
+from linear_dag.genotype import read_vcf
+from scipy.sparse import csc_matrix
 
 TEST_DATA_DIR = Path(__file__).parent / "testdata"
+
 
 def test_lineararg():
     """Tests for lineararg module."""
@@ -20,7 +22,8 @@ def test_lineararg():
     print(blocks_df)
     assert isinstance(blocks_df, pl.DataFrame)
     assert not blocks_df.is_empty()
-    assert 'block_name' in blocks_df.columns
+    assert "block_name" in blocks_df.columns
+
 
 def test_read_vcf():
     """Test reading a VCF file."""
@@ -32,7 +35,7 @@ def test_read_vcf():
     assert isinstance(v_info, pl.DataFrame)
     assert isinstance(iids, list)
 
-    assert genotypes.shape[0] == len(iids) * 2 # phased
+    assert genotypes.shape[0] == len(iids) * 2  # phased
     assert genotypes.shape[1] == len(v_info)
     assert len(flip) == len(v_info)
 
@@ -54,32 +57,22 @@ def test_from_vcf():
 
 def test_zero_ac_variants():
     """Test handling of variants with 0 allele count (all-zero columns)."""
-    genotypes = csc_matrix(np.array([
-        [1, 0, 1, 0],
-        [0, 0, 1, 0],
-        [1, 0, 0, 0],
-        [0, 0, 1, 0]
-    ]))
+    genotypes = csc_matrix(np.array([[1, 0, 1, 0], [0, 0, 1, 0], [1, 0, 0, 0], [0, 0, 1, 0]]))
     flip = np.array([False, False, False, False])
-    
+
     linarg = LinearARG.from_genotypes(genotypes, flip, find_recombinations=True)
-    
+
     assert isinstance(linarg, LinearARG)
     assert linarg.shape[0] == genotypes.shape[0]
 
 
 def test_samples_with_no_variants():
     """Test handling of samples with no variants (all-zero rows)."""
-    genotypes = csc_matrix(np.array([
-        [1, 1, 1],
-        [0, 0, 0],
-        [1, 0, 1],
-        [0, 0, 0]
-    ]))
+    genotypes = csc_matrix(np.array([[1, 1, 1], [0, 0, 0], [1, 0, 1], [0, 0, 0]]))
     flip = np.array([False, False, False])
-    
+
     linarg = LinearARG.from_genotypes(genotypes, flip, find_recombinations=True)
-    
+
     assert isinstance(linarg, LinearARG)
     assert linarg.shape[0] == genotypes.shape[0]
 
@@ -100,7 +93,9 @@ def test_read_write_matmul(tmp_path):
     linarg.write(temp_h5_path, block_info=block_info)
 
     # 2. Read it from the temp file
-    loaded_linarg = LinearARG.read(temp_h5_path, block=f'{block_info["chrom"]}:{block_info["start"]}-{block_info["end"]}')
+    loaded_linarg = LinearARG.read(
+        temp_h5_path, block=f"{block_info['chrom']}:{block_info['start']}-{block_info['end']}"
+    )
     assert loaded_linarg.shape == linarg.shape
     print(loaded_linarg.iids)
     print(linarg.iids)
@@ -152,38 +147,98 @@ def test_get_carriers_subset():
     """Test get_carriers_subset method against linarg @ indicator."""
     vcf_path = TEST_DATA_DIR / "1kg_small.vcf"
     linarg, genotypes = LinearARG.from_vcf(vcf_path, return_genotypes=True)
-    
+
     # Test with a subset of variant indices
     np.random.seed(42)
     n_variants = linarg.shape[1]
     subset_size = min(10, n_variants)
     user_indices = np.sort(np.random.choice(n_variants, subset_size, replace=False))
-    
+
     # Get carriers using the new method
     carriers_matrix = linarg.get_carriers_subset(user_indices)
-    
+
     # Verify shape
     assert carriers_matrix.shape == (linarg.shape[0], len(user_indices))
-    
+
     # Verify against linarg @ indicator for each variant
     for i, variant_idx in enumerate(user_indices):
         indicator = np.zeros(n_variants)
         indicator[variant_idx] = 1
         expected = linarg @ indicator
         actual = carriers_matrix[:, i].toarray().ravel()
-        np.testing.assert_array_equal(actual, expected, 
-            err_msg=f"Mismatch for variant index {variant_idx}")
-    
+        np.testing.assert_array_equal(actual, expected, err_msg=f"Mismatch for variant index {variant_idx}")
+
     # Test unphased option
     carriers_unphased = linarg.get_carriers_subset(user_indices, unphased=True)
-    
+
     # Verify shape: should have half the rows (diploid)
     assert carriers_unphased.shape == (linarg.shape[0] // 2, len(user_indices))
-    
+
     # Verify that unphased carriers are the sum of consecutive haplotype pairs
     carriers_phased = carriers_matrix.toarray()
     for i in range(carriers_unphased.shape[0]):
-        expected_diploid = carriers_phased[2*i, :] + carriers_phased[2*i + 1, :]
+        expected_diploid = carriers_phased[2 * i, :] + carriers_phased[2 * i + 1, :]
         actual_diploid = carriers_unphased[i, :].toarray().ravel()
-        np.testing.assert_array_equal(actual_diploid, expected_diploid,
-            err_msg=f"Mismatch for individual {i}")
+        np.testing.assert_array_equal(actual_diploid, expected_diploid, err_msg=f"Mismatch for individual {i}")
+
+
+def test_lineararg_copy_independent_arrays():
+    vcf_path = TEST_DATA_DIR / "1kg_small.vcf"
+    linarg = LinearARG.from_vcf(vcf_path)
+    linarg_copy = linarg.copy()
+
+    assert isinstance(linarg_copy, LinearARG)
+    assert linarg_copy is not linarg
+    assert linarg_copy.A is not linarg.A
+    assert linarg_copy.shape == linarg.shape
+
+    # Mutating copy arrays should not mutate original arrays.
+    original_variant_idx0 = linarg.variant_indices[0]
+    linarg_copy.variant_indices[0] = linarg_copy.variant_indices[0] + 1
+    assert linarg.variant_indices[0] == original_variant_idx0
+
+    original_flip0 = linarg.flip[0]
+    linarg_copy.flip[0] = ~linarg_copy.flip[0]
+    assert linarg.flip[0] == original_flip0
+
+
+def test_add_individual_nodes_propagates_explicit_sex():
+    vcf_path = TEST_DATA_DIR / "1kg_small.vcf"
+    linarg = LinearARG.from_vcf(vcf_path)
+    n_individuals = linarg.shape[0] // 2
+    sex = np.zeros(n_individuals, dtype=np.uint)
+    sex[::3] = 1  # include a subset of males to exercise haplotype count logic
+
+    linarg_with_individuals = linarg.add_individual_nodes(sex=sex)
+
+    assert linarg_with_individuals.sex is not None
+    assert np.array_equal(linarg_with_individuals.sex, sex)
+
+
+def test_list_blocks_handles_non_numeric_chromosomes(tmp_path):
+    h5_path = tmp_path / "mixed_chroms.h5"
+
+    with h5py.File(h5_path, "w") as f:
+        g_x = f.create_group("chrX:200-300")
+        g_x.attrs["chrom"] = "X"
+        g_x.attrs["start"] = 200
+        g_x.attrs["end"] = 300
+
+        g_10 = f.create_group("chr10:50-60")
+        g_10.attrs["chrom"] = "10"
+        g_10.attrs["start"] = 50
+        g_10.attrs["end"] = 60
+
+        g_2 = f.create_group("chr2:100-200")
+        g_2.attrs["chrom"] = "2"
+        g_2.attrs["start"] = 100
+        g_2.attrs["end"] = 200
+
+    blocks_df = list_blocks(h5_path)
+    assert isinstance(blocks_df, pl.DataFrame)
+    assert blocks_df.height == 3
+    assert blocks_df.get_column("block_name").to_list() == [
+        "chr2:100-200",
+        "chr10:50-60",
+        "chrX:200-300",
+    ]

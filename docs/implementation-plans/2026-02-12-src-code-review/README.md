@@ -11,7 +11,7 @@ Execute a 4-phase `src/` review/remediation plan with immediate priority on CLI 
 
 ## Current Status
 - `phase_01.md` (CLI): active and partially completed.
-- `phase_02.md` (Core): queued.
+- `phase_02.md` (Core): active and partially completed.
 - `phase_03.md` (Association): queued.
 - `phase_04.md` (Structure + consolidation): queued.
 
@@ -26,14 +26,23 @@ Execute a 4-phase `src/` review/remediation plan with immediate priority on CLI 
 - Added CLI-focused regression tests in `tests/test_cli.py`:
   - `test_cli_version_fallback`
   - `test_prep_data_requires_block_metadata`
+- Implemented core fixes in `src/linear_dag/core/lineararg.py`:
+  - implemented `LinearARG.copy()`
+  - fixed explicit `sex` propagation in `add_individual_nodes()`
+  - made `list_blocks()` chromosome sorting robust for non-numeric chromosomes (e.g., `chrX`)
+- Added core-focused regression tests in `tests/test_lineararg.py`:
+  - `test_lineararg_copy_independent_arrays`
+  - `test_add_individual_nodes_propagates_explicit_sex`
+  - `test_list_blocks_handles_non_numeric_chromosomes`
 
 ## Verification Notes
 - Compile checks for updated files completed.
 - Targeted runtime checks completed for new CLI guard and version fallback behavior.
-- Full pytest run is still pending in a non-restricted runtime due shared-memory multiprocessing limits in current sandbox (`/psm_*` permission error).
+- Targeted runtime checks completed for core regression scenarios.
+- Full pytest run is still pending in a non-restricted runtime (sandbox constraints cause abnormal `pytest` termination and shared-memory multiprocessing limits in this environment).
 
 ## Next Steps
 1. Re-run CLI test suite in a runtime that allows multiprocessing shared memory.
-2. Execute `phase_02.md` remediation work.
+2. Finish remaining `phase_02.md` remediation/validation tasks.
 3. Execute `phase_03.md` remediation work.
 4. Execute `phase_04.md` remediation work and finalize.
