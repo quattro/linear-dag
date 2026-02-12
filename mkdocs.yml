@@ -1,0 +1,82 @@
+site_name: linear-dag
+site_description: Compressed LinearARG analysis tools for biobank-scale genotype data.
+repo_url: https://github.com/quattro/linear-dag
+repo_name: quattro/linear-dag
+edit_uri: ""
+docs_dir: docs/site
+strict: false
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - toc.integrate
+    - header.autohide
+  palette:
+    - scheme: default
+      primary: white
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: black
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/chart-bell-curve-cumulative
+  favicon: _static/favicon.png
+  custom_dir: docs/_overrides
+
+extra_javascript:
+  - _static/mathjax.js
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+extra_css:
+  - _static/custom_css.css
+
+markdown_extensions:
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.snippets:
+      base_path: docs/site
+  - admonition
+  - toc:
+      permalink: "¤"
+      toc_depth: 4
+
+plugins:
+  - search:
+      separator: '[\\s\\-,:!=\\[\\]()"/]+|(?!\\b)(?=[A-Z][a-z])|\\.(?!\\d)|&[lg]t;'
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            force_inspection: true
+            heading_level: 4
+            inherited_members: true
+            members_order: source
+            show_bases: false
+            show_if_no_docstring: true
+            show_overloads: false
+            show_root_heading: true
+            show_signature_annotations: true
+            show_source: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+
+nav:
+  - Home: index.md
+  - Install: install.md
+  - Quickstart: quickstart.md
+  - CLI: cli.md
+  - Python API: python-api.md
+  - FAQ: faq.md
+  - Contributing: contributing.md
