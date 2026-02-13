@@ -81,6 +81,33 @@ title = """                            @@@@
 @@@@@                @@@@                                                          @@@@"""
 
 
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen = set()
+    deduped = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _format_available_values(values: list[str], *, max_values: int = 8) -> str:
+    ordered = _dedupe_preserve_order([str(v) for v in values])
+    if not ordered:
+        return "(none)"
+    if len(ordered) <= max_values:
+        return ", ".join(ordered)
+    return ", ".join(ordered[:max_values]) + ", ..."
+
+
+def _normalize_chromosome_label(value: object) -> str:
+    chrom = str(value).strip()
+    if chrom.lower().startswith("chr"):
+        chrom = chrom[3:]
+    return chrom.lower()
+
+
 def _construct_cmd_string(argv: list[str], parser: argparse.ArgumentParser, parsed_args: argparse.Namespace) -> str:
     """Pretty-print an executable command with positional args on line 1 and indented options."""
 
@@ -245,6 +272,19 @@ def _read_pheno_or_covar(
             raise ValueError("Columns supplied to read_pheno/read_covar must be all 'str' or all 'int'. Not mixture.")
         if all_int and any([x < 0 for x in columns]):
             raise ValueError("Must supply valid column indices to read_pheno/read_covar")
+        if all_str:
+            available_columns = pl.read_csv(path_or_filename, separator="\t", n_rows=0).columns
+            available_set = set(available_columns)
+            missing = [str(x) for x in columns if str(x) not in available_set]
+            if missing:
+                missing_str = ", ".join(_dedupe_preserve_order(missing))
+                available_str = _format_available_values(available_columns, max_values=20)
+                raise ValueError(
+                    (
+                        f"Requested column name(s) not found in '{path_or_filename}': {missing_str}. "
+                        f"Available columns: {available_str}"
+                    )
+                )
 
     df = pl.read_csv(
         path_or_filename,
@@ -516,16 +556,51 @@ def _prep_data(
 
 def _filter_blocks(
     block_metadata: pl.DataFrame, chromosomes: list | None = None, block_names: list | None = None
-) -> pl.DataFrame:
+) -> Optional[pl.DataFrame]:
     """Helper to filter blocks by a list of chromosomes or block names."""
     if block_metadata is None:
         return None
     if block_names is not None and chromosomes is not None:
         raise ValueError("Specify either block_names or chromosomes, not both.")
     if block_names is not None:
-        block_metadata = block_metadata.filter(pl.col("block_name").is_in(block_names))
+        available_block_names = [str(x) for x in block_metadata.get_column("block_name").to_list()]
+        requested_block_names = [str(x) for x in block_names]
+        available_block_name_set = set(available_block_names)
+        missing = [name for name in requested_block_names if name not in available_block_name_set]
+        if missing:
+            missing_str = ", ".join(_dedupe_preserve_order(missing))
+            available_str = _format_available_values(available_block_names)
+            raise ValueError(
+                (f"Unknown block name(s): {missing_str}. " f"Available block names include: {available_str}")
+            )
+        block_metadata = block_metadata.filter(pl.col("block_name").cast(pl.String).is_in(requested_block_names))
     if chromosomes is not None:
-        block_metadata = block_metadata.filter(pl.col("chrom").is_in(chromosomes))
+        requested_raw = [str(x) for x in chromosomes]
+        requested_norm = [_normalize_chromosome_label(x) for x in requested_raw]
+
+        available_raw = [str(x) for x in block_metadata.get_column("chrom").cast(pl.String).to_list()]
+        available_norm = [_normalize_chromosome_label(x) for x in available_raw]
+        available_norm_set = set(available_norm)
+        missing = [raw for raw, norm in zip(requested_raw, requested_norm) if norm not in available_norm_set]
+        if missing:
+            missing_str = ", ".join(_dedupe_preserve_order(missing))
+            available_str = _format_available_values(available_raw)
+            raise ValueError(
+                (
+                    f"Unknown chromosome selection(s): {missing_str}. "
+                    f"Available chromosomes: {available_str}. "
+                    "Use values like '21' or 'chr21'."
+                )
+            )
+        block_metadata = (
+            block_metadata.with_columns(
+                __chrom_norm=pl.col("chrom")
+                .cast(pl.String)
+                .map_elements(_normalize_chromosome_label, return_dtype=pl.String)
+            )
+            .filter(pl.col("__chrom_norm").is_in(_dedupe_preserve_order(requested_norm)))
+            .drop("__chrom_norm")
+        )
     return block_metadata
 
 

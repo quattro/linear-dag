@@ -192,6 +192,71 @@ def test_prep_data_requires_block_metadata():
         cli._prep_data(str(linarg_path), str(pheno_path))
 
 
+def test_filter_blocks_rejects_block_names_and_chromosomes_together():
+    block_metadata = cli.list_blocks(str(TEST_DATA_DIR / "test_chr21_50.h5"))
+    with pytest.raises(ValueError, match="Specify either block_names or chromosomes"):
+        cli._filter_blocks(block_metadata, chromosomes=["21"], block_names=["21_10000001.0_10200000.0"])
+
+
+def test_load_required_block_metadata_invalid_block_name_has_actionable_error():
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    logger = cli.MemoryLogger(__name__)
+    with pytest.raises(ValueError, match=r"Unknown block name\(s\): missing_block"):
+        cli._load_required_block_metadata(
+            str(linarg_path),
+            chromosomes=None,
+            block_names=["missing_block"],
+            command_name="assoc/rhe",
+            logger=logger,
+        )
+
+
+def test_load_required_block_metadata_invalid_chromosome_has_actionable_error():
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    logger = cli.MemoryLogger(__name__)
+    with pytest.raises(ValueError, match=r"Unknown chromosome selection\(s\): not_a_chrom"):
+        cli._load_required_block_metadata(
+            str(linarg_path),
+            chromosomes=["not_a_chrom"],
+            block_names=None,
+            command_name="assoc/rhe",
+            logger=logger,
+        )
+
+
+def test_load_required_block_metadata_accepts_chr_prefix_for_numeric_blocks():
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    logger = cli.MemoryLogger(__name__)
+    block_metadata = cli._load_required_block_metadata(
+        str(linarg_path),
+        chromosomes=["chr21"],
+        block_names=None,
+        command_name="assoc/rhe",
+        logger=logger,
+    )
+    assert block_metadata.height == 2
+    assert set(block_metadata.get_column("chrom").to_list()) == {21}
+
+
+def test_read_pheno_or_covar_missing_named_column_has_actionable_error():
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    with pytest.raises(ValueError, match=r"Requested column name\(s\) not found.*not_a_col"):
+        cli._read_pheno_or_covar(str(pheno_path), columns=["iid", "not_a_col"])
+
+
+def test_prep_data_missing_covar_name_has_actionable_error():
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    with pytest.raises(ValueError, match=r"Requested column name\(s\) not found.*not_a_col"):
+        cli._prep_data(
+            str(linarg_path),
+            str(pheno_path),
+            pheno_names=["iid", "height"],
+            covar=str(pheno_path),
+            covar_names=["iid", "not_a_col"],
+        )
+
+
 class _DummyContext:
     def __init__(self, value):
         self._value = value
@@ -452,3 +517,86 @@ def test_run_cli_runtime_error_returns_one_and_stderr(monkeypatch, capsys):
     monkeypatch.setattr(cli.sys, "argv", ["kodama", "assoc"])
     assert cli.run_cli() == 1
     assert "error: boom" in capsys.readouterr().err
+
+
+def test_run_cli_invalid_block_name_returns_one_and_actionable_stderr(monkeypatch, capsys, tmp_path: Path):
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    out_prefix = tmp_path / "invalid_block"
+
+    monkeypatch.setattr(
+        cli.sys,
+        "argv",
+        [
+            "kodama",
+            "-q",
+            "assoc",
+            str(linarg_path),
+            str(pheno_path),
+            "--pheno-name",
+            "iid,height",
+            "--block-names",
+            "missing_block",
+            "--out",
+            str(out_prefix),
+        ],
+    )
+
+    assert cli.run_cli() == 1
+    assert "Unknown block name(s): missing_block" in capsys.readouterr().err
+
+
+def test_run_cli_invalid_chromosome_returns_one_and_actionable_stderr(monkeypatch, capsys, tmp_path: Path):
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    out_prefix = tmp_path / "invalid_chrom"
+
+    monkeypatch.setattr(
+        cli.sys,
+        "argv",
+        [
+            "kodama",
+            "-q",
+            "assoc",
+            str(linarg_path),
+            str(pheno_path),
+            "--pheno-name",
+            "iid,height",
+            "--chromosomes",
+            "not_a_chrom",
+            "--out",
+            str(out_prefix),
+        ],
+    )
+
+    assert cli.run_cli() == 1
+    assert "Unknown chromosome selection(s): not_a_chrom" in capsys.readouterr().err
+
+
+def test_run_cli_missing_covar_column_returns_one_and_actionable_stderr(monkeypatch, capsys, tmp_path: Path):
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    out_prefix = tmp_path / "invalid_covar"
+
+    monkeypatch.setattr(
+        cli.sys,
+        "argv",
+        [
+            "kodama",
+            "-q",
+            "assoc",
+            str(linarg_path),
+            str(pheno_path),
+            "--pheno-name",
+            "iid,height",
+            "--covar",
+            str(pheno_path),
+            "--covar-name",
+            "iid,not_a_col",
+            "--out",
+            str(out_prefix),
+        ],
+    )
+
+    assert cli.run_cli() == 1
+    assert "Requested column name(s) not found" in capsys.readouterr().err
