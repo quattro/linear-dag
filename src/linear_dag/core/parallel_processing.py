@@ -753,7 +753,7 @@ class GRMOperator(LinearOperator):
         _, num_variants = linarg.shape
         pq = linarg.allele_frequencies * (1 - linarg.allele_frequencies)
         K = aslinearoperator(diags(pq ** (1 + alpha)))
-        result = linarg.normalized @ K @ linarg.normalized.T @ input_arr
+        result = (linarg.normalized @ K @ linarg.normalized.T @ input_arr) / num_variants
         with output_lock:
             output_arr += result
 

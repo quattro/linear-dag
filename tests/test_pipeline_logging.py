@@ -106,6 +106,8 @@ def test_compress_vcf_passes_logger_to_lineararg_from_vcf(monkeypatch, tmp_path:
     class _FakeLinarg:
         shape = (4, 3)
         nnz = 5
+        A = np.zeros((7, 7))
+        num_nonunique_indices = 2
         allele_frequencies = np.array([0.25, 0.1, 0.4])
 
         def calculate_nonunique_indices(self):
@@ -140,6 +142,8 @@ def test_compress_vcf_creates_fallback_logger_when_logger_not_provided(monkeypat
     class _FakeLinarg:
         shape = (2, 2)
         nnz = 2
+        A = np.zeros((4, 4))
+        num_nonunique_indices = 1
         allele_frequencies = np.array([0.1, 0.2])
 
         def calculate_nonunique_indices(self):

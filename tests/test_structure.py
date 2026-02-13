@@ -2,12 +2,25 @@ import numpy as np
 import pytest
 
 from linear_dag.structure import pca, svd
-from scipy.sparse.linalg import aslinearoperator
+from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 
 class _DummyLinearARG:
     def __init__(self, normalized_matrix: np.ndarray):
         self.normalized = aslinearoperator(np.asarray(normalized_matrix, dtype=np.float64))
+
+
+class _DummyGRMOperator(LinearOperator):
+    def __init__(self, matrix: np.ndarray):
+        dense = np.asarray(matrix, dtype=np.float64)
+        super().__init__(dtype=dense.dtype, shape=dense.shape)
+        self._operator = aslinearoperator(dense)
+
+    def _matvec(self, x):
+        return self._operator.matvec(x)
+
+    def _matmat(self, x):
+        return self._operator.matmat(x)
 
 
 def _build_dummy_linarg() -> tuple[_DummyLinearARG, np.ndarray]:
@@ -24,6 +37,10 @@ def _build_dummy_linarg() -> tuple[_DummyLinearARG, np.ndarray]:
     return _DummyLinearARG(matrix), matrix
 
 
+def _build_dummy_grm(matrix: np.ndarray) -> _DummyGRMOperator:
+    return _DummyGRMOperator(matrix @ matrix.T)
+
+
 def test_svd_returns_sorted_singular_values():
     linarg, matrix = _build_dummy_linarg()
     left_vecs, singular_values, right_vecs = svd(linarg, k=3)
@@ -38,7 +55,8 @@ def test_svd_returns_sorted_singular_values():
 
 def test_pca_returns_sorted_real_eigenpairs():
     linarg, matrix = _build_dummy_linarg()
-    eigenvectors, eigenvalues = pca(linarg, k=3)
+    grm = _build_dummy_grm(matrix)
+    eigenvectors, eigenvalues = pca(grm, k=3)
 
     gram = matrix @ matrix.T
     expected = np.linalg.eigvalsh(gram)[::-1][:3]
@@ -65,7 +83,11 @@ def test_pca_returns_sorted_real_eigenpairs():
     ],
 )
 def test_structure_rank_validation(routine, k, error_type, message):
-    linarg, _ = _build_dummy_linarg()
+    linarg, matrix = _build_dummy_linarg()
     fn = svd if routine == "svd" else pca
+    if routine == "svd":
+        arg = linarg
+    else:
+        arg = _build_dummy_grm(matrix)
     with pytest.raises(error_type, match=message):
-        fn(linarg, k=k)
+        fn(arg, k=k)

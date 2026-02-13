@@ -201,6 +201,12 @@ def _construct_cmd_string(argv: list[str], parser: argparse.ArgumentParser, pars
         return names
 
     def _first_option_string(action: argparse.Action) -> str:
+        # Preserve the flag form the user actually typed (e.g. `-v` vs `--verbose`)
+        # so the reconstructed command is copy/paste equivalent.
+        for raw in argv:
+            token = raw.split("=", 1)[0]
+            if token in action.option_strings:
+                return token
         long_opts = [opt for opt in action.option_strings if opt.startswith("--")]
         if long_opts:
             return long_opts[0]
