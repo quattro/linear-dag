@@ -73,6 +73,7 @@ plugins:
             show_symbol_type_toc: true
 
 # Public site navigation intentionally excludes non-site planning artifacts.
+# Validated: nav entries resolve only to docs/site markdown pages.
 nav:
   - Home: index.md
   - Getting Started:
