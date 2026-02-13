@@ -712,6 +712,26 @@ def test_main_repeated_invocations_do_not_accumulate_cli_handlers(monkeypatch, t
         assert managed_handlers == []
 
 
+def test_main_dispatches_shared_logger_to_handler(monkeypatch, tmp_path: Path):
+    captured = {}
+
+    def _fake_assoc(args):
+        captured["logger"] = getattr(args, "logger", None)
+
+    monkeypatch.setattr(cli, "_assoc_scan", _fake_assoc)
+
+    out_prefix = tmp_path / "assoc_dispatch"
+    rc = cli._main(["-q", "assoc", "dummy.h5", "dummy.tsv", "--out", str(out_prefix)])
+    assert rc == 0 or rc is None
+    assert captured["logger"] is logging.getLogger(cli.__name__)
+
+
+def test_get_command_logger_prefers_injected_logger():
+    injected = logging.getLogger("linear_dag.cli.injected")
+    args = Namespace(logger=injected)
+    assert cli._get_command_logger(args) is injected
+
+
 def test_run_cli_maps_system_exit_to_explicit_code(monkeypatch):
     def _fake_main(_args):
         raise SystemExit(2)

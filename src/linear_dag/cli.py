@@ -371,7 +371,7 @@ def _read_pheno_or_covar(
 
 def _prs(args):
     t = time.time()
-    logger = MemoryLogger(__name__)
+    logger = _get_command_logger(args)
     if not args.linarg_path:
         raise ValueError("`--linarg-path` is required for score.")
     if not args.beta_path:
@@ -394,7 +394,7 @@ def _prs(args):
 
 
 def _assoc_scan(args):
-    logger = MemoryLogger(__name__)
+    logger = _get_command_logger(args)
 
     # load data for assoc scan
     logger.info("Loading phenotype data")
@@ -509,7 +509,7 @@ def _assoc_scan(args):
 
 
 def _estimate_h2g(args):
-    logger = MemoryLogger(__name__)
+    logger = _get_command_logger(args)
     if args.num_matvecs < 1:
         raise ValueError(f"`--num-matvecs` must be positive integer. Observed {args.num_matvecs}")
 
@@ -565,10 +565,9 @@ def _prep_data(
     chromosomes: Optional[list[str]] = None,
     block_names: Optional[list[str]] = None,
     num_processes: Optional[int] = None,
-    logger: Optional[MemoryLogger] = None,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
-    if logger is None:
-        logger = MemoryLogger(__name__)
+    logger = _coerce_logger(logger)
 
     _validate_num_processes(num_processes)
     block_metadata = _load_required_block_metadata(
@@ -707,8 +706,9 @@ def _load_required_block_metadata(
     chromosomes: Optional[list[str]],
     block_names: Optional[list[str]],
     command_name: str,
-    logger: MemoryLogger,
+    logger: Union[logging.Logger, MemoryLogger],
 ) -> pl.DataFrame:
+    logger = _coerce_logger(logger)
     logger.info("Getting blocks")
     block_metadata = list_blocks(linarg_path)
     block_metadata = _filter_blocks(block_metadata, chromosomes=chromosomes, block_names=block_names)
@@ -733,7 +733,7 @@ def _build_parallel_operator_kwargs(
 def _attach_variant_info(
     association_results: pl.LazyFrame,
     variant_info: pl.LazyFrame,
-    logger: Optional[MemoryLogger] = None,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ) -> pl.LazyFrame:
     """Attach variant metadata to association results using an explicit alignment join.
 
@@ -751,8 +751,9 @@ def _attach_variant_info(
             )
         )
 
-    if logger is not None:
-        logger.info(f"Aligning variant metadata via row-index join ({result_count} rows)")
+    active_logger = _coerce_logger(logger) if logger is not None else None
+    if active_logger is not None:
+        active_logger.info(f"Aligning variant metadata via row-index join ({result_count} rows)")
 
     metadata_cols = variant_info.collect_schema().names()
     result_cols = association_results.collect_schema().names()
@@ -787,7 +788,7 @@ def _require_block_metadata(
 
 
 def _compress(args):
-    logger = MemoryLogger(__name__)
+    logger = _get_command_logger(args)
     if args.region is None:
         logger.info(
             "No --region was provided to `compress`; output may lack block metadata required by assoc/rhe/score."
@@ -806,7 +807,7 @@ def _compress(args):
 
 
 def _step0(args):
-    logger = MemoryLogger(__name__)
+    logger = _get_command_logger(args)
     logger.info("Starting main process")
     msc_step0(
         args.vcf_metadata,
@@ -825,35 +826,35 @@ def _step0(args):
 
 
 def _step1(args):
-    logger = MemoryLogger(__name__)
+    logger = _get_command_logger(args)
     logger.info("Starting main process")
     msc_step1(args.job_metadata, args.small_job_id)
     return
 
 
 def _step2(args):
-    logger = MemoryLogger(__name__)
+    logger = _get_command_logger(args)
     logger.info("Starting main process")
     msc_step2(args.job_metadata, args.small_job_id)
     return
 
 
 def _step3(args):
-    logger = MemoryLogger(__name__)
+    logger = _get_command_logger(args)
     logger.info("Starting main process")
     msc_step3(args.job_metadata, args.large_job_id)
     return
 
 
 def _step4(args):
-    logger = MemoryLogger(__name__)
+    logger = _get_command_logger(args)
     logger.info("Starting main process")
     msc_step4(args.job_metadata, args.large_job_id)
     return
 
 
 def _step5(args):
-    logger = MemoryLogger(__name__)
+    logger = _get_command_logger(args)
     logger.info("Starting main process")
     msc_step5(args.job_metadata)
     return
@@ -1135,6 +1136,7 @@ def _main(args):
 
         # launch w/e task was selected
         if hasattr(args, "func"):
+            setattr(args, "logger", log)
             args.func(args)
         else:
             argp.print_help()
@@ -1309,6 +1311,18 @@ def _create_cli_logger_context(
         cli_streams.append(disk_log_stream)
 
     return log, cli_handlers, cli_streams
+
+
+def _coerce_logger(logger: Optional[Union[logging.Logger, MemoryLogger]]) -> logging.Logger:
+    if isinstance(logger, MemoryLogger):
+        return logger.logger
+    if logger is not None:
+        return logger
+    return MemoryLogger(__name__, log_file=None).logger
+
+
+def _get_command_logger(args: argparse.Namespace) -> logging.Logger:
+    return _coerce_logger(getattr(args, "logger", None))
 
 
 if __name__ == "__main__":
