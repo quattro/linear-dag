@@ -129,6 +129,32 @@ def _format_suggestion_fragment(requested: str, available: list[str]) -> str:
     return f" Did you mean: {', '.join(suggestions)}?"
 
 
+def _format_suggestion_fragment_for_missing_values(requested: list[str], available: list[str]) -> str:
+    merged_suggestions: list[str] = []
+    for value in _dedupe_preserve_order([str(v) for v in requested]):
+        suggestion = _closest_matches(value, available, limit=1)
+        merged_suggestions.extend(suggestion)
+    suggestions = _dedupe_preserve_order(merged_suggestions)
+    if not suggestions:
+        return ""
+    return f" Did you mean: {', '.join(suggestions)}?"
+
+
+def _validate_integer_column_selection_bounds(path_or_filename: Union[str, PathLike], columns: list[int]) -> None:
+    available_columns = pl.read_csv(path_or_filename, separator="\t", n_rows=0).columns
+    num_columns = len(available_columns)
+    invalid = [x for x in _dedupe_preserve_order(columns) if x >= num_columns]
+    if not invalid:
+        return
+    invalid_str = ", ".join(str(x) for x in invalid)
+    raise ValueError(
+        (
+            f"Requested column index value(s) out of bounds in '{path_or_filename}': {invalid_str}. "
+            f"Valid range: 0..{num_columns - 1}. Total columns: {num_columns}."
+        )
+    )
+
+
 def _construct_cmd_string(argv: list[str], parser: argparse.ArgumentParser, parsed_args: argparse.Namespace) -> str:
     """Pretty-print an executable command with positional args on line 1 and indented options."""
 
@@ -293,6 +319,8 @@ def _read_pheno_or_covar(
             raise ValueError("Columns supplied to read_pheno/read_covar must be all 'str' or all 'int'. Not mixture.")
         if all_int and any([x < 0 for x in columns]):
             raise ValueError("Must supply valid column indices to read_pheno/read_covar")
+        if all_int:
+            _validate_integer_column_selection_bounds(path_or_filename, columns)
         if all_str:
             available_columns = pl.read_csv(path_or_filename, separator="\t", n_rows=0).columns
             available_set = set(available_columns)
@@ -300,10 +328,11 @@ def _read_pheno_or_covar(
             if missing:
                 missing_str = ", ".join(_dedupe_preserve_order(missing))
                 available_str = _format_available_values(available_columns, max_values=20)
+                suggestion = _format_suggestion_fragment_for_missing_values(missing, available_columns)
                 raise ValueError(
                     (
                         f"Requested column name(s) not found in '{path_or_filename}': {missing_str}. "
-                        f"Available columns: {available_str}"
+                        f"Available columns: {available_str}{suggestion}"
                     )
                 )
 
@@ -591,7 +620,10 @@ def _filter_blocks(
         if missing:
             missing_str = ", ".join(_dedupe_preserve_order(missing))
             available_str = _format_available_values(available_block_names)
-            raise ValueError((f"Unknown block name(s): {missing_str}. Available block names include: {available_str}"))
+            suggestion = _format_suggestion_fragment_for_missing_values(missing, available_block_names)
+            raise ValueError(
+                (f"Unknown block name(s): {missing_str}. Available block names include: {available_str}{suggestion}")
+            )
         block_metadata = block_metadata.filter(pl.col("block_name").cast(pl.String).is_in(requested_block_names))
     if chromosomes is not None:
         requested_raw = [str(x) for x in chromosomes]
@@ -604,11 +636,12 @@ def _filter_blocks(
         if missing:
             missing_str = ", ".join(_dedupe_preserve_order(missing))
             available_str = _format_available_values(available_raw)
+            suggestion = _format_suggestion_fragment_for_missing_values(missing, available_raw)
             raise ValueError(
                 (
                     f"Unknown chromosome selection(s): {missing_str}. "
                     f"Available chromosomes: {available_str}. "
-                    "Use values like '21' or 'chr21'."
+                    f"Use values like '21' or 'chr21'.{suggestion}"
                 )
             )
         block_metadata = (
@@ -1229,8 +1262,22 @@ def run_cli():
         return int(exc.code) if isinstance(exc.code, int) else 1
     except Exception as exc:
         # Explicit exit-code contract for runtime failures in CLI usage.
-        sys.stderr.write(f"error: {exc}{os.linesep}")
+        subcommand = _infer_primary_subcommand(sys.argv[1:])
+        if subcommand is not None:
+            sys.stderr.write(f"error: {subcommand}: {exc}{os.linesep}")
+        else:
+            sys.stderr.write(f"error: {exc}{os.linesep}")
         return 1
+
+
+def _infer_primary_subcommand(argv: list[str]) -> Optional[str]:
+    known_subcommands = {"assoc", "rhe", "score", "compress", "multi-step-compress"}
+    for token in argv:
+        if token in {"-v", "--verbose", "-q", "--quiet"}:
+            continue
+        if token in known_subcommands:
+            return token
+    return None
 
 
 def _resolve_cli_version() -> str:

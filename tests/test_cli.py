@@ -236,6 +236,22 @@ def test_load_required_block_metadata_invalid_block_name_has_actionable_error():
         )
 
 
+def test_load_required_block_metadata_invalid_block_name_includes_suggestion():
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    logger = cli.MemoryLogger(__name__)
+    with pytest.raises(ValueError, match=r"Unknown block name\(s\): 21_10000001\.0_10200000\.x") as excinfo:
+        cli._load_required_block_metadata(
+            str(linarg_path),
+            chromosomes=None,
+            block_names=["21_10000001.0_10200000.x"],
+            command_name="assoc/rhe",
+            logger=logger,
+        )
+    msg = str(excinfo.value)
+    assert "Did you mean:" in msg
+    assert "21_10000001.0_10200000.0" in msg
+
+
 def test_load_required_block_metadata_invalid_chromosome_has_actionable_error():
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
     logger = cli.MemoryLogger(__name__)
@@ -247,6 +263,22 @@ def test_load_required_block_metadata_invalid_chromosome_has_actionable_error():
             command_name="assoc/rhe",
             logger=logger,
         )
+
+
+def test_load_required_block_metadata_invalid_chromosome_includes_suggestion():
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    logger = cli.MemoryLogger(__name__)
+    with pytest.raises(ValueError, match=r"Unknown chromosome selection\(s\): 2_1") as excinfo:
+        cli._load_required_block_metadata(
+            str(linarg_path),
+            chromosomes=["2_1"],
+            block_names=None,
+            command_name="assoc/rhe",
+            logger=logger,
+        )
+    msg = str(excinfo.value)
+    assert "Did you mean:" in msg
+    assert "21" in msg
 
 
 def test_load_required_block_metadata_accepts_chr_prefix_for_numeric_blocks():
@@ -269,6 +301,15 @@ def test_read_pheno_or_covar_missing_named_column_has_actionable_error():
         cli._read_pheno_or_covar(str(pheno_path), columns=["iid", "not_a_col"])
 
 
+def test_read_pheno_or_covar_missing_named_column_includes_suggestion():
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    with pytest.raises(ValueError, match=r"Requested column name\(s\) not found.*heigt") as excinfo:
+        cli._read_pheno_or_covar(str(pheno_path), columns=["iid", "heigt"])
+    msg = str(excinfo.value)
+    assert "Did you mean:" in msg
+    assert "height" in msg
+
+
 def test_prep_data_missing_covar_name_has_actionable_error():
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
     pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
@@ -280,6 +321,108 @@ def test_prep_data_missing_covar_name_has_actionable_error():
             covar=str(pheno_path),
             covar_names=["iid", "not_a_col"],
         )
+
+
+def test_prep_data_missing_covar_name_includes_suggestion():
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    with pytest.raises(ValueError, match=r"Requested column name\(s\) not found.*heigt") as excinfo:
+        cli._prep_data(
+            str(linarg_path),
+            str(pheno_path),
+            pheno_names=["iid", "height"],
+            covar=str(pheno_path),
+            covar_names=["iid", "heigt"],
+        )
+    msg = str(excinfo.value)
+    assert "Did you mean:" in msg
+    assert "height" in msg
+
+
+def test_load_required_block_metadata_invalid_block_name_without_suggestion_lists_available():
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    logger = cli.MemoryLogger(__name__)
+    with pytest.raises(ValueError, match=r"Unknown block name\(s\): missing_block") as excinfo:
+        cli._load_required_block_metadata(
+            str(linarg_path),
+            chromosomes=None,
+            block_names=["missing_block"],
+            command_name="assoc/rhe",
+            logger=logger,
+        )
+    msg = str(excinfo.value)
+    assert "Available block names include:" in msg
+    assert "Did you mean:" not in msg
+
+
+def test_load_required_block_metadata_invalid_chromosome_without_suggestion_lists_available():
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    logger = cli.MemoryLogger(__name__)
+    with pytest.raises(ValueError, match=r"Unknown chromosome selection\(s\): not_a_chrom") as excinfo:
+        cli._load_required_block_metadata(
+            str(linarg_path),
+            chromosomes=["not_a_chrom"],
+            block_names=None,
+            command_name="assoc/rhe",
+            logger=logger,
+        )
+    msg = str(excinfo.value)
+    assert "Available chromosomes:" in msg
+    assert "Did you mean:" not in msg
+
+
+def test_read_pheno_or_covar_missing_named_column_without_suggestion_lists_available():
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    with pytest.raises(ValueError, match=r"Requested column name\(s\) not found.*totally_unknown_column") as excinfo:
+        cli._read_pheno_or_covar(str(pheno_path), columns=["iid", "totally_unknown_column"])
+    msg = str(excinfo.value)
+    assert "Available columns:" in msg
+    assert "Did you mean:" not in msg
+
+
+def test_read_pheno_or_covar_out_of_bounds_col_index_reports_bounds():
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    with pytest.raises(ValueError, match=r"out of bounds.*999") as excinfo:
+        cli._read_pheno_or_covar(str(pheno_path), columns=[0, 999])
+    msg = str(excinfo.value)
+    assert "Valid range: 0..5" in msg
+    assert "Total columns: 6" in msg
+
+
+def test_read_pheno_or_covar_negative_col_index_rejected():
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    with pytest.raises(ValueError, match="Must supply valid column indices to read_pheno/read_covar"):
+        cli._read_pheno_or_covar(str(pheno_path), columns=[0, -1])
+
+
+def test_prep_data_out_of_bounds_pheno_col_nums_reports_bounds():
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    with pytest.raises(ValueError, match=r"out of bounds.*999") as excinfo:
+        cli._prep_data(
+            str(linarg_path),
+            str(pheno_path),
+            pheno_col_nums=[0, 999],
+        )
+    msg = str(excinfo.value)
+    assert "Valid range: 0..5" in msg
+    assert "Total columns: 6" in msg
+
+
+def test_prep_data_out_of_bounds_covar_col_nums_reports_bounds():
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    with pytest.raises(ValueError, match=r"out of bounds.*999") as excinfo:
+        cli._prep_data(
+            str(linarg_path),
+            str(pheno_path),
+            pheno_col_nums=[0, 1],
+            covar=str(pheno_path),
+            covar_col_nums=[0, 999],
+        )
+    msg = str(excinfo.value)
+    assert "Valid range: 0..5" in msg
+    assert "Total columns: 6" in msg
 
 
 class _DummyContext:
@@ -534,12 +677,30 @@ def test_run_cli_maps_system_exit_to_explicit_code(monkeypatch):
     assert cli.run_cli() == 2
 
 
+def test_infer_primary_subcommand_skips_global_flags():
+    assert cli._infer_primary_subcommand(["-q", "--verbose", "assoc"]) == "assoc"
+
+
+def test_infer_primary_subcommand_returns_none_without_known_subcommand():
+    assert cli._infer_primary_subcommand(["-q", "--out", "result-prefix"]) is None
+
+
 def test_run_cli_runtime_error_returns_one_and_stderr(monkeypatch, capsys):
     def _fake_main(_args):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(cli, "_main", _fake_main)
     monkeypatch.setattr(cli.sys, "argv", ["kodama", "assoc"])
+    assert cli.run_cli() == 1
+    assert "error: assoc: boom" in capsys.readouterr().err
+
+
+def test_run_cli_runtime_error_without_subcommand_falls_back_to_plain_error(monkeypatch, capsys):
+    def _fake_main(_args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli, "_main", _fake_main)
+    monkeypatch.setattr(cli.sys, "argv", ["kodama", "-q"])
     assert cli.run_cli() == 1
     assert "error: boom" in capsys.readouterr().err
 
@@ -571,6 +732,37 @@ def test_run_cli_invalid_block_name_returns_one_and_actionable_stderr(monkeypatc
     assert "Unknown block name(s): missing_block" in capsys.readouterr().err
 
 
+def test_run_cli_invalid_block_name_includes_suggestion_in_stderr(monkeypatch, capsys, tmp_path: Path):
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    out_prefix = tmp_path / "invalid_block_typo"
+
+    monkeypatch.setattr(
+        cli.sys,
+        "argv",
+        [
+            "kodama",
+            "-q",
+            "assoc",
+            str(linarg_path),
+            str(pheno_path),
+            "--pheno-name",
+            "iid,height",
+            "--block-names",
+            "21_10000001.0_10200000.x",
+            "--out",
+            str(out_prefix),
+        ],
+    )
+
+    assert cli.run_cli() == 1
+    stderr = capsys.readouterr().err
+    assert "error: assoc:" in stderr
+    assert "Unknown block name(s): 21_10000001.0_10200000.x" in stderr
+    assert "Did you mean:" in stderr
+    assert "21_10000001.0_10200000.0" in stderr
+
+
 def test_run_cli_invalid_chromosome_returns_one_and_actionable_stderr(monkeypatch, capsys, tmp_path: Path):
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
     pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
@@ -596,6 +788,37 @@ def test_run_cli_invalid_chromosome_returns_one_and_actionable_stderr(monkeypatc
 
     assert cli.run_cli() == 1
     assert "Unknown chromosome selection(s): not_a_chrom" in capsys.readouterr().err
+
+
+def test_run_cli_invalid_chromosome_includes_suggestion_in_stderr(monkeypatch, capsys, tmp_path: Path):
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    out_prefix = tmp_path / "invalid_chrom_typo"
+
+    monkeypatch.setattr(
+        cli.sys,
+        "argv",
+        [
+            "kodama",
+            "-q",
+            "assoc",
+            str(linarg_path),
+            str(pheno_path),
+            "--pheno-name",
+            "iid,height",
+            "--chromosomes",
+            "2_1",
+            "--out",
+            str(out_prefix),
+        ],
+    )
+
+    assert cli.run_cli() == 1
+    stderr = capsys.readouterr().err
+    assert "error: assoc:" in stderr
+    assert "Unknown chromosome selection(s): 2_1" in stderr
+    assert "Did you mean:" in stderr
+    assert "21" in stderr
 
 
 def test_run_cli_missing_covar_column_returns_one_and_actionable_stderr(monkeypatch, capsys, tmp_path: Path):
@@ -625,3 +848,96 @@ def test_run_cli_missing_covar_column_returns_one_and_actionable_stderr(monkeypa
 
     assert cli.run_cli() == 1
     assert "Requested column name(s) not found" in capsys.readouterr().err
+
+
+def test_run_cli_missing_covar_column_includes_suggestion_in_stderr(monkeypatch, capsys, tmp_path: Path):
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    out_prefix = tmp_path / "invalid_covar_typo"
+
+    monkeypatch.setattr(
+        cli.sys,
+        "argv",
+        [
+            "kodama",
+            "-q",
+            "assoc",
+            str(linarg_path),
+            str(pheno_path),
+            "--pheno-name",
+            "iid,height",
+            "--covar",
+            str(pheno_path),
+            "--covar-name",
+            "iid,heigt",
+            "--out",
+            str(out_prefix),
+        ],
+    )
+
+    assert cli.run_cli() == 1
+    stderr = capsys.readouterr().err
+    assert "error: assoc:" in stderr
+    assert "Requested column name(s) not found" in stderr
+    assert "Did you mean:" in stderr
+    assert "height" in stderr
+
+
+def test_run_cli_out_of_bounds_pheno_col_nums_returns_bounds_error(monkeypatch, capsys, tmp_path: Path):
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    out_prefix = tmp_path / "invalid_pheno_col_num"
+
+    monkeypatch.setattr(
+        cli.sys,
+        "argv",
+        [
+            "kodama",
+            "-q",
+            "assoc",
+            str(linarg_path),
+            str(pheno_path),
+            "--pheno-col-nums",
+            "0,999",
+            "--out",
+            str(out_prefix),
+        ],
+    )
+
+    assert cli.run_cli() == 1
+    stderr = capsys.readouterr().err
+    assert "Requested column index value(s) out of bounds" in stderr
+    assert "Valid range: 0..5" in stderr
+    assert "Total columns: 6" in stderr
+
+
+def test_run_cli_out_of_bounds_covar_col_nums_returns_bounds_error(monkeypatch, capsys, tmp_path: Path):
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+    out_prefix = tmp_path / "invalid_covar_col_num"
+
+    monkeypatch.setattr(
+        cli.sys,
+        "argv",
+        [
+            "kodama",
+            "-q",
+            "assoc",
+            str(linarg_path),
+            str(pheno_path),
+            "--pheno-col-nums",
+            "0,1",
+            "--covar",
+            str(pheno_path),
+            "--covar-col-nums",
+            "0,999",
+            "--out",
+            str(out_prefix),
+        ],
+    )
+
+    assert cli.run_cli() == 1
+    stderr = capsys.readouterr().err
+    assert "Requested column index value(s) out of bounds" in stderr
+    assert "Valid range: 0..5" in stderr
+    assert "Total columns: 6" in stderr
