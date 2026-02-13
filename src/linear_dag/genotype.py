@@ -1,3 +1,4 @@
+import logging
 import os
 
 from collections import defaultdict
@@ -173,13 +174,13 @@ def load_genotypes(
     maf_threshold: Optional[float] = None,
     rsq_threshold: Optional[float] = None,
     skiprows: int = 0,
+    logger: Optional[logging.Logger] = None,
 ) -> tuple[csc_matrix, NDArray, NDArray]:
     """Load genotype matrix data from `<prefix>.mtx` or `<prefix>.txt`.
 
     !!! info
 
-        This helper prints the number of retained variants and is primarily used by
-        compression/inference flows, not end-user CLI output.
+        This helper reports retained-variant counts via logger when provided.
 
     **Arguments:**
 
@@ -188,6 +189,7 @@ def load_genotypes(
     - `maf_threshold`: Optional minor-allele-frequency cutoff.
     - `rsq_threshold`: Optional dosage-to-hardcall correlation cutoff.
     - `skiprows`: Number of rows to skip when loading text genotype files.
+    - `logger`: Optional logger for retained-variant progress output.
 
     **Returns:**
 
@@ -229,7 +231,11 @@ def load_genotypes(
         genotypes, common_variants = apply_maf_threshold(genotypes, ploidy, maf_threshold)
 
     kept_variants = well_imputed_variants[common_variants]
-    print("kept_variants:", kept_variants.shape)
+    message = f"kept_variants: {kept_variants.shape}"
+    if logger is None:
+        print(message)
+    else:
+        logger.info(message)
 
     if flip_minor_alleles:
         genotypes, flipped_variants = flip_alleles(genotypes, ploidy)

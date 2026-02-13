@@ -1,6 +1,9 @@
 # linear_arg_inference.py
+import logging
 import time
 import warnings
+
+from typing import Optional
 
 import numpy as np
 import polars as pl
@@ -13,7 +16,14 @@ from .recombination import Recombination
 from .solve import spinv_make_triangular
 
 
-def linear_arg_from_genotypes(genotypes, flip, variant_info, find_recombinations, verbosity):
+def linear_arg_from_genotypes(
+    genotypes,
+    flip,
+    variant_info,
+    find_recombinations,
+    verbosity,
+    logger: Optional[logging.Logger] = None,
+):
     """Infer a linearized ARG adjacency matrix from sparse genotypes.
 
     **Arguments:**
@@ -22,7 +32,8 @@ def linear_arg_from_genotypes(genotypes, flip, variant_info, find_recombinations
     - `flip`: Boolean flip vector aligned to input variants.
     - `variant_info`: Optional variant metadata DataFrame.
     - `find_recombinations`: Whether to explicitly infer recombination events.
-    - `verbosity`: Verbosity level for timing/progress prints.
+    - `verbosity`: Verbosity level for timing/progress output.
+    - `logger`: Optional logger used when `verbosity > 0`. If omitted, output is printed.
 
     **Returns:**
 
@@ -37,31 +48,33 @@ def linear_arg_from_genotypes(genotypes, flip, variant_info, find_recombinations
     if type(genotypes) is not csc_matrix:
         raise TypeError
 
-    if verbosity > 0:
-        print("Inferring brick graph")
+    def _emit_progress(message: str) -> None:
+        if verbosity <= 0:
+            return
+        if logger is None:
+            print(message)
+            return
+        logger.info(message)
+
+    _emit_progress("Inferring brick graph")
     t0 = time.time()
     brick_graph, samples_idx, variants_idx = BrickGraph.from_genotypes(genotypes)
     t1 = time.time()
-    if verbosity > 0:
-        print(f"  Time: {t1 - t0:.3f}s")
+    _emit_progress(f"  Time: {t1 - t0:.3f}s")
 
-    if verbosity > 0:
-        print("Finding recombinations")
+    _emit_progress("Finding recombinations")
     t0 = time.time()
     recom = Recombination.from_graph(brick_graph)
     if find_recombinations:
         recom.find_recombinations()
     t1 = time.time()
-    if verbosity > 0:
-        print(f"  Time: {t1 - t0:.3f}s")
+    _emit_progress(f"  Time: {t1 - t0:.3f}s")
 
-    if verbosity > 0:
-        print("Linearizing brick graph")
+    _emit_progress("Linearizing brick graph")
     t0 = time.time()
     linear_arg_adjacency_matrix = csc_matrix(linearize_brick_graph(recom))
     t1 = time.time()
-    if verbosity > 0:
-        print(f"  Time: {t1 - t0:.3f}s")
+    _emit_progress(f"  Time: {t1 - t0:.3f}s")
 
     num_variants = len(variants_idx)
     if variant_info is None:

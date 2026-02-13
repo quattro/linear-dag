@@ -1,4 +1,5 @@
 # lineararg.py
+import logging
 import os
 
 from dataclasses import dataclass
@@ -31,6 +32,13 @@ from .solve import (
     spsolve_forward_triangular_matmat,
     topological_sort,
 )
+
+
+def _emit_progress(message: str, logger: Optional[logging.Logger]) -> None:
+    if logger is None:
+        print(message)
+        return
+    logger.info(message)
 
 
 @dataclass
@@ -128,6 +136,7 @@ class LinearARG(LinearOperator):
         find_recombinations: bool = True,
         sex: Optional[npt.NDArray[np.int32]] = None,
         verbosity: int = 0,
+        logger: Optional[logging.Logger] = None,
     ):
         """Infer a [`linear_dag.core.lineararg.LinearARG`][] from phased genotypes.
 
@@ -140,6 +149,7 @@ class LinearARG(LinearOperator):
         - `find_recombinations`: Whether to infer recombination nodes before linearization.
         - `sex`: Optional per-individual sex array for later individual-node expansion.
         - `verbosity`: Verbosity level for timing/progress output.
+        - `logger`: Optional logger used for progress messages when `verbosity > 0`.
 
         **Returns:**
 
@@ -152,27 +162,27 @@ class LinearARG(LinearOperator):
         import time
 
         A, flip, variants_idx, samples_idx, variant_info = linear_arg_from_genotypes(
-            genotypes, flip, variant_info, find_recombinations, verbosity
+            genotypes, flip, variant_info, find_recombinations, verbosity, logger=logger
         )
 
         if verbosity > 0:
-            print("Removing degree-zero nodes")
+            _emit_progress("Removing degree-zero nodes", logger)
         t0 = time.time()
         A_filt, variants_idx_reindexed, samples_idx_reindexed = remove_degree_zero_nodes(A, variants_idx, samples_idx)
         t1 = time.time()
         if verbosity > 0:
-            print(f"  Time: {t1 - t0:.3f}s")
+            _emit_progress(f"  Time: {t1 - t0:.3f}s", logger)
 
         if verbosity > 0:
-            print("Making triangular")
+            _emit_progress("Making triangular", logger)
         t0 = time.time()
         A_tri, variants_idx_tri = make_triangular(A_filt, variants_idx_reindexed, samples_idx_reindexed)
         t1 = time.time()
         if verbosity > 0:
-            print(f"  Time: {t1 - t0:.3f}s")
+            _emit_progress(f"  Time: {t1 - t0:.3f}s", logger)
 
         if verbosity > 0:
-            print("Creating LinearARG object")
+            _emit_progress("Creating LinearARG object", logger)
         t0 = time.time()
         linarg = LinearARG(
             A_tri,
@@ -186,7 +196,7 @@ class LinearARG(LinearOperator):
         linarg.calculate_nonunique_indices()
         t1 = time.time()
         if verbosity > 0:
-            print(f"  Time: {t1 - t0:.3f}s")
+            _emit_progress(f"  Time: {t1 - t0:.3f}s", logger)
         return linarg
 
     @staticmethod
@@ -201,6 +211,7 @@ class LinearARG(LinearOperator):
         maf_filter: float = None,
         snps_only: bool = False,
         remove_multiallelics: bool = False,
+        logger: Optional[logging.Logger] = None,
     ) -> Union[tuple, "LinearARG"]:
         """Read a VCF and infer a [`linear_dag.core.lineararg.LinearARG`][].
 
@@ -216,6 +227,7 @@ class LinearARG(LinearOperator):
         - `maf_filter`: Optional MAF filter applied during VCF parsing.
         - `snps_only`: Whether to remove indels.
         - `remove_multiallelics`: Whether to remove multi-allelic sites.
+        - `logger`: Optional logger used for progress messages when `verbosity > 0`.
 
         **Returns:**
 
@@ -230,7 +242,7 @@ class LinearARG(LinearOperator):
         import time
 
         if verbosity > 0:
-            print("Reading VCF")
+            _emit_progress("Reading VCF", logger)
         t0 = time.time()
         genotypes, flip, v_info, iids = read_vcf(
             path,
@@ -243,12 +255,12 @@ class LinearARG(LinearOperator):
         )
         t1 = time.time()
         if verbosity > 0:
-            print(f"  Time: {t1 - t0:.3f}s")
-        if verbosity > 0:
-            print(f"Number of variants: {genotypes.shape[1]}")
+            _emit_progress(f"  Time: {t1 - t0:.3f}s", logger)
 
         if genotypes is None:
             raise ValueError("No valid variants found in VCF")
+        if verbosity > 0:
+            _emit_progress(f"Number of variants: {genotypes.shape[1]}", logger)
 
         if phased:
             iids = [id_ for id_ in iids for _ in range(2)]
@@ -257,7 +269,7 @@ class LinearARG(LinearOperator):
             genotypes = genotypes[include_samples, :]
             iids = [iids[i] for i in include_samples]
 
-        result = LinearARG.from_genotypes(genotypes, flip, v_info, iids=iids, verbosity=verbosity)
+        result = LinearARG.from_genotypes(genotypes, flip, v_info, iids=iids, verbosity=verbosity, logger=logger)
 
         return (result, genotypes) if return_genotypes else result
 
@@ -1012,8 +1024,12 @@ class LinearARG(LinearOperator):
         mask = in_bed & maf_ok
         self.filter_variants_by_mask(mask)
 
-    def calculate_nonunique_indices(self) -> None:
+    def calculate_nonunique_indices(self, logger: Optional[logging.Logger] = None) -> None:
         """Compute and cache non-unique index compression metadata.
+
+        **Arguments:**
+
+        - `logger`: Optional logger for progress output while computing index metadata.
 
         **Returns:**
 
@@ -1033,7 +1049,8 @@ class LinearARG(LinearOperator):
                 individual_indices=individual_indices,
             )
             self.nonunique_indices = np.asarray(self.nonunique_indices)
-            print(f"Non-unique indices: {self.num_nonunique_indices} vs. {self.A.shape[0]}")
+            if logger is not None:
+                logger.info(f"Non-unique indices: {self.num_nonunique_indices} vs. {self.A.shape[0]}")
 
     @cached_property
     def num_nonunique_indices(self) -> Optional[int]:

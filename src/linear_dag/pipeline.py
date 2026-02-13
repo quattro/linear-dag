@@ -75,6 +75,7 @@ def compress_vcf(
         region=region,
         include_samples=include_samples,
         flip_minor_alleles=flip_minor_alleles,
+        logger=logger,
         maf_filter=maf_filter,
         snps_only=remove_indels,
         remove_multiallelics=remove_multiallelics,
@@ -89,7 +90,7 @@ def compress_vcf(
     if add_individual_nodes:
         linarg = linarg.add_individual_nodes()
     else:
-        linarg.calculate_nonunique_indices()
+        linarg.calculate_nonunique_indices(logger=logger)
 
     if region:
         chrom, pos = region.split(":")
@@ -906,7 +907,7 @@ def merge(
     )
     A_tri, variant_indices_tri = make_triangular(A_filt, variant_indices_reindexed, sample_indices_reindexed)
     linarg = LinearARG(A_tri, variant_indices_tri, flip, len(sample_indices), variants=var_info, sex=sex, iids=iids)
-    linarg.calculate_nonunique_indices()
+    linarg.calculate_nonunique_indices(logger=logger)
     logger.info("Saving linear ARG")
 
     block = {
