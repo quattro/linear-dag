@@ -128,7 +128,7 @@ class LinearARG(LinearOperator):
         iids: Optional[list] = None,
         find_recombinations: bool = True,
         sex: Optional[npt.NDArray[np.int32]] = None,
-        verbosity: int = 0,
+        logger: Optional[logging.Logger] = None,
     ):
         """Infer a [`linear_dag.core.lineararg.LinearARG`][] from phased genotypes.
 
@@ -140,7 +140,7 @@ class LinearARG(LinearOperator):
         - `iids`: Optional identifiers corresponding to genotype rows.
         - `find_recombinations`: Whether to infer recombination nodes before linearization.
         - `sex`: Optional per-individual sex array for later individual-node expansion.
-        - `verbosity`: Verbosity level for timing/progress output.
+        - `logger`: Optional logger for timing/progress output.
 
         **Returns:**
 
@@ -152,30 +152,28 @@ class LinearARG(LinearOperator):
         """
         import time
 
-        progress_logger = logging.getLogger(__name__)
-
         A, flip, variants_idx, samples_idx, variant_info = linear_arg_from_genotypes(
-            genotypes, flip, variant_info, find_recombinations, verbosity
+            genotypes, flip, variant_info, find_recombinations, logger=logger
         )
 
-        if verbosity > 0:
-            progress_logger.info("Removing degree-zero nodes")
+        if logger is not None:
+            logger.info("Removing degree-zero nodes")
         t0 = time.time()
         A_filt, variants_idx_reindexed, samples_idx_reindexed = remove_degree_zero_nodes(A, variants_idx, samples_idx)
         t1 = time.time()
-        if verbosity > 0:
-            progress_logger.info(f"  Time: {t1 - t0:.3f}s")
+        if logger is not None:
+            logger.info(f"  Time: {t1 - t0:.3f}s")
 
-        if verbosity > 0:
-            progress_logger.info("Making triangular")
+        if logger is not None:
+            logger.info("Making triangular")
         t0 = time.time()
         A_tri, variants_idx_tri = make_triangular(A_filt, variants_idx_reindexed, samples_idx_reindexed)
         t1 = time.time()
-        if verbosity > 0:
-            progress_logger.info(f"  Time: {t1 - t0:.3f}s")
+        if logger is not None:
+            logger.info(f"  Time: {t1 - t0:.3f}s")
 
-        if verbosity > 0:
-            progress_logger.info("Creating LinearARG object")
+        if logger is not None:
+            logger.info("Creating LinearARG object")
         t0 = time.time()
         linarg = LinearARG(
             A_tri,
@@ -188,8 +186,8 @@ class LinearARG(LinearOperator):
         )
         linarg.calculate_nonunique_indices()
         t1 = time.time()
-        if verbosity > 0:
-            progress_logger.info(f"  Time: {t1 - t0:.3f}s")
+        if logger is not None:
+            logger.info(f"  Time: {t1 - t0:.3f}s")
         return linarg
 
     @staticmethod
@@ -200,7 +198,7 @@ class LinearARG(LinearOperator):
         include_samples: Optional[list] = None,
         flip_minor_alleles: bool = False,
         return_genotypes: bool = False,
-        verbosity: int = 0,
+        logger: Optional[logging.Logger] = None,
         maf_filter: float = None,
         snps_only: bool = False,
         remove_multiallelics: bool = False,
@@ -215,7 +213,7 @@ class LinearARG(LinearOperator):
         - `include_samples`: Optional row indices to keep after loading.
         - `flip_minor_alleles`: Whether to flip minor alleles during VCF parsing.
         - `return_genotypes`: Whether to return `(linarg, genotypes)` instead of only `linarg`.
-        - `verbosity`: Verbosity level for timing/progress output.
+        - `logger`: Optional logger for timing/progress output.
         - `maf_filter`: Optional MAF filter applied during VCF parsing.
         - `snps_only`: Whether to remove indels.
         - `remove_multiallelics`: Whether to remove multi-allelic sites.
@@ -232,10 +230,8 @@ class LinearARG(LinearOperator):
         """
         import time
 
-        progress_logger = logging.getLogger(__name__)
-
-        if verbosity > 0:
-            progress_logger.info("Reading VCF")
+        if logger is not None:
+            logger.info("Reading VCF")
         t0 = time.time()
         genotypes, flip, v_info, iids = read_vcf(
             path,
@@ -247,13 +243,13 @@ class LinearARG(LinearOperator):
             remove_multiallelics=remove_multiallelics,
         )
         t1 = time.time()
-        if verbosity > 0:
-            progress_logger.info(f"  Time: {t1 - t0:.3f}s")
+        if logger is not None:
+            logger.info(f"  Time: {t1 - t0:.3f}s")
 
         if genotypes is None:
             raise ValueError("No valid variants found in VCF")
-        if verbosity > 0:
-            progress_logger.info(f"Number of variants: {genotypes.shape[1]}")
+        if logger is not None:
+            logger.info(f"Number of variants: {genotypes.shape[1]}")
 
         if phased:
             iids = [id_ for id_ in iids for _ in range(2)]
@@ -262,7 +258,7 @@ class LinearARG(LinearOperator):
             genotypes = genotypes[include_samples, :]
             iids = [iids[i] for i in include_samples]
 
-        result = LinearARG.from_genotypes(genotypes, flip, v_info, iids=iids, verbosity=verbosity)
+        result = LinearARG.from_genotypes(genotypes, flip, v_info, iids=iids, logger=logger)
 
         return (result, genotypes) if return_genotypes else result
 

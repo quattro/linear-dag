@@ -75,6 +75,7 @@ def compress_vcf(
         region=region,
         include_samples=include_samples,
         flip_minor_alleles=flip_minor_alleles,
+        logger=logger,
         maf_filter=maf_filter,
         snps_only=remove_indels,
         remove_multiallelics=remove_multiallelics,

@@ -225,7 +225,7 @@ def test_filter_blocks_rejects_block_names_and_chromosomes_together():
 
 def test_load_required_block_metadata_invalid_block_name_has_actionable_error():
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
-    logger = cli.MemoryLogger(__name__)
+    logger = logging.getLogger("linear_dag.tests.cli.blocks.invalid_chrom")
     with pytest.raises(ValueError, match=r"Unknown block name\(s\): missing_block"):
         cli._load_required_block_metadata(
             str(linarg_path),
@@ -238,7 +238,7 @@ def test_load_required_block_metadata_invalid_block_name_has_actionable_error():
 
 def test_load_required_block_metadata_invalid_block_name_includes_suggestion():
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
-    logger = cli.MemoryLogger(__name__)
+    logger = logging.getLogger("linear_dag.tests.cli.blocks.invalid_chrom_suggestion")
     with pytest.raises(ValueError, match=r"Unknown block name\(s\): 21_10000001\.0_10200000\.x") as excinfo:
         cli._load_required_block_metadata(
             str(linarg_path),
@@ -254,7 +254,7 @@ def test_load_required_block_metadata_invalid_block_name_includes_suggestion():
 
 def test_load_required_block_metadata_invalid_chromosome_has_actionable_error():
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
-    logger = cli.MemoryLogger(__name__)
+    logger = logging.getLogger("linear_dag.tests.cli.blocks.chr_prefix")
     with pytest.raises(ValueError, match=r"Unknown chromosome selection\(s\): not_a_chrom"):
         cli._load_required_block_metadata(
             str(linarg_path),
@@ -267,7 +267,7 @@ def test_load_required_block_metadata_invalid_chromosome_has_actionable_error():
 
 def test_load_required_block_metadata_invalid_chromosome_includes_suggestion():
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
-    logger = cli.MemoryLogger(__name__)
+    logger = logging.getLogger("linear_dag.tests.cli.blocks.invalid_block")
     with pytest.raises(ValueError, match=r"Unknown chromosome selection\(s\): 2_1") as excinfo:
         cli._load_required_block_metadata(
             str(linarg_path),
@@ -283,7 +283,7 @@ def test_load_required_block_metadata_invalid_chromosome_includes_suggestion():
 
 def test_load_required_block_metadata_accepts_chr_prefix_for_numeric_blocks():
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
-    logger = cli.MemoryLogger(__name__)
+    logger = logging.getLogger("linear_dag.tests.cli.blocks.invalid_chrom_no_suggestion")
     block_metadata = cli._load_required_block_metadata(
         str(linarg_path),
         chromosomes=["chr21"],
@@ -341,7 +341,7 @@ def test_prep_data_missing_covar_name_includes_suggestion():
 
 def test_load_required_block_metadata_invalid_block_name_without_suggestion_lists_available():
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
-    logger = cli.MemoryLogger(__name__)
+    logger = logging.getLogger("linear_dag.tests.cli.blocks.no_blocks")
     with pytest.raises(ValueError, match=r"Unknown block name\(s\): missing_block") as excinfo:
         cli._load_required_block_metadata(
             str(linarg_path),
@@ -357,7 +357,7 @@ def test_load_required_block_metadata_invalid_block_name_without_suggestion_list
 
 def test_load_required_block_metadata_invalid_chromosome_without_suggestion_lists_available():
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
-    logger = cli.MemoryLogger(__name__)
+    logger = logging.getLogger("linear_dag.tests.cli.blocks.no_blocks_filtered")
     with pytest.raises(ValueError, match=r"Unknown chromosome selection\(s\): not_a_chrom") as excinfo:
         cli._load_required_block_metadata(
             str(linarg_path),
@@ -693,6 +693,26 @@ def test_create_cli_logger_context_configures_debug_level_and_file_output(tmp_pa
             log.removeHandler(handler)
             handler.close()
         cli._remove_cli_handlers(log)
+
+
+def test_prep_data_allows_none_logger():
+    linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
+
+    block_metadata, covar_cols, pheno_cols, phenotypes = cli._prep_data(
+        str(linarg_path),
+        str(pheno_path),
+        pheno_names=["iid", "height"],
+    )
+
+    assert block_metadata.height > 0
+    assert covar_cols == ["i0"]
+    assert pheno_cols == ["height"]
+    assert "i0" in phenotypes.columns
+
+
+def test_cli_module_no_logger_coercion_helper():
+    assert not hasattr(cli, "_coerce_logger")
 
 
 def test_main_repeated_invocations_do_not_accumulate_cli_handlers(monkeypatch, tmp_path: Path):

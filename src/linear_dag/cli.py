@@ -29,7 +29,7 @@ from .association.heritability import randomized_haseman_elston
 from .association.prs import run_prs
 from .core.lineararg import list_blocks, load_variant_info
 from .core.parallel_processing import GRMOperator, ParallelOperator
-from .memory_logger import ensure_memory_usage_filter, MemoryLogger
+from .memory_logger import ensure_memory_usage_filter
 
 title = """                            @@@@
           @@@@@@            @@@@@
@@ -561,10 +561,8 @@ def _prep_data(
     chromosomes: Optional[list[str]] = None,
     block_names: Optional[list[str]] = None,
     num_processes: Optional[int] = None,
-    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+    logger: Optional[logging.Logger] = None,
 ):
-    logger = _coerce_logger(logger)
-
     _validate_num_processes(num_processes)
     block_metadata = _load_required_block_metadata(
         linarg_path,
@@ -574,7 +572,8 @@ def _prep_data(
         logger=logger,
     )
 
-    logger.info("Loading phenotypes")
+    if logger is not None:
+        logger.info("Loading phenotypes")
     columns = _select_columns(pheno_names, pheno_col_nums)
     phenotypes = _read_pheno_or_covar(pheno, columns)
     pheno_cols = [x for x in phenotypes.columns if x != "iid"]
@@ -583,7 +582,8 @@ def _prep_data(
     phenotypes = phenotypes.filter(pl.any_horizontal([pl.col(c).is_not_null() for c in pheno_cols]))
 
     if covar is not None:
-        logger.info("Loading covariates")
+        if logger is not None:
+            logger.info("Loading covariates")
         columns = _select_columns(covar_names, covar_col_nums)
         covars = _read_pheno_or_covar(covar, columns)
         covar_cols = ["i0"] + [x for x in covars.columns if x != "iid"]
@@ -702,10 +702,10 @@ def _load_required_block_metadata(
     chromosomes: Optional[list[str]],
     block_names: Optional[list[str]],
     command_name: str,
-    logger: Union[logging.Logger, MemoryLogger],
+    logger: Optional[logging.Logger] = None,
 ) -> pl.DataFrame:
-    logger = _coerce_logger(logger)
-    logger.info("Getting blocks")
+    if logger is not None:
+        logger.info("Getting blocks")
     block_metadata = list_blocks(linarg_path)
     block_metadata = _filter_blocks(block_metadata, chromosomes=chromosomes, block_names=block_names)
     return _require_block_metadata(block_metadata, linarg_path, command_name=command_name)
@@ -729,7 +729,7 @@ def _build_parallel_operator_kwargs(
 def _attach_variant_info(
     association_results: pl.LazyFrame,
     variant_info: pl.LazyFrame,
-    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+    logger: Optional[logging.Logger] = None,
 ) -> pl.LazyFrame:
     """Attach variant metadata to association results using an explicit alignment join.
 
@@ -747,9 +747,8 @@ def _attach_variant_info(
             )
         )
 
-    active_logger = _coerce_logger(logger) if logger is not None else None
-    if active_logger is not None:
-        active_logger.info(f"Aligning variant metadata via row-index join ({result_count} rows)")
+    if logger is not None:
+        logger.info(f"Aligning variant metadata via row-index join ({result_count} rows)")
 
     metadata_cols = variant_info.collect_schema().names()
     result_cols = association_results.collect_schema().names()
@@ -1289,14 +1288,6 @@ def _create_cli_logger_context(
         disk_handler._linear_dag_cli_stream = disk_log_stream
         log.addHandler(disk_handler)
     return log
-
-
-def _coerce_logger(logger: Optional[Union[logging.Logger, MemoryLogger]]) -> logging.Logger:
-    if isinstance(logger, MemoryLogger):
-        return logger.logger
-    if logger is not None:
-        return logger
-    return MemoryLogger(__name__, log_file=None).logger
 
 
 if __name__ == "__main__":
