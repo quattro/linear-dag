@@ -668,6 +668,50 @@ def test_construct_cmd_string_is_copy_paste_executable():
     assert parser.parse_args(reconstructed_args) == parsed
 
 
+def test_create_cli_logger_context_configures_debug_level_and_file_output(tmp_path: Path):
+    logger = logging.getLogger(cli.__name__)
+    cli._remove_cli_handlers(logger)
+    args = Namespace(verbose=True, quiet=True, out=str(tmp_path / "cli_context"))
+
+    log, handlers, streams = cli._create_cli_logger_context(args, "masthead\n", "kodama assoc")
+    try:
+        assert log is logger
+        assert log.level == logging.DEBUG
+        assert len(handlers) == 1
+        assert getattr(handlers[0], "_linear_dag_cli_handler", False)
+
+        log.info("logger context smoke")
+        for handler in handlers:
+            handler.flush()
+        log_path = tmp_path / "cli_context.log"
+        assert log_path.exists()
+        text = log_path.read_text()
+        assert "Starting log..." in text
+        assert "logger context smoke" in text
+    finally:
+        for handler in handlers:
+            log.removeHandler(handler)
+            handler.close()
+        for stream in streams:
+            stream.close()
+
+
+def test_main_repeated_invocations_do_not_accumulate_cli_handlers(monkeypatch, tmp_path: Path):
+    def _fake_assoc(_args):
+        return None
+
+    monkeypatch.setattr(cli, "_assoc_scan", _fake_assoc)
+    logger = logging.getLogger(cli.__name__)
+    cli._remove_cli_handlers(logger)
+
+    for idx in range(3):
+        out_prefix = tmp_path / f"assoc_run_{idx}"
+        rc = cli._main(["-q", "assoc", "dummy.h5", "dummy.tsv", "--out", str(out_prefix)])
+        assert rc == 0 or rc is None
+        managed_handlers = [h for h in logger.handlers if getattr(h, "_linear_dag_cli_handler", False)]
+        assert managed_handlers == []
+
+
 def test_run_cli_maps_system_exit_to_explicit_code(monkeypatch):
     def _fake_main(_args):
         raise SystemExit(2)

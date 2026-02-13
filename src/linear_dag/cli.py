@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from importlib import metadata
 from os import PathLike
-from typing import Optional, Union
+from typing import IO, Optional, Union
 
 import polars as pl
 
@@ -29,7 +29,7 @@ from .association.heritability import randomized_haseman_elston
 from .association.prs import run_prs
 from .core.lineararg import list_blocks, load_variant_info
 from .core.parallel_processing import GRMOperator, ParallelOperator
-from .memory_logger import MemoryLogger
+from .memory_logger import ensure_memory_usage_filter, MemoryLogger
 
 title = """                            @@@@
           @@@@@@            @@@@@
@@ -1127,42 +1127,7 @@ def _main(args):
     masthead = title_and_ver + os.linesep
 
     # setup logging
-    log = logging.getLogger(__name__)
-    log_format = "[%(asctime)s - %(levelname)s - %(memory_usage).2f MB] %(message)s"
-    date_format = "%Y-%m-%d %H:%M:%S"
-
-    if args.verbose:
-        log.setLevel(logging.DEBUG)
-    else:
-        log.setLevel(logging.INFO)
-    fmt = logging.Formatter(fmt=log_format, datefmt=date_format)
-    log.propagate = False
-    _remove_cli_handlers(log)
-
-    cli_handlers: list[logging.Handler] = []
-
-    if not args.quiet:
-        sys.stdout.write(masthead)
-        sys.stdout.write(cmd_str + os.linesep)
-        sys.stdout.write("Starting log..." + os.linesep)
-        stdout_handler = logging.StreamHandler(sys.stdout)
-        stdout_handler.setFormatter(fmt)
-        stdout_handler._linear_dag_cli_handler = True
-        log.addHandler(stdout_handler)
-        cli_handlers.append(stdout_handler)
-
-    # setup log file, but write PLINK-style command first
-    if hasattr(args, "out") and args.out:
-        disk_log_stream = open(f"{args.out}.log", "w")
-        disk_log_stream.write(masthead)
-        disk_log_stream.write(cmd_str + os.linesep)
-        disk_log_stream.write("Starting log..." + os.linesep)
-
-        disk_handler = logging.StreamHandler(disk_log_stream)
-        disk_handler.setFormatter(fmt)
-        disk_handler._linear_dag_cli_handler = True
-        log.addHandler(disk_handler)
-        cli_handlers.append(disk_handler)
+    log, cli_handlers, cli_streams = _create_cli_logger_context(args, masthead, cmd_str)
 
     try:
         if hasattr(args, "num_processes"):
@@ -1178,6 +1143,9 @@ def _main(args):
         for handler in cli_handlers:
             log.removeHandler(handler)
             handler.close()
+        for stream in cli_streams:
+            if not stream.closed:
+                stream.close()
 
 
 def _create_common_parser(subp, name, help):
@@ -1290,8 +1258,57 @@ def _resolve_cli_version() -> str:
 def _remove_cli_handlers(log: logging.Logger) -> None:
     for handler in list(log.handlers):
         if getattr(handler, "_linear_dag_cli_handler", False):
+            stream = getattr(handler, "_linear_dag_cli_stream", None)
             log.removeHandler(handler)
             handler.close()
+            if stream is not None and not stream.closed:
+                stream.close()
+
+
+def _create_cli_logger_context(
+    args: argparse.Namespace,
+    masthead: str,
+    cmd_str: str,
+) -> tuple[logging.Logger, list[logging.Handler], list[IO[str]]]:
+    log = logging.getLogger(__name__)
+    log_format = "[%(asctime)s - %(levelname)s - %(memory_usage).2f MB] %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+
+    log.setLevel(logging.DEBUG if args.verbose else logging.INFO)
+    log.propagate = False
+    _remove_cli_handlers(log)
+    ensure_memory_usage_filter(log)
+
+    fmt = logging.Formatter(fmt=log_format, datefmt=date_format)
+    cli_handlers: list[logging.Handler] = []
+    cli_streams: list[IO[str]] = []
+
+    if not args.quiet:
+        sys.stdout.write(masthead)
+        sys.stdout.write(cmd_str + os.linesep)
+        sys.stdout.write("Starting log..." + os.linesep)
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler.setFormatter(fmt)
+        stdout_handler._linear_dag_cli_handler = True
+        log.addHandler(stdout_handler)
+        cli_handlers.append(stdout_handler)
+
+    # setup log file, but write PLINK-style command first
+    if hasattr(args, "out") and args.out:
+        disk_log_stream = open(f"{args.out}.log", "w")
+        disk_log_stream.write(masthead)
+        disk_log_stream.write(cmd_str + os.linesep)
+        disk_log_stream.write("Starting log..." + os.linesep)
+
+        disk_handler = logging.StreamHandler(disk_log_stream)
+        disk_handler.setFormatter(fmt)
+        disk_handler._linear_dag_cli_handler = True
+        disk_handler._linear_dag_cli_stream = disk_log_stream
+        log.addHandler(disk_handler)
+        cli_handlers.append(disk_handler)
+        cli_streams.append(disk_log_stream)
+
+    return log, cli_handlers, cli_streams
 
 
 if __name__ == "__main__":
