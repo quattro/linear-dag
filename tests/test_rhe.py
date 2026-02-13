@@ -80,10 +80,7 @@ def test_rhe(h2g, estimator, sampler, num_matvecs):
 
         # Extract genotype matrix to compute GRM the ol' fashioned way, for comparison
         G = dgenotypes @ np.eye(dgenotypes.shape[1])
-        af = G.mean(axis=0) / 2.0
-        G_std = (G - 2 * af) / np.sqrt(2 * af * (1.0 - af))
-        G_std[np.isnan(G_std)] = 0
-        grm_direct = G_std @ G_std.T / G.shape[1]
+        grm_direct = G @ G.T / G.shape[1]
 
     pheno_cols = ["phenotype1", "phenotype2"]
     covar_cols = ["intercept", "covar1"]

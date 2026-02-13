@@ -69,17 +69,15 @@ def randomized_haseman_elston(
 
     # align and residualize
     left_op, right_op = get_inner_merge_operators(data.select("iid").cast(pl.Utf8).collect().to_series(), grm.iids)
-    phenotypes = data.select(pheno_cols).collect().to_numpy()
-    covariates = data.select(covar_cols).collect().to_numpy()
+    phenotypes = data.select(pheno_cols).collect().to_numpy(writable=True)
+    covariates = data.select(covar_cols).collect().to_numpy(writable=True)
     yresid, covariates = _prep_for_h2_estimation(left_op, right_op, phenotypes, covariates)
 
-    # length here represent N in haplotype space, we need to account for this otherwise wrong results!
     N = len(yresid)
     grm = right_op @ grm @ right_op.T
     grm = 0.5 * (left_op @ grm @ left_op.T)  # assumes diploid; comes from the normalization term being pq, not 2pq
 
-    if num_matvecs > N:
-        raise ValueError(f"num_matvecs={num_matvecs} should be << N={N}")
+    _validate_num_matvecs(num_matvecs, N, trace_est)
 
     # set up for randomized estimator
     generator = np.random.default_rng(seed=seed)
@@ -102,12 +100,12 @@ def randomized_haseman_elston(
     # compute y_j' K y_j for each y_j \in y
     C = np.sum(grm.matmat(yresid) * yresid, axis=0)
 
-    # compute y_j' y_j for each y_j \in y
-    E = np.sum(yresid * yresid, axis=0)
+    # compute N_j := y_j' y_j for each y_j \in Y
+    N_j = np.sum(yresid * yresid, axis=0)
 
     # construct linear equations to solve
     LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, N]])
-    RHS = np.vstack([C, E])
+    RHS = np.vstack([C, N_j])
     solution = np.linalg.solve(LHS, RHS)
 
     # compute the (co)variance of our estimates
@@ -120,11 +118,11 @@ def randomized_haseman_elston(
     # this handles any possible rescaling of the 'grm' like object to compute the correct total genetic variance
     # rescale variances and covariances to trace(K) parameterization
     s2g = solution[0, :] * grm_trace
-    s2e = solution[1, :] * N
+    s2e = solution[1, :] * N_j
     heritability = s2g / (s2g + s2e)
     var_s2g = (grm_trace**2) * var_s2g
-    var_s2e = (N**2) * var_s2e
-    covariances = (grm_trace * N) * covariances
+    var_s2e = (N_j**2) * var_s2e
+    covariances = (grm_trace * N_j) * covariances
 
     # approx delta method to compute std err of h2g
     numer = (s2e**2) * var_s2g + (s2g**2) * var_s2e - 2 * s2g * s2e * covariances
@@ -175,6 +173,8 @@ def _prep_for_h2_estimation(
     covariates = impute_missing_with_mean(covariates)
     is_missing = np.isnan(phenotypes)
     num_nonmissing = np.sum(~is_missing, axis=0)
+    if np.any(num_nonmissing == 0):
+        raise ValueError("Each phenotype must have at least one non-missing value")
     phenotypes.ravel()[is_missing.ravel()] = 0
 
     # Residualize phenotypes on covariates and standardize
@@ -182,6 +182,21 @@ def _prep_for_h2_estimation(
     y_resid /= np.sqrt(np.sum(y_resid**2, axis=0) / num_nonmissing)  # ||y_resid||^2 == num_nonmissing
 
     return y_resid, covariates
+
+
+def _validate_num_matvecs(num_matvecs: int, sample_count: int, trace_est: str) -> None:
+    if not isinstance(num_matvecs, (int, np.integer)):
+        raise TypeError(f"num_matvecs must be an integer, got {type(num_matvecs).__name__}")
+    if num_matvecs < 1:
+        raise ValueError(f"num_matvecs={num_matvecs} must be >= 1")
+    if num_matvecs > sample_count:
+        raise ValueError(f"num_matvecs={num_matvecs} should be <= N={sample_count}")
+
+    name = str(trace_est).lower()
+    if name in {"hutch++", "hutchpp"} and num_matvecs < 3:
+        raise ValueError("hutch++ requires num_matvecs >= 3")
+    if name in {"xnystrace", "xnystrom"} and num_matvecs < 2:
+        raise ValueError("xnystrace requires num_matvecs >= 2")
 
 
 _Sampler = Callable[[int, int], np.ndarray]
@@ -281,6 +296,8 @@ def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple
     """
     n, _ = GRM.shape
     m = k // 3
+    if m < 1:
+        raise ValueError("hutch++ requires k >= 3")
 
     samples = sampler(n, 2 * m)
     X1 = samples[:, :m]
