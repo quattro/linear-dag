@@ -174,13 +174,12 @@ def load_genotypes(
     maf_threshold: Optional[float] = None,
     rsq_threshold: Optional[float] = None,
     skiprows: int = 0,
-    logger: Optional[logging.Logger] = None,
 ) -> tuple[csc_matrix, NDArray, NDArray]:
     """Load genotype matrix data from `<prefix>.mtx` or `<prefix>.txt`.
 
     !!! info
 
-        This helper reports retained-variant counts via logger when provided.
+        This helper logs retained-variant counts at debug level.
 
     **Arguments:**
 
@@ -189,7 +188,6 @@ def load_genotypes(
     - `maf_threshold`: Optional minor-allele-frequency cutoff.
     - `rsq_threshold`: Optional dosage-to-hardcall correlation cutoff.
     - `skiprows`: Number of rows to skip when loading text genotype files.
-    - `logger`: Optional logger for retained-variant progress output.
 
     **Returns:**
 
@@ -231,11 +229,7 @@ def load_genotypes(
         genotypes, common_variants = apply_maf_threshold(genotypes, ploidy, maf_threshold)
 
     kept_variants = well_imputed_variants[common_variants]
-    message = f"kept_variants: {kept_variants.shape}"
-    if logger is None:
-        print(message)
-    else:
-        logger.info(message)
+    logging.getLogger(__name__).debug("kept_variants: %s", kept_variants.shape)
 
     if flip_minor_alleles:
         genotypes, flipped_variants = flip_alleles(genotypes, ploidy)

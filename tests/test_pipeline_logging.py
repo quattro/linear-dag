@@ -56,26 +56,15 @@ def test_msc_step1_skip_paths_log_via_logger_not_stdout(tmp_path: Path, caplog, 
     )
 
 
-def test_load_genotypes_uses_logger_when_provided(tmp_path: Path, capsys):
+def test_load_genotypes_does_not_print_progress(tmp_path: Path, capsys):
     prefix = tmp_path / "geno"
     np.savetxt(prefix.with_suffix(".txt"), np.array([[0, 1], [1, 0]]), fmt="%d")
 
-    logger = logging.getLogger("linear_dag.tests.genotype")
-    records = []
-    handler = logging.Handler()
-    handler.emit = lambda record: records.append(record.getMessage())
-    logger.handlers.clear()
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-
-    genotype.load_genotypes(str(prefix), logger=logger)
-
+    genotype.load_genotypes(str(prefix))
     assert capsys.readouterr().out == ""
-    assert any("kept_variants: (2,)" in message for message in records)
 
 
-def test_linear_arg_inference_uses_logger_without_stdout(monkeypatch, capsys):
+def test_linear_arg_inference_does_not_print_progress(monkeypatch, capsys):
     class _FakeBrickGraph:
         @staticmethod
         def from_genotypes(_genotypes):
@@ -93,15 +82,6 @@ def test_linear_arg_inference_uses_logger_without_stdout(monkeypatch, capsys):
     monkeypatch.setattr(lai, "Recombination", _FakeRecombination)
     monkeypatch.setattr(lai, "linearize_brick_graph", lambda _recom: np.eye(2))
 
-    logger = logging.getLogger("linear_dag.tests.inference")
-    records = []
-    handler = logging.Handler()
-    handler.emit = lambda record: records.append(record.getMessage())
-    logger.handlers.clear()
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-
     genotypes = csc_matrix(np.array([[1], [0]]))
     flip = np.array([False])
     lai.linear_arg_from_genotypes(
@@ -110,13 +90,9 @@ def test_linear_arg_inference_uses_logger_without_stdout(monkeypatch, capsys):
         variant_info=None,
         find_recombinations=False,
         verbosity=1,
-        logger=logger,
     )
 
     assert capsys.readouterr().out == ""
-    assert any("Inferring brick graph" in message for message in records)
-    assert any("Finding recombinations" in message for message in records)
-    assert any("Linearizing brick graph" in message for message in records)
 
 
 def test_compress_vcf_passes_logger_to_lineararg_from_vcf(monkeypatch, tmp_path: Path):
@@ -127,8 +103,8 @@ def test_compress_vcf_passes_logger_to_lineararg_from_vcf(monkeypatch, tmp_path:
         nnz = 5
         allele_frequencies = np.array([0.25, 0.1, 0.4])
 
-        def calculate_nonunique_indices(self, logger=None):
-            captured["calculate_nonunique_indices.logger"] = logger
+        def calculate_nonunique_indices(self):
+            captured["calculate_nonunique_indices.called"] = True
 
         def write(self, output_h5, block_info=None):
             captured["write.output_h5"] = output_h5
@@ -148,8 +124,8 @@ def test_compress_vcf_passes_logger_to_lineararg_from_vcf(monkeypatch, tmp_path:
         logger=injected,
     )
 
-    assert captured["from_vcf.kwargs"]["logger"] is injected
-    assert captured["calculate_nonunique_indices.logger"] is injected
+    assert "logger" not in captured["from_vcf.kwargs"]
+    assert captured["calculate_nonunique_indices.called"]
     assert captured["write.output_h5"] == str(out_path)
 
 
@@ -161,8 +137,8 @@ def test_compress_vcf_creates_fallback_logger_when_logger_not_provided(monkeypat
         nnz = 2
         allele_frequencies = np.array([0.1, 0.2])
 
-        def calculate_nonunique_indices(self, logger=None):
-            captured["calculate_nonunique_indices.logger"] = logger
+        def calculate_nonunique_indices(self):
+            captured["calculate_nonunique_indices.called"] = True
 
         def write(self, output_h5, block_info=None):
             captured["write.output_h5"] = output_h5
@@ -180,6 +156,6 @@ def test_compress_vcf_creates_fallback_logger_when_logger_not_provided(monkeypat
         output_h5=str(out_path),
     )
 
-    assert isinstance(captured["from_vcf.kwargs"]["logger"], logging.Logger)
-    assert captured["calculate_nonunique_indices.logger"] is captured["from_vcf.kwargs"]["logger"]
+    assert "logger" not in captured["from_vcf.kwargs"]
+    assert captured["calculate_nonunique_indices.called"]
     assert captured["write.output_h5"] == str(out_path)

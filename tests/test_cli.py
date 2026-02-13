@@ -517,11 +517,11 @@ def test_assoc_parallel_operator_kwargs_consistent_across_modes(tmp_path: Path, 
         bed_maf_log10_threshold=-4,
         out=str(tmp_path / "assoc_repeat"),
     )
-    cli._assoc_scan(args)
+    cli._assoc_scan(args, logging.getLogger("linear_dag.tests.cli.assoc"))
 
     args.repeat_covar = False
     args.out = str(tmp_path / "assoc_default")
-    cli._assoc_scan(args)
+    cli._assoc_scan(args, logging.getLogger("linear_dag.tests.cli.assoc"))
 
     assert len(captured_kwargs) == 2
     repeat_kwargs, default_kwargs = captured_kwargs
@@ -587,7 +587,7 @@ def test_estimate_h2g_passes_filtered_block_metadata_to_grm_operator(tmp_path: P
         seed=0,
         out=str(tmp_path / "rhe"),
     )
-    cli._estimate_h2g(args)
+    cli._estimate_h2g(args, logging.getLogger("linear_dag.tests.cli.rhe"))
 
     assert captured["hdf5_file"] == "dummy.h5"
     assert captured["num_processes"] == 4
@@ -673,12 +673,12 @@ def test_create_cli_logger_context_configures_debug_level_and_file_output(tmp_pa
     cli._remove_cli_handlers(logger)
     args = Namespace(verbose=True, quiet=True, out=str(tmp_path / "cli_context"))
 
-    log, handlers, streams = cli._create_cli_logger_context(args, "masthead\n", "kodama assoc")
+    log = cli._create_cli_logger_context(args, "masthead\n", "kodama assoc")
     try:
         assert log is logger
         assert log.level == logging.DEBUG
+        handlers = [h for h in log.handlers if getattr(h, "_linear_dag_cli_handler", False)]
         assert len(handlers) == 1
-        assert getattr(handlers[0], "_linear_dag_cli_handler", False)
 
         log.info("logger context smoke")
         for handler in handlers:
@@ -692,12 +692,11 @@ def test_create_cli_logger_context_configures_debug_level_and_file_output(tmp_pa
         for handler in handlers:
             log.removeHandler(handler)
             handler.close()
-        for stream in streams:
-            stream.close()
+        cli._remove_cli_handlers(log)
 
 
 def test_main_repeated_invocations_do_not_accumulate_cli_handlers(monkeypatch, tmp_path: Path):
-    def _fake_assoc(_args):
+    def _fake_assoc(_args, _logger):
         return None
 
     monkeypatch.setattr(cli, "_assoc_scan", _fake_assoc)
@@ -715,8 +714,8 @@ def test_main_repeated_invocations_do_not_accumulate_cli_handlers(monkeypatch, t
 def test_main_dispatches_shared_logger_to_handler(monkeypatch, tmp_path: Path):
     captured = {}
 
-    def _fake_assoc(args):
-        captured["logger"] = getattr(args, "logger", None)
+    def _fake_assoc(_args, logger):
+        captured["logger"] = logger
 
     monkeypatch.setattr(cli, "_assoc_scan", _fake_assoc)
 
@@ -724,12 +723,6 @@ def test_main_dispatches_shared_logger_to_handler(monkeypatch, tmp_path: Path):
     rc = cli._main(["-q", "assoc", "dummy.h5", "dummy.tsv", "--out", str(out_prefix)])
     assert rc == 0 or rc is None
     assert captured["logger"] is logging.getLogger(cli.__name__)
-
-
-def test_get_command_logger_prefers_injected_logger():
-    injected = logging.getLogger("linear_dag.cli.injected")
-    args = Namespace(logger=injected)
-    assert cli._get_command_logger(args) is injected
 
 
 def test_compress_passes_injected_logger_to_pipeline(monkeypatch):
@@ -751,9 +744,8 @@ def test_compress_passes_injected_logger_to_pipeline(monkeypatch):
         remove_indels=False,
         remove_multiallelics=False,
         add_individual_nodes=False,
-        logger=injected,
     )
-    cli._compress(args)
+    cli._compress(args, injected)
     assert captured["logger"] is injected
 
 
@@ -768,8 +760,8 @@ def test_step1_passes_injected_logger_to_pipeline(monkeypatch):
     monkeypatch.setattr(cli, "msc_step1", _fake_msc_step1)
 
     injected = logging.getLogger("linear_dag.cli.injected.step1")
-    args = Namespace(job_metadata="jobs.parquet", small_job_id=7, logger=injected)
-    cli._step1(args)
+    args = Namespace(job_metadata="jobs.parquet", small_job_id=7)
+    cli._step1(args, injected)
 
     assert captured["job_metadata"] == "jobs.parquet"
     assert captured["small_job_id"] == 7

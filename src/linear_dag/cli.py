@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from importlib import metadata
 from os import PathLike
-from typing import IO, Optional, Union
+from typing import Optional, Union
 
 import polars as pl
 
@@ -369,9 +369,8 @@ def _read_pheno_or_covar(
     return df
 
 
-def _prs(args):
+def _prs(args, logger):
     t = time.time()
-    logger = _get_command_logger(args)
     if not args.linarg_path:
         raise ValueError("`--linarg-path` is required for score.")
     if not args.beta_path:
@@ -393,9 +392,7 @@ def _prs(args):
     return
 
 
-def _assoc_scan(args):
-    logger = _get_command_logger(args)
-
+def _assoc_scan(args, logger):
     # load data for assoc scan
     logger.info("Loading phenotype data")
     block_metadata, covar_cols, pheno_cols, phenotypes = _prep_data(
@@ -508,8 +505,7 @@ def _assoc_scan(args):
     return
 
 
-def _estimate_h2g(args):
-    logger = _get_command_logger(args)
+def _estimate_h2g(args, logger):
     if args.num_matvecs < 1:
         raise ValueError(f"`--num-matvecs` must be positive integer. Observed {args.num_matvecs}")
 
@@ -787,8 +783,7 @@ def _require_block_metadata(
     )
 
 
-def _compress(args):
-    logger = _get_command_logger(args)
+def _compress(args, logger):
     if args.region is None:
         logger.info(
             "No --region was provided to `compress`; output may lack block metadata required by assoc/rhe/score."
@@ -807,8 +802,7 @@ def _compress(args):
     )
 
 
-def _step0(args):
-    logger = _get_command_logger(args)
+def _step0(args, logger):
     logger.info("Starting main process")
     msc_step0(
         args.vcf_metadata,
@@ -827,36 +821,31 @@ def _step0(args):
     return
 
 
-def _step1(args):
-    logger = _get_command_logger(args)
+def _step1(args, logger):
     logger.info("Starting main process")
     msc_step1(args.job_metadata, args.small_job_id, logger=logger)
     return
 
 
-def _step2(args):
-    logger = _get_command_logger(args)
+def _step2(args, logger):
     logger.info("Starting main process")
     msc_step2(args.job_metadata, args.small_job_id, logger=logger)
     return
 
 
-def _step3(args):
-    logger = _get_command_logger(args)
+def _step3(args, logger):
     logger.info("Starting main process")
     msc_step3(args.job_metadata, args.large_job_id, logger=logger)
     return
 
 
-def _step4(args):
-    logger = _get_command_logger(args)
+def _step4(args, logger):
     logger.info("Starting main process")
     msc_step4(args.job_metadata, args.large_job_id, logger=logger)
     return
 
 
-def _step5(args):
-    logger = _get_command_logger(args)
+def _step5(args, logger):
     logger.info("Starting main process")
     msc_step5(args.job_metadata, logger=logger)
     return
@@ -1130,7 +1119,7 @@ def _main(args):
     masthead = title_and_ver + os.linesep
 
     # setup logging
-    log, cli_handlers, cli_streams = _create_cli_logger_context(args, masthead, cmd_str)
+    log = _create_cli_logger_context(args, masthead, cmd_str)
 
     try:
         if hasattr(args, "num_processes"):
@@ -1138,18 +1127,12 @@ def _main(args):
 
         # launch w/e task was selected
         if hasattr(args, "func"):
-            setattr(args, "logger", log)
-            args.func(args)
+            args.func(args, log)
         else:
             argp.print_help()
         return 0
     finally:
-        for handler in cli_handlers:
-            log.removeHandler(handler)
-            handler.close()
-        for stream in cli_streams:
-            if not stream.closed:
-                stream.close()
+        _remove_cli_handlers(log)
 
 
 def _create_common_parser(subp, name, help):
@@ -1273,7 +1256,7 @@ def _create_cli_logger_context(
     args: argparse.Namespace,
     masthead: str,
     cmd_str: str,
-) -> tuple[logging.Logger, list[logging.Handler], list[IO[str]]]:
+) -> logging.Logger:
     log = logging.getLogger(__name__)
     log_format = "[%(asctime)s - %(levelname)s - %(memory_usage).2f MB] %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
@@ -1284,9 +1267,6 @@ def _create_cli_logger_context(
     ensure_memory_usage_filter(log)
 
     fmt = logging.Formatter(fmt=log_format, datefmt=date_format)
-    cli_handlers: list[logging.Handler] = []
-    cli_streams: list[IO[str]] = []
-
     if not args.quiet:
         sys.stdout.write(masthead)
         sys.stdout.write(cmd_str + os.linesep)
@@ -1295,7 +1275,6 @@ def _create_cli_logger_context(
         stdout_handler.setFormatter(fmt)
         stdout_handler._linear_dag_cli_handler = True
         log.addHandler(stdout_handler)
-        cli_handlers.append(stdout_handler)
 
     # setup log file, but write PLINK-style command first
     if hasattr(args, "out") and args.out:
@@ -1309,10 +1288,7 @@ def _create_cli_logger_context(
         disk_handler._linear_dag_cli_handler = True
         disk_handler._linear_dag_cli_stream = disk_log_stream
         log.addHandler(disk_handler)
-        cli_handlers.append(disk_handler)
-        cli_streams.append(disk_log_stream)
-
-    return log, cli_handlers, cli_streams
+    return log
 
 
 def _coerce_logger(logger: Optional[Union[logging.Logger, MemoryLogger]]) -> logging.Logger:
@@ -1321,10 +1297,6 @@ def _coerce_logger(logger: Optional[Union[logging.Logger, MemoryLogger]]) -> log
     if logger is not None:
         return logger
     return MemoryLogger(__name__, log_file=None).logger
-
-
-def _get_command_logger(args: argparse.Namespace) -> logging.Logger:
-    return _coerce_logger(getattr(args, "logger", None))
 
 
 if __name__ == "__main__":

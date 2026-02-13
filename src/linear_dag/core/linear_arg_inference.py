@@ -3,8 +3,6 @@ import logging
 import time
 import warnings
 
-from typing import Optional
-
 import numpy as np
 import polars as pl
 
@@ -22,7 +20,6 @@ def linear_arg_from_genotypes(
     variant_info,
     find_recombinations,
     verbosity,
-    logger: Optional[logging.Logger] = None,
 ):
     """Infer a linearized ARG adjacency matrix from sparse genotypes.
 
@@ -33,8 +30,6 @@ def linear_arg_from_genotypes(
     - `variant_info`: Optional variant metadata DataFrame.
     - `find_recombinations`: Whether to explicitly infer recombination events.
     - `verbosity`: Verbosity level for timing/progress output.
-    - `logger`: Optional logger used when `verbosity > 0`. If omitted, output is printed.
-
     **Returns:**
 
     - Tuple `(adjacency, flip, variant_indices, sample_indices, variant_info)` for
@@ -48,13 +43,11 @@ def linear_arg_from_genotypes(
     if type(genotypes) is not csc_matrix:
         raise TypeError
 
+    progress_logger = logging.getLogger(__name__)
+
     def _emit_progress(message: str) -> None:
-        if verbosity <= 0:
-            return
-        if logger is None:
-            print(message)
-            return
-        logger.info(message)
+        if verbosity > 0:
+            progress_logger.info(message)
 
     _emit_progress("Inferring brick graph")
     t0 = time.time()
