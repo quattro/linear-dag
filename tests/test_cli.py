@@ -192,6 +192,31 @@ def test_prep_data_requires_block_metadata():
         cli._prep_data(str(linarg_path), str(pheno_path))
 
 
+def test_closest_matches_returns_candidate_for_typo():
+    matches = cli._closest_matches("heigt", ["height", "weight", "bmi"])
+    assert matches
+    assert "height" in matches
+
+
+def test_closest_matches_returns_empty_for_unrelated_value():
+    matches = cli._closest_matches("zzzzz", ["height", "weight", "bmi"])
+    assert matches == []
+
+
+def test_closest_matches_respects_limit():
+    matches = cli._closest_matches("traita", ["trait1", "trait2", "trait3", "trait4"], limit=2)
+    assert len(matches) <= 2
+
+
+def test_format_suggestion_fragment_has_expected_forms():
+    with_hint = cli._format_suggestion_fragment("heigt", ["height", "weight", "bmi"])
+    without_hint = cli._format_suggestion_fragment("zzzzz", ["height", "weight", "bmi"])
+
+    assert "Did you mean:" in with_hint
+    assert "height" in with_hint
+    assert without_hint == ""
+
+
 def test_filter_blocks_rejects_block_names_and_chromosomes_together():
     block_metadata = cli.list_blocks(str(TEST_DATA_DIR / "test_chr21_50.h5"))
     with pytest.raises(ValueError, match="Specify either block_names or chromosomes"):

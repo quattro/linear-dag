@@ -1,4 +1,5 @@
 import argparse
+import difflib
 import logging
 import os
 import re
@@ -106,6 +107,26 @@ def _normalize_chromosome_label(value: object) -> str:
     if chrom.lower().startswith("chr"):
         chrom = chrom[3:]
     return chrom.lower()
+
+
+def _closest_matches(
+    requested: str,
+    available: list[str],
+    *,
+    limit: int = 3,
+    cutoff: float = 0.75,
+) -> list[str]:
+    candidates = _dedupe_preserve_order([str(value) for value in available])
+    if not requested or not candidates or limit <= 0:
+        return []
+    return difflib.get_close_matches(str(requested), candidates, n=limit, cutoff=cutoff)
+
+
+def _format_suggestion_fragment(requested: str, available: list[str]) -> str:
+    suggestions = _closest_matches(requested, available)
+    if not suggestions:
+        return ""
+    return f" Did you mean: {', '.join(suggestions)}?"
 
 
 def _construct_cmd_string(argv: list[str], parser: argparse.ArgumentParser, parsed_args: argparse.Namespace) -> str:
@@ -570,9 +591,7 @@ def _filter_blocks(
         if missing:
             missing_str = ", ".join(_dedupe_preserve_order(missing))
             available_str = _format_available_values(available_block_names)
-            raise ValueError(
-                (f"Unknown block name(s): {missing_str}. " f"Available block names include: {available_str}")
-            )
+            raise ValueError((f"Unknown block name(s): {missing_str}. Available block names include: {available_str}"))
         block_metadata = block_metadata.filter(pl.col("block_name").cast(pl.String).is_in(requested_block_names))
     if chromosomes is not None:
         requested_raw = [str(x) for x in chromosomes]
