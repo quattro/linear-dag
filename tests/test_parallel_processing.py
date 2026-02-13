@@ -204,16 +204,15 @@ def test_grm_matmat_matches_serial():
         # Parallel result
         Y_par = grm @ X
 
-    # Serial result: sum over blocks of (L.normalized @ L.normalized.T @ X) / num_block_variants
-    # GRMOperator divides each block's contribution by that block's variant count
+    # Serial result: sum over blocks of L.normalized @ L.normalized.T @ X
+    # GRMOperator aggregates unscaled block contributions.
     Y_ser = np.zeros((n, 3), dtype=np.float32)
     for la in linargs:
-        num_block_variants = la.shape[1]
         la_norm = la.normalized
-        Y_ser += (la_norm @ la_norm.T @ X) / num_block_variants
+        Y_ser += la_norm @ la_norm.T @ X
 
     print(f"Y_par: {Y_par[:, 0]}, Y_ser: {Y_ser[:, 0]}")
-    assert np.allclose(Y_par, Y_ser , rtol=1e-4, atol=1e-4)
+    assert np.allclose(Y_par, Y_ser, rtol=1e-4, atol=1e-4)
 
 
 def test_grm_matmat_with_alpha():
@@ -233,14 +232,13 @@ def test_grm_matmat_with_alpha():
         # Parallel result
         Y_par = grm @ X
 
-    # Serial result: sum over blocks of (L.normalized @ K @ L.normalized.T @ X) / num_block_variants
-    # GRMOperator divides each block's contribution by that block's variant count
+    # Serial result: sum over blocks of L.normalized @ K @ L.normalized.T @ X
+    # GRMOperator aggregates unscaled block contributions.
     Y_ser = np.zeros((n, 3), dtype=np.float32)
     for la in linargs:
-        num_block_variants = la.shape[1]
         pq = la.allele_frequencies * (1 - la.allele_frequencies)
         K = aslinearoperator(diags(pq ** (1 + alpha)))
-        Y_ser += (la.normalized @ K @ la.normalized.T @ X) / num_block_variants
+        Y_ser += la.normalized @ K @ la.normalized.T @ X
 
     assert np.allclose(Y_par, Y_ser, rtol=1e-3, atol=1e-3)
 
@@ -296,14 +294,14 @@ def test_maf_threshold_filtering():
             result_serial += result
 
         # Check shapes match
-        assert linarg_op.shape[1] == total_filtered_variants, (
-            f"Shape mismatch: operator has {linarg_op.shape[1]} variants, expected {total_filtered_variants}"
-        )
+        assert (
+            linarg_op.shape[1] == total_filtered_variants
+        ), f"Shape mismatch: operator has {linarg_op.shape[1]} variants, expected {total_filtered_variants}"
 
         # Check that parallel and serial results match
-        assert np.allclose(result_parallel, result_serial, rtol=1e-2, atol=1e-2), (
-            "MAF filtered multiplication results do not match"
-        )
+        assert np.allclose(
+            result_parallel, result_serial, rtol=1e-2, atol=1e-2
+        ), "MAF filtered multiplication results do not match"
 
         # Test that filtering actually reduces variant count
         with ParallelOperator.from_hdf5(tmp_path, max_num_traits=2, num_processes=1) as linarg_op_unfiltered:
