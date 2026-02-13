@@ -731,6 +731,22 @@ def test_main_repeated_invocations_do_not_accumulate_cli_handlers(monkeypatch, t
         assert managed_handlers == []
 
 
+def test_main_restores_logger_propagation_after_dispatch(monkeypatch, tmp_path: Path):
+    def _fake_assoc(_args, _logger):
+        return None
+
+    monkeypatch.setattr(cli, "_assoc_scan", _fake_assoc)
+    logger = logging.getLogger(cli.__name__)
+    original_propagate = logger.propagate
+    try:
+        out_prefix = tmp_path / "assoc_propagate"
+        rc = cli._main(["-q", "assoc", "dummy.h5", "dummy.tsv", "--out", str(out_prefix)])
+        assert rc == 0 or rc is None
+        assert logger.propagate is original_propagate
+    finally:
+        logger.propagate = original_propagate
+
+
 def test_main_dispatches_shared_logger_to_handler(monkeypatch, tmp_path: Path):
     captured = {}
 

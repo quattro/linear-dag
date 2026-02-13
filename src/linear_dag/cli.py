@@ -1255,6 +1255,10 @@ def _remove_cli_handlers(log: logging.Logger) -> None:
             handler.close()
             if stream is not None and not stream.closed:
                 stream.close()
+    previous_propagate = getattr(log, "_linear_dag_previous_propagate", None)
+    if previous_propagate is not None:
+        log.propagate = previous_propagate
+        delattr(log, "_linear_dag_previous_propagate")
 
 
 def _create_cli_logger_context(
@@ -1267,8 +1271,9 @@ def _create_cli_logger_context(
     date_format = "%Y-%m-%d %H:%M:%S"
 
     log.setLevel(logging.DEBUG if args.verbose else logging.INFO)
-    log.propagate = False
     _remove_cli_handlers(log)
+    log._linear_dag_previous_propagate = log.propagate
+    log.propagate = False
     ensure_memory_usage_filter(log)
 
     fmt = logging.Formatter(fmt=log_format, datefmt=date_format)
