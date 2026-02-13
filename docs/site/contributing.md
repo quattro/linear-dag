@@ -28,3 +28,15 @@ uv sync --extra docs
 uv run mkdocs serve
 uv run mkdocs build
 ```
+
+## Documentation Locations
+
+- Public website docs live in `docs/site/`.
+- Design plans live in `docs/design-plans/`.
+- Implementation plans live in `docs/implementation-plans/`.
+
+Use these rules when adding new content:
+
+- Put user-facing documentation and tutorials in `docs/site/`.
+- Put exploratory architecture/design artifacts in `docs/design-plans/`.
+- Put execution-ready implementation task breakdowns in `docs/implementation-plans/`.
