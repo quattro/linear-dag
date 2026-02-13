@@ -28,3 +28,9 @@ uv sync --extra docs
 uv run mkdocs serve
 uv run mkdocs build
 ```
+
+If `uv sync --extra docs` fails because `uv.lock` is not present, install docs dependencies with:
+
+```bash
+uv pip install -e '.[docs]'
+```
