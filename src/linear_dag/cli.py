@@ -803,6 +803,7 @@ def _compress(args):
         remove_indels=args.remove_indels,
         remove_multiallelics=args.remove_multiallelics,
         add_individual_nodes=args.add_individual_nodes,
+        logger=logger,
     )
 
 
@@ -821,6 +822,7 @@ def _step0(args):
         args.remove_multiallelics,
         args.sex_path,
         args.mount_point,
+        logger=logger,
     )
     return
 
@@ -828,35 +830,35 @@ def _step0(args):
 def _step1(args):
     logger = _get_command_logger(args)
     logger.info("Starting main process")
-    msc_step1(args.job_metadata, args.small_job_id)
+    msc_step1(args.job_metadata, args.small_job_id, logger=logger)
     return
 
 
 def _step2(args):
     logger = _get_command_logger(args)
     logger.info("Starting main process")
-    msc_step2(args.job_metadata, args.small_job_id)
+    msc_step2(args.job_metadata, args.small_job_id, logger=logger)
     return
 
 
 def _step3(args):
     logger = _get_command_logger(args)
     logger.info("Starting main process")
-    msc_step3(args.job_metadata, args.large_job_id)
+    msc_step3(args.job_metadata, args.large_job_id, logger=logger)
     return
 
 
 def _step4(args):
     logger = _get_command_logger(args)
     logger.info("Starting main process")
-    msc_step4(args.job_metadata, args.large_job_id)
+    msc_step4(args.job_metadata, args.large_job_id, logger=logger)
     return
 
 
 def _step5(args):
     logger = _get_command_logger(args)
     logger.info("Starting main process")
-    msc_step5(args.job_metadata)
+    msc_step5(args.job_metadata, logger=logger)
     return
 
 

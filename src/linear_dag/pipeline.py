@@ -1,4 +1,5 @@
 import gzip
+import logging
 import os
 import subprocess
 import time
@@ -19,6 +20,18 @@ from .genotype import read_vcf
 from .memory_logger import MemoryLogger
 
 
+def _coerce_logger(
+    logger: Optional[Union[logging.Logger, MemoryLogger]],
+    *,
+    log_file: Optional[Union[str, PathLike]] = None,
+) -> logging.Logger:
+    if isinstance(logger, MemoryLogger):
+        return logger.logger
+    if logger is not None:
+        return logger
+    return MemoryLogger(__name__, log_file=log_file).logger
+
+
 def compress_vcf(
     input_vcf: Union[str, PathLike],
     output_h5: Union[str, PathLike],
@@ -29,6 +42,7 @@ def compress_vcf(
     remove_indels: bool = False,
     remove_multiallelics: bool = False,
     add_individual_nodes: bool = False,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
     """Compress a VCF file into a [`linear_dag.core.lineararg.LinearARG`][] HDF5 file.
 
@@ -48,7 +62,7 @@ def compress_vcf(
 
     - `None`.
     """
-    logger = MemoryLogger(__name__)
+    logger = _coerce_logger(logger, log_file="memory_usage.log")
     logger.info("Starting compression")
 
     if keep_path is not None:
@@ -101,12 +115,14 @@ def msc_step0(
     remove_multiallelics: bool = False,
     sex_path: Optional[Union[str, PathLike]] = None,
     mount_point: Optional[Union[str, PathLike]] = None,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
     """
     Partitions chromosomes into large blocks of size large_partition_size and smaller blocks of
     size partition_size / n_small_blocks. Output jobs_metadata.txt containing linear ARG parameters
     required for steps 1-5 in the multi-step compress pipeline.
     """
+    logger = _coerce_logger(logger)
     os.makedirs(out, exist_ok=True)
 
     vcf_meta = pl.read_csv(vcf_metadata, separator=" ")
@@ -180,13 +196,14 @@ def msc_step0(
         "mount_point": "" if mount_point is None else str(mount_point),
     }
 
-    print(f"n_small_jobs: {job_meta.height}, n_large_jobs: {n_large_jobs}")
+    logger.info(f"n_small_jobs: {job_meta.height}, n_large_jobs: {n_large_jobs}")
     job_meta.write_parquet(f"{out}/job_metadata.parquet", metadata=params)
 
 
 def msc_step1(
     jobs_metadata: Union[str, PathLike],
     small_job_id: int,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
     """Run multi-step compression step 1 for one small partition.
 
@@ -203,6 +220,7 @@ def msc_step1(
     - `None`.
     """
 
+    logger = _coerce_logger(logger)
     job_meta = pl.read_parquet(jobs_metadata)
     job = job_meta.filter(pl.col("small_job_id") == small_job_id)
     vcf_path = job["vcf_path"].item()
@@ -219,7 +237,7 @@ def msc_step1(
     out = params["out"]
 
     if os.path.exists(f"{mount_point}{out}/genotype_matrices/{small_job_id}_{region}.h5"):
-        print(f"Genotype matrix for {small_job_id}_{region} already exists. Skipping.")
+        logger.info(f"Genotype matrix for {small_job_id}_{region} already exists. Skipping.")
     else:
         make_genotype_matrix(
             vcf_path=vcf_path,
@@ -232,19 +250,24 @@ def msc_step1(
             remove_indels=remove_indels,
             remove_multiallelics=remove_multiallelics,
             sex_path=sex_path,
+            logger=logger,
         )
 
     if os.path.exists(f"{mount_point}{out}/forward_backward_graphs/{small_job_id}_{region}_forward_graph.h5"):
-        print(f"Forward backward graph for {small_job_id}_{region} already exists. Skipping.")
+        logger.info(f"Forward backward graph for {small_job_id}_{region} already exists. Skipping.")
     else:
         run_forward_backward(
-            out, "", f"{small_job_id}_{region}"
+            out,
+            "",
+            f"{small_job_id}_{region}",
+            logger=logger,
         )  # no mount point needed since matrices are generated in the same job
 
 
 def msc_step2(
     jobs_metadata: Union[str, PathLike],
     small_job_id: int,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
     """Run multi-step compression step 2 for one small partition.
 
@@ -264,6 +287,7 @@ def msc_step2(
     - `FileNotFoundError`: If required step-1 artifacts are missing.
     """
 
+    logger = _coerce_logger(logger)
     job_meta = pl.read_parquet(jobs_metadata)
     job = job_meta.filter(pl.col("small_job_id") == small_job_id)
     region = job["small_region"].item()
@@ -280,14 +304,15 @@ def msc_step2(
             )
         )
     if os.path.exists(f"{mount_point}{out}/brick_graph_partitions/{small_job_id}_{region}.h5"):
-        print(f"Brick graph for {small_job_id}_{region} already exists. Skipping.")
+        logger.info(f"Brick graph for {small_job_id}_{region} already exists. Skipping.")
     else:
-        reduction_union_recom(out, mount_point, f"{small_job_id}_{region}")
+        reduction_union_recom(out, mount_point, f"{small_job_id}_{region}", logger=logger)
 
 
 def msc_step3(
     jobs_metadata: Union[str, PathLike],
     large_job_id: int,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
     """Run multi-step compression step 3 for one large partition.
 
@@ -308,6 +333,7 @@ def msc_step3(
     - `FileNotFoundError`: If required step-2 brick-graph artifacts are missing.
     """
 
+    logger = _coerce_logger(logger)
     job_meta = pl.read_parquet(jobs_metadata)
     jobs = job_meta.filter(pl.col("large_job_id") == large_job_id)
     large_region = jobs["large_region"].to_list()[0]
@@ -317,7 +343,7 @@ def msc_step3(
     out = params["out"]
 
     if os.path.exists(f"{mount_point}{out}/linear_args/{large_job_id}_{large_region}.h5"):
-        print(f"Linear ARG for {large_job_id}_{large_region} already exists. Skipping.")
+        logger.info(f"Linear ARG for {large_job_id}_{large_region} already exists. Skipping.")
         return
 
     # check that all brick graphs have been generated before merging
@@ -345,12 +371,13 @@ def msc_step3(
             f.attrs["is_empty"] = True
         return
 
-    merge(out, mount_point, partition_identifiers, large_partition_identifier)
+    merge(out, mount_point, partition_identifiers, large_partition_identifier, logger=logger)
 
 
 def msc_step4(
     jobs_metadata: Union[str, PathLike],
     large_job_id: int,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
     """Run multi-step compression step 4 for one large partition.
 
@@ -371,6 +398,7 @@ def msc_step4(
     - `FileNotFoundError`: If required step-2 brick-graph artifacts are missing.
     """
 
+    logger = _coerce_logger(logger)
     job_meta = pl.read_parquet(jobs_metadata)
     jobs = job_meta.filter(pl.col("large_job_id") == large_job_id)
     large_region = jobs["large_region"].to_list()[0]
@@ -381,7 +409,7 @@ def msc_step4(
     out = params["out"]
 
     if os.path.exists(f"{mount_point}{out}/individual_linear_args/{large_job_id}_{large_region}.h5"):
-        print(f"Individual linear ARG for {large_job_id}_{large_region} already exists. Skipping.")
+        logger.info(f"Individual linear ARG for {large_job_id}_{large_region} already exists. Skipping.")
         return
 
     partition_identifiers = []
@@ -407,11 +435,12 @@ def msc_step4(
             f.attrs["is_empty"] = True
         return
 
-    add_individuals_to_linarg(out, mount_point, partition_identifiers, large_partition_identifier)
+    add_individuals_to_linarg(out, mount_point, partition_identifiers, large_partition_identifier, logger=logger)
 
 
 def msc_step5(
     jobs_metadata: Union[str, PathLike],
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
     """Merge multiple [`linear_dag.core.lineararg.LinearARG`][] HDF5 files.
 
@@ -428,7 +457,7 @@ def msc_step5(
     out = params["out"]
 
     os.makedirs(f"{out}/logs", exist_ok=True)
-    logger = MemoryLogger(__name__, log_file=f"{out}/logs/msc_step5.log")
+    logger = _coerce_logger(logger, log_file=f"{out}/logs/msc_step5.log")
     logger.info("Starting merge of LinearARG partitions")
 
     job_meta = pl.read_parquet(jobs_metadata)
@@ -441,16 +470,16 @@ def msc_step5(
     mount_point = params["mount_point"]
     out = params["out"]
 
-    final_merge(out, mount_point, partition_identifiers, logger)
+    final_merge(out, mount_point, partition_identifiers, logger=logger)
     if os.path.exists(f"{mount_point}{out}/individual_linear_args/"):
-        final_merge(out, mount_point, partition_identifiers, logger, individual=True)
+        final_merge(out, mount_point, partition_identifiers, logger=logger, individual=True)
 
 
 def final_merge(
     out,
     mount_point,
     partition_identifiers,
-    logger,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
     individual=False,
 ):
     """Merge partitioned [`linear_dag.core.lineararg.LinearARG`][] HDF5 files.
@@ -479,6 +508,7 @@ def final_merge(
     - `ValueError`: If allele-count checks fail or no IID dataset is found.
     """
 
+    logger = _coerce_logger(logger)
     non_empty_partition_identifiers = []
 
     # check that all linear ARGs have been inferred and are correct
@@ -578,6 +608,7 @@ def make_genotype_matrix(
     remove_indels: bool = False,
     remove_multiallelics: bool = False,
     sex_path=None,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
     """
     From a vcf file, save the genotype matrix and variant metadata for the given region.
@@ -586,7 +617,7 @@ def make_genotype_matrix(
     os.makedirs(f"{out}/variant_metadata/", exist_ok=True)
     os.makedirs(f"{out}/genotype_matrices/", exist_ok=True)
 
-    logger = MemoryLogger(__name__, log_file=f"{out}/logs/{partition_number}_{region}_make_genotype_matrix.log")
+    logger = _coerce_logger(logger, log_file=f"{out}/logs/{partition_number}_{region}_make_genotype_matrix.log")
 
     if samples_path is not None:
         samples = load_sample_ids(samples_path)
@@ -643,7 +674,12 @@ def make_genotype_matrix(
     v_info.write_csv(f"{out}/variant_metadata/{partition_number}_{region}.txt", separator=" ")
 
 
-def run_forward_backward(out, mount_point, partition_identifier):
+def run_forward_backward(
+    out,
+    mount_point,
+    partition_identifier,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+):
     """Run forward/backward brick-graph construction for one partition.
 
     **Arguments:**
@@ -659,7 +695,7 @@ def run_forward_backward(out, mount_point, partition_identifier):
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/forward_backward_graphs/", exist_ok=True)
 
-    logger = MemoryLogger(__name__, log_file=f"{out}/logs/{partition_identifier}_forward_backward.log")
+    logger = _coerce_logger(logger, log_file=f"{out}/logs/{partition_identifier}_forward_backward.log")
     logger.info("Loading genotype matrix")
     t1 = time.time()
     with h5py.File(f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5", "r") as f:
@@ -689,7 +725,12 @@ def run_forward_backward(out, mount_point, partition_identifier):
     logger.info(f"Forward and backward brick graph algorithms completed in {np.round(t4 - t3, 3)} seconds")
 
 
-def reduction_union_recom(out, mount_point, partition_identifier):
+def reduction_union_recom(
+    out,
+    mount_point,
+    partition_identifier,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+):
     """
     Compute the transitive reduction of the union of the forward and backward graphs
     and find recombinations to obtain the brick graph.
@@ -697,7 +738,7 @@ def reduction_union_recom(out, mount_point, partition_identifier):
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/brick_graph_partitions/", exist_ok=True)
 
-    logger = MemoryLogger(__name__, log_file=f"{out}/logs/{partition_identifier}_reduction_union_recom.log")
+    logger = _coerce_logger(logger, log_file=f"{out}/logs/{partition_identifier}_reduction_union_recom.log")
 
     logger.info("Loading genotypes, forward and backward graphs, and sample indices")
     t1 = time.time()
@@ -755,14 +796,19 @@ def reduction_union_recom(out, mount_point, partition_identifier):
     logger.info(f"Stats - n: {n}, m: {m}, geno_nnz: {geno_nnz}, brickgraph_nnz: {adj_mat.nnz}, nnz_ratio: {nnz_ratio}")
 
 
-def infer_brick_graph(out, mount_point, partition_identifier):
+def infer_brick_graph(
+    out,
+    mount_point,
+    partition_identifier,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+):
     """
     From a genotype matrix, infer the brick graph and find recombinations.
     """
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/brick_graph_partitions/", exist_ok=True)
 
-    logger = MemoryLogger(__name__, log_file=f"{out}/logs/{partition_identifier}_infer_brick_graph.log")
+    logger = _coerce_logger(logger, log_file=f"{out}/logs/{partition_identifier}_infer_brick_graph.log")
     logger.info("Loading genotype matrix")
     t1 = time.time()
     with h5py.File(f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5", "r") as f:
@@ -796,7 +842,13 @@ def infer_brick_graph(out, mount_point, partition_identifier):
     logger.info(f"Stats - n: {n}, m: {m}, geno_nnz: {geno_nnz}, brickgraph_nnz: {adj_mat.nnz}, nnz_ratio: {nnz_ratio}")
 
 
-def merge(out, mount_point, partition_identifiers, partition_identifier):
+def merge(
+    out,
+    mount_point,
+    partition_identifiers,
+    partition_identifier,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+):
     """
     Merged partitioned brick graphs, find recombinations, and linearize.
     """
@@ -804,7 +856,7 @@ def merge(out, mount_point, partition_identifiers, partition_identifier):
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/linear_args/", exist_ok=True)
 
-    logger = MemoryLogger(__name__, log_file=f"{out}/logs/merge.log")
+    logger = _coerce_logger(logger, log_file=f"{out}/logs/merge.log")
     logger.info("Merging brick graphs")
     t1 = time.time()
 
@@ -955,7 +1007,13 @@ def is_allele_count_correct(stats_file_path):
             return False
 
 
-def add_individuals_to_linarg(out, mount_point, partition_identifiers, partition_identifier):
+def add_individuals_to_linarg(
+    out,
+    mount_point,
+    partition_identifiers,
+    partition_identifier,
+    logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+):
     """Load a partition [`linear_dag.core.lineararg.LinearARG`][], add individual nodes, and write output stats.
 
     **Arguments:**
@@ -972,7 +1030,7 @@ def add_individuals_to_linarg(out, mount_point, partition_identifiers, partition
 
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/individual_linear_args/", exist_ok=True)
-    logger = MemoryLogger(__name__, log_file=f"{out}/logs/add_individual_nodes.log")
+    logger = _coerce_logger(logger, log_file=f"{out}/logs/add_individual_nodes.log")
 
     logger.info("Loading linear ARG")
     t1 = time.time()

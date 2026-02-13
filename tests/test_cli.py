@@ -732,6 +732,50 @@ def test_get_command_logger_prefers_injected_logger():
     assert cli._get_command_logger(args) is injected
 
 
+def test_compress_passes_injected_logger_to_pipeline(monkeypatch):
+    captured = {}
+
+    def _fake_compress_vcf(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli, "compress_vcf", _fake_compress_vcf)
+
+    injected = logging.getLogger("linear_dag.cli.injected.compress")
+    args = Namespace(
+        vcf_path="input.vcf.gz",
+        output_h5="output.h5",
+        region=None,
+        keep=None,
+        flip_minor_alleles=False,
+        maf=None,
+        remove_indels=False,
+        remove_multiallelics=False,
+        add_individual_nodes=False,
+        logger=injected,
+    )
+    cli._compress(args)
+    assert captured["logger"] is injected
+
+
+def test_step1_passes_injected_logger_to_pipeline(monkeypatch):
+    captured = {}
+
+    def _fake_msc_step1(job_metadata, small_job_id, logger=None):
+        captured["job_metadata"] = job_metadata
+        captured["small_job_id"] = small_job_id
+        captured["logger"] = logger
+
+    monkeypatch.setattr(cli, "msc_step1", _fake_msc_step1)
+
+    injected = logging.getLogger("linear_dag.cli.injected.step1")
+    args = Namespace(job_metadata="jobs.parquet", small_job_id=7, logger=injected)
+    cli._step1(args)
+
+    assert captured["job_metadata"] == "jobs.parquet"
+    assert captured["small_job_id"] == 7
+    assert captured["logger"] is injected
+
+
 def test_run_cli_maps_system_exit_to_explicit_code(monkeypatch):
     def _fake_main(_args):
         raise SystemExit(2)
