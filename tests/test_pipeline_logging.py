@@ -151,3 +151,35 @@ def test_compress_vcf_passes_logger_to_lineararg_from_vcf(monkeypatch, tmp_path:
     assert captured["from_vcf.kwargs"]["logger"] is injected
     assert captured["calculate_nonunique_indices.logger"] is injected
     assert captured["write.output_h5"] == str(out_path)
+
+
+def test_compress_vcf_creates_fallback_logger_when_logger_not_provided(monkeypatch, tmp_path: Path):
+    captured = {}
+
+    class _FakeLinarg:
+        shape = (2, 2)
+        nnz = 2
+        allele_frequencies = np.array([0.1, 0.2])
+
+        def calculate_nonunique_indices(self, logger=None):
+            captured["calculate_nonunique_indices.logger"] = logger
+
+        def write(self, output_h5, block_info=None):
+            captured["write.output_h5"] = output_h5
+
+    def _fake_from_vcf(**kwargs):
+        captured["from_vcf.kwargs"] = kwargs
+        return _FakeLinarg()
+
+    monkeypatch.setattr(pipeline.LinearARG, "from_vcf", staticmethod(_fake_from_vcf))
+    monkeypatch.chdir(tmp_path)
+
+    out_path = tmp_path / "out.h5"
+    pipeline.compress_vcf(
+        input_vcf="input.vcf.gz",
+        output_h5=str(out_path),
+    )
+
+    assert isinstance(captured["from_vcf.kwargs"]["logger"], logging.Logger)
+    assert captured["calculate_nonunique_indices.logger"] is captured["from_vcf.kwargs"]["logger"]
+    assert captured["write.output_h5"] == str(out_path)
