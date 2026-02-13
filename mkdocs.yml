@@ -74,9 +74,12 @@ plugins:
 
 nav:
   - Home: index.md
-  - Install: install.md
-  - Quickstart: quickstart.md
-  - CLI: cli.md
-  - Python API: python-api.md
-  - FAQ: faq.md
-  - Contributing: contributing.md
+  - Getting Started:
+      - Install: install.md
+      - Quickstart: quickstart.md
+  - Usage:
+      - CLI: cli.md
+      - Python API: python-api.md
+  - Reference:
+      - FAQ: faq.md
+      - Contributing: contributing.md
