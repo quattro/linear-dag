@@ -41,12 +41,43 @@ def get_gwas_beta_se(
     in_place_op: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Compute GWAS effect sizes and SEs in per-allele units.
-    - Assumes the first column of `covariates` is all-ones.
-    - If `num_heterozygotes` is None, assumes HWE for the denominator.
+    """Compute GWAS effect sizes and standard errors in per-allele units.
 
-    Returns (beta, var_numerator, var_denominator, allele_counts).
+    Let $X$ denote the genotype operator in shared sample space, $Y$ denote
+    residualized phenotypes, and $C$ denote covariates.
+
+    !!! info
+
+        The first column of `covariates` must be an all-ones intercept.
+        If `num_heterozygotes` is `None`, denominator terms are computed under
+        Hardy-Weinberg assumptions. If `in_place_op=True`, `genotypes` must be
+        [`linear_dag.core.parallel_processing.ParallelOperator`][].
+
+    **Arguments:**
+
+    - `genotypes`: Genotype operator over samples-by-variants.
+    - `right_op`: Merge operator mapping shared IID space into genotype IID space.
+    - `y_resid`: Residualized phenotype matrix.
+    - `covariates`: Covariate matrix with intercept in first column.
+    - `num_nonmissing`: Optional non-missing sample counts per phenotype.
+    - `y_nonmissing`: Optional indicator matrix for phenotype missingness.
+    - `num_heterozygotes`: Optional per-variant heterozygote counts for non-HWE paths.
+    - `in_place_op`: Whether to use in-place reverse matmul on parallel operators.
+    - `logger`: Optional logger for diagnostics.
+
+    **Returns:**
+
+    - Tuple `(beta, var_numerator, var_denominator, allele_counts)` where:
+      - `beta` is per-variant per-trait effect size.
+      - `var_numerator` is per-trait residual variance numerator.
+      - `var_denominator` is per-variant denominator term.
+      - `allele_counts` is per-variant alternate-allele count.
+
+    **Raises:**
+
+    - `ValueError`: If covariates are missing an intercept or if
+      `in_place_op=True` is requested without a
+      [`linear_dag.core.parallel_processing.ParallelOperator`][].
     """
     if logger:
         logger.info(
@@ -196,12 +227,41 @@ def run_gwas(
     detach_arrays: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> pl.LazyFrame:
-    """
-    Linear regression association scan with covariates.
-    - `data` must contain `iid`, `pheno_cols`, and `covar_cols` (first covariate is all-ones).
-    - If `assume_hwe` is False, requires a
-      [`linear_dag.core.lineararg.LinearARG`][] with individual nodes.
-    Returns a LazyFrame of per-variant summary statistics.
+    """Run a covariate-adjusted linear-regression GWAS association scan.
+
+    Let $Y$ denote phenotype columns and $C$ denote covariates. This function
+    aligns IIDs between `data` and `genotypes`, residualizes $Y$ on $C$, and
+    computes per-variant summary statistics.
+
+    !!! info
+
+        `data` must include `iid`, phenotype columns, and covariate columns.
+        The first covariate column must be an all-ones intercept. If
+        `assume_hwe=False`, `genotypes` must provide explicit heterozygote
+        counts (for example via individual-node-enabled LinearARG paths).
+
+    **Arguments:**
+
+    - `genotypes`: Genotype operator supporting matmul/rmatmul operations.
+    - `data`: Phenotype/covariate table keyed by `iid`.
+    - `pheno_cols`: Phenotype column names to scan.
+    - `covar_cols`: Covariate column names (first column is intercept).
+    - `variant_info`: Optional variant metadata lazy frame to augment outputs.
+    - `assume_hwe`: Whether to use HWE-based denominator handling.
+    - `recompute_AC`: Whether to recompute allele-count terms under missingness.
+    - `in_place_op`: Whether to use in-place operator paths when available.
+    - `detach_arrays`: Whether to copy result arrays before LazyFrame assembly.
+    - `logger`: Optional logger for diagnostics.
+
+    **Returns:**
+
+    - `polars.LazyFrame` with per-variant summary statistics grouped by trait
+      (`<trait>_BETA`, `<trait>_SE`) plus selected variant metadata columns.
+
+    **Raises:**
+
+    - `ValueError`: If intercept validation fails, IID merge has no overlap, or
+      non-HWE mode is requested without required genotype capabilities.
     """
     if logger:
         logger.info(f"run_gwas: assume_hwe={assume_hwe}; n_pheno={len(pheno_cols)} n_covar={len(covar_cols)}")
@@ -302,14 +362,30 @@ def run_gwas(
 def simple_gwas(
     genotypes: np.ndarray, phenotypes: np.ndarray, covariates: np.ndarray, ploidy: int = 1
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Simple GWAS implementation for testing purposes.
-    Regresses phenotypes on genotypes residualized on covariates,
-    and calculates beta and standard error for each variant. Genotypes
-    can be either diploid or haploid. If genotypes are haploid but the
-    chromosome is diploid, ploidy should be 2, and d.f. for the standard
-    error will be n - p, where p is the number of covariates, instead of
-    (2n - p) / 2.
+    """Compute a simple dense GWAS baseline for testing.
+
+    Let $X$ denote genotype columns, $y$ denote phenotype values, and $C$
+    denote covariates. The function residualizes both $X$ and $y$ on $C$ and
+    computes ordinary least-squares effect sizes and standard errors per
+    variant.
+
+    !!! info
+
+        This helper is intended for test/reference comparisons. `ploidy`
+        controls effective degrees-of-freedom scaling for the standard-error
+        denominator in haploid-vs-diploid interpretations.
+
+    **Arguments:**
+
+    - `genotypes`: Dense genotype matrix.
+    - `phenotypes`: Dense phenotype matrix.
+    - `covariates`: Dense covariate matrix.
+    - `ploidy`: Ploidy scaling factor for standard-error degrees of freedom.
+
+    **Returns:**
+
+    - Tuple `(beta, se)` where each array is shaped
+      `(n_variants, n_traits)`.
     """
 
     nan_rows = np.isnan(phenotypes[:, 0]).ravel()
