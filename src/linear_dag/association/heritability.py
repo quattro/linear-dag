@@ -13,11 +13,12 @@ from scipy.sparse import identity
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 from ..core.operators import get_inner_merge_operators
+from ..core.parallel_processing import GRMOperator
 from .util import impute_missing_with_mean, residualize_phenotypes
 
 
 def randomized_haseman_elston(
-    grm: LinearOperator,
+    grm: GRMOperator,
     data: pl.LazyFrame,
     pheno_cols: list[str],
     covar_cols: list[str],
@@ -40,15 +41,12 @@ def randomized_haseman_elston(
 
     **Arguments:**
 
-    - `grm`: Genetic relatedness operator, typically
-      [`linear_dag.core.parallel_processing.GRMOperator`][] or another
-      compatible `LinearOperator` with `iids`.
+    - `grm`: Genetic relatedness operator implemented as [`linear_dag.core.parallel_processing.GRMOperator`][]
     - `data`: Input phenotype/covariate table containing IID labels.
     - `pheno_cols`: Phenotype columns to estimate.
     - `covar_cols`: Covariate columns; first column must be an intercept.
     - `num_matvecs`: Number of probe vectors for randomized trace estimation.
-    - `trace_est`: Trace-estimator choice (`hutchinson`, `hutch++`,
-      `xnystrace`).
+    - `trace_est`: Trace-estimator choice (`hutchinson`, `hutch++`, `xnystrace`).
     - `sampler`: Probe distribution (`normal`, `sphere`, `rademacher`).
     - `seed`: Optional random seed or generator for probe sampling.
     - `logger`: Optional logger for diagnostics.
@@ -64,14 +62,39 @@ def randomized_haseman_elston(
       is invalid, or if `num_matvecs` exceeds sample count.
     """
 
+    def _info(msg, *args):
+        if logger is not None:
+            logger.info(msg, *args)
+        return
+
+    def _debug(msg, *args):
+        if logger is not None:
+            logger.debug(msg, *args)
+        return
+
+    _info(
+        "randomized_haseman_elston: starting with %d pheno, %d covar, num_matvecs=%d, trace_est=%s, sampler=%s",
+        len(pheno_cols),
+        len(covar_cols),
+        num_matvecs,
+        trace_est,
+        sampler,
+    )
+
     if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
 
     # align and residualize
+    _debug("randomized_haseman_elston: aligning phenotype rows to GRM identifiers")
     left_op, right_op = get_inner_merge_operators(data.select("iid").cast(pl.Utf8).collect().to_series(), grm.iids)
     phenotypes = data.select(pheno_cols).collect().to_numpy(writable=True)
     covariates = data.select(covar_cols).collect().to_numpy(writable=True)
     yresid, covariates = _prep_for_h2_estimation(left_op, right_op, phenotypes, covariates)
+    _debug(
+        "randomized_haseman_elston: prepared residualized phenotypes with shape=%s and covariates shape=%s",
+        yresid.shape,
+        covariates.shape,
+    )
 
     N = len(yresid)
     grm = right_op @ grm @ right_op.T
@@ -83,6 +106,11 @@ def randomized_haseman_elston(
     generator = np.random.default_rng(seed=seed)
     estimator = _construct_estimator(trace_est)
     sampler = _construct_sampler(sampler, generator)
+    _info(
+        "randomized_haseman_elston: estimating traces with estimator=%s using %d probe vectors",
+        trace_est,
+        num_matvecs,
+    )
 
     # wrap the probe-sampler in a residualizer
     # these should be independent in expectation, but it's not much overhead to residualize for exact independence
@@ -96,6 +124,11 @@ def randomized_haseman_elston(
 
     # se not used atm, but for some trace estimators (eg xtrace, xnystrace) we can compute it
     grm_trace, grm_sq_trace, se = estimator(grm, num_matvecs, _resid_sampler)
+    _debug(
+        "randomized_haseman_elston: estimated traces tr(K)=%.6g tr(K^2)=%.6g",
+        grm_trace,
+        grm_sq_trace,
+    )
 
     # compute y_j' K y_j for each y_j \in y
     C = np.sum(grm.matmat(yresid) * yresid, axis=0)
@@ -106,10 +139,11 @@ def randomized_haseman_elston(
     # construct linear equations to solve
     LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, N]])
     RHS = np.vstack([C, N_j])
+    _info("randomized_haseman_elston: solving moment equations for %d phenotypes", RHS.shape[1])
     solution = np.linalg.solve(LHS, RHS)
 
     # compute the (co)variance of our estimates
-    # var_s2g, var_s2e, covariances = _compute_err_variance(grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs)
+    _info("randomized_haseman_elston: estimating std err")
     var_s2g, var_s2e, covariances = _compute_err_variance_vectorized(
         grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs
     )
@@ -139,6 +173,12 @@ def randomized_haseman_elston(
             "h2g": heritability,
             "h2g.se": np.sqrt(var_h2g),
         }
+    )
+
+    _info(
+        "randomized_haseman_elston: completed for %d phenotypes; mean h2g=%.6g",
+        len(pheno_cols),
+        float(np.mean(heritability)),
     )
 
     return df_result
@@ -235,7 +275,7 @@ def _rademacher_sampler(n: int, k: int, generator: Generator) -> np.ndarray:
     return 2 * generator.binomial(1, 0.5, size=(n, k)) - 1
 
 
-_TraceEstimator = Callable[[LinearOperator, int, _Sampler], tuple[float, float, dict]]
+_TraceEstimator = Callable[[GRMOperator, int, _Sampler], tuple[float, float, dict]]
 
 
 def _construct_estimator(tr_est: str) -> _TraceEstimator:
@@ -259,7 +299,7 @@ def _construct_estimator(tr_est: str) -> _TraceEstimator:
     return estimator
 
 
-def _hutchinson_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
+def _hutchinson_estimator(GRM: GRMOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
     n, _ = GRM.shape
     samples = sampler(n, k)
 
@@ -274,7 +314,7 @@ def _hutchinson_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tup
     return trace_grm, trace_grm_sq, {}
 
 
-def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
+def _hutch_pp_estimator(GRM: GRMOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
     """
     Hutch++ trace estimator, but generalized to estimate tr(A) and tr(A^2) in an efficient manner.
 
@@ -331,7 +371,7 @@ def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple
 
 
 def _xtrace_estimator(
-    GRM: LinearOperator,
+    GRM: GRMOperator,
     k: int,
     sampler: _Sampler,
     estimate_diag: bool = False,
@@ -387,7 +427,7 @@ def _xtrace_estimator(
     return trace_grm, trace_grm_sq, {"std.err": std_err}
 
 
-def _xnystrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
+def _xnystrace_estimator(GRM: GRMOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
     n, _ = GRM.shape
     m = k // 2
 
