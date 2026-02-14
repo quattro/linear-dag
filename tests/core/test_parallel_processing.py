@@ -9,15 +9,13 @@ import pytest
 from linear_dag.core.lineararg import LinearARG, list_blocks
 from linear_dag.core.parallel_processing import GRMOperator, ParallelOperator
 
-TEST_DATA_DIR = Path(__file__).parent / "testdata"
 
-
-def test_parallel_operator():
+def test_parallel_operator(linarg_h5_path: Path):
     """
     Test that ParallelOperator gives the same result as serial processing.
     """
     # 1. Setup
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    hdf5_path = linarg_h5_path
     num_traits = 5
 
     # 2. Parallel version
@@ -65,8 +63,8 @@ def _load_serial_blocks(hdf5_path: Path):
     return linargs, n_variants
 
 
-def test_matmat_matches_serial():
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+def test_matmat_matches_serial(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
     linargs, nvars = _load_serial_blocks(hdf5_path)
 
     with ParallelOperator.from_hdf5(hdf5_path, num_processes=2) as par:
@@ -87,8 +85,8 @@ def test_matmat_matches_serial():
     assert np.allclose(Y_par, Y_ser, rtol=1e-3, atol=1e-3)
 
 
-def test_rmatmat_matches_serial():
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+def test_rmatmat_matches_serial(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
     linargs, nvars = _load_serial_blocks(hdf5_path)
 
     with ParallelOperator.from_hdf5(hdf5_path, num_processes=2) as par:
@@ -108,8 +106,8 @@ def test_rmatmat_matches_serial():
     assert np.allclose(Z_par, Z_ser, rtol=1e-5, atol=1e-5)
 
 
-def test_number_of_carriers_matches_serial():
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+def test_number_of_carriers_matches_serial(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
     linargs, nvars = _load_serial_blocks(hdf5_path)
 
     with ParallelOperator.from_hdf5(hdf5_path, num_processes=2) as par:
@@ -128,8 +126,8 @@ def test_number_of_carriers_matches_serial():
     assert np.array_equal(carriers_par_int, carriers_ser.astype(np.int64))
 
 
-def test_rmatmat_in_place_view_and_correctness():
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+def test_rmatmat_in_place_view_and_correctness(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
     linargs, _ = _load_serial_blocks(hdf5_path)
 
     with ParallelOperator.from_hdf5(hdf5_path, num_processes=2, max_num_traits=10) as par:
@@ -152,8 +150,8 @@ def test_rmatmat_in_place_view_and_correctness():
         assert np.allclose(Z_view, Z2_ser, rtol=1e-5, atol=1e-5)
 
 
-def test_matmat_in_place_uses_shared_variant_data():
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+def test_matmat_in_place_uses_shared_variant_data(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
     linargs, nvars = _load_serial_blocks(hdf5_path)
 
     with ParallelOperator.from_hdf5(hdf5_path, num_processes=2, max_num_traits=10) as par:
@@ -180,8 +178,8 @@ def test_matmat_in_place_uses_shared_variant_data():
     assert np.allclose(Y_par, Y_ser, rtol=1e-5, atol=1e-5)
 
 
-def test_in_place_raises_when_exceeds_max_traits():
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+def test_in_place_raises_when_exceeds_max_traits(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
     with ParallelOperator.from_hdf5(hdf5_path, num_processes=2, max_num_traits=2) as par:
         n, m = par.shape
         Y = np.ones((n, 3), dtype=np.float32)
@@ -192,8 +190,8 @@ def test_in_place_raises_when_exceeds_max_traits():
             _ = par._matmat(X, in_place=True)
 
 
-def test_grm_matmat_matches_serial():
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+def test_grm_matmat_matches_serial(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
     linargs, _ = _load_serial_blocks(hdf5_path)
 
     with GRMOperator.from_hdf5(hdf5_path, num_processes=1) as grm:
@@ -215,11 +213,11 @@ def test_grm_matmat_matches_serial():
     assert np.allclose(Y_par, Y_ser, rtol=1e-4, atol=1e-4)
 
 
-def test_grm_matmat_with_alpha():
+def test_grm_matmat_with_alpha(linarg_h5_path: Path):
     from scipy.sparse import diags
     from scipy.sparse.linalg import aslinearoperator
 
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    hdf5_path = linarg_h5_path
     linargs, _ = _load_serial_blocks(hdf5_path)
 
     alpha = 0.5
@@ -243,9 +241,9 @@ def test_grm_matmat_with_alpha():
     assert np.allclose(Y_par, Y_ser, rtol=1e-3, atol=1e-3)
 
 
-def test_maf_threshold_filtering():
+def test_maf_threshold_filtering(linarg_h5_path: Path):
     """Test MAF threshold filtering in ParallelOperator."""
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    hdf5_path = linarg_h5_path
 
     # Create a temporary file with threshold data
     with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
