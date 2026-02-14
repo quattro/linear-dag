@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import numpy as np
 import polars as pl
 import pytest
@@ -10,15 +8,13 @@ from linear_dag.core.operators import get_diploid_operator, get_inner_merge_oper
 from linear_dag.core.parallel_processing import ParallelOperator
 from scipy.sparse.linalg import aslinearoperator
 
-TEST_DATA_DIR = Path(__file__).parent / "testdata"
 
-
-def test_gwas_hwe():
+def test_gwas_hwe(linarg_h5_path):
     """
     Test that run_gwas can recover a simulated causal effect.
     """
     # 1. Setup
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    hdf5_path = linarg_h5_path
     heritability = 0.5
 
     # 2. Simulation
@@ -85,12 +81,12 @@ def test_gwas_hwe():
         assert np.allclose(se, se_simple, atol=1e-6)
 
 
-def test_gwas_no_hwe():
+def test_gwas_no_hwe(linarg_h5_path):
     """
     Test that run_gwas can recover a simulated causal effect.
     """
     # 1. Setup
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    hdf5_path = linarg_h5_path
     heritability = 0.5
     np.random.seed(42)
 
@@ -156,12 +152,12 @@ def test_gwas_no_hwe():
         assert np.allclose(se, se_simple, atol=1e-3)
 
 
-def test_gwas_missingness():
+def test_gwas_missingness(linarg_h5_path):
     """
     Test that run_gwas can recover a simulated causal effect.
     """
     # 1. Setup
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    hdf5_path = linarg_h5_path
     heritability = 0.5
 
     # 2. Simulation
@@ -228,12 +224,12 @@ def test_gwas_missingness():
         assert np.isclose(np.median(beta**2), np.median(beta_simple**2), atol=1e-1)
 
 
-def test_gwas_recompute_AC():
+def test_gwas_recompute_AC(linarg_h5_path):
     """
     Test that run_gwas can handle missingness with HWE assumption.
     """
     # 1. Setup
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    hdf5_path = linarg_h5_path
     heritability = 0.5
 
     # 2. Simulation
@@ -303,12 +299,12 @@ def test_gwas_recompute_AC():
         assert np.allclose(se, se_simple, atol=1e-6)
 
 
-def test_gwas_recompute_AC_no_hwe():
+def test_gwas_recompute_AC_no_hwe(linarg_h5_path):
     """
     Test that run_gwas can handle missingness without HWE assumption.
     """
     # 1. Setup
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+    hdf5_path = linarg_h5_path
     heritability = 0.5
 
     # 2. Simulation

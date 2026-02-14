@@ -9,7 +9,6 @@ from linear_dag.association.simulation import simulate_phenotype
 from linear_dag.core.operators import get_diploid_operator
 from linear_dag.core.parallel_processing import GRMOperator, ParallelOperator
 
-TEST_DATA_DIR = Path(__file__).parent / "testdata"
 BASE_SEED = 0
 NUM_DATA_REPEATS = 2
 NUM_ESTIMATOR_REPEATS = 4
@@ -133,8 +132,8 @@ def _run_randomized_replicates(
 
 
 @pytest.mark.parametrize("estimator", ("hutchinson", "hutch++", "xnystrace"))
-def test_rhe_mean_tracks_exact_he_baseline(estimator: str):
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+def test_rhe_mean_tracks_exact_he_baseline(estimator: str, linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
     error_values: list[float] = []
 
     root_ss = np.random.SeedSequence(BASE_SEED)
@@ -164,8 +163,8 @@ def test_rhe_mean_tracks_exact_he_baseline(estimator: str):
 
 @pytest.mark.parametrize("estimator", ("hutchinson", "hutch++", "xnystrace"))
 @pytest.mark.parametrize("sampler", ("normal", "sphere", "rademacher"))
-def test_hutchinson_error_reduces_with_more_matvecs(estimator: str, sampler: str):
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+def test_hutchinson_error_reduces_with_more_matvecs(estimator: str, sampler: str, linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
     small_k_errors: list[float] = []
     large_k_errors: list[float] = []
 
@@ -203,8 +202,8 @@ def test_hutchinson_error_reduces_with_more_matvecs(estimator: str, sampler: str
     assert float(np.mean(large_k_errors)) <= float(np.mean(small_k_errors)) + 0.05
 
 
-def test_rhe_seed_reproducible_across_operator_instances():
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
+def test_rhe_seed_reproducible_across_operator_instances(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
     df_pheno, _ = _build_rhe_fixture(
         hdf5_path,
         heritability=0.5,
