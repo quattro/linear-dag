@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import h5py
 import numpy as np
 import polars as pl
@@ -9,15 +7,12 @@ from linear_dag.core.operators import get_diploid_operator
 from linear_dag.genotype import read_vcf
 from scipy.sparse import csc_matrix
 
-TEST_DATA_DIR = Path(__file__).parent / "testdata"
 
-
-def test_lineararg():
+def test_lineararg(linarg_h5_path):
     """Tests for lineararg module."""
     # Test list_blocks()
-    hdf5_path = TEST_DATA_DIR / "test_chr21_50.h5"
-    print(f"\nTesting list_blocks with HDF5 file: {hdf5_path}")
-    blocks_df = list_blocks(hdf5_path)
+    print(f"\nTesting list_blocks with HDF5 file: {linarg_h5_path}")
+    blocks_df = list_blocks(linarg_h5_path)
     print("Blocks found:")
     print(blocks_df)
     assert isinstance(blocks_df, pl.DataFrame)
@@ -25,9 +20,9 @@ def test_lineararg():
     assert "block_name" in blocks_df.columns
 
 
-def test_read_vcf():
+def test_read_vcf(test_data_dir):
     """Test reading a VCF file."""
-    vcf_path = TEST_DATA_DIR / "1kg_small.vcf"
+    vcf_path = test_data_dir / "1kg_small.vcf"
     genotypes, flip, v_info, iids = read_vcf(vcf_path)
 
     assert isinstance(genotypes, csc_matrix)
@@ -40,9 +35,9 @@ def test_read_vcf():
     assert len(flip) == len(v_info)
 
 
-def test_from_vcf():
+def test_from_vcf(test_data_dir):
     """Test creating a LinearARG from a VCF file."""
-    vcf_path = TEST_DATA_DIR / "1kg_small.vcf"
+    vcf_path = test_data_dir / "1kg_small.vcf"
     linarg, genotypes = LinearARG.from_vcf(vcf_path, return_genotypes=True)
 
     assert isinstance(linarg, LinearARG)
@@ -77,13 +72,13 @@ def test_samples_with_no_variants():
     assert linarg.shape[0] == genotypes.shape[0]
 
 
-def test_read_write_matmul(tmp_path):
+def test_read_write_matmul(tmp_path, test_data_dir):
     """
     Test that a written and then read LinearARG object gives the same
     matrix-vector product as the original object and the raw genotype matrix.
     Also tests all matrix multiplication variants.
     """
-    vcf_path = TEST_DATA_DIR / "1kg_small.vcf"
+    vcf_path = test_data_dir / "1kg_small.vcf"
     linarg, genotypes = LinearARG.from_vcf(vcf_path, return_genotypes=True)
 
     # 1. Save the linear arg to a temporary file
@@ -143,9 +138,9 @@ def test_read_write_matmul(tmp_path):
     assert np.all(num_carriers == loaded_linarg.number_of_carriers())
 
 
-def test_get_carriers_subset():
+def test_get_carriers_subset(test_data_dir):
     """Test get_carriers_subset method against linarg @ indicator."""
-    vcf_path = TEST_DATA_DIR / "1kg_small.vcf"
+    vcf_path = test_data_dir / "1kg_small.vcf"
     linarg, genotypes = LinearARG.from_vcf(vcf_path, return_genotypes=True)
 
     # Test with a subset of variant indices
@@ -182,8 +177,8 @@ def test_get_carriers_subset():
         np.testing.assert_array_equal(actual_diploid, expected_diploid, err_msg=f"Mismatch for individual {i}")
 
 
-def test_lineararg_copy_independent_arrays():
-    vcf_path = TEST_DATA_DIR / "1kg_small.vcf"
+def test_lineararg_copy_independent_arrays(test_data_dir):
+    vcf_path = test_data_dir / "1kg_small.vcf"
     linarg = LinearARG.from_vcf(vcf_path)
     linarg_copy = linarg.copy()
 
@@ -202,8 +197,8 @@ def test_lineararg_copy_independent_arrays():
     assert linarg.flip[0] == original_flip0
 
 
-def test_add_individual_nodes_propagates_explicit_sex():
-    vcf_path = TEST_DATA_DIR / "1kg_small.vcf"
+def test_add_individual_nodes_propagates_explicit_sex(test_data_dir):
+    vcf_path = test_data_dir / "1kg_small.vcf"
     linarg = LinearARG.from_vcf(vcf_path)
     n_individuals = linarg.shape[0] // 2
     sex = np.zeros(n_individuals, dtype=np.uint)
