@@ -1,5 +1,7 @@
+import io
 import logging
 
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +12,7 @@ from linear_dag.core import linear_arg_inference as lai
 from scipy.sparse import csc_matrix
 
 
-def test_msc_step1_skip_paths_log_via_logger_not_stdout(tmp_path: Path, caplog, capsys):
+def test_msc_step1_skip_paths_log_via_logger_not_stdout(tmp_path: Path, caplog):
     out_dir = tmp_path / "kodama"
     region = "chr1:1-2"
     small_job_id = 0
@@ -46,25 +48,29 @@ def test_msc_step1_skip_paths_log_via_logger_not_stdout(tmp_path: Path, caplog, 
     )
 
     logger = logging.getLogger("linear_dag.tests.pipeline")
+    stdout = io.StringIO()
     with caplog.at_level(logging.INFO, logger=logger.name):
-        pipeline.msc_step1(str(jobs_metadata), small_job_id, logger=logger)
+        with redirect_stdout(stdout):
+            pipeline.msc_step1(str(jobs_metadata), small_job_id, logger=logger)
 
-    assert capsys.readouterr().out == ""
+    assert stdout.getvalue() == ""
     assert any("Genotype matrix for 0_chr1:1-2 already exists. Skipping." in rec.message for rec in caplog.records)
     assert any(
         "Forward backward graph for 0_chr1:1-2 already exists. Skipping." in rec.message for rec in caplog.records
     )
 
 
-def test_load_genotypes_does_not_print_progress(tmp_path: Path, capsys):
+def test_load_genotypes_does_not_print_progress(tmp_path: Path):
     prefix = tmp_path / "geno"
     np.savetxt(prefix.with_suffix(".txt"), np.array([[0, 1], [1, 0]]), fmt="%d")
 
-    genotype.load_genotypes(str(prefix))
-    assert capsys.readouterr().out == ""
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        genotype.load_genotypes(str(prefix))
+    assert stdout.getvalue() == ""
 
 
-def test_linear_arg_inference_logs_progress_when_logger_provided(monkeypatch, caplog, capsys):
+def test_linear_arg_inference_logs_progress_when_logger_provided(monkeypatch, caplog):
     class _FakeBrickGraph:
         @staticmethod
         def from_genotypes(_genotypes):
@@ -85,16 +91,18 @@ def test_linear_arg_inference_logs_progress_when_logger_provided(monkeypatch, ca
     genotypes = csc_matrix(np.array([[1], [0]]))
     flip = np.array([False])
     logger = logging.getLogger("linear_dag.tests.linear_arg_inference")
+    stdout = io.StringIO()
     with caplog.at_level(logging.INFO, logger=logger.name):
-        lai.linear_arg_from_genotypes(
-            genotypes,
-            flip,
-            variant_info=None,
-            find_recombinations=False,
-            logger=logger,
-        )
+        with redirect_stdout(stdout):
+            lai.linear_arg_from_genotypes(
+                genotypes,
+                flip,
+                variant_info=None,
+                find_recombinations=False,
+                logger=logger,
+            )
 
-    assert capsys.readouterr().out == ""
+    assert stdout.getvalue() == ""
     assert any("Inferring brick graph" in rec.message for rec in caplog.records)
     assert any("Finding recombinations" in rec.message for rec in caplog.records)
     assert any("Linearizing brick graph" in rec.message for rec in caplog.records)
