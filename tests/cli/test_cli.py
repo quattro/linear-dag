@@ -1,8 +1,10 @@
 import argparse
+import io
 import logging
 import shlex
 
 from argparse import Namespace
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +15,14 @@ from linear_dag import cli
 from linear_dag.core.lineararg import load_variant_info
 from linear_dag.core.parallel_processing import ParallelOperator
 
-TEST_DATA_DIR = Path(__file__).parent / "testdata"
+# Injected from shared conftest fixture via autouse.
+TEST_DATA_DIR = Path(".")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _inject_test_data_dir(test_data_dir: Path):
+    global TEST_DATA_DIR
+    TEST_DATA_DIR = test_data_dir
 
 
 def test_cli_assoc_smoke(tmp_path: Path):
@@ -595,17 +604,21 @@ def test_estimate_h2g_passes_filtered_block_metadata_to_grm_operator(tmp_path: P
     assert captured["block_metadata"].to_dicts() == block_metadata.to_dicts()
 
 
-def test_cli_help_includes_argument_groups(capsys):
+def test_cli_help_includes_argument_groups():
+    assoc_stdout = io.StringIO()
     with pytest.raises(SystemExit):
-        cli._main(["assoc", "--help"])
-    assoc_help = capsys.readouterr().out
+        with redirect_stdout(assoc_stdout):
+            cli._main(["assoc", "--help"])
+    assoc_help = assoc_stdout.getvalue()
     assert "Association Model:" in assoc_help
     assert "Variant Output and Filtering:" in assoc_help
     assert "Phenotype and Covariate Columns:" in assoc_help
 
+    score_stdout = io.StringIO()
     with pytest.raises(SystemExit):
-        cli._main(["score", "--help"])
-    score_help = capsys.readouterr().out
+        with redirect_stdout(score_stdout):
+            cli._main(["score", "--help"])
+    score_help = score_stdout.getvalue()
     assert "Input:" in score_help
     assert "Block Selection:" in score_help
     assert "Execution and Output:" in score_help
@@ -821,27 +834,31 @@ def test_infer_primary_subcommand_returns_none_without_known_subcommand():
     assert cli._infer_primary_subcommand(["-q", "--out", "result-prefix"]) is None
 
 
-def test_run_cli_runtime_error_returns_one_and_stderr(monkeypatch, capsys):
+def test_run_cli_runtime_error_returns_one_and_stderr(monkeypatch):
     def _fake_main(_args):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(cli, "_main", _fake_main)
     monkeypatch.setattr(cli.sys, "argv", ["kodama", "assoc"])
-    assert cli.run_cli() == 1
-    assert "error: assoc: boom" in capsys.readouterr().err
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        assert cli.run_cli() == 1
+    assert "error: assoc: boom" in stderr.getvalue()
 
 
-def test_run_cli_runtime_error_without_subcommand_falls_back_to_plain_error(monkeypatch, capsys):
+def test_run_cli_runtime_error_without_subcommand_falls_back_to_plain_error(monkeypatch):
     def _fake_main(_args):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(cli, "_main", _fake_main)
     monkeypatch.setattr(cli.sys, "argv", ["kodama", "-q"])
-    assert cli.run_cli() == 1
-    assert "error: boom" in capsys.readouterr().err
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        assert cli.run_cli() == 1
+    assert "error: boom" in stderr.getvalue()
 
 
-def test_run_cli_invalid_block_name_returns_one_and_actionable_stderr(monkeypatch, capsys, tmp_path: Path):
+def test_run_cli_invalid_block_name_returns_one_and_actionable_stderr(monkeypatch, tmp_path: Path):
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
     pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
     out_prefix = tmp_path / "invalid_block"
@@ -864,11 +881,13 @@ def test_run_cli_invalid_block_name_returns_one_and_actionable_stderr(monkeypatc
         ],
     )
 
-    assert cli.run_cli() == 1
-    assert "Unknown block name(s): missing_block" in capsys.readouterr().err
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        assert cli.run_cli() == 1
+    assert "Unknown block name(s): missing_block" in stderr.getvalue()
 
 
-def test_run_cli_invalid_block_name_includes_suggestion_in_stderr(monkeypatch, capsys, tmp_path: Path):
+def test_run_cli_invalid_block_name_includes_suggestion_in_stderr(monkeypatch, tmp_path: Path):
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
     pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
     out_prefix = tmp_path / "invalid_block_typo"
@@ -891,15 +910,17 @@ def test_run_cli_invalid_block_name_includes_suggestion_in_stderr(monkeypatch, c
         ],
     )
 
-    assert cli.run_cli() == 1
-    stderr = capsys.readouterr().err
+    stderr_buf = io.StringIO()
+    with redirect_stderr(stderr_buf):
+        assert cli.run_cli() == 1
+    stderr = stderr_buf.getvalue()
     assert "error: assoc:" in stderr
     assert "Unknown block name(s): 21_10000001.0_10200000.x" in stderr
     assert "Did you mean:" in stderr
     assert "21_10000001.0_10200000.0" in stderr
 
 
-def test_run_cli_invalid_chromosome_returns_one_and_actionable_stderr(monkeypatch, capsys, tmp_path: Path):
+def test_run_cli_invalid_chromosome_returns_one_and_actionable_stderr(monkeypatch, tmp_path: Path):
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
     pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
     out_prefix = tmp_path / "invalid_chrom"
@@ -922,11 +943,13 @@ def test_run_cli_invalid_chromosome_returns_one_and_actionable_stderr(monkeypatc
         ],
     )
 
-    assert cli.run_cli() == 1
-    assert "Unknown chromosome selection(s): not_a_chrom" in capsys.readouterr().err
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        assert cli.run_cli() == 1
+    assert "Unknown chromosome selection(s): not_a_chrom" in stderr.getvalue()
 
 
-def test_run_cli_invalid_chromosome_includes_suggestion_in_stderr(monkeypatch, capsys, tmp_path: Path):
+def test_run_cli_invalid_chromosome_includes_suggestion_in_stderr(monkeypatch, tmp_path: Path):
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
     pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
     out_prefix = tmp_path / "invalid_chrom_typo"
@@ -949,15 +972,17 @@ def test_run_cli_invalid_chromosome_includes_suggestion_in_stderr(monkeypatch, c
         ],
     )
 
-    assert cli.run_cli() == 1
-    stderr = capsys.readouterr().err
+    stderr_buf = io.StringIO()
+    with redirect_stderr(stderr_buf):
+        assert cli.run_cli() == 1
+    stderr = stderr_buf.getvalue()
     assert "error: assoc:" in stderr
     assert "Unknown chromosome selection(s): 2_1" in stderr
     assert "Did you mean:" in stderr
     assert "21" in stderr
 
 
-def test_run_cli_missing_covar_column_returns_one_and_actionable_stderr(monkeypatch, capsys, tmp_path: Path):
+def test_run_cli_missing_covar_column_returns_one_and_actionable_stderr(monkeypatch, tmp_path: Path):
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
     pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
     out_prefix = tmp_path / "invalid_covar"
@@ -982,11 +1007,13 @@ def test_run_cli_missing_covar_column_returns_one_and_actionable_stderr(monkeypa
         ],
     )
 
-    assert cli.run_cli() == 1
-    assert "Requested column name(s) not found" in capsys.readouterr().err
+    stderr = io.StringIO()
+    with redirect_stderr(stderr):
+        assert cli.run_cli() == 1
+    assert "Requested column name(s) not found" in stderr.getvalue()
 
 
-def test_run_cli_missing_covar_column_includes_suggestion_in_stderr(monkeypatch, capsys, tmp_path: Path):
+def test_run_cli_missing_covar_column_includes_suggestion_in_stderr(monkeypatch, tmp_path: Path):
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
     pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
     out_prefix = tmp_path / "invalid_covar_typo"
@@ -1011,15 +1038,17 @@ def test_run_cli_missing_covar_column_includes_suggestion_in_stderr(monkeypatch,
         ],
     )
 
-    assert cli.run_cli() == 1
-    stderr = capsys.readouterr().err
+    stderr_buf = io.StringIO()
+    with redirect_stderr(stderr_buf):
+        assert cli.run_cli() == 1
+    stderr = stderr_buf.getvalue()
     assert "error: assoc:" in stderr
     assert "Requested column name(s) not found" in stderr
     assert "Did you mean:" in stderr
     assert "height" in stderr
 
 
-def test_run_cli_out_of_bounds_pheno_col_nums_returns_bounds_error(monkeypatch, capsys, tmp_path: Path):
+def test_run_cli_out_of_bounds_pheno_col_nums_returns_bounds_error(monkeypatch, tmp_path: Path):
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
     pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
     out_prefix = tmp_path / "invalid_pheno_col_num"
@@ -1040,14 +1069,16 @@ def test_run_cli_out_of_bounds_pheno_col_nums_returns_bounds_error(monkeypatch, 
         ],
     )
 
-    assert cli.run_cli() == 1
-    stderr = capsys.readouterr().err
+    stderr_buf = io.StringIO()
+    with redirect_stderr(stderr_buf):
+        assert cli.run_cli() == 1
+    stderr = stderr_buf.getvalue()
     assert "Requested column index value(s) out of bounds" in stderr
     assert "Valid range: 0..5" in stderr
     assert "Total columns: 6" in stderr
 
 
-def test_run_cli_out_of_bounds_covar_col_nums_returns_bounds_error(monkeypatch, capsys, tmp_path: Path):
+def test_run_cli_out_of_bounds_covar_col_nums_returns_bounds_error(monkeypatch, tmp_path: Path):
     linarg_path = TEST_DATA_DIR / "test_chr21_50.h5"
     pheno_path = TEST_DATA_DIR / "phenotypes_50.tsv"
     out_prefix = tmp_path / "invalid_covar_col_num"
@@ -1072,8 +1103,10 @@ def test_run_cli_out_of_bounds_covar_col_nums_returns_bounds_error(monkeypatch, 
         ],
     )
 
-    assert cli.run_cli() == 1
-    stderr = capsys.readouterr().err
+    stderr_buf = io.StringIO()
+    with redirect_stderr(stderr_buf):
+        assert cli.run_cli() == 1
+    stderr = stderr_buf.getvalue()
     assert "Requested column index value(s) out of bounds" in stderr
     assert "Valid range: 0..5" in stderr
     assert "Total columns: 6" in stderr
