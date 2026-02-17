@@ -859,6 +859,81 @@ def test_main_builds_assoc_and_rhe_using_assembler_helpers(monkeypatch):
     assert calls == ["assoc", "rhe"]
 
 
+def test_assoc_rhe_assembler_wiring_preserves_expected_parse_behavior():
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="cmd", required=True)
+
+    assoc = cli._build_assoc_parser(subparsers)
+    rhe = cli._build_rhe_parser(subparsers)
+
+    assert "--no-hwe" in assoc._option_string_actions
+    assert "--no-hwe" not in rhe._option_string_actions
+    assert "--num-matvecs" in rhe._option_string_actions
+    assert "--num-matvecs" not in assoc._option_string_actions
+
+    assoc_args = parser.parse_args(
+        [
+            "assoc",
+            "linarg.h5",
+            "pheno.tsv",
+            "--pheno-name",
+            "iid,height",
+            "--covar-name",
+            "iid,sex",
+            "--all-variant-info",
+            "--bed",
+            "regions.bed",
+            "--bed-maf-log10-threshold",
+            "-4",
+        ]
+    )
+    assert assoc_args.cmd == "assoc"
+    assert assoc_args.pheno_name == ["iid", "height"]
+    assert assoc_args.covar_name == ["iid", "sex"]
+    assert assoc_args.all_variant_info is True
+    assert assoc_args.no_variant_info is False
+    assert assoc_args.bed == "regions.bed"
+    assert assoc_args.bed_maf_log10_threshold == -4
+
+    rhe_args = parser.parse_args(
+        [
+            "rhe",
+            "linarg.h5",
+            "pheno.tsv",
+            "--pheno-col-nums",
+            "0,1",
+            "--num-matvecs",
+            "200",
+            "--estimator",
+            "hutchinson",
+            "--sampler",
+            "rademacher",
+            "--seed",
+            "9",
+        ]
+    )
+    assert rhe_args.cmd == "rhe"
+    assert rhe_args.pheno_col_nums == [0, 1]
+    assert rhe_args.num_matvecs == 200
+    assert rhe_args.estimator == "hutchinson"
+    assert rhe_args.sampler == "rademacher"
+    assert rhe_args.seed == 9
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "assoc",
+                "linarg.h5",
+                "pheno.tsv",
+                "--no-variant-info",
+                "--all-variant-info",
+            ]
+        )
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["rhe", "linarg.h5", "pheno.tsv", "--no-hwe"])
+
+
 def test_attach_variant_info_joins_with_explicit_row_alignment():
     association_results = pl.DataFrame(
         {
