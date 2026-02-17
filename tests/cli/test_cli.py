@@ -631,6 +631,58 @@ def test_cli_help_includes_argument_groups():
     assert "Execution and Output:" in score_help
 
 
+def test_common_parser_preserves_column_selection_mutual_exclusion():
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="cmd", required=True)
+    common = cli._create_common_parser(subparsers, "assoc", help="assoc help")
+
+    assert common._option_string_actions["--pheno-name"].dest == "pheno_name"
+    assert common._option_string_actions["--pheno-col-nums"].dest == "pheno_col_nums"
+    assert common._option_string_actions["--covar-name"].dest == "covar_name"
+    assert common._option_string_actions["--covar-col-nums"].dest == "covar_col_nums"
+
+    parsed = parser.parse_args(
+        [
+            "assoc",
+            "linarg.h5",
+            "pheno.tsv",
+            "--pheno-name",
+            "iid,height",
+            "--covar-name",
+            "iid,sex",
+        ]
+    )
+    assert parsed.pheno_name == ["iid", "height"]
+    assert parsed.pheno_col_nums is None
+    assert parsed.covar_name == ["iid", "sex"]
+    assert parsed.covar_col_nums is None
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "assoc",
+                "linarg.h5",
+                "pheno.tsv",
+                "--pheno-name",
+                "iid,height",
+                "--pheno-col-nums",
+                "0,1",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "assoc",
+                "linarg.h5",
+                "pheno.tsv",
+                "--covar-name",
+                "iid,sex",
+                "--covar-col-nums",
+                "0,2",
+            ]
+        )
+
+
 def test_attach_variant_info_joins_with_explicit_row_alignment():
     association_results = pl.DataFrame(
         {

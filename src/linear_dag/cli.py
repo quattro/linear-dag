@@ -1159,18 +1159,16 @@ def _add_assoc_rhe_input_group(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _create_common_parser(subp, name, help):
-    common_p = subp.add_parser(name, help=help)
-    _add_assoc_rhe_input_group(common_p)
-    column_group = common_p.add_argument_group("Phenotype and Covariate Columns")
-    assoc_p_pgroup = column_group.add_mutually_exclusive_group(required=False)
-    assoc_p_pgroup.add_argument(
+def _add_assoc_rhe_column_selection_group(parser: argparse.ArgumentParser) -> None:
+    column_group = parser.add_argument_group("Phenotype and Covariate Columns")
+    pheno_selection_group = column_group.add_mutually_exclusive_group(required=False)
+    pheno_selection_group.add_argument(
         "--pheno-name",
         nargs="+",
         action=_SplitAction,
         help="Phenotype name or names (comma/space delimited)",
     )
-    assoc_p_pgroup.add_argument(
+    pheno_selection_group.add_argument(
         "--pheno-col-nums",
         nargs="+",
         action=_SplitAction,
@@ -1181,20 +1179,26 @@ def _create_common_parser(subp, name, help):
         "--covar",
         help="Path to covariate file (tab-delimited). Must contain IID-like column (e.g., `iid`, `IID`, `#iid`, etc.).",
     )
-    assoc_p_cgroup = column_group.add_mutually_exclusive_group(required=False)
-    assoc_p_cgroup.add_argument(
+    covar_selection_group = column_group.add_mutually_exclusive_group(required=False)
+    covar_selection_group.add_argument(
         "--covar-name",
         nargs="+",
         action=_SplitAction,
         help="Covariate name or names (comma/space delimited)",
     )
-    assoc_p_cgroup.add_argument(
+    covar_selection_group.add_argument(
         "--covar-col-nums",
         nargs="+",
         action=_SplitAction,
         type=int,
         help="Covariate column number or numbers (comma/space delimited)",
     )
+
+
+def _create_common_parser(subp, name, help):
+    common_p = subp.add_parser(name, help=help)
+    _add_assoc_rhe_input_group(common_p)
+    _add_assoc_rhe_column_selection_group(common_p)
 
     selection_group = common_p.add_argument_group("Block Selection")
     selection_group.add_argument(
