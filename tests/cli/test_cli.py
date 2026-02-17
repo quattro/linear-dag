@@ -934,6 +934,51 @@ def test_assoc_rhe_assembler_wiring_preserves_expected_parse_behavior():
         parser.parse_args(["rhe", "linarg.h5", "pheno.tsv", "--no-hwe"])
 
 
+def test_assoc_parser_shape_via_main_with_monkeypatched_dispatch(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_assoc_scan(args, logger):
+        captured["args"] = args
+        captured["logger"] = logger
+
+    monkeypatch.setattr(cli, "_assoc_scan", _fake_assoc_scan)
+    monkeypatch.setattr(cli, "_create_cli_logger_context", lambda *_args, **_kwargs: logging.getLogger("cli-test"))
+    monkeypatch.setattr(cli, "_remove_cli_handlers", lambda _logger: None)
+
+    rc = cli._main(
+        [
+            "assoc",
+            "linarg.h5",
+            "pheno.tsv",
+            "--pheno-name",
+            "iid,height",
+            "--covar-name",
+            "iid,sex",
+            "--num-processes",
+            "3",
+            "--no-hwe",
+            "--repeat-covar",
+            "--recompute-ac",
+            "--out",
+            "assoc_out",
+        ]
+    )
+
+    assert rc == 0
+    parsed = captured["args"]
+    assert parsed.linarg_path == "linarg.h5"
+    assert parsed.pheno == "pheno.tsv"
+    assert parsed.pheno_name == ["iid", "height"]
+    assert parsed.covar_name == ["iid", "sex"]
+    assert parsed.num_processes == 3
+    assert parsed.no_hwe is True
+    assert parsed.repeat_covar is True
+    assert parsed.recompute_ac is True
+    assert parsed.out == "assoc_out"
+    assert parsed.func is _fake_assoc_scan
+    assert captured["logger"].name == "cli-test"
+
+
 def test_attach_variant_info_joins_with_explicit_row_alignment():
     association_results = pl.DataFrame(
         {
