@@ -621,6 +621,17 @@ def test_cli_help_includes_argument_groups():
     assert "Variant Output and Filtering:" in assoc_help
     assert "Phenotype and Covariate Columns:" in assoc_help
 
+    rhe_stdout = io.StringIO()
+    with pytest.raises(SystemExit):
+        with redirect_stdout(rhe_stdout):
+            cli._main(["rhe", "--help"])
+    rhe_help = rhe_stdout.getvalue()
+    assert "Input:" in rhe_help
+    assert "Phenotype and Covariate Columns:" in rhe_help
+    assert "Block Selection:" in rhe_help
+    assert "Execution and Output:" in rhe_help
+    assert "RHE Estimator:" in rhe_help
+
     score_stdout = io.StringIO()
     with pytest.raises(SystemExit):
         with redirect_stdout(score_stdout):
