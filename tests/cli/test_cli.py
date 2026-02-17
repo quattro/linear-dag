@@ -1027,6 +1027,38 @@ def test_rhe_parser_shape_via_main_with_monkeypatched_dispatch(monkeypatch):
     assert captured["logger"].name == "cli-test"
 
 
+def test_main_rejects_pheno_name_with_pheno_col_nums():
+    with pytest.raises(SystemExit) as excinfo:
+        cli._main(
+            [
+                "assoc",
+                "linarg.h5",
+                "pheno.tsv",
+                "--pheno-name",
+                "iid,height",
+                "--pheno-col-nums",
+                "0,1",
+            ]
+        )
+    assert excinfo.value.code == 2
+
+
+def test_main_rejects_covar_name_with_covar_col_nums():
+    with pytest.raises(SystemExit) as excinfo:
+        cli._main(
+            [
+                "assoc",
+                "linarg.h5",
+                "pheno.tsv",
+                "--covar-name",
+                "iid,sex",
+                "--covar-col-nums",
+                "0,2",
+            ]
+        )
+    assert excinfo.value.code == 2
+
+
 def test_attach_variant_info_joins_with_explicit_row_alignment():
     association_results = pl.DataFrame(
         {
