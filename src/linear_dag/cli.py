@@ -1150,15 +1150,18 @@ def _main(args):
         _remove_cli_handlers(log)
 
 
-def _create_common_parser(subp, name, help):
-    common_p = subp.add_parser(name, help=help)
-    input_group = common_p.add_argument_group("Input")
+def _add_assoc_rhe_input_group(parser: argparse.ArgumentParser) -> None:
+    input_group = parser.add_argument_group("Input")
     input_group.add_argument("linarg_path", help="Path to linear ARG (.h5 file)")
     input_group.add_argument(
         "pheno",
         help="Path to phenotype file (tab-delimited). Must contain IID-like column (e.g., `iid`, `IID`, `#iid`, etc.).",
     )
 
+
+def _create_common_parser(subp, name, help):
+    common_p = subp.add_parser(name, help=help)
+    _add_assoc_rhe_input_group(common_p)
     column_group = common_p.add_argument_group("Phenotype and Covariate Columns")
     assoc_p_pgroup = column_group.add_mutually_exclusive_group(required=False)
     assoc_p_pgroup.add_argument(
