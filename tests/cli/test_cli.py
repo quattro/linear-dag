@@ -979,6 +979,54 @@ def test_assoc_parser_shape_via_main_with_monkeypatched_dispatch(monkeypatch):
     assert captured["logger"].name == "cli-test"
 
 
+def test_rhe_parser_shape_via_main_with_monkeypatched_dispatch(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_estimate_h2g(args, logger):
+        captured["args"] = args
+        captured["logger"] = logger
+
+    monkeypatch.setattr(cli, "_estimate_h2g", _fake_estimate_h2g)
+    monkeypatch.setattr(cli, "_create_cli_logger_context", lambda *_args, **_kwargs: logging.getLogger("cli-test"))
+    monkeypatch.setattr(cli, "_remove_cli_handlers", lambda _logger: None)
+
+    rc = cli._main(
+        [
+            "rhe",
+            "linarg.h5",
+            "pheno.tsv",
+            "--pheno-col-nums",
+            "0,1",
+            "--num-processes",
+            "4",
+            "--num-matvecs",
+            "200",
+            "--estimator",
+            "hutchinson",
+            "--sampler",
+            "sphere",
+            "--seed",
+            "11",
+            "--out",
+            "rhe_out",
+        ]
+    )
+
+    assert rc == 0
+    parsed = captured["args"]
+    assert parsed.linarg_path == "linarg.h5"
+    assert parsed.pheno == "pheno.tsv"
+    assert parsed.pheno_col_nums == [0, 1]
+    assert parsed.num_processes == 4
+    assert parsed.num_matvecs == 200
+    assert parsed.estimator == "hutchinson"
+    assert parsed.sampler == "sphere"
+    assert parsed.seed == 11
+    assert parsed.out == "rhe_out"
+    assert parsed.func is _fake_estimate_h2g
+    assert captured["logger"].name == "cli-test"
+
+
 def test_attach_variant_info_joins_with_explicit_row_alignment():
     association_results = pl.DataFrame(
         {
