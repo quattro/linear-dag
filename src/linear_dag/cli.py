@@ -529,14 +529,9 @@ def _estimate_h2g(args, logger):
         args.num_processes,
         logger,
     )
-    num_processes = args.num_processes
     logger.info("Creating parallel operator")
-    with GRMOperator.from_hdf5(
-        args.linarg_path,
-        num_processes=num_processes,
-        alpha=-1.0,
-        block_metadata=block_metadata,
-    ) as grm:
+    operator_kwargs = _build_grm_operator_kwargs(args, block_metadata)
+    with GRMOperator.from_hdf5(args.linarg_path, **operator_kwargs) as grm:
         logger.info("Estimating SNP heritability")
         results = randomized_haseman_elston(
             grm,
@@ -729,6 +724,21 @@ def _build_parallel_operator_kwargs(
         "maf_log10_threshold": args.maf_log10_threshold,
         "bed_file": args.bed,
         "bed_maf_log10_threshold": args.bed_maf_log10_threshold,
+    }
+
+
+def _build_grm_operator_kwargs(
+    args: argparse.Namespace,
+    block_metadata: pl.DataFrame,
+) -> dict[str, Union[int, float, str, pl.DataFrame, None]]:
+    return {
+        "num_processes": _validate_num_processes(args.num_processes),
+        "max_num_traits": 8,
+        "maf_log10_threshold": getattr(args, "maf_log10_threshold", None),
+        "block_metadata": block_metadata,
+        "bed_file": getattr(args, "bed", None),
+        "bed_maf_log10_threshold": getattr(args, "bed_maf_log10_threshold", None),
+        "alpha": -1.0,
     }
 
 

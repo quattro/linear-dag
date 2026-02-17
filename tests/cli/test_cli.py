@@ -594,12 +594,19 @@ def test_estimate_h2g_passes_filtered_block_metadata_to_grm_operator(tmp_path: P
         estimator="xnystrace",
         sampler="normal",
         seed=0,
+        maf_log10_threshold=None,
+        bed=None,
+        bed_maf_log10_threshold=None,
         out=str(tmp_path / "rhe"),
     )
     cli._estimate_h2g(args, logging.getLogger("linear_dag.tests.cli.rhe"))
 
     assert captured["hdf5_file"] == "dummy.h5"
     assert captured["num_processes"] == 4
+    assert captured["max_num_traits"] == 8
+    assert captured["maf_log10_threshold"] is None
+    assert captured["bed_file"] is None
+    assert captured["bed_maf_log10_threshold"] is None
     assert captured["alpha"] == -1.0
     assert captured["block_metadata"].to_dicts() == block_metadata.to_dicts()
 

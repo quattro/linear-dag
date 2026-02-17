@@ -245,3 +245,38 @@ def test_rhe_seed_reproducible_across_operator_instances(linarg_h5_path: Path):
         )
 
     np.testing.assert_allclose(observed_first, observed_second, rtol=0.0, atol=1e-8)
+
+
+def test_rhe_workflow_accepts_unified_grm_constructor_kwargs(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
+    df_pheno, _ = _build_rhe_fixture(
+        hdf5_path,
+        heritability=0.5,
+        simulation_seed=BASE_SEED + 3,
+        covariate_seed=BASE_SEED + 4,
+    )
+
+    with GRMOperator.from_hdf5(
+        hdf5_path,
+        num_processes=2,
+        max_num_traits=8,
+        maf_log10_threshold=None,
+        block_metadata=None,
+        bed_file=None,
+        bed_maf_log10_threshold=None,
+        alpha=-1.0,
+    ) as grm:
+        observed = randomized_haseman_elston(
+            grm,
+            df_pheno.lazy(),
+            PHENO_COLS,
+            COVAR_COLS,
+            num_matvecs=5,
+            trace_est="hutchinson",
+            sampler="normal",
+            seed=BASE_SEED + 5,
+        )
+
+    h2g = observed.get_column("h2g").to_numpy()
+    assert h2g.shape == (len(PHENO_COLS),)
+    assert np.all(np.isfinite(h2g))
