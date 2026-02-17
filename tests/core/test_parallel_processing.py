@@ -1,6 +1,7 @@
 import os
 import tempfile
 
+from inspect import signature
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,46 @@ import pytest
 
 from linear_dag.core.lineararg import LinearARG, list_blocks
 from linear_dag.core.parallel_processing import GRMOperator, ParallelOperator
+
+
+def test_from_hdf5_signature_constructor_contract_parameter_order():
+    expected = [
+        "hdf5_file",
+        "num_processes",
+        "max_num_traits",
+        "maf_log10_threshold",
+        "block_metadata",
+        "bed_file",
+        "bed_maf_log10_threshold",
+        "alpha",
+    ]
+
+    parallel_params = list(signature(ParallelOperator.from_hdf5).parameters)
+    grm_params = list(signature(GRMOperator.from_hdf5).parameters)
+
+    assert parallel_params == expected
+    assert grm_params == expected
+    assert parallel_params == grm_params
+
+
+def test_from_hdf5_signature_constructor_contract_default_values():
+    parallel_signature = signature(ParallelOperator.from_hdf5)
+    grm_signature = signature(GRMOperator.from_hdf5)
+
+    assert parallel_signature.parameters["max_num_traits"].default == 8
+    assert grm_signature.parameters["max_num_traits"].default == 8
+
+    for name in (
+        "maf_log10_threshold",
+        "block_metadata",
+        "bed_file",
+        "bed_maf_log10_threshold",
+    ):
+        assert parallel_signature.parameters[name].default is None
+        assert grm_signature.parameters[name].default is None
+
+    assert parallel_signature.parameters["alpha"].default == -1.0
+    assert grm_signature.parameters["alpha"].default == -1.0
 
 
 def test_parallel_operator(linarg_h5_path: Path):
@@ -104,6 +145,23 @@ def test_rmatmat_matches_serial(linarg_h5_path: Path):
     Z_ser = np.vstack(Z_parts)
 
     assert np.allclose(Z_par, Z_ser, rtol=1e-5, atol=1e-5)
+
+
+def test_parallel_operator_alpha_is_no_op(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
+    rng = np.random.default_rng(2026)
+
+    with ParallelOperator.from_hdf5(hdf5_path, num_processes=2, alpha=-1.0) as op_alpha_neg:
+        _, m = op_alpha_neg.shape
+        x = rng.standard_normal((m, 3)).astype(np.float32)
+        y_alpha_neg = op_alpha_neg @ x
+
+    with ParallelOperator.from_hdf5(hdf5_path, num_processes=2, alpha=0.75) as op_alpha_pos:
+        y_alpha_pos = op_alpha_pos @ x
+
+    assert y_alpha_neg.shape == y_alpha_pos.shape
+    assert y_alpha_neg.dtype == y_alpha_pos.dtype
+    np.testing.assert_allclose(y_alpha_neg, y_alpha_pos, rtol=1e-5, atol=1e-5)
 
 
 def test_number_of_carriers_matches_serial(linarg_h5_path: Path):

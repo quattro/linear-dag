@@ -529,12 +529,16 @@ class ParallelOperator(LinearOperator):
         block_metadata: Optional[pl.DataFrame] = None,
         bed_file: Optional[str] = None,
         bed_maf_log10_threshold: Optional[int] = None,
+        alpha: float = -1.0,
     ) -> ParallelOperator:
         """Create a ParallelOperator from a metadata file.
 
         !!! info
             MAF and BED filtering are applied during construction, so the returned
             operator shape reflects post-filtered variants.
+            The `alpha` argument is accepted for constructor parity with
+            [`linear_dag.core.parallel_processing.GRMOperator`][] and is a no-op
+            for genotype-only paths.
 
         **Arguments:**
 
@@ -545,6 +549,7 @@ class ParallelOperator(LinearOperator):
         - `block_metadata`: Optional pre-filtered block metadata.
         - `bed_file`: Optional BED file path.
         - `bed_maf_log10_threshold`: Keep BED variants with MAF greater than `10**x`.
+        - `alpha`: Accepted for API parity; not used by `ParallelOperator`.
 
         **Returns:**
 
@@ -554,6 +559,7 @@ class ParallelOperator(LinearOperator):
 
         - `RuntimeError`: If any worker signals an error while initializing/awaiting.
         """
+        _ = alpha
         if block_metadata is None:
             block_metadata = list_blocks(hdf5_file)
 
@@ -761,19 +767,29 @@ class GRMOperator(LinearOperator):
         cls,
         hdf5_file: str,
         num_processes: Optional[int] = None,
-        alpha: float = -1.0,
-        max_num_traits: int = 10,
+        max_num_traits: int = 8,
+        maf_log10_threshold: Optional[int] = None,
         block_metadata: Optional[pl.DataFrame] = None,
+        bed_file: Optional[str] = None,
+        bed_maf_log10_threshold: Optional[int] = None,
+        alpha: float = -1.0,
     ) -> GRMOperator:
         """Create a GRMOperator from a metadata file.
+
+        !!! info
+            `alpha` is operational for GRM weighting and controls the diagonal
+            re-weighting in each block contribution.
 
         **Arguments:**
 
         - `hdf5_file`: Path to HDF5 file.
         - `num_processes`: Number of workers; `None` uses available CPUs bounded by block count.
-        - `alpha`: Alpha parameter used in GRM diagonal weighting.
         - `max_num_traits`: Chunk width for shared-memory matmat.
+        - `maf_log10_threshold`: Accepted for constructor parity; currently ignored by GRM.
         - `block_metadata`: Optional pre-filtered block metadata.
+        - `bed_file`: Accepted for constructor parity; currently ignored by GRM.
+        - `bed_maf_log10_threshold`: Accepted for constructor parity; currently ignored by GRM.
+        - `alpha`: Alpha parameter used in GRM diagonal weighting.
 
         **Returns:**
 
@@ -783,6 +799,19 @@ class GRMOperator(LinearOperator):
 
         - `RuntimeError`: If any worker signals an error while initializing/awaiting.
         """
+        # Backward compatibility for legacy positional calls:
+        # (hdf5_file, num_processes, alpha, max_num_traits, block_metadata)
+        legacy_alpha_position = isinstance(max_num_traits, (float, np.floating)) or (
+            isinstance(max_num_traits, (int, np.integer)) and max_num_traits <= 0
+        )
+        if legacy_alpha_position and maf_log10_threshold is not None and bed_file is None:
+            alpha = float(max_num_traits)
+            max_num_traits = int(maf_log10_threshold)
+            maf_log10_threshold = None
+
+        _ = maf_log10_threshold
+        _ = bed_file
+        _ = bed_maf_log10_threshold
         if block_metadata is None:
             block_metadata = list_blocks(hdf5_file)
         num_samples = block_metadata["n_samples"][0]
