@@ -884,30 +884,7 @@ def _main(args):
 
     # build h2g estimation parser from 'common' parser, but add additional options for RHE
     rhe_p = _create_common_parser(subp, "rhe", help="Estimate SNP heritability using linear ARG")
-    rhe_group = rhe_p.add_argument_group("RHE Estimator")
-    rhe_group.add_argument(
-        "--num-matvecs",
-        type=int,
-        default=100,
-        help="Number of matrix-vector products to perform.",
-    )
-    rhe_group.add_argument(
-        "--estimator",
-        choices=["hutchinson", "hutch++", "xnystrace"],
-        default="xnystrace",
-        help="The stochastic trace estimator algorithm.",
-    )
-    rhe_group.add_argument(
-        "--sampler",
-        choices=["normal", "sphere", "rademacher"],
-        default="normal",
-        help="The distribution for sampling vector/probes.",
-    )
-    rhe_group.add_argument(
-        "--seed",
-        type=int,
-        help="PRNG seed for reproducibility.",
-    )
+    _add_rhe_estimator_group(rhe_p)
     rhe_p.set_defaults(func=_estimate_h2g)
 
     prs_p = subp.add_parser("score", help="Score individuals using linear ARG")
@@ -1219,6 +1196,33 @@ def _add_assoc_variant_output_filtering_group(parser: argparse.ArgumentParser) -
             "MAF log10 threshold for variants inside BED regions (e.g., -4 for MAF > 0.0001). "
             "Only used when --bed is specified."
         ),
+    )
+
+
+def _add_rhe_estimator_group(parser: argparse.ArgumentParser) -> None:
+    rhe_group = parser.add_argument_group("RHE Estimator")
+    rhe_group.add_argument(
+        "--num-matvecs",
+        type=int,
+        default=100,
+        help="Number of matrix-vector products to perform.",
+    )
+    rhe_group.add_argument(
+        "--estimator",
+        choices=["hutchinson", "hutch++", "xnystrace"],
+        default="xnystrace",
+        help="The stochastic trace estimator algorithm.",
+    )
+    rhe_group.add_argument(
+        "--sampler",
+        choices=["normal", "sphere", "rademacher"],
+        default="normal",
+        help="The distribution for sampling vector/probes.",
+    )
+    rhe_group.add_argument(
+        "--seed",
+        type=int,
+        help="PRNG seed for reproducibility.",
     )
 
 

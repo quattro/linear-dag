@@ -776,6 +776,39 @@ def test_assoc_specific_options_parse_and_do_not_leak_to_rhe():
     assert "--maf-log10-threshold" not in rhe._option_string_actions
 
 
+def test_rhe_estimator_options_parse_to_expected_fields():
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="cmd", required=True)
+
+    assoc = cli._create_common_parser(subparsers, "assoc", help="assoc help")
+    rhe = cli._create_common_parser(subparsers, "rhe", help="rhe help")
+    cli._add_rhe_estimator_group(rhe)
+
+    parsed = parser.parse_args(
+        [
+            "rhe",
+            "linarg.h5",
+            "pheno.tsv",
+            "--num-matvecs",
+            "12",
+            "--estimator",
+            "hutch++",
+            "--sampler",
+            "sphere",
+            "--seed",
+            "7",
+        ]
+    )
+    assert parsed.num_matvecs == 12
+    assert parsed.estimator == "hutch++"
+    assert parsed.sampler == "sphere"
+    assert parsed.seed == 7
+    assert "--num-matvecs" not in assoc._option_string_actions
+    assert "--estimator" not in assoc._option_string_actions
+    assert "--sampler" not in assoc._option_string_actions
+    assert "--seed" not in assoc._option_string_actions
+
+
 def test_attach_variant_info_joins_with_explicit_row_alignment():
     association_results = pl.DataFrame(
         {
