@@ -765,10 +765,32 @@ class GRMOperator(LinearOperator):
         blocks: list,
         variant_offsets: list,
         alpha_value: float,
+        maf_log10_threshold: Optional[float] = None,
+        bed_regions: Optional[pl.DataFrame] = None,
+        bed_maf_log10_threshold: Optional[float] = None,
     ) -> None:
         """Worker process that loads LDGMs and processes blocks."""
 
         linargs = [LinearARG.read(hdf5_file, block) for block in blocks]
+
+        needs_filtering = maf_log10_threshold is not None or bed_regions is not None
+        if needs_filtering:
+            maf_threshold = 10**maf_log10_threshold if maf_log10_threshold is not None else 0.0
+            bed_maf_threshold = 10**bed_maf_log10_threshold if bed_maf_log10_threshold is not None else 0.0
+
+            for linarg, block in zip(linargs, blocks):
+                mask = compute_variant_filter_mask(
+                    hdf5_file,
+                    block,
+                    maf_threshold=maf_threshold,
+                    bed_regions=bed_regions,
+                    bed_maf_threshold=bed_maf_threshold,
+                )
+                allele_counts = linarg.allele_counts
+                linarg.filter_variants_by_mask(mask)
+                linarg.set_allele_counts(allele_counts[mask])
+                linarg.nonunique_indices = None
+                linarg.calculate_nonunique_indices()
 
         while True:
             while flag.value == FLAGS["wait"]:
@@ -874,6 +896,9 @@ class GRMOperator(LinearOperator):
             context.block_metadata,
             shm_specification,
             alpha,
+            context.maf_log10_threshold,
+            context.bed_regions,
+            context.bed_maf_log10_threshold,
         )
         manager.start_workers(FLAGS["wait"])
 

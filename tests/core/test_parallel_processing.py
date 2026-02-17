@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from linear_dag.core.lineararg import LinearARG, list_blocks
+from linear_dag.core.lineararg import compute_variant_filter_mask, LinearARG, list_blocks
 from linear_dag.core.parallel_processing import GRMOperator, ParallelOperator
 
 
@@ -364,6 +364,107 @@ def test_grm_matmat_with_alpha(linarg_h5_path: Path):
         Y_ser += la.normalized @ K @ la.normalized.T @ X
 
     assert np.allclose(Y_par, Y_ser, rtol=1e-3, atol=1e-3)
+
+
+def _compute_serial_filtered_grm(
+    hdf5_path: Path,
+    x: np.ndarray,
+    alpha: float = -1.0,
+    maf_log10_threshold: int | None = None,
+    bed_regions=None,
+    bed_maf_log10_threshold: int | None = None,
+) -> np.ndarray:
+    from scipy.sparse import diags
+    from scipy.sparse.linalg import aslinearoperator
+
+    maf_threshold = 10**maf_log10_threshold if maf_log10_threshold is not None else 0.0
+    bed_maf_threshold = 10**bed_maf_log10_threshold if bed_maf_log10_threshold is not None else 0.0
+
+    y = np.zeros_like(x, dtype=np.float32)
+    for block_name in list_blocks(hdf5_path)["block_name"]:
+        linarg = LinearARG.read(hdf5_path, block=block_name, load_metadata=True)
+        if maf_log10_threshold is not None or bed_regions is not None:
+            mask = compute_variant_filter_mask(
+                hdf5_path,
+                block_name,
+                maf_threshold=maf_threshold,
+                bed_regions=bed_regions,
+                bed_maf_threshold=bed_maf_threshold,
+            )
+            allele_counts = linarg.allele_counts
+            linarg.filter_variants_by_mask(mask)
+            linarg.set_allele_counts(allele_counts[mask])
+            linarg.nonunique_indices = None
+            linarg.calculate_nonunique_indices()
+
+        pq = linarg.allele_frequencies * (1 - linarg.allele_frequencies)
+        K = aslinearoperator(diags(pq ** (1 + alpha)))
+        y += linarg.normalized @ K @ linarg.normalized.T @ x
+
+    return y
+
+
+def test_grm_filter_maf_matches_serial(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
+    maf_log10_threshold = -1
+    rng = np.random.default_rng(43)
+
+    with GRMOperator.from_hdf5(
+        hdf5_path,
+        num_processes=2,
+        maf_log10_threshold=maf_log10_threshold,
+    ) as grm:
+        n = grm.shape[0]
+        x = rng.standard_normal((n, 3)).astype(np.float32)
+        y_par = grm @ x
+
+    y_ser = _compute_serial_filtered_grm(
+        hdf5_path,
+        x,
+        alpha=-1.0,
+        maf_log10_threshold=maf_log10_threshold,
+    )
+
+    np.testing.assert_allclose(y_par, y_ser, rtol=1e-3, atol=1e-3)
+
+
+def test_grm_filter_bed_and_maf_matches_serial(linarg_h5_path: Path):
+    from linear_dag.bed_io import read_bed
+
+    hdf5_path = linarg_h5_path
+    maf_log10_threshold = -1
+    bed_maf_log10_threshold = -4
+    rng = np.random.default_rng(44)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".bed", delete=False) as f:
+        f.write("chr21\t10000000\t10100000\n")
+        bed_path = f.name
+
+    try:
+        bed_regions = read_bed(bed_path)
+        with GRMOperator.from_hdf5(
+            hdf5_path,
+            num_processes=2,
+            maf_log10_threshold=maf_log10_threshold,
+            bed_file=bed_path,
+            bed_maf_log10_threshold=bed_maf_log10_threshold,
+        ) as grm:
+            n = grm.shape[0]
+            x = rng.standard_normal((n, 3)).astype(np.float32)
+            y_par = grm @ x
+
+        y_ser = _compute_serial_filtered_grm(
+            hdf5_path,
+            x,
+            alpha=-1.0,
+            maf_log10_threshold=maf_log10_threshold,
+            bed_regions=bed_regions,
+            bed_maf_log10_threshold=bed_maf_log10_threshold,
+        )
+
+        np.testing.assert_allclose(y_par, y_ser, rtol=1e-3, atol=1e-3)
+    finally:
+        os.remove(bed_path)
 
 
 def test_maf_threshold_filtering(linarg_h5_path: Path):
