@@ -683,6 +683,43 @@ def test_common_parser_preserves_column_selection_mutual_exclusion():
         )
 
 
+def test_assoc_rhe_group_helpers_compose_in_deterministic_order():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sentinel", action="store_true", default=False)
+
+    cli._add_assoc_rhe_input_group(parser)
+    cli._add_assoc_rhe_column_selection_group(parser)
+    cli._add_assoc_rhe_block_selection_group(parser)
+    cli._add_assoc_rhe_execution_output_group(parser)
+
+    custom_group_titles = [
+        group.title for group in parser._action_groups if group.title not in {"positional arguments", "options"}
+    ]
+    assert custom_group_titles == [
+        "Input",
+        "Phenotype and Covariate Columns",
+        "Block Selection",
+        "Execution and Output",
+    ]
+
+    parsed = parser.parse_args(
+        [
+            "linarg.h5",
+            "pheno.tsv",
+            "--pheno-col-nums",
+            "0,1",
+            "--block-names",
+            "block_a",
+            "--num-processes",
+            "2",
+        ]
+    )
+    assert parsed.sentinel is False
+    assert parsed.pheno_col_nums == [0, 1]
+    assert parsed.block_names == ["block_a"]
+    assert parsed.num_processes == 2
+
+
 def test_attach_variant_info_joins_with_explicit_row_alignment():
     association_results = pl.DataFrame(
         {

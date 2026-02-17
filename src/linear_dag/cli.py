@@ -1195,12 +1195,8 @@ def _add_assoc_rhe_column_selection_group(parser: argparse.ArgumentParser) -> No
     )
 
 
-def _create_common_parser(subp, name, help):
-    common_p = subp.add_parser(name, help=help)
-    _add_assoc_rhe_input_group(common_p)
-    _add_assoc_rhe_column_selection_group(common_p)
-
-    selection_group = common_p.add_argument_group("Block Selection")
+def _add_assoc_rhe_block_selection_group(parser: argparse.ArgumentParser) -> None:
+    selection_group = parser.add_argument_group("Block Selection")
     selection_group.add_argument(
         "--chromosomes", type=str, nargs="+", help="Which chromosomes to include. Defaults to all chromosomes."
     )
@@ -1208,13 +1204,23 @@ def _create_common_parser(subp, name, help):
         "--block-names", type=str, nargs="+", help="Which blocks to include. Defaults to all blocks."
     )
 
-    execution_group = common_p.add_argument_group("Execution and Output")
+
+def _add_assoc_rhe_execution_output_group(parser: argparse.ArgumentParser) -> None:
+    execution_group = parser.add_argument_group("Execution and Output")
     execution_group.add_argument(
         "--num-processes",
         type=int,
         help="How many cores to uses. Defaults to all available cores.",
     )
     execution_group.add_argument("--out", default="kodama", help="Location to save result files.")
+
+
+def _create_common_parser(subp, name, help):
+    common_p = subp.add_parser(name, help=help)
+    _add_assoc_rhe_input_group(common_p)
+    _add_assoc_rhe_column_selection_group(common_p)
+    _add_assoc_rhe_block_selection_group(common_p)
+    _add_assoc_rhe_execution_output_group(common_p)
     return common_p
 
 
