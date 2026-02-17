@@ -1215,12 +1215,16 @@ def _add_assoc_rhe_execution_output_group(parser: argparse.ArgumentParser) -> No
     execution_group.add_argument("--out", default="kodama", help="Location to save result files.")
 
 
+def _compose_assoc_rhe_shared_parser_groups(parser: argparse.ArgumentParser) -> None:
+    _add_assoc_rhe_input_group(parser)
+    _add_assoc_rhe_column_selection_group(parser)
+    _add_assoc_rhe_block_selection_group(parser)
+    _add_assoc_rhe_execution_output_group(parser)
+
+
 def _create_common_parser(subp, name, help):
     common_p = subp.add_parser(name, help=help)
-    _add_assoc_rhe_input_group(common_p)
-    _add_assoc_rhe_column_selection_group(common_p)
-    _add_assoc_rhe_block_selection_group(common_p)
-    _add_assoc_rhe_execution_output_group(common_p)
+    _compose_assoc_rhe_shared_parser_groups(common_p)
     return common_p
 
 

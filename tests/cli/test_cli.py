@@ -720,6 +720,20 @@ def test_assoc_rhe_group_helpers_compose_in_deterministic_order():
     assert parsed.num_processes == 2
 
 
+def test_compose_assoc_rhe_shared_parser_groups_calls_primitives_in_order(monkeypatch):
+    parser = argparse.ArgumentParser()
+    calls: list[str] = []
+
+    monkeypatch.setattr(cli, "_add_assoc_rhe_input_group", lambda _parser: calls.append("input"))
+    monkeypatch.setattr(cli, "_add_assoc_rhe_column_selection_group", lambda _parser: calls.append("columns"))
+    monkeypatch.setattr(cli, "_add_assoc_rhe_block_selection_group", lambda _parser: calls.append("blocks"))
+    monkeypatch.setattr(cli, "_add_assoc_rhe_execution_output_group", lambda _parser: calls.append("execution"))
+
+    cli._compose_assoc_rhe_shared_parser_groups(parser)
+
+    assert calls == ["input", "columns", "blocks", "execution"]
+
+
 def test_attach_variant_info_joins_with_explicit_row_alignment():
     association_results = pl.DataFrame(
         {
