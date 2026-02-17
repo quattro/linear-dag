@@ -1,6 +1,6 @@
 # Core Domain
 
-Last verified: 2026-02-12
+Last verified: 2026-02-17
 
 ## Purpose
 Implements the fundamental LinearARG data model and graph algebra.
@@ -8,7 +8,7 @@ This domain owns graph construction, sparse operator behavior, HDF5 persistence,
 
 ## Contracts
 - **Exposes**: `BrickGraph`, `linear_arg_from_genotypes`, `LinearARG`, `list_blocks`, `ParallelOperator`, `Recombination`, triangular solve/topological utilities from `src/linear_dag/core/__init__.py`.
-- **Guarantees**: `LinearARG` behaves like a sample-by-variant `LinearOperator`; `write()` and `read()` round-trip graph state; block metadata and IID loading support blockwise workflows.
+- **Guarantees**: `LinearARG` behaves like a sample-by-variant `LinearOperator`; `write()` and `read()` round-trip graph state; block metadata and IID loading support blockwise workflows; `ParallelOperator.from_hdf5` and `GRMOperator.from_hdf5` share a constructor-preparation pipeline (metadata/BED/filter/IID bootstrap) with class-specific compute hooks.
 - **Expects**: genotype inference inputs are CSC-like and shape-consistent; HDF5 blocks contain required datasets/attrs (`indptr`, `indices`, `data`, `variant_indices`, `flip`, sample counts).
 
 ## Dependencies
@@ -27,6 +27,8 @@ This domain owns graph construction, sparse operator behavior, HDF5 persistence,
 - Sample indices occupy the tail of node ordering; `shape` derives from `sample_indices` and `variant_indices`.
 - Non-HWE operations require individual nodes (`n_individuals` not `None`) and must fail fast otherwise.
 - Parallel operators are used in context managers so workers and shared memory are always cleaned up.
+- Constructor calls with `num_processes < 1` raise deterministic `ValueError` before worker startup.
+- `alpha` is accepted by both constructors for contract parity but only changes GRM weighting behavior.
 
 ## Key Files
 - `src/linear_dag/core/lineararg.py` - core representation, filtering, serialization

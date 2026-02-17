@@ -1,6 +1,6 @@
 # linear-dag
 
-Last verified: 2026-02-12
+Last verified: 2026-02-17
 
 ## Scope
 This context is intentionally scoped to `src/` only.
@@ -22,6 +22,7 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
   - `LinearARG` behaves as a `scipy.sparse.linalg.LinearOperator` over sample-by-variant genotype space.
   - `LinearARG.write()` / `LinearARG.read()` persist and restore HDF5-backed graph state and metadata.
   - Association and heritability paths align phenotype/covariate rows to genotype IDs using merge operators.
+  - `ParallelOperator.from_hdf5` and `GRMOperator.from_hdf5` use a unified constructor keyword contract; `alpha` is operational only for GRM weighting and a no-op for `ParallelOperator`.
 - **Expects**:
   - IID columns in phenotype/covariate inputs (`iid`, `IID`, `#iid`, etc.).
   - First covariate column is an intercept (all ones) for GWAS and RHE code paths.
@@ -52,6 +53,7 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 - BED coordinates are interpreted as UCSC 0-based half-open intervals `[start, end)`.
 - Merge/alignment failures between genotype and phenotype identifiers are fatal (do not silently continue).
 - Parallel operators must be used within context managers so worker processes and shared memory are cleaned up.
+- Constructor calls with `num_processes < 1` fail deterministically with a user-facing `ValueError`.
 
 ## Agent Guidelines
 - Preserve the public API surface:
