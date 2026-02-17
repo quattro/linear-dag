@@ -118,6 +118,13 @@ def test_from_hdf5_shared_pipeline_path_for_parallel_and_grm(monkeypatch):
     assert grm.shape == (5, 5)
 
 
+@pytest.mark.parametrize("operator_cls", [ParallelOperator, GRMOperator])
+@pytest.mark.parametrize("num_processes", [0, -1])
+def test_from_hdf5_num_processes_raises_ValueError(linarg_h5_path: Path, operator_cls, num_processes: int):
+    with pytest.raises(ValueError, match=rf"`num_processes` must be positive\. Observed {num_processes}\."):
+        operator_cls.from_hdf5(linarg_h5_path, num_processes=num_processes)
+
+
 def test_parallel_operator(linarg_h5_path: Path):
     """
     Test that ParallelOperator gives the same result as serial processing.
@@ -275,6 +282,27 @@ def test_rmatmat_in_place_view_and_correctness(linarg_h5_path: Path):
         assert np.allclose(Z_view, Z2_ser, rtol=1e-5, atol=1e-5)
 
 
+def test_parallel_operator_shutdown_joins_workers_and_unlinks_shared_memory(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
+    with ParallelOperator.from_hdf5(hdf5_path, num_processes=2) as par:
+        manager = par._manager
+        processes = list(manager.processes)
+        assert processes
+
+    assert all(not process.is_alive() for process in processes)
+    assert all(handle._shm is None for handle in manager.handles.values())
+
+
+def test_borrow_variant_data_view_closes_handles_on_context_exit(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
+    with ParallelOperator.from_hdf5(hdf5_path, num_processes=2) as par:
+        _ = par.borrow_variant_data_view()
+        borrowed_handle = par._variant_view_handles[-1]
+        assert borrowed_handle._opened_shm is not None
+
+    assert borrowed_handle._opened_shm is None
+
+
 def test_matmat_in_place_uses_shared_variant_data(linarg_h5_path: Path):
     hdf5_path = linarg_h5_path
     linargs, nvars = _load_serial_blocks(hdf5_path)
@@ -313,6 +341,35 @@ def test_in_place_raises_when_exceeds_max_traits(linarg_h5_path: Path):
         X = np.ones((m, 3), dtype=np.float32)
         with pytest.raises(ValueError):
             _ = par._matmat(X, in_place=True)
+
+
+def test_worker_error_path_raises_runtime_error_and_cleans_up_shared_memory():
+    import linear_dag.core.parallel_processing as parallel_processing
+
+    manager = parallel_processing._ParallelManager(
+        num_processes=1,
+        object_specification={"tmp": ((1, 1), np.float32)},
+    )
+    cleanup_called = False
+    original_close = manager.close
+
+    def wrapped_close():
+        nonlocal cleanup_called
+        cleanup_called = True
+        original_close()
+
+    manager.close = wrapped_close
+
+    try:
+        manager.flags[0].value = parallel_processing.FLAGS["error"]
+        with pytest.raises(RuntimeError, match="Worker process encountered an error"):
+            manager.await_workers()
+
+        assert cleanup_called
+        assert all(handle._shm is None for handle in manager.handles.values())
+    finally:
+        if any(handle._shm is not None for handle in manager.handles.values()):
+            original_close()
 
 
 def test_grm_matmat_matches_serial(linarg_h5_path: Path):
