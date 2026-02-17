@@ -878,61 +878,9 @@ def _main(args):
 
     # build association scan parser from 'common' parser
     assoc_p = _create_common_parser(subp, "assoc", help="Perform an association scan using the linear ARG.")
+    _add_assoc_model_group(assoc_p)
+    _add_assoc_variant_output_filtering_group(assoc_p)
     assoc_p.set_defaults(func=_assoc_scan)
-    assoc_model_group = assoc_p.add_argument_group("Association Model")
-    assoc_model_group.add_argument(
-        "--no-hwe",
-        action="store_true",
-        help="Do not assume Hardy-Weinberg equilibrium (requires individual nodes in the ARG).",
-    )
-    assoc_model_group.add_argument(
-        "--repeat-covar",
-        action="store_true",
-        help=("Run phenotypes one at a time inside the parallel operator, repeating covariate projections. "),
-    )
-    assoc_model_group.add_argument(
-        "--recompute-ac",
-        action="store_true",
-        help=("Recompute allele counts."),
-    )
-
-    assoc_variant_group = assoc_p.add_argument_group("Variant Output and Filtering")
-    variant_info_group = assoc_variant_group.add_mutually_exclusive_group(required=False)
-    variant_info_group.add_argument(
-        "--no-variant-info",
-        action="store_true",
-        help="Do not include variant metadata columns (CHROM, POS, ID, REF, ALT) in output.",
-    )
-    variant_info_group.add_argument(
-        "--all-variant-info",
-        action="store_true",
-        help="Include all variant metadata columns (CHROM, POS, ID, REF, ALT) in output. Default is ID only.",
-    )
-    assoc_variant_group.add_argument(
-        "--maf-log10-threshold",
-        type=int,
-        default=None,
-        help=("MAF log10 threshold for variants outside BED regions (e.g., -2 for MAF > 0.01)."),
-    )
-    assoc_variant_group.add_argument(
-        "--bed",
-        type=str,
-        default=None,
-        help=(
-            "Path to BED file defining genomic regions of interest. "
-            "Variants inside BED regions use --bed-maf-log10-threshold; "
-            "variants outside use --maf-log10-threshold."
-        ),
-    )
-    assoc_variant_group.add_argument(
-        "--bed-maf-log10-threshold",
-        type=int,
-        default=None,
-        help=(
-            "MAF log10 threshold for variants inside BED regions (e.g., -4 for MAF > 0.0001). "
-            "Only used when --bed is specified."
-        ),
-    )
 
     # build h2g estimation parser from 'common' parser, but add additional options for RHE
     rhe_p = _create_common_parser(subp, "rhe", help="Estimate SNP heritability using linear ARG")
@@ -1213,6 +1161,65 @@ def _add_assoc_rhe_execution_output_group(parser: argparse.ArgumentParser) -> No
         help="How many cores to uses. Defaults to all available cores.",
     )
     execution_group.add_argument("--out", default="kodama", help="Location to save result files.")
+
+
+def _add_assoc_model_group(parser: argparse.ArgumentParser) -> None:
+    assoc_model_group = parser.add_argument_group("Association Model")
+    assoc_model_group.add_argument(
+        "--no-hwe",
+        action="store_true",
+        help="Do not assume Hardy-Weinberg equilibrium (requires individual nodes in the ARG).",
+    )
+    assoc_model_group.add_argument(
+        "--repeat-covar",
+        action="store_true",
+        help=("Run phenotypes one at a time inside the parallel operator, repeating covariate projections. "),
+    )
+    assoc_model_group.add_argument(
+        "--recompute-ac",
+        action="store_true",
+        help=("Recompute allele counts."),
+    )
+
+
+def _add_assoc_variant_output_filtering_group(parser: argparse.ArgumentParser) -> None:
+    assoc_variant_group = parser.add_argument_group("Variant Output and Filtering")
+    variant_info_group = assoc_variant_group.add_mutually_exclusive_group(required=False)
+    variant_info_group.add_argument(
+        "--no-variant-info",
+        action="store_true",
+        help="Do not include variant metadata columns (CHROM, POS, ID, REF, ALT) in output.",
+    )
+    variant_info_group.add_argument(
+        "--all-variant-info",
+        action="store_true",
+        help="Include all variant metadata columns (CHROM, POS, ID, REF, ALT) in output. Default is ID only.",
+    )
+    assoc_variant_group.add_argument(
+        "--maf-log10-threshold",
+        type=int,
+        default=None,
+        help=("MAF log10 threshold for variants outside BED regions (e.g., -2 for MAF > 0.01)."),
+    )
+    assoc_variant_group.add_argument(
+        "--bed",
+        type=str,
+        default=None,
+        help=(
+            "Path to BED file defining genomic regions of interest. "
+            "Variants inside BED regions use --bed-maf-log10-threshold; "
+            "variants outside use --maf-log10-threshold."
+        ),
+    )
+    assoc_variant_group.add_argument(
+        "--bed-maf-log10-threshold",
+        type=int,
+        default=None,
+        help=(
+            "MAF log10 threshold for variants inside BED regions (e.g., -4 for MAF > 0.0001). "
+            "Only used when --bed is specified."
+        ),
+    )
 
 
 def _compose_assoc_rhe_shared_parser_groups(parser: argparse.ArgumentParser) -> None:

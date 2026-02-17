@@ -734,6 +734,48 @@ def test_compose_assoc_rhe_shared_parser_groups_calls_primitives_in_order(monkey
     assert calls == ["input", "columns", "blocks", "execution"]
 
 
+def test_assoc_specific_options_parse_and_do_not_leak_to_rhe():
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="cmd", required=True)
+
+    assoc = cli._create_common_parser(subparsers, "assoc", help="assoc help")
+    cli._add_assoc_model_group(assoc)
+    cli._add_assoc_variant_output_filtering_group(assoc)
+
+    rhe = cli._create_common_parser(subparsers, "rhe", help="rhe help")
+
+    parsed = parser.parse_args(
+        [
+            "assoc",
+            "linarg.h5",
+            "pheno.tsv",
+            "--no-hwe",
+            "--repeat-covar",
+            "--recompute-ac",
+            "--all-variant-info",
+            "--maf-log10-threshold",
+            "-2",
+            "--bed",
+            "regions.bed",
+            "--bed-maf-log10-threshold",
+            "-4",
+        ]
+    )
+    assert parsed.no_hwe is True
+    assert parsed.repeat_covar is True
+    assert parsed.recompute_ac is True
+    assert parsed.all_variant_info is True
+    assert parsed.maf_log10_threshold == -2
+    assert parsed.bed == "regions.bed"
+    assert parsed.bed_maf_log10_threshold == -4
+
+    assert "--no-hwe" not in rhe._option_string_actions
+    assert "--repeat-covar" not in rhe._option_string_actions
+    assert "--recompute-ac" not in rhe._option_string_actions
+    assert "--all-variant-info" not in rhe._option_string_actions
+    assert "--maf-log10-threshold" not in rhe._option_string_actions
+
+
 def test_attach_variant_info_joins_with_explicit_row_alignment():
     association_results = pl.DataFrame(
         {
