@@ -3,12 +3,23 @@ import tempfile
 
 from inspect import signature
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from linear_dag.core.lineararg import LinearARG, list_blocks
 from linear_dag.core.parallel_processing import GRMOperator, ParallelOperator
+
+
+class _FakeManager:
+    def __init__(self, handles):
+        self.handles = handles
+        self.num_traits = SimpleNamespace(value=0)
+        self.start_flags = []
+
+    def start_workers(self, flag):
+        self.start_flags.append(flag)
 
 
 def test_from_hdf5_signature_constructor_contract_parameter_order():
@@ -49,6 +60,62 @@ def test_from_hdf5_signature_constructor_contract_default_values():
 
     assert parallel_signature.parameters["alpha"].default == -1.0
     assert grm_signature.parameters["alpha"].default == -1.0
+
+
+def test_from_hdf5_shared_pipeline_path_for_parallel_and_grm(monkeypatch):
+    import linear_dag.core.parallel_processing as parallel_processing
+
+    context_calls = []
+    manager_calls = []
+    iids = object()
+    fake_context = SimpleNamespace(
+        block_metadata=object(),
+        bed_regions=None,
+        maf_log10_threshold=None,
+        bed_maf_log10_threshold=None,
+        num_samples=5,
+        num_variants=11,
+        iids=iids,
+    )
+
+    def fake_prepare_from_hdf5_context(
+        hdf5_file,
+        num_processes,
+        maf_log10_threshold,
+        block_metadata,
+        bed_file,
+        bed_maf_log10_threshold,
+    ):
+        context_calls.append(
+            (
+                hdf5_file,
+                num_processes,
+                maf_log10_threshold,
+                block_metadata,
+                bed_file,
+                bed_maf_log10_threshold,
+            )
+        )
+        return fake_context
+
+    def fake_create_manager(cls, worker, hdf5_file, num_processes, block_metadata, shm_specification, *args):
+        manager = _FakeManager({name: object() for name in shm_specification})
+        manager_calls.append((worker, hdf5_file, num_processes, block_metadata, args, manager))
+        return manager
+
+    monkeypatch.setattr(parallel_processing, "_prepare_from_hdf5_context", fake_prepare_from_hdf5_context)
+    monkeypatch.setattr(parallel_processing._ManagerFactory, "create_manager", classmethod(fake_create_manager))
+
+    parallel = ParallelOperator.from_hdf5("dummy.h5", num_processes=2, alpha=0.5)
+    grm = GRMOperator.from_hdf5("dummy.h5", num_processes=2, alpha=0.5)
+
+    assert len(context_calls) == 2
+    assert len(manager_calls) == 2
+    assert all(call[-1].start_flags == [parallel_processing.FLAGS["wait"]] for call in manager_calls)
+    assert parallel.iids is iids
+    assert grm.iids is iids
+    assert parallel.shape == (5, 11)
+    assert grm.shape == (5, 5)
 
 
 def test_parallel_operator(linarg_h5_path: Path):

@@ -34,6 +34,63 @@ FLAGS = {
 assert len(np.unique([val for val in FLAGS.values()])) == len(FLAGS)
 
 
+@dataclass(frozen=True)
+class _FromHdf5Context:
+    block_metadata: pl.DataFrame
+    bed_regions: Optional[pl.DataFrame]
+    maf_log10_threshold: Optional[int]
+    bed_maf_log10_threshold: Optional[int]
+    num_samples: int
+    num_variants: int
+    iids: pl.Series
+
+
+def _validate_num_processes(num_processes: Optional[int]) -> None:
+    if num_processes is not None and num_processes < 1:
+        raise ValueError(f"`num_processes` must be positive. Observed {num_processes}.")
+
+
+def _prepare_from_hdf5_context(
+    hdf5_file: str,
+    num_processes: Optional[int],
+    maf_log10_threshold: Optional[int],
+    block_metadata: Optional[pl.DataFrame],
+    bed_file: Optional[str],
+    bed_maf_log10_threshold: Optional[int],
+) -> _FromHdf5Context:
+    _validate_num_processes(num_processes)
+    if block_metadata is None:
+        block_metadata = list_blocks(hdf5_file)
+
+    bed_regions = None
+    if bed_file is not None:
+        from linear_dag.bed_io import read_bed
+
+        bed_regions = read_bed(bed_file)
+
+    needs_filtering = maf_log10_threshold is not None or bed_regions is not None
+    if needs_filtering:
+        block_metadata = _compute_filtered_variant_counts(
+            block_metadata,
+            hdf5_file,
+            maf_log10_threshold=maf_log10_threshold,
+            bed_regions=bed_regions,
+            bed_maf_log10_threshold=bed_maf_log10_threshold,
+        )
+
+    num_samples = block_metadata["n_samples"][0]
+    num_variants = block_metadata["n_variants"].sum()
+    return _FromHdf5Context(
+        block_metadata=block_metadata,
+        bed_regions=bed_regions,
+        maf_log10_threshold=maf_log10_threshold,
+        bed_maf_log10_threshold=bed_maf_log10_threshold,
+        num_samples=num_samples,
+        num_variants=num_variants,
+        iids=list_iids(hdf5_file),
+    )
+
+
 def _compute_filtered_variant_counts(
     block_metadata: pl.DataFrame,
     hdf5_file: str,
@@ -560,43 +617,29 @@ class ParallelOperator(LinearOperator):
         - `RuntimeError`: If any worker signals an error while initializing/awaiting.
         """
         _ = alpha
-        if block_metadata is None:
-            block_metadata = list_blocks(hdf5_file)
+        context = _prepare_from_hdf5_context(
+            hdf5_file=hdf5_file,
+            num_processes=num_processes,
+            maf_log10_threshold=maf_log10_threshold,
+            block_metadata=block_metadata,
+            bed_file=bed_file,
+            bed_maf_log10_threshold=bed_maf_log10_threshold,
+        )
 
-        # Load BED regions if provided
-        bed_regions = None
-        if bed_file is not None:
-            from linear_dag.bed_io import read_bed
-
-            bed_regions = read_bed(bed_file)
-
-        # Compute filtered variant counts
-        needs_filtering = maf_log10_threshold is not None or bed_regions is not None
-        if needs_filtering:
-            block_metadata = _compute_filtered_variant_counts(
-                block_metadata,
-                hdf5_file,
-                maf_log10_threshold=maf_log10_threshold,
-                bed_regions=bed_regions,
-                bed_maf_log10_threshold=bed_maf_log10_threshold,
-            )
-
-        num_variants = block_metadata["n_variants"].sum()
-        num_samples = block_metadata["n_samples"][0]
         shm_specification = {
-            "sample_data": ((max_num_traits, num_samples), np.float32),
-            "variant_data": ((num_variants, max_num_traits), np.float32),
+            "sample_data": ((max_num_traits, context.num_samples), np.float32),
+            "variant_data": ((context.num_variants, max_num_traits), np.float32),
         }
 
         manager = _ManagerFactory.create_manager(
             cls._worker,
             hdf5_file,
             num_processes,
-            block_metadata,
+            context.block_metadata,
             shm_specification,
-            maf_log10_threshold,
-            bed_regions,
-            bed_maf_log10_threshold,
+            context.maf_log10_threshold,
+            context.bed_regions,
+            context.bed_maf_log10_threshold,
         )
         manager.start_workers(FLAGS["wait"])
 
@@ -611,9 +654,9 @@ class ParallelOperator(LinearOperator):
             _variant_data_handle=variant_data_handle,
             _num_traits=manager.num_traits,
             _max_num_traits=max_num_traits,
-            shape=(num_samples, num_variants),
+            shape=(context.num_samples, context.num_variants),
             dtype=np.float32,
-            iids=list_iids(hdf5_file),
+            iids=context.iids,
         )
 
 
@@ -809,20 +852,28 @@ class GRMOperator(LinearOperator):
             max_num_traits = int(maf_log10_threshold)
             maf_log10_threshold = None
 
-        _ = maf_log10_threshold
-        _ = bed_file
-        _ = bed_maf_log10_threshold
-        if block_metadata is None:
-            block_metadata = list_blocks(hdf5_file)
-        num_samples = block_metadata["n_samples"][0]
+        context = _prepare_from_hdf5_context(
+            hdf5_file=hdf5_file,
+            num_processes=num_processes,
+            maf_log10_threshold=maf_log10_threshold,
+            block_metadata=block_metadata,
+            bed_file=bed_file,
+            bed_maf_log10_threshold=bed_maf_log10_threshold,
+        )
+
         shm_specification = {
-            "input_data": ((max_num_traits, num_samples), np.float32),
-            "output_data": ((max_num_traits, num_samples), np.float32),
+            "input_data": ((max_num_traits, context.num_samples), np.float32),
+            "output_data": ((max_num_traits, context.num_samples), np.float32),
         }
 
         alpha_value = Value("d", alpha)
         manager = _ManagerFactory.create_manager(
-            cls._worker, hdf5_file, num_processes, block_metadata, shm_specification, alpha
+            cls._worker,
+            hdf5_file,
+            num_processes,
+            context.block_metadata,
+            shm_specification,
+            alpha,
         )
         manager.start_workers(FLAGS["wait"])
 
@@ -838,9 +889,9 @@ class GRMOperator(LinearOperator):
             _num_traits=manager.num_traits,
             _alpha=alpha_value,
             _max_num_traits=max_num_traits,
-            shape=(num_samples, num_samples),
+            shape=(context.num_samples, context.num_samples),
             dtype=np.float32,
-            iids=list_iids(hdf5_file),
+            iids=context.iids,
         )
 
 
