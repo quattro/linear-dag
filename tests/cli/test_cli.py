@@ -809,6 +809,56 @@ def test_rhe_estimator_options_parse_to_expected_fields():
     assert "--seed" not in assoc._option_string_actions
 
 
+def test_assoc_and_rhe_assemblers_scope_options_and_dispatch():
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="cmd", required=True)
+
+    assoc = cli._build_assoc_parser(subparsers)
+    rhe = cli._build_rhe_parser(subparsers)
+
+    assert assoc.get_default("func") is cli._assoc_scan
+    assert rhe.get_default("func") is cli._estimate_h2g
+    assert "--no-hwe" in assoc._option_string_actions
+    assert "--no-hwe" not in rhe._option_string_actions
+    assert "--num-matvecs" in rhe._option_string_actions
+    assert "--num-matvecs" not in assoc._option_string_actions
+
+    parsed_assoc = parser.parse_args(["assoc", "linarg.h5", "pheno.tsv"])
+    parsed_rhe = parser.parse_args(["rhe", "linarg.h5", "pheno.tsv"])
+    assert parsed_assoc.func is cli._assoc_scan
+    assert parsed_rhe.func is cli._estimate_h2g
+
+
+def test_main_builds_assoc_and_rhe_using_assembler_helpers(monkeypatch):
+    calls: list[str] = []
+
+    def _fake_assoc_builder(subparsers):
+        calls.append("assoc")
+        parser = subparsers.add_parser("assoc")
+        parser.add_argument("linarg_path")
+        parser.add_argument("pheno")
+        parser.set_defaults(func=lambda _args, _logger: None)
+        return parser
+
+    def _fake_rhe_builder(subparsers):
+        calls.append("rhe")
+        parser = subparsers.add_parser("rhe")
+        parser.add_argument("linarg_path")
+        parser.add_argument("pheno")
+        parser.set_defaults(func=lambda _args, _logger: None)
+        return parser
+
+    monkeypatch.setattr(cli, "_build_assoc_parser", _fake_assoc_builder)
+    monkeypatch.setattr(cli, "_build_rhe_parser", _fake_rhe_builder)
+    monkeypatch.setattr(cli, "_create_cli_logger_context", lambda *_args, **_kwargs: logging.getLogger("cli-test"))
+    monkeypatch.setattr(cli, "_remove_cli_handlers", lambda _logger: None)
+
+    rc = cli._main(["assoc", "linarg.h5", "pheno.tsv"])
+
+    assert rc == 0
+    assert calls == ["assoc", "rhe"]
+
+
 def test_attach_variant_info_joins_with_explicit_row_alignment():
     association_results = pl.DataFrame(
         {

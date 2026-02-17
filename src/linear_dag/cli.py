@@ -876,16 +876,8 @@ def _main(args):
 
     subp = argp.add_subparsers(dest="cmd", required=True, help="Subcommands for linear-dag")
 
-    # build association scan parser from 'common' parser
-    assoc_p = _create_common_parser(subp, "assoc", help="Perform an association scan using the linear ARG.")
-    _add_assoc_model_group(assoc_p)
-    _add_assoc_variant_output_filtering_group(assoc_p)
-    assoc_p.set_defaults(func=_assoc_scan)
-
-    # build h2g estimation parser from 'common' parser, but add additional options for RHE
-    rhe_p = _create_common_parser(subp, "rhe", help="Estimate SNP heritability using linear ARG")
-    _add_rhe_estimator_group(rhe_p)
-    rhe_p.set_defaults(func=_estimate_h2g)
+    _build_assoc_parser(subp)
+    _build_rhe_parser(subp)
 
     prs_p = subp.add_parser("score", help="Score individuals using linear ARG")
     prs_input_group = prs_p.add_argument_group("Input")
@@ -1231,6 +1223,25 @@ def _compose_assoc_rhe_shared_parser_groups(parser: argparse.ArgumentParser) -> 
     _add_assoc_rhe_column_selection_group(parser)
     _add_assoc_rhe_block_selection_group(parser)
     _add_assoc_rhe_execution_output_group(parser)
+
+
+def _build_assoc_parser(subparsers):
+    assoc_parser = _create_common_parser(
+        subparsers,
+        "assoc",
+        help="Perform an association scan using the linear ARG.",
+    )
+    _add_assoc_model_group(assoc_parser)
+    _add_assoc_variant_output_filtering_group(assoc_parser)
+    assoc_parser.set_defaults(func=_assoc_scan)
+    return assoc_parser
+
+
+def _build_rhe_parser(subparsers):
+    rhe_parser = _create_common_parser(subparsers, "rhe", help="Estimate SNP heritability using linear ARG")
+    _add_rhe_estimator_group(rhe_parser)
+    rhe_parser.set_defaults(func=_estimate_h2g)
+    return rhe_parser
 
 
 def _create_common_parser(subp, name, help):
