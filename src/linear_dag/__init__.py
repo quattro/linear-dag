@@ -2,10 +2,13 @@ from importlib.metadata import PackageNotFoundError, version  # pragma: no cover
 
 # annoying 'as' notation to avoid warnings/errors about unused imports...
 from .association import (
+    get_gwas_beta_se as get_gwas_beta_se,
     randomized_haseman_elston as randomized_haseman_elston,
+    run_gwas as run_gwas,
 )
 from .core import (
     BrickGraph as BrickGraph,
+    GRMOperator as GRMOperator,
     linear_arg_from_genotypes as linear_arg_from_genotypes,
     LinearARG as LinearARG,
     list_blocks as list_blocks,

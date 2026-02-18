@@ -436,8 +436,8 @@ class LinearARG(LinearOperator):
             carriers = get_pairing_matrix(self.shape[0]) @ carriers
         return carriers
 
-    def remove_samples(self, iids_to_remove: npt.ArrayLike):
-        """Create a new [`linear_dag.core.lineararg.LinearARG`][] with selected sample IDs removed.
+    def remove_samples(self, iids_to_remove: npt.NDArray[np.int_]):
+        """Create a new [`linear_dag.LinearARG`][] with selected sample IDs removed.
 
         **Arguments:**
 
@@ -445,7 +445,7 @@ class LinearARG(LinearOperator):
 
         **Returns:**
 
-        - New [`linear_dag.core.lineararg.LinearARG`][] with updated adjacency and metadata.
+        - New [`linear_dag.LinearARG`][] with updated adjacency and metadata.
         """
         sample_mask = np.isin(self.iids, iids_to_remove)
         sample_indices_to_remove = np.where(sample_mask)[0]
