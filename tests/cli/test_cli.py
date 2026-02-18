@@ -611,6 +611,69 @@ def test_estimate_h2g_passes_filtered_block_metadata_to_grm_operator(tmp_path: P
     assert captured["block_metadata"].to_dicts() == block_metadata.to_dicts()
 
 
+def test_estimate_h2g_forwards_variant_filtering_kwargs_to_grm_operator(tmp_path: Path, monkeypatch):
+    block_metadata = pl.DataFrame(
+        {
+            "block_name": ["1:0-100"],
+            "chrom": ["1"],
+            "n_samples": [2],
+            "n_variants": [4],
+            "n_entries": [8],
+        }
+    )
+    phenotypes = pl.DataFrame(
+        {
+            "iid": ["id1", "id2"],
+            "trait1": [0.1, 0.2],
+            "i0": [1.0, 1.0],
+        }
+    )
+
+    def _fake_prep_data(*_args, **_kwargs):
+        return block_metadata, ["i0"], ["trait1"], phenotypes
+
+    captured = {}
+
+    def _fake_grm_from_hdf5(_cls, hdf5_file, **kwargs):
+        captured["hdf5_file"] = hdf5_file
+        captured.update(kwargs)
+        return _DummyContext(object())
+
+    def _fake_randomized_he(*_args, **_kwargs):
+        return pl.DataFrame({"trait": ["trait1"], "h2g": [0.2]})
+
+    monkeypatch.setattr(cli, "_prep_data", _fake_prep_data)
+    monkeypatch.setattr(cli.GRMOperator, "from_hdf5", classmethod(_fake_grm_from_hdf5))
+    monkeypatch.setattr(cli, "randomized_haseman_elston", _fake_randomized_he)
+
+    args = Namespace(
+        linarg_path="dummy.h5",
+        pheno="dummy.tsv",
+        pheno_name=None,
+        pheno_col_nums=None,
+        covar=None,
+        covar_name=None,
+        covar_col_nums=None,
+        chromosomes=["1"],
+        block_names=None,
+        num_processes=4,
+        num_matvecs=10,
+        estimator="xnystrace",
+        sampler="normal",
+        seed=0,
+        maf_log10_threshold=-2,
+        bed="regions.bed",
+        bed_maf_log10_threshold=-4,
+        out=str(tmp_path / "rhe"),
+    )
+    cli._estimate_h2g(args, logging.getLogger("linear_dag.tests.cli.rhe"))
+
+    assert captured["hdf5_file"] == "dummy.h5"
+    assert captured["maf_log10_threshold"] == -2
+    assert captured["bed_file"] == "regions.bed"
+    assert captured["bed_maf_log10_threshold"] == -4
+
+
 def test_cli_help_includes_argument_groups():
     assoc_stdout = io.StringIO()
     with pytest.raises(SystemExit):
@@ -630,6 +693,7 @@ def test_cli_help_includes_argument_groups():
     assert "Phenotype and Covariate Columns:" in rhe_help
     assert "Block Selection:" in rhe_help
     assert "Execution and Output:" in rhe_help
+    assert "Variant Filtering:" in rhe_help
     assert "RHE Estimator:" in rhe_help
 
     score_stdout = io.StringIO()
@@ -753,7 +817,7 @@ def test_assoc_specific_options_parse_and_do_not_leak_to_rhe():
     cli._add_assoc_model_group(assoc)
     cli._add_assoc_variant_output_filtering_group(assoc)
 
-    rhe = cli._create_common_parser(subparsers, "rhe", help="rhe help")
+    rhe = cli._build_rhe_parser(subparsers)
 
     parsed = parser.parse_args(
         [
@@ -784,7 +848,10 @@ def test_assoc_specific_options_parse_and_do_not_leak_to_rhe():
     assert "--repeat-covar" not in rhe._option_string_actions
     assert "--recompute-ac" not in rhe._option_string_actions
     assert "--all-variant-info" not in rhe._option_string_actions
-    assert "--maf-log10-threshold" not in rhe._option_string_actions
+    assert "--no-variant-info" not in rhe._option_string_actions
+    assert "--maf-log10-threshold" in rhe._option_string_actions
+    assert "--bed" in rhe._option_string_actions
+    assert "--bed-maf-log10-threshold" in rhe._option_string_actions
 
 
 def test_rhe_estimator_options_parse_to_expected_fields():
@@ -794,6 +861,7 @@ def test_rhe_estimator_options_parse_to_expected_fields():
     assoc = cli._create_common_parser(subparsers, "assoc", help="assoc help")
     rhe = cli._create_common_parser(subparsers, "rhe", help="rhe help")
     cli._add_rhe_estimator_group(rhe)
+    cli._add_rhe_variant_filtering_group(rhe)
 
     parsed = parser.parse_args(
         [
@@ -808,16 +876,26 @@ def test_rhe_estimator_options_parse_to_expected_fields():
             "sphere",
             "--seed",
             "7",
+            "--maf-log10-threshold",
+            "-2",
+            "--bed",
+            "regions.bed",
+            "--bed-maf-log10-threshold",
+            "-4",
         ]
     )
     assert parsed.num_matvecs == 12
     assert parsed.estimator == "hutch++"
     assert parsed.sampler == "sphere"
     assert parsed.seed == 7
+    assert parsed.maf_log10_threshold == -2
+    assert parsed.bed == "regions.bed"
+    assert parsed.bed_maf_log10_threshold == -4
     assert "--num-matvecs" not in assoc._option_string_actions
     assert "--estimator" not in assoc._option_string_actions
     assert "--sampler" not in assoc._option_string_actions
     assert "--seed" not in assoc._option_string_actions
+    assert "--maf-log10-threshold" not in assoc._option_string_actions
 
 
 def test_assoc_and_rhe_assemblers_scope_options_and_dispatch():
@@ -833,6 +911,8 @@ def test_assoc_and_rhe_assemblers_scope_options_and_dispatch():
     assert "--no-hwe" not in rhe._option_string_actions
     assert "--num-matvecs" in rhe._option_string_actions
     assert "--num-matvecs" not in assoc._option_string_actions
+    assert "--maf-log10-threshold" in assoc._option_string_actions
+    assert "--maf-log10-threshold" in rhe._option_string_actions
 
     parsed_assoc = parser.parse_args(["assoc", "linarg.h5", "pheno.tsv"])
     parsed_rhe = parser.parse_args(["rhe", "linarg.h5", "pheno.tsv"])
@@ -881,6 +961,8 @@ def test_assoc_rhe_assembler_wiring_preserves_expected_parse_behavior():
     assert "--no-hwe" not in rhe._option_string_actions
     assert "--num-matvecs" in rhe._option_string_actions
     assert "--num-matvecs" not in assoc._option_string_actions
+    assert "--maf-log10-threshold" in rhe._option_string_actions
+    assert "--bed-maf-log10-threshold" in rhe._option_string_actions
 
     assoc_args = parser.parse_args(
         [
@@ -921,6 +1003,12 @@ def test_assoc_rhe_assembler_wiring_preserves_expected_parse_behavior():
             "rademacher",
             "--seed",
             "9",
+            "--maf-log10-threshold",
+            "-3",
+            "--bed",
+            "regions.bed",
+            "--bed-maf-log10-threshold",
+            "-5",
         ]
     )
     assert rhe_args.cmd == "rhe"
@@ -929,6 +1017,9 @@ def test_assoc_rhe_assembler_wiring_preserves_expected_parse_behavior():
     assert rhe_args.estimator == "hutchinson"
     assert rhe_args.sampler == "rademacher"
     assert rhe_args.seed == 9
+    assert rhe_args.maf_log10_threshold == -3
+    assert rhe_args.bed == "regions.bed"
+    assert rhe_args.bed_maf_log10_threshold == -5
 
     with pytest.raises(SystemExit):
         parser.parse_args(
@@ -1018,6 +1109,12 @@ def test_rhe_parser_shape_via_main_with_monkeypatched_dispatch(monkeypatch):
             "sphere",
             "--seed",
             "11",
+            "--maf-log10-threshold",
+            "-2",
+            "--bed",
+            "regions.bed",
+            "--bed-maf-log10-threshold",
+            "-4",
             "--out",
             "rhe_out",
         ]
@@ -1033,6 +1130,9 @@ def test_rhe_parser_shape_via_main_with_monkeypatched_dispatch(monkeypatch):
     assert parsed.estimator == "hutchinson"
     assert parsed.sampler == "sphere"
     assert parsed.seed == 11
+    assert parsed.maf_log10_threshold == -2
+    assert parsed.bed == "regions.bed"
+    assert parsed.bed_maf_log10_threshold == -4
     assert parsed.out == "rhe_out"
     assert parsed.func is _fake_estimate_h2g
     assert captured["logger"].name == "cli-test"

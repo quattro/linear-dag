@@ -1164,13 +1164,17 @@ def _add_assoc_variant_output_filtering_group(parser: argparse.ArgumentParser) -
         action="store_true",
         help="Include all variant metadata columns (CHROM, POS, ID, REF, ALT) in output. Default is ID only.",
     )
-    assoc_variant_group.add_argument(
+    _add_assoc_rhe_variant_filtering_options(assoc_variant_group)
+
+
+def _add_assoc_rhe_variant_filtering_options(group) -> None:
+    group.add_argument(
         "--maf-log10-threshold",
         type=int,
         default=None,
         help=("MAF log10 threshold for variants outside BED regions (e.g., -2 for MAF > 0.01)."),
     )
-    assoc_variant_group.add_argument(
+    group.add_argument(
         "--bed",
         type=str,
         default=None,
@@ -1180,7 +1184,7 @@ def _add_assoc_variant_output_filtering_group(parser: argparse.ArgumentParser) -
             "variants outside use --maf-log10-threshold."
         ),
     )
-    assoc_variant_group.add_argument(
+    group.add_argument(
         "--bed-maf-log10-threshold",
         type=int,
         default=None,
@@ -1218,6 +1222,11 @@ def _add_rhe_estimator_group(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_rhe_variant_filtering_group(parser: argparse.ArgumentParser) -> None:
+    rhe_variant_group = parser.add_argument_group("Variant Filtering")
+    _add_assoc_rhe_variant_filtering_options(rhe_variant_group)
+
+
 def _compose_assoc_rhe_shared_parser_groups(parser: argparse.ArgumentParser) -> None:
     _add_assoc_rhe_input_group(parser)
     _add_assoc_rhe_column_selection_group(parser)
@@ -1240,6 +1249,7 @@ def _build_assoc_parser(subparsers):
 def _build_rhe_parser(subparsers):
     rhe_parser = _create_common_parser(subparsers, "rhe", help="Estimate SNP heritability using linear ARG")
     _add_rhe_estimator_group(rhe_parser)
+    _add_rhe_variant_filtering_group(rhe_parser)
     rhe_parser.set_defaults(func=_estimate_h2g)
     return rhe_parser
 
