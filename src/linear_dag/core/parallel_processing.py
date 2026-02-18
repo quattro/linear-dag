@@ -842,6 +842,9 @@ class GRMOperator(LinearOperator):
         """Create a GRMOperator from a metadata file.
 
         !!! info
+            MAF and BED filtering are applied during construction, so the
+            returned operator reflects post-filtered variants in GRM
+            computations.
             `alpha` is operational for GRM weighting and controls the diagonal
             re-weighting in each block contribution.
 
@@ -850,10 +853,10 @@ class GRMOperator(LinearOperator):
         - `hdf5_file`: Path to HDF5 file.
         - `num_processes`: Number of workers; `None` uses available CPUs bounded by block count.
         - `max_num_traits`: Chunk width for shared-memory matmat.
-        - `maf_log10_threshold`: Accepted for constructor parity; currently ignored by GRM.
+        - `maf_log10_threshold`: Keep non-BED variants with MAF greater than `10**x`.
         - `block_metadata`: Optional pre-filtered block metadata.
-        - `bed_file`: Accepted for constructor parity; currently ignored by GRM.
-        - `bed_maf_log10_threshold`: Accepted for constructor parity; currently ignored by GRM.
+        - `bed_file`: Optional BED file path.
+        - `bed_maf_log10_threshold`: Keep BED variants with MAF greater than `10**x`.
         - `alpha`: Alpha parameter used in GRM diagonal weighting.
 
         **Returns:**
