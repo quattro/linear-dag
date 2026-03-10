@@ -1,12 +1,16 @@
+import logging
+
+from typing import Optional
+
 import numpy as np
 import polars as pl
-import pyarrow.parquet as pq
 import pyarrow as pa
-from linear_dag.core.parallel_processing import ParallelOperator
-from linear_dag.core.lineararg import load_variant_info
-import logging
-from typing import Optional
+import pyarrow.parquet as pq
+
 from scipy.sparse import coo_matrix
+
+from linear_dag.core.lineararg import load_variant_info
+from linear_dag.core.parallel_processing import ParallelOperator
 
 
 def parquet_to_numpy(
@@ -17,21 +21,26 @@ def parquet_to_numpy(
     beta_variants: pl.Series,
     dtype=np.float32,
 ):
-    """
-    Stream betas from a Parquet file into the shared-memory destination in ARG-variant order.
+    """Stream PRS effect sizes from Parquet into shared memory in ARG variant order.
 
-    This performs the equivalent of (left_op @ right_op @ betas) by:
-    - Computing the inner-join between ARG variant IDs (linarg_variants) and beta IDs (beta_variants)
-      to obtain index arrays row_idx (ARG space) and col_idx (beta/global row space).
-    - Iterating over Parquet row-groups, selecting only intersecting rows in each group via Arrow take,
-      and scattering them into the destination at the matching ARG rows.
+    !!! info
 
-    destination: NumPy view into shared memory of shape (m_arg, k)
-    parquet_path: path to Parquet file containing columns score_cols and an ID column represented by beta_variants
-    score_cols: list of column names to load and score
-    linarg_variants: pl.Series of ARG variant IDs (length m_arg)
-    beta_variants: pl.Series of beta variant IDs in Parquet row order (length m_beta)
-    dtype: target dtype for destination entries
+        The alignment is based on variant ID intersection. Variants present in one
+        source but not the other are skipped; unmatched destination rows remain
+        untouched.
+
+    **Arguments:**
+
+    - `destination`: Shared-memory NumPy view with shape `(m_arg, n_scores)`.
+    - `parquet_path`: Path to the score parquet file containing `score_cols` plus `ID`.
+    - `score_cols`: Score/effect columns to stream.
+    - `linarg_variants`: ARG variant IDs in operator column order.
+    - `beta_variants`: Parquet variant IDs in parquet row order.
+    - `dtype`: Target dtype used when writing values into `destination`.
+
+    **Returns:**
+
+    - `None`. `destination` is updated in place.
     """
     parq = pq.ParquetFile(parquet_path)
 
@@ -85,12 +94,34 @@ def run_prs(
     block_metadata: pl.DataFrame,
     score_cols: list[str],
     num_processes: int,
-    logger: Optional[logging.Logger] = None) -> np.ndarray:
-        
+    logger: Optional[logging.Logger] = None,
+) -> np.ndarray:
+    """Compute polygenic risk scores for selected traits/effect columns.
+
+    !!! info
+
+        Variant alignment is performed by ID so score rows are applied to the
+        matching variants in the selected ARG blocks.
+
+    **Arguments:**
+
+    - `linarg_path`: Path to the input
+      [`linear_dag.core.lineararg.LinearARG`][] HDF5 file.
+    - `beta_path`: Path to parquet file containing variant IDs and score columns.
+    - `block_metadata`: Block selection metadata used to restrict the operator.
+    - `score_cols`: Parquet columns to treat as score vectors.
+    - `num_processes`: Number of worker processes for
+      [`linear_dag.core.parallel_processing.ParallelOperator`][].
+    - `logger`: Optional logger for progress messages.
+
+    **Returns:**
+
+    - Polars DataFrame with one row per unique individual ID and one score column
+      per entry in `score_cols`.
+    """
     with ParallelOperator.from_hdf5(
         linarg_path, num_processes=num_processes, block_metadata=block_metadata, max_num_traits=len(score_cols)
     ) as linarg:
-        
         if logger:
             logger.info("Reading in betas and copying to shared memory")
         # 1) Load ARG variant IDs (ID-only, in ARG column order for selected blocks)
@@ -114,7 +145,7 @@ def run_prs(
         dummy = np.empty((linarg.shape[1], k), dtype=np.float32)
         prs = linarg._matmat(dummy, in_place=True)
         iids = linarg.iids
-       
+
     if logger:
         logger.info("Summing haplotype scores to individual scores")
     unique_ids, row_indices = np.unique(iids, return_inverse=True)
@@ -123,11 +154,11 @@ def run_prs(
     col_indices = np.arange(num_cols)
     data = np.ones(num_cols, dtype=np.int8)
     S = coo_matrix((data, (row_indices, col_indices)), shape=(num_ids, num_cols)).tocsc()
-    prs_ind = S @ prs   
-    
+    prs_ind = S @ prs
+
     frame_dict = {"iid": unique_ids}
     for i, score in enumerate(score_cols):
         frame_dict[score] = prs_ind[:, i]
     result = pl.DataFrame(frame_dict)
-    
+
     return result
