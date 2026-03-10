@@ -1,0 +1,107 @@
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - toc.integrate
+    - header.autohide
+  palette:
+    - scheme: default
+      primary: white
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: black
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/chart-bell-curve-cumulative
+  favicon: _static/favicon.png
+  custom_dir: docs/_overrides
+
+site_name: linear-dag
+site_description: Compressed LinearARG analysis tools for biobank-scale genotype data.
+site_url: https://quattro.github.io/linear-dag
+
+repo_url: https://github.com/quattro/linear-dag
+repo_name: quattro/linear-dag
+edit_uri: ""  # No edit button, as some of our pages are in /docs and some in /examples via symlink, so it's impossible for them all to be accurate
+
+docs_dir: docs/
+strict: true
+
+extra_javascript:
+  - _static/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+extra_css:
+  - _static/custom_css.css
+
+markdown_extensions:
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.snippets:
+      base_path: docs/
+  - admonition
+  - toc:
+      permalink: "¤"
+      toc_depth: 4
+
+plugins:
+  - search:
+      separator: '[\s\-,:!=\[\]()"/]+|(?!\b)(?=[A-Z][a-z])|\.(?!\d)|&[lg]t;'
+  - hippogriffe:
+      show_bases: true
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            # general
+            force_inspection: true
+            show_source: false
+            # headings
+            heading_level: 4
+            show_root_heading: true
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            # members
+            filters: ["!^_", "^__init__$"]
+            inherited_members: true
+            members_order: source
+            # docstrings
+            docstring_style: google
+            show_if_no_docstring: false
+            # signatures
+            line_length: 80
+            modernize_annotations: true
+            show_overloads: false
+            show_signature_annotations: true
+            separate_signature: false
+
+# Public site navigation intentionally excludes non-site planning artifacts.
+# Validated: nav entries resolve only to docs/site markdown pages.
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Install: install.md
+      - Quickstart: quickstart.md
+  - CLI: cli.md
+  - Python API:
+    - Association / Heritability:
+      - 'api/assoc.md'
+      - 'api/heritability.md'
+    - Data Structures:
+      - 'api/linear_arg.md'
+      - 'api/parallel_ops.md'
+  - Reference:
+      - FAQ: faq.md
+      - Contributing: contributing.md
+      - License: license.md
+      - Conduct: conduct.md

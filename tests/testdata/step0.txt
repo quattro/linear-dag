@@ -1,0 +1,2 @@
+chr vcf_path
+chr1 /Users/nicholas/Projects/linear-dag/tests/testdata/tiny.ma.vcf.gz
