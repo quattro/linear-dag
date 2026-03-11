@@ -262,11 +262,21 @@ class _ParallelManager:
 
 @dataclass
 class ParallelOperator(LinearOperator):
-    """Parallel genotype linear operator backed by blockwise shared-memory workers.
+    """Process-parallel genotype operator assembled from HDF5 LinearARG blocks.
 
     This class exposes the same algebraic interface as
-    [`linear_dag.core.lineararg.LinearARG`][] while distributing block
-    computation across worker processes.
+    [`linear_dag.core.lineararg.LinearARG`][] while distributing blockwise
+    products across worker processes that share input and output buffers.
+
+    Let $X$ denote the full genotype operator obtained by horizontally
+    concatenating all loaded blocks after optional filtering. Forward products
+    compute $X B$ and reverse products compute $X^\\top Y$ without materializing
+    $X$ densely.
+
+    !!! info
+
+        Use this class as a context manager. Exiting the context closes shared
+        memory handles and shuts down worker processes cleanly.
 
     !!! Example
 
@@ -325,8 +335,14 @@ class ParallelOperator(LinearOperator):
     def borrow_variant_data_view(self) -> np.ndarray:
         """Return a NumPy view into the shared variant_data without copying.
 
-        The returned array aliases the shared memory. It remains valid until
-        this operator exits its context manager (when handles are closed).
+        !!! info
+
+            The returned array aliases shared memory owned by the operator. Do
+            not retain it after the operator leaves its context manager.
+
+        **Returns:**
+
+        - NumPy array view backed by the shared `variant_data` buffer.
         """
         handle = self._variant_data_handle.copy()
         self._variant_view_handles.append(handle)
@@ -441,7 +457,10 @@ class ParallelOperator(LinearOperator):
 
     @cached_property
     def allele_frequencies(self) -> np.ndarray:
-        """Compute allele frequencies from the operator matrix.
+        """Compute per-variant allele frequencies for the concatenated operator.
+
+        Let $X$ denote the blockwise genotype operator and $n$ denote the number
+        of sample rows. This property returns $\\mathbf{1}^\\top X / n$.
 
         **Returns:**
 
@@ -451,7 +470,7 @@ class ParallelOperator(LinearOperator):
 
     @property
     def mean_centered(self) -> LinearOperator:
-        """Return mean-centered genotype operator.
+        """Return the centered operator $X - \\mathbf{1} f^\\top$.
 
         **Returns:**
 
@@ -464,7 +483,10 @@ class ParallelOperator(LinearOperator):
 
     @property
     def normalized(self) -> LinearOperator:
-        """Return normalized genotype operator.
+        """Return a variance-standardized version of the genotype operator.
+
+        If $f_j$ is the allele frequency for variant $j$, the returned operator
+        scales column $j$ by $1 / \\sqrt{f_j (1-f_j)}$ after centering.
 
         **Returns:**
 
@@ -588,7 +610,7 @@ class ParallelOperator(LinearOperator):
         bed_maf_log10_threshold: Optional[int] = None,
         alpha: float = -1.0,
     ) -> ParallelOperator:
-        """Create a ParallelOperator from a metadata file.
+        """Build a blockwise parallel genotype operator from HDF5 storage.
 
         !!! info
             MAF and BED filtering are applied during construction, so the returned
@@ -662,12 +684,19 @@ class ParallelOperator(LinearOperator):
 
 @dataclass
 class GRMOperator(LinearOperator):
-    """Parallel genetic relatedness matrix (GRM) operator.
+    """Process-parallel genetic relatedness matrix operator.
 
-    This operator computes blockwise contributions to $X K X^\\top$, where
-    $X$ is the genotype operator from
-    [`linear_dag.core.lineararg.LinearARG`][] and $K$ is a diagonal
-    weighting matrix induced by allele-frequency scaling.
+    Let $X$ denote the normalized genotype operator for a block and let
+    $D_\\alpha = \\operatorname{diag}\\left((f_j (1-f_j))^{1+\\alpha}\\right)$,
+    where $f_j$ is the allele frequency of variant $j$. This operator sums
+    blockwise contributions of the form $X D_\\alpha X^\\top$ into a sample-by-
+    sample linear operator.
+
+    !!! info
+
+        As with [`linear_dag.core.parallel_processing.ParallelOperator`][], use
+        this class as a context manager so worker processes and shared memory
+        are released deterministically.
 
     !!! Example
 
@@ -712,7 +741,7 @@ class GRMOperator(LinearOperator):
 
     @property
     def alpha(self):
-        """Return current alpha parameter for GRM weighting.
+        """Return the current GRM weighting exponent $\\alpha$.
 
         **Returns:**
 
@@ -839,14 +868,15 @@ class GRMOperator(LinearOperator):
         bed_maf_log10_threshold: Optional[int] = None,
         alpha: float = -1.0,
     ) -> GRMOperator:
-        """Create a GRMOperator from a metadata file.
+        """Build a blockwise GRM operator from HDF5 LinearARG blocks.
 
         !!! info
             MAF and BED filtering are applied during construction, so the
             returned operator reflects post-filtered variants in GRM
             computations.
             `alpha` is operational for GRM weighting and controls the diagonal
-            re-weighting in each block contribution.
+            re-weighting in each block contribution through
+            $D_\\alpha = \\operatorname{diag}((f_j (1-f_j))^{1+\\alpha})$.
 
         **Arguments:**
 

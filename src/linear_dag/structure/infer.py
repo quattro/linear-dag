@@ -64,6 +64,9 @@ def pca(grm: GRMOperator, k: int = 20) -> tuple[np.ndarray, np.ndarray]:
 
     !!! info
 
+        The returned `pcs` are eigenvectors of the GRM operator itself. Any
+        downstream whitening or rescaling should be applied by the caller.
+
         `k` must satisfy `1 <= k < grm.shape[0]` for this solver path.
 
     **Arguments:**

@@ -8,8 +8,17 @@ from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 
 def get_inner_merge_operators(row_ids: pl.Series, col_ids: pl.Series) -> Tuple[LinearOperator, LinearOperator]:
-    """
-    Build left/right merge operators that align two ID vectors into a shared inner-join space.
+    """Build operators that align two ID vectors onto their inner join.
+
+    Let $r$ denote `row_ids`, $c$ denote `col_ids`, and let $m$ denote the
+    ordered intersection produced by the Polars inner join. The returned
+    operators $L$ and $R$ map row-space and column-space arrays into that
+    shared join space.
+
+    !!! info
+
+        Alignment is exact and key-based. IDs absent from the other side are
+        dropped rather than filled.
 
     **Arguments:**
 
@@ -49,8 +58,11 @@ def get_inner_merge_operators(row_ids: pl.Series, col_ids: pl.Series) -> Tuple[L
 
 
 def get_merge_operator(row_ids: pl.Series, col_ids: pl.Series) -> LinearOperator:
-    """
-    Build a sparse merge operator between two identifier vectors.
+    """Build the sparse equality-join operator between two identifier vectors.
+
+    If $L$ and $R$ are the outputs of
+    [`linear_dag.core.operators.get_inner_merge_operators`][], this function
+    returns $M = L R$.
 
     **Arguments:**
 
@@ -70,7 +82,7 @@ def get_merge_operator(row_ids: pl.Series, col_ids: pl.Series) -> LinearOperator
 
 
 def get_row_filter_operator(merge_operator: LinearOperator):
-    """Build a row filter that keeps rows with at least one merge match.
+    """Build a row-selection operator for rows with at least one merge match.
 
     **Arguments:**
 
@@ -85,7 +97,10 @@ def get_row_filter_operator(merge_operator: LinearOperator):
 
 
 def get_pairing_matrix(two_n: int) -> LinearOperator:
-    """Build a diploid-pairing matrix that sums adjacent haplotype rows.
+    """Build the pairing matrix that sums adjacent haplotype rows.
+
+    Let $2n$ be the number of haplotype rows. The returned matrix
+    $P \\in \\{0,1\\}^{n \\times 2n}$ maps adjacent haplotypes to diploid rows.
 
     **Arguments:**
 
@@ -110,8 +125,10 @@ def get_pairing_matrix(two_n: int) -> LinearOperator:
 
 
 def get_diploid_operator(haploid_operator: LinearOperator) -> LinearOperator:
-    """
-    Convert a haploid genotype operator into a diploid operator by pairing adjacent rows.
+    """Convert a haploid operator into a diploid operator by row pairing.
+
+    If $H$ is the haploid operator and $P$ is the matrix from
+    [`linear_dag.core.operators.get_pairing_matrix`][], this returns $P H$.
 
     **Arguments:**
 
@@ -133,6 +150,11 @@ def estimate_column_variance(
     operator: LinearOperator, num_samples: int = 1000, seed: Optional[int] = None
 ) -> np.ndarray:
     """Estimate per-column variance using a random subset of rows.
+
+    !!! info
+
+        This is a Monte Carlo diagnostic helper. It samples rows without
+        replacement and computes empirical column variances on that subsample.
 
     **Arguments:**
 

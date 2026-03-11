@@ -20,6 +20,16 @@ class MemoryUsageFilter(logging.Filter):
     """Inject `memory_usage` onto log records when missing."""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        """Populate `record.memory_usage` before formatting.
+
+        **Arguments:**
+
+        - `record`: Log record being processed.
+
+        **Returns:**
+
+        - `True` so the record is always emitted.
+        """
         if not hasattr(record, "memory_usage"):
             record.memory_usage = get_memory_usage_mb()
         return True
@@ -123,10 +133,40 @@ class MemoryLogger:
         self.logger.info(message)
 
     def warning(self, message: str) -> None:
+        """Log a WARNING message annotated with current memory usage.
+
+        **Arguments:**
+
+        - `message`: Message content to emit.
+
+        **Returns:**
+
+        - `None`.
+        """
         self.logger.warning(message)
 
     def error(self, message: str) -> None:
+        """Log an ERROR message annotated with current memory usage.
+
+        **Arguments:**
+
+        - `message`: Message content to emit.
+
+        **Returns:**
+
+        - `None`.
+        """
         self.logger.error(message)
 
     def debug(self, message: str) -> None:
+        """Log a DEBUG message annotated with current memory usage.
+
+        **Arguments:**
+
+        - `message`: Message content to emit.
+
+        **Returns:**
+
+        - `None`.
+        """
         self.logger.debug(message)

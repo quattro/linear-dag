@@ -23,6 +23,19 @@ def linear_arg_from_genotypes(
 ):
     """Infer a linearized ARG adjacency matrix from sparse genotypes.
 
+    Let $G$ denote the phased genotype matrix with haplotypes on rows and
+    variants on columns. This routine constructs a brick graph from $G$,
+    optionally identifies recombination nodes, and returns a linearized sparse
+    adjacency matrix ready for
+    [`linear_dag.core.lineararg.LinearARG`][] construction.
+
+    !!! info
+
+        The returned adjacency matrix is not yet cleaned for disconnected
+        internal nodes or topologically reordered sample/variant indices; those
+        later steps are handled by
+        [`linear_dag.core.lineararg.LinearARG.from_genotypes`][].
+
     **Arguments:**
 
     - `genotypes`: Sparse CSC genotype matrix (`samples x variants`).
@@ -30,6 +43,7 @@ def linear_arg_from_genotypes(
     - `variant_info`: Optional variant metadata DataFrame.
     - `find_recombinations`: Whether to explicitly infer recombination events.
     - `logger`: Optional logger for timing/progress output.
+
     **Returns:**
 
     - Tuple `(adjacency, flip, variant_indices, sample_indices, variant_info)` for
@@ -84,6 +98,11 @@ def linear_arg_from_genotypes(
 
 def infer_brick_graph_using_containment(genotypes: csc_matrix, ploidy) -> csr_matrix:
     """Build a brick-graph containment closure from genotype carrier relationships.
+
+    For each allele count level $n \\in \\{1, \\dots, \\text{ploidy}\\}$, the
+    routine builds a carrier-incidence matrix and marks variant pairs whose
+    carrier sets are nested. The final graph is the intersection of those
+    containment relations across allele-count levels.
 
     **Arguments:**
 
@@ -147,7 +166,11 @@ def pad_leading_zeros(A: csr_matrix, num_cols: int) -> csr_matrix:
 
 
 def path_sum(graph: csr_matrix) -> csr_matrix:
-    """Compute path-count matrix for a DAG-like sparse graph adjacency matrix.
+    """Compute the path-sum operator $(I - A)^{-1}$ for a sparse DAG adjacency.
+
+    Let $A$ denote `graph`. For a triangular DAG adjacency, the returned matrix
+    corresponds to the path-count or reachability-sum operator obtained from
+    $(I - A)^{-1}$.
 
     **Arguments:**
 
@@ -168,8 +191,22 @@ def path_sum(graph: csr_matrix) -> csr_matrix:
 
 
 def setdiag(matrix: csr_matrix, value: int) -> None:
-    """
-    Workaround for bug in scipy.sparse.csr_matrix.setdiag()
+    """Set the diagonal of a CSR matrix despite SciPy `setdiag` edge cases.
+
+    !!! info
+
+        This helper exists because `scipy.sparse.csr_matrix.setdiag` can leave
+        some diagonal entries unchanged for the sparsity patterns encountered in
+        this module.
+
+    **Arguments:**
+
+    - `matrix`: CSR matrix to modify in place.
+    - `value`: Diagonal value to assign.
+
+    **Returns:**
+
+    - `None`.
     """
     matrix.setdiag(value)
     if np.all(matrix.diagonal() == value):  # sometimes not, unclear why

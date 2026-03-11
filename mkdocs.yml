@@ -58,7 +58,20 @@ plugins:
       separator: '[\s\-,:!=\[\]()"/]+|(?!\b)(?=[A-Z][a-z])|\.(?!\d)|&[lg]t;'
   - hippogriffe:
       show_bases: true
+      show_source_links: toplevel
+      extra_public_objects:
+        - numpy.ndarray
+        - numpy.uint64
+        - numpy.int32
+        - numpy.int64
+        - numpy.bool
+        - numpy.dtype
+        - scipy.sparse.linalg.LinearOperator
+        - scipy.sparse.csc_matrix
+        - polars.LazyFrame
+        - polars.DataFrame
   - mkdocstrings:
+      custom_templates: docs/_mkdocstrings
       handlers:
         python:
           paths: [src]

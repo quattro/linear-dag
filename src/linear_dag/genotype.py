@@ -25,13 +25,20 @@ def read_vcf(
     remove_multiallelics: bool = False,
     sex: np.array = None,
 ):
-    """Load genotype calls from a VCF/BCF region into sparse CSC format.
+    """Load genotype calls from a VCF/BCF file into sparse CSC format.
+
+    Rows correspond to haplotypes when `phased=True` and to diploid samples
+    when `phased=False`. Columns correspond to retained variant records.
 
     !!! info
 
         When `sex` is provided, male haplotypes are treated as haploid on sex
         chromosomes and non-binary haplotype calls after filtering raise an
         assertion error.
+
+        `flip_minor_alleles=True` rewrites columns so returned allele
+        frequencies are at most $0.5$, and the accompanying `flip` vector
+        records which columns were complemented.
 
     **Arguments:**
 
@@ -175,11 +182,13 @@ def load_genotypes(
     rsq_threshold: Optional[float] = None,
     skiprows: int = 0,
 ) -> tuple[csc_matrix, NDArray, NDArray]:
-    """Load genotype matrix data from `<prefix>.mtx` or `<prefix>.txt`.
+    """Load genotype data from Matrix Market or text files and apply basic QC.
 
     !!! info
 
-        This helper logs retained-variant counts at debug level.
+        The routine optionally binarizes dosages, filters by MAF, and flips
+        high-frequency alternate alleles, returning both the filtered matrix and
+        the retained original column indices.
 
     **Arguments:**
 
@@ -240,7 +249,11 @@ def load_genotypes(
 
 
 def compute_af(genotypes: csc_matrix, ploidy: int = 1) -> NDArray:
-    """Compute allele frequencies for each genotype column.
+    """Compute per-column allele frequencies.
+
+    Let $G \\in \\mathbb{R}^{n \\times p}$ denote the genotype matrix and let
+    $c$ denote the ploidy. The returned vector is
+    $f = \\mathbf{1}^\\top G / (n c)$.
 
     **Arguments:**
 
@@ -264,7 +277,11 @@ def compute_af(genotypes: csc_matrix, ploidy: int = 1) -> NDArray:
 
 
 def flip_alleles(genotypes: csc_matrix, ploidy: int = 1) -> tuple[csc_matrix, NDArray]:
-    """Flip variants with alternate-allele frequency above 0.5.
+    """Flip columns whose alternate-allele frequency exceeds $0.5$.
+
+    For each selected column $j$, the routine replaces genotypes $g_j$ with
+    $c - g_j$, where $c$ is `ploidy`, so the returned alternate allele becomes
+    the minor allele.
 
     **Arguments:**
 
@@ -303,6 +320,9 @@ def flip_alleles(genotypes: csc_matrix, ploidy: int = 1) -> tuple[csc_matrix, ND
 def apply_maf_threshold(genotypes: csc_matrix, ploidy: int = 1, threshold: float = 0.0) -> tuple[csc_matrix, NDArray]:
     """Filter genotype columns by minor-allele-frequency threshold.
 
+    A column is kept when $\\min(f_j, 1-f_j) > \\text{threshold}$, where $f_j$
+    is the allele frequency computed by [`linear_dag.genotype.compute_af`][].
+
     **Arguments:**
 
     - `genotypes`: Input CSC genotype matrix.
@@ -329,7 +349,12 @@ def apply_maf_threshold(genotypes: csc_matrix, ploidy: int = 1, threshold: float
 
 
 def binarize(genotypes: csc_matrix, r2_threshold: float = 0.0) -> tuple[csc_matrix, NDArray]:
-    """Round dosages to hard calls and filter variants by dosage-call correlation.
+    """Round dosages to hard calls and filter by dosage-call agreement.
+
+    Each column is rounded to the nearest integer genotype. The routine then
+    computes the per-column Pearson correlation between the original dosage and
+    rounded hard calls, retaining columns with correlation at least
+    `r2_threshold`.
 
     **Arguments:**
 

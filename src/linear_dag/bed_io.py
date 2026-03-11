@@ -11,6 +11,9 @@ def read_bed(bed_file: str) -> pl.DataFrame:
         BED intervals use 0-based, half-open coordinates $[start, end)$,
         where `start` is inclusive and `end` is exclusive.
 
+        Only the first three BED columns are parsed. Additional annotation
+        columns are ignored.
+
     **Arguments:**
 
     - `bed_file`: Path to a BED text file with at least three columns.

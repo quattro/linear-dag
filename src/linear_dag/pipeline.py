@@ -46,6 +46,15 @@ def compress_vcf(
 ):
     """Compress a VCF file into a [`linear_dag.core.lineararg.LinearARG`][] HDF5 file.
 
+    This is the single-step compression entry point: it loads genotype calls
+    from one VCF/BCF region, infers a LinearARG, optionally adds individual
+    nodes, and writes the result to the package HDF5 schema.
+
+    !!! info
+
+        When `region` is provided, the written HDF5 uses block metadata derived
+        from that region so the output can participate in multi-block workflows.
+
     **Arguments:**
 
     - `input_vcf`: Input VCF/BCF path.
@@ -120,10 +129,35 @@ def msc_step0(
     mount_point: Optional[Union[str, PathLike]] = None,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
-    """
-    Partitions chromosomes into large blocks of size large_partition_size and smaller blocks of
-    size partition_size / n_small_blocks. Output jobs_metadata.txt containing linear ARG parameters
-    required for steps 1-5 in the multi-step compress pipeline.
+    """Plan jobs for the multi-step compression pipeline.
+
+    For each chromosome listed in `vcf_metadata`, this routine queries the first
+    and last variant positions, partitions that span into large blocks, and then
+    subdivides each large block into `n_small_blocks` smaller regions.
+
+    !!! info
+
+        `bcftools` is required because genomic extents are discovered by shelling
+        out to `bcftools query`.
+
+    **Arguments:**
+
+    - `vcf_metadata`: Path to the metadata table describing per-chromosome VCF inputs.
+    - `large_partition_size`: Target width of each large genomic partition.
+    - `n_small_blocks`: Number of small partitions nested inside each large block.
+    - `out`: Output directory for planning metadata and derived artifacts.
+    - `flip_minor_alleles`: Whether downstream jobs should flip minor alleles on load.
+    - `keep`: Optional sample-ID keep file propagated to downstream steps.
+    - `maf`: Optional MAF threshold propagated to downstream steps.
+    - `remove_indels`: Whether downstream jobs should exclude indels.
+    - `remove_multiallelics`: Whether downstream jobs should exclude multiallelic sites.
+    - `sex_path`: Optional path to sex annotations propagated to downstream steps.
+    - `mount_point`: Optional path prefix prepended to discovered VCF paths.
+    - `logger`: Optional logger.
+
+    **Returns:**
+
+    - `None`. Planning metadata are written to disk under `out`.
     """
     logger = _coerce_logger(logger)
     os.makedirs(out, exist_ok=True)
@@ -213,6 +247,11 @@ def msc_step1(
     This step materializes the genotype matrix and forward/backward graph for the
     selected small job.
 
+    !!! info
+
+        Step 1 is idempotent with respect to its on-disk outputs. Existing
+        genotype matrices or forward/backward graphs are detected and skipped.
+
     **Arguments:**
 
     - `jobs_metadata`: Path to `job_metadata.parquet` emitted by `msc_step0`.
@@ -276,6 +315,11 @@ def msc_step2(
 
     This step builds the brick graph partition from step-1 forward/backward output.
 
+    !!! info
+
+        The output is a recombination-aware brick-graph partition stored under
+        `brick_graph_partitions/` for later large-block merging.
+
     **Arguments:**
 
     - `jobs_metadata`: Path to `job_metadata.parquet` emitted by `msc_step0`.
@@ -321,6 +365,11 @@ def msc_step3(
 
     This step merges small brick-graph partitions and infers a large-partition
     [`linear_dag.core.lineararg.LinearARG`][].
+
+    !!! info
+
+        Empty small partitions are skipped. If every contributing partition is
+        empty, the large-partition output is written as an empty HDF5 marker.
 
     **Arguments:**
 
@@ -387,6 +436,11 @@ def msc_step4(
     This step adds individual nodes to the large-partition
     [`linear_dag.core.lineararg.LinearARG`][] built in step 3.
 
+    !!! info
+
+        As in step 3, empty upstream partitions short-circuit to an empty
+        marker file rather than attempting node augmentation.
+
     **Arguments:**
 
     - `jobs_metadata`: Path to `job_metadata.parquet` emitted by `msc_step0`.
@@ -445,7 +499,11 @@ def msc_step5(
     jobs_metadata: Union[str, PathLike],
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
-    """Merge multiple [`linear_dag.core.lineararg.LinearARG`][] HDF5 files.
+    """Finalize the multi-step pipeline by merging large-partition outputs.
+
+    This stage merges all non-empty large-partition LinearARG files into a
+    single project-level HDF5. If individual-node outputs exist, it performs an
+    analogous merge for those files as well.
 
     **Arguments:**
 
@@ -569,7 +627,17 @@ def final_merge(
 
 
 def copy_h5_group(src_group, dest_group):
-    """Recursively copy all datasets and groups from src_group to dest_group"""
+    """Recursively copy datasets, subgroups, and attributes between HDF5 groups.
+
+    **Arguments:**
+
+    - `src_group`: Source `h5py.Group` or subgroup to copy from.
+    - `dest_group`: Destination `h5py.Group` receiving copied contents.
+
+    **Returns:**
+
+    - `None`.
+    """
     for key in src_group.keys():
         if isinstance(src_group[key], h5py.Dataset):
             if key in dest_group:
@@ -587,9 +655,23 @@ def copy_h5_group(src_group, dest_group):
 
 
 def get_partitions(interval_start, interval_end, partition_size):
-    """
-    Returns a list of (start, end) tuples representing partitions of the interval [interval_start, interval_end]
-    where start and end are inclusive.
+    """Partition an inclusive integer interval into fixed-width subintervals.
+
+    !!! info
+
+        Returned tuples use inclusive coordinates `(start, end)`, matching how
+        `msc_step0` currently records job regions before converting them to
+        region strings.
+
+    **Arguments:**
+
+    - `interval_start`: Inclusive interval start.
+    - `interval_end`: Inclusive interval end.
+    - `partition_size`: Target width of each partition.
+
+    **Returns:**
+
+    - List of `(start, end)` tuples covering the input interval.
     """
     num_partitions = int((interval_end - interval_start + 1) / partition_size)
     ticks = np.linspace(interval_start, interval_end + 1, num_partitions + 1).astype(int)
@@ -613,8 +695,17 @@ def make_genotype_matrix(
     sex_path=None,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
-    """
-    From a vcf file, save the genotype matrix and variant metadata for the given region.
+    """Materialize one regional genotype matrix plus variant metadata sidecars.
+
+    This helper reads one genomic region from a VCF/BCF, writes the sparse
+    genotype matrix to HDF5, and writes variant metadata to a text sidecar used
+    by later merge stages.
+
+    !!! info
+
+        Empty regions are represented explicitly by an `is_empty` HDF5 attribute
+        and a sentinel metadata text file so downstream steps can skip them
+        deterministically.
     """
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/variant_metadata/", exist_ok=True)
@@ -734,9 +825,16 @@ def reduction_union_recom(
     partition_identifier,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
-    """
-    Compute the transitive reduction of the union of the forward and backward graphs
-    and find recombinations to obtain the brick graph.
+    """Build one recombination-aware brick-graph partition from step-1 artifacts.
+
+    The routine loads the sparse genotype matrix plus forward/backward graphs,
+    forms the reduction-union graph, inserts recombination nodes, and writes the
+    resulting adjacency plus index arrays to disk.
+
+    !!! info
+
+        Empty genotype partitions short-circuit to an empty output marker under
+        `brick_graph_partitions/`.
     """
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/brick_graph_partitions/", exist_ok=True)
@@ -805,8 +903,11 @@ def infer_brick_graph(
     partition_identifier,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
-    """
-    From a genotype matrix, infer the brick graph and find recombinations.
+    """Infer a brick graph directly from one genotype-matrix partition.
+
+    This is a single-shot alternative to the forward/backward plus
+    reduction-union route. It loads the partition genotype matrix, infers a
+    brick graph, inserts recombinations, and writes the resulting partition.
     """
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/brick_graph_partitions/", exist_ok=True)
@@ -852,8 +953,12 @@ def merge(
     partition_identifier,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
-    """
-    Merged partitioned brick graphs, find recombinations, and linearize.
+    """Merge brick-graph partitions into one large-partition LinearARG.
+
+    This stage merges non-empty brick-graph partitions for a large region,
+    reinfers recombinations on the merged graph, linearizes the result, loads
+    variant metadata and flip vectors, and writes the final large-partition
+    [`linear_dag.core.lineararg.LinearARG`][].
     """
 
     os.makedirs(f"{out}/logs/", exist_ok=True)
@@ -927,8 +1032,22 @@ def merge(
 
 
 def get_linarg_stats(out, mount_point, partition_identifiers, partition_identifier, linarg=None):
-    """
-    Get stats from linear ARG.
+    """Compute and persist validation stats for a large-partition LinearARG.
+
+    The current checks compare allele counts derived from the LinearARG against
+    allele counts recomputed from the contributing genotype partitions.
+
+    **Arguments:**
+
+    - `out`: Output directory containing partition artifacts.
+    - `mount_point`: Optional mount prefix for genotype and LinearARG reads.
+    - `partition_identifiers`: Small-partition IDs contributing to this partition.
+    - `partition_identifier`: Large-partition identifier being validated.
+    - `linarg`: Optional in-memory [`linear_dag.core.lineararg.LinearARG`][].
+
+    **Returns:**
+
+    - `None`. A stats sidecar text file is written under `linear_args/`.
     """
     if linarg is None:
         linarg = LinearARG.read(
@@ -1193,10 +1312,21 @@ def get_carrier_counts(genotypes, sex=None):
 
 
 def load_sample_ids(sample_path: Union[str, PathLike]) -> list[str]:
-    """
-    Helper function to load sample IDs from a path-like object. The file should be
-    whitespace delimited and either contain a column with a `IID` header, or no header.
-    If the file contains multiple columns `IID` header is required.
+    """Load sample identifiers from a plain-text or gzipped keep file.
+
+    !!! info
+
+        The file may be headerless only when it contains exactly one
+        whitespace-delimited column. Multi-column inputs must include `IID` or
+        `#IID` in the header row.
+
+    **Arguments:**
+
+    - `sample_path`: Path to the sample-ID file.
+
+    **Returns:**
+
+    - List of sample identifiers as strings, in file order.
     """
     opener = gzip.open if str(sample_path).endswith(".gz") else open
 

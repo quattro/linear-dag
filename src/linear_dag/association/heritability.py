@@ -39,6 +39,10 @@ def randomized_haseman_elston(
         estimates, including $\\mathrm{tr}(K)$ and
         $\\mathrm{tr}(K^2)$, where $K$ is the GRM operator.
 
+        Reported `s2g` and `s2e` are total genetic and environmental variance
+        components in the trace-parameterized system used internally, and
+        `h2g = s2g / (s2g + s2e)`.
+
     **Arguments:**
 
     - `grm`: Genetic relatedness operator implemented as [`linear_dag.core.parallel_processing.GRMOperator`][]

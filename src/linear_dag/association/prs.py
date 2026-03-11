@@ -23,6 +23,11 @@ def parquet_to_numpy(
 ):
     """Stream PRS effect sizes from Parquet into shared memory in ARG variant order.
 
+    The destination matrix is treated as variant-major storage for downstream
+    in-place multiplication. This routine performs an ID-based inner join
+    between ARG variants and score rows, then scatters only the matched score
+    values into `destination`.
+
     !!! info
 
         The alignment is based on variant ID intersection. Variants present in one
@@ -95,13 +100,21 @@ def run_prs(
     score_cols: list[str],
     num_processes: int,
     logger: Optional[logging.Logger] = None,
-) -> np.ndarray:
+) -> pl.DataFrame:
     """Compute polygenic risk scores for selected traits/effect columns.
+
+    Let $X$ denote the genotype operator over haplotype rows and let $B$ denote
+    the aligned matrix of effect sizes loaded from `beta_path`. This routine
+    computes $X B$, then sums paired haplotype scores to one row per unique
+    individual identifier.
 
     !!! info
 
         Variant alignment is performed by ID so score rows are applied to the
         matching variants in the selected ARG blocks.
+
+        The final aggregation assumes adjacent haplotype rows share the same
+        individual identifier and should be summed to one per-individual score.
 
     **Arguments:**
 

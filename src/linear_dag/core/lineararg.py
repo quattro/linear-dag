@@ -36,20 +36,31 @@ from .solve import (
 
 @dataclass
 class LinearARG(LinearOperator):
-    """Sparse linear-operator representation of a linear ARG.
+    """Sparse linear-operator representation of a LinearARG genotype matrix.
 
-    This [`linear_dag.core.lineararg.LinearARG`][] class wraps the graph
-    adjacency matrix and variant/sample indexing needed to expose genotype
-    operations through the
-    `scipy.sparse.linalg.LinearOperator` interface.
+    Let $A$ denote the square sparse adjacency matrix over internal, variant,
+    sample, and optional individual nodes. This class combines $A$ with
+    variant/sample index arrays so the graph behaves like a genotype matrix
+    $X \\in \\mathbb{R}^{n \\times p}$, where $n$ is the number of sample
+    haplotypes and $p$ is the number of retained variants.
+
+    !!! info
+
+        [`linear_dag.core.lineararg.LinearARG`][] is a
+        `scipy.sparse.linalg.LinearOperator`, not a materialized genotype
+        matrix. Forward and reverse products solve sparse triangular systems on
+        the graph instead of expanding $X$ densely.
+
+        Sample nodes are stored at the tail of the graph. `shape` is derived
+        from `sample_indices` and `variant_indices`, not directly from `A.shape`.
 
     !!! Example
+
         ```python
         linarg = LinearARG.read("example.h5", block="1:1000-2000")
         x = np.ones((linarg.shape[1], 1), dtype=np.float32)
         y = linarg @ x
         ```
-
     """
 
     A: csc_matrix  # samples must be in descending order starting from the final row/col
@@ -65,16 +76,48 @@ class LinearARG(LinearOperator):
 
     @cached_property
     def allele_counts(self) -> npt.NDArray[np.int32]:
-        """Compute and cache allele counts (sum of allele dosages across all samples)."""
+        """Return per-variant alternate-allele counts across all sample rows.
+
+        Let $X$ denote this operator viewed as a sample-by-variant genotype
+        matrix. This property computes $\\mathbf{1}^\\top X$ once and caches the
+        result.
+
+        **Returns:**
+
+        - Integer array with length `self.shape[1]`.
+        """
         return np.ones(self.shape[0], dtype=np.int32) @ self
 
     def set_allele_counts(self, counts: npt.NDArray[np.int32]) -> None:
-        """Pre-set allele counts (e.g., when loading from disk)."""
+        """Inject precomputed allele counts into the cached-property slot.
+
+        !!! info
+
+            This is mainly used by HDF5 loading paths so downstream methods can
+            reuse persisted allele counts without recomputing $\\mathbf{1}^\\top X$.
+
+        **Arguments:**
+
+        - `counts`: Per-variant allele counts aligned to the current variant order.
+
+        **Returns:**
+
+        - `None`.
+        """
         object.__setattr__(self, "allele_counts", counts)
 
     @cached_property
     def allele_frequencies(self):
         """Return per-variant allele frequencies across all samples.
+
+        Let $X$ denote the genotype operator and let $n$ denote the number of
+        sample rows. The returned vector is
+        $f = \\mathbf{1}^\\top X / n$.
+
+        !!! info
+
+            Frequencies are computed in the operator's current state, so
+            filtering variants changes the length and alignment of the result.
 
         **Returns:**
 
@@ -132,6 +175,18 @@ class LinearARG(LinearOperator):
     ):
         """Infer a [`linear_dag.core.lineararg.LinearARG`][] from phased genotypes.
 
+        The input matrix is interpreted as phased haplotype rows and variant
+        columns. The pipeline infers a brick graph, optionally inserts
+        recombination nodes, removes disconnected internal nodes, and
+        topologically reorders the result into the triangular layout expected by
+        LinearARG matvec routines.
+
+        !!! info
+
+            `genotypes` must already be phased. Diploid semantics are recovered
+            later by pairing adjacent haplotypes or by adding explicit
+            individual nodes.
+
         **Arguments:**
 
         - `genotypes`: CSC matrix of phased haploid genotypes with shape `(n_samples, n_variants)`.
@@ -144,7 +199,8 @@ class LinearARG(LinearOperator):
 
         **Returns:**
 
-        - Inferred [`linear_dag.core.lineararg.LinearARG`][] instance.
+        - Inferred [`linear_dag.core.lineararg.LinearARG`][] whose operator
+          shape matches the input genotype matrix.
 
         **Raises:**
 
@@ -203,7 +259,16 @@ class LinearARG(LinearOperator):
         snps_only: bool = False,
         remove_multiallelics: bool = False,
     ) -> Union[tuple, "LinearARG"]:
-        """Read a VCF and infer a [`linear_dag.core.lineararg.LinearARG`][].
+        """Read a VCF/BCF, parse genotype calls, and infer a LinearARG.
+
+        This is a convenience wrapper around
+        `linear_dag.read_vcf` followed by
+        [`linear_dag.core.lineararg.LinearARG.from_genotypes`][].
+
+        !!! info
+
+            When `phased=True`, each VCF sample contributes two haplotype rows,
+            so returned `iids` are duplicated to stay aligned with operator rows.
 
         **Arguments:**
 
@@ -306,11 +371,16 @@ class LinearARG(LinearOperator):
 
     @property
     def mean_centered(self):
-        """Return a mean-centered genotype linear operator.
+        """Return the centered genotype operator $X - \\mathbf{1} f^\\top$.
+
+        Let $X$ denote this operator and let $f$ denote
+        [`linear_dag.core.lineararg.LinearARG.allele_frequencies`][]. The
+        returned operator subtracts each variant's sample mean from that
+        variant column.
 
         **Returns:**
 
-        - `LinearOperator` with per-variant mean removed.
+        - `LinearOperator` with column means removed.
         """
         mean = aslinearoperator(np.ones((self.shape[0], 1), dtype=np.float32)) @ aslinearoperator(
             self.allele_frequencies
@@ -319,11 +389,21 @@ class LinearARG(LinearOperator):
 
     @property
     def normalized(self):
-        """Return a normalized genotype operator with variance-stabilized columns.
+        """Return a variance-standardized genotype operator.
+
+        Let $f_j$ denote the allele frequency for variant $j$. The returned
+        operator applies the scaling
+        $(X_j - f_j) / \\sqrt{f_j (1 - f_j)}$ columnwise, with zero-variance
+        columns guarded by replacing $f_j (1-f_j)=0$ with `1`.
+
+        !!! info
+
+            This normalization matches the scaling used by downstream PCA/SVD
+            and GRM routines in the package.
 
         **Returns:**
 
-        - `LinearOperator` with mean-zero, variance-scaled columns.
+        - `LinearOperator` with centered, variance-standardized columns.
         """
         pq = self.allele_frequencies * (1 - self.allele_frequencies)
         pq[pq == 0] = 1
@@ -413,8 +493,16 @@ class LinearARG(LinearOperator):
         return num_carriers.astype(np.int32)
 
     def get_carriers_subset(self, variant_indices: npt.NDArray[np.int_], unphased: bool = False) -> csc_matrix:
-        """
-        Get carriers for a subset of variants specified by variant_indices.
+        """Return sparse carrier indicators for a subset of variants.
+
+        The result marks which sample rows descend from each requested variant
+        node. When `unphased=True`, adjacent haplotype rows are collapsed to
+        diploid individuals.
+
+        !!! info
+
+            `variant_indices` indexes the current operator column order, not the
+            raw graph-node numbering.
 
         **Arguments:**
 
@@ -437,7 +525,13 @@ class LinearARG(LinearOperator):
         return carriers
 
     def remove_samples(self, iids_to_remove: npt.NDArray[np.int_]):
-        """Create a new [`linear_dag.LinearARG`][] with selected sample IDs removed.
+        """Return a copy with selected sample IDs removed.
+
+        !!! info
+
+            This method rebuilds the graph by dropping sample nodes and, when
+            present, their corresponding individual nodes. Variant indexing is
+            preserved.
 
         **Arguments:**
 
@@ -616,14 +710,21 @@ class LinearARG(LinearOperator):
         compression_option: str = "gzip",
         save_allele_counts: bool = True,
     ):
-        """Write [`linear_dag.core.lineararg.LinearARG`][] data to disk.
+        """Write this LinearARG to HDF5 in the package's on-disk schema.
+
+        !!! info
+
+            When `block_info` is provided, the data are written into a block
+            group inside an existing or new HDF5 container. Otherwise the file
+            is written as a root-level single-block object.
 
         **Arguments:**
 
         - `h5_fname`: Base path/prefix used for output files.
         - `block_info`: Optional dictionary with keys `chrom`, `start`, and `end`.
         - `compression_option`: HDF5 compression option.
-        - `save_allele_counts`: Whether to persist precomputed allele counts.
+        - `save_allele_counts`: Whether to persist per-variant
+          $\\mathbf{1}^\\top X$ counts for faster reloads.
 
         **Returns:**
 
@@ -717,12 +818,10 @@ class LinearARG(LinearOperator):
         codec: str = "zstd",
         level: int = 5,
     ):
-        """Write [`linear_dag.core.lineararg.LinearARG`][] data with Blosc compression.
+        """Write this LinearARG to HDF5 using Blosc-compressed datasets.
 
-        This method uses Blosc compression (default: Zstd level 5 with bitshuffle)
-        which provides 2-3x faster read performance compared to gzip while maintaining
-        good compression ratios. Files written with this method can be read normally
-        using [`linear_dag.core.lineararg.LinearARG.read`][].
+        This method uses Blosc compression while preserving the same logical
+        schema as [`linear_dag.core.lineararg.LinearARG.write`][].
 
         !!! info
             Reading Blosc-compressed files requires `hdf5plugin` to be installed
@@ -838,7 +937,12 @@ class LinearARG(LinearOperator):
         h5_fname: Union[str, PathLike],
         block: Optional[str] = None,
     ) -> pl.LazyFrame:
-        """Reads variant info from provided HDF5 file.
+        """Load variant metadata from an HDF5 LinearARG file or block.
+
+        !!! info
+
+            This reads only the tabular variant fields and does not construct a
+            full [`linear_dag.core.lineararg.LinearARG`][].
 
         **Arguments:**
 
@@ -871,12 +975,15 @@ class LinearARG(LinearOperator):
         block: Optional[str] = None,
         load_metadata: bool = False,
     ) -> "LinearARG":
-        """Read [`linear_dag.core.lineararg.LinearARG`][] data from HDF5 files.
+        """Read a [`linear_dag.core.lineararg.LinearARG`][] from HDF5 storage.
 
         !!! info
 
             If `hdf5plugin` is unavailable, Blosc-compressed files may fail to
             load even though gzip/lzf-backed files can still be read.
+
+            `load_metadata=False` avoids materializing variant tables on read,
+            which is preferable for algebra-only workflows.
 
         **Arguments:**
 
@@ -886,7 +993,8 @@ class LinearARG(LinearOperator):
 
         **Returns:**
 
-        - A [`linear_dag.core.lineararg.LinearARG`][] object.
+        - A [`linear_dag.core.lineararg.LinearARG`][] aligned to the stored
+          block or root group.
 
         **Raises:**
 
@@ -940,7 +1048,10 @@ class LinearARG(LinearOperator):
         return linarg
 
     def filter_variants_by_maf(self, maf_threshold: float) -> None:
-        """Filter variants to those with minor allele frequency above a threshold.
+        """Filter variants in place by minor-allele frequency.
+
+        Let $f_j$ denote the allele frequency of variant $j$. A variant is kept
+        when $\\min(f_j, 1-f_j) > \\text{maf_threshold}$.
 
         **Arguments:**
 
@@ -957,7 +1068,12 @@ class LinearARG(LinearOperator):
         self.flip = self.flip[mask]
 
     def filter_variants_by_mask(self, mask: npt.NDArray[np.bool_]) -> None:
-        """Filter variants using a boolean keep-mask.
+        """Filter variants in place using an explicit keep-mask.
+
+        !!! info
+
+            The mask is applied to both `variant_indices` and `flip`, so those
+            arrays remain aligned after filtering.
 
         **Arguments:**
 
@@ -981,7 +1097,10 @@ class LinearARG(LinearOperator):
         bed_regions: "pl.DataFrame",
         maf_threshold: float = 0.0,
     ) -> None:
-        """Filter variants to BED-overlapping variants above a MAF threshold.
+        """Filter variants in place to BED-overlapping loci above a MAF threshold.
+
+        BED intervals are interpreted as UCSC-style half-open intervals
+        $[\\mathrm{start}, \\mathrm{end})$.
 
         **Arguments:**
 
@@ -1048,7 +1167,13 @@ class LinearARG(LinearOperator):
         return np.max(self.nonunique_indices) + 1
 
     def add_individual_nodes(self, sex: npt.NDArray[np.uint] = None) -> "LinearARG":
-        """Create a new [`linear_dag.core.lineararg.LinearARG`][] with individual nodes.
+        """Return a copy with explicit individual nodes appended to the graph.
+
+        !!! info
+
+            Individual nodes are required for methods that distinguish
+            heterozygotes from homozygotes, such as non-HWE GWAS denominator
+            calculations.
 
         **Arguments:**
 

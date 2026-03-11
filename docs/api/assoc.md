@@ -21,7 +21,7 @@ At a high level, association testing consists of:
 ---
 
 ::: linear_dag.get_gwas_beta_se
-options:
-show_bases: true
+    options:
+        show_bases: true
 
 ---

@@ -44,7 +44,10 @@ def get_gwas_beta_se(
     """Compute GWAS effect sizes and standard errors in per-allele units.
 
     Let $X$ denote the genotype operator in shared sample space, $Y$ denote
-    residualized phenotypes, and $C$ denote covariates.
+    residualized phenotypes, and $C$ denote covariates. The routine computes
+    $X^\\top Y$ and rescales by per-variant denominator terms so each effect
+    estimate corresponds to a one-allele change under the package's genotype
+    coding convention.
 
     !!! info
 
@@ -52,6 +55,10 @@ def get_gwas_beta_se(
         If `num_heterozygotes` is `None`, denominator terms are computed under
         Hardy-Weinberg assumptions. If `in_place_op=True`, `genotypes` must be
         [`linear_dag.core.parallel_processing.ParallelOperator`][].
+
+        Missing phenotypes are handled by zero-filling residual arrays and, when
+        `y_nonmissing` is provided, recomputing denominator terms against
+        trait-specific non-missing sample counts.
 
     **Arguments:**
 
@@ -68,10 +75,12 @@ def get_gwas_beta_se(
     **Returns:**
 
     - Tuple `(beta, var_numerator, var_denominator, allele_counts)` where:
-      - `beta` is per-variant per-trait effect size.
-      - `var_numerator` is per-trait residual variance numerator.
-      - `var_denominator` is per-variant denominator term.
-      - `allele_counts` is per-variant alternate-allele count.
+        - `beta` is the matrix of per-variant, per-trait effect estimates.
+        - `var_numerator` is the residual variance numerator for each trait.
+        - `var_denominator` is the variant-specific denominator used for effect
+          scaling.
+        - `allele_counts` is the per-variant alternate-allele count in the
+          aligned sample set.
 
     **Raises:**
 
@@ -227,11 +236,11 @@ def run_gwas(
     detach_arrays: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> pl.LazyFrame:
-    """Run a covariate-adjusted linear-regression GWAS association scan.
+    """Run a covariate-adjusted linear-regression GWAS scan.
 
     Let $Y$ denote phenotype columns and $C$ denote covariates. This function
     aligns IIDs between `data` and `genotypes`, residualizes $Y$ on $C$, and
-    computes per-variant summary statistics.
+    computes per-variant summary statistics for each requested phenotype.
 
     !!! info
 
@@ -239,6 +248,10 @@ def run_gwas(
         The first covariate column must be an all-ones intercept. If
         `assume_hwe=False`, `genotypes` must provide explicit heterozygote
         counts (for example via individual-node-enabled LinearARG paths).
+
+        The returned lazy frame includes allele-frequency metadata derived from
+        the aligned analysis sample, not necessarily the original on-disk
+        cohort.
 
     **Arguments:**
 

@@ -15,17 +15,46 @@ random.seed(0)
 
 @dataclass
 class Intervals:
+    """Collection of interval endpoints with associated candidate identifiers.
+
+    This helper stores interval metadata used during candidate-brick search for
+    sample insertion routines.
+
+    !!! Example
+
+        ```python
+        intervals = Intervals(
+            left_bound=np.array([0, 2]),
+            right_bound=np.array([2, 4]),
+            identifiers=np.array([10, 11]),
+        )
+        cover = intervals.minimal_disjoint_cover()
+        ```
+    """
+
     left_bound: np.ndarray
     right_bound: np.ndarray
     identifiers: np.ndarray
 
     def sort_intervals_by_right_bound(self):
+        """Sort all stored intervals in place by ascending right endpoint.
+
+        **Returns:**
+
+        - `None`.
+        """
         order = np.argsort(self.right_bound)
         self.right_bound = self.right_bound[order]
         self.left_bound = self.left_bound[order]
         self.identifiers = self.identifiers[order]
 
     def minimal_disjoint_cover(self):
+        """Return one minimal disjoint cover across the represented span.
+
+        **Returns:**
+
+        - List of interval identifiers forming a minimal cover.
+        """
         self.sort_intervals_by_right_bound()
         interval_start = np.min(self.left_bound)
         min_n_intervals = defaultdict(lambda: np.inf)
@@ -40,6 +69,20 @@ class Intervals:
 
 
 class linarg_add_sample:
+    """Helper object for attaching a new haplotype to a LinearARG.
+
+    The object builds NetworkX views of reduced and full ancestor graphs, then
+    exposes search utilities for finding candidate parental bricks and
+    reconstructing the corresponding path-sum vector.
+
+    !!! Example
+
+        ```python
+        helper = make_linarg_add_sample(linarg, linarg_recom)
+        parent_mutations, candidates, cover, intervals, coeffs = helper.add_sample(haplotype)
+        ```
+    """
+
     def __init__(self, A_reduced, A, variant_indices_reduced, variant_indices, A_lin):
         self.A_reduced = A_reduced
         self.G_reduced = nx.from_numpy_array(A_reduced, create_using=nx.DiGraph)
@@ -50,9 +93,29 @@ class linarg_add_sample:
         self.A_lin = A_lin  # full adjacency matrix with -1 edges
 
     def get_successors(self, mut):
+        """Return all descendants of a reduced-graph mutation node.
+
+        **Arguments:**
+
+        - `mut`: Mutation-node index in `self.G_reduced`.
+
+        **Returns:**
+
+        - Set of descendant node indices reachable from `mut`.
+        """
         return {item for sublist in list(nx.dfs_successors(self.G_reduced, mut).values()) for item in sublist}
 
     def get_parent_mutations(self, haplotype):
+        """Partition haplotype mutations into parent and non-parent sets.
+
+        **Arguments:**
+
+        - `haplotype`: Iterable of mutation indices relative to the reduced graph.
+
+        **Returns:**
+
+        - Tuple `(parent_mutations, nonparent_mutations)`.
+        """
         haplotype_mapped = set([self.variant_indices_reduced[m] for m in haplotype])  # variants indices wrt A_reduced
         parent_mutations = [
             x
@@ -63,6 +126,18 @@ class linarg_add_sample:
         return parent_mutations, nonparent_mutations
 
     def get_interval(self, parent_intervals):
+        """Merge parent intervals when they define a contiguous span.
+
+        **Arguments:**
+
+        - `parent_intervals`: Sequence of interval tuples, empty tuples, or `None`.
+
+        **Returns:**
+
+        - Interval tuple `(left, right)` for a contiguous merge.
+        - Empty tuple `()` when all intervals are empty.
+        - `None` when the merge is invalid or unresolved.
+        """
         if len(parent_intervals) == 1:
             return parent_intervals[0]
         if None in parent_intervals:  # some parent of the child either has not been visited or is not a candidate
@@ -80,6 +155,18 @@ class linarg_add_sample:
         return child_interval
 
     def find_candidates(self, haplotype):
+        """Find candidate ancestor nodes covering a haplotype's mutations.
+
+        **Arguments:**
+
+        - `haplotype`: Iterable of mutation indices in reduced-graph coordinates.
+
+        **Returns:**
+
+        - Tuple `(candidate_intervals, parent_mutations, interval_map)` where
+          `candidate_intervals` is an [`linear_dag.core.add_sample.Intervals`][]
+          instance.
+        """
         haplotype_mapped = [self.variant_indices[m] for m in sorted(haplotype)]  # variants indices wrt A
         parent_mutations, nonparent_mutations = self.get_parent_mutations(haplotype)  # order by genomic location
         parent_mutations_mapped = [
@@ -115,10 +202,31 @@ class linarg_add_sample:
         return candidate_intervals, parent_mutations, interval
 
     def minimal_disjoint_cover(self, candidate_intervals):
+        """Return a minimal disjoint cover for candidate intervals.
+
+        **Arguments:**
+
+        - `candidate_intervals`: Candidate interval collection.
+
+        **Returns:**
+
+        - List of candidate identifiers selected for the cover.
+        """
         mdc = candidate_intervals.minimal_disjoint_cover()
         return mdc
 
     def get_predecessors(self, node, visited=None):
+        """Return recursive predecessors of `node`.
+
+        **Arguments:**
+
+        - `node`: Node whose ancestors should be collected.
+        - `visited`: Optional accumulator set.
+
+        **Returns:**
+
+        - Set of predecessor node indices.
+        """
         if visited is None:
             visited = set()
         predecessors = set(self.predecessors(node))
@@ -129,6 +237,16 @@ class linarg_add_sample:
         return visited
 
     def correct_path_sum(self, mdc):
+        """Compute the corrected path-sum vector for a chosen cover.
+
+        **Arguments:**
+
+        - `mdc`: Minimal disjoint cover of candidate brick identifiers.
+
+        **Returns:**
+
+        - CSC column vector of path-sum coefficients.
+        """
         predecessors = set()
         for b in mdc:
             b_predecessors = get_all_predecessors(self.G, b)
@@ -142,6 +260,16 @@ class linarg_add_sample:
         return X_inv @ h_tilde
 
     def add_sample(self, haplotype):
+        """Run candidate search and path-sum reconstruction for one haplotype.
+
+        **Arguments:**
+
+        - `haplotype`: Iterable of mutation indices in reduced-graph coordinates.
+
+        **Returns:**
+
+        - Tuple `(parent_mutations, candidate_ids, cover, interval_map, path_sum)`.
+        """
         candidate_intervals, parent_mutations, interval = self.find_candidates(haplotype)
         mdc = self.minimal_disjoint_cover(candidate_intervals)
         a = self.correct_path_sum(mdc)
@@ -150,6 +278,17 @@ class linarg_add_sample:
 
 
 def get_ancestral_adjacency_matrix(linarg, mask_negs=True):
+    """Extract the ancestor-only adjacency matrix from a LinearARG-like object.
+
+    **Arguments:**
+
+    - `linarg`: Object exposing `.A`, `.sample_indices`, and `.variant_indices`.
+    - `mask_negs`: Whether to zero out negative edges in the returned matrix.
+
+    **Returns:**
+
+    - Tuple `(A_anc, variant_indices)` where `A_anc` is a CSR ancestor graph.
+    """
     A_anc = linarg.A.copy()
     A_anc = A_anc.T
     A_anc = A_anc.tocoo()
@@ -163,6 +302,17 @@ def get_ancestral_adjacency_matrix(linarg, mask_negs=True):
 
 
 def make_linarg_add_sample(linarg, linarg_recom):
+    """Construct a [`linear_dag.core.add_sample.linarg_add_sample`][] helper.
+
+    **Arguments:**
+
+    - `linarg`: Reduced LinearARG used to identify parent mutations.
+    - `linarg_recom`: Recombination-expanded LinearARG.
+
+    **Returns:**
+
+    - Initialized helper object for sample insertion workflows.
+    """
     A_reduced, variant_indices_reduced = get_ancestral_adjacency_matrix(linarg)
     A, variant_indices = get_ancestral_adjacency_matrix(linarg_recom)
     A_lin, _ = get_ancestral_adjacency_matrix(linarg_recom, mask_negs=False)
@@ -171,6 +321,18 @@ def make_linarg_add_sample(linarg, linarg_recom):
 
 
 def get_all_predecessors(graph, node, visited=None):
+    """Return all recursive predecessors of `node` in a directed graph.
+
+    **Arguments:**
+
+    - `graph`: Graph object exposing `.predecessors(node)`.
+    - `node`: Node whose ancestors should be collected.
+    - `visited`: Optional accumulator set.
+
+    **Returns:**
+
+    - Set of predecessor nodes reachable by reverse traversal.
+    """
     if visited is None:
         visited = set()
     predecessors = set(graph.predecessors(node))
@@ -182,6 +344,18 @@ def get_all_predecessors(graph, node, visited=None):
 
 
 def plot_mutations(true_a, h, linarg_sample):
+    """Plot haplotype mutations explained by inferred parental bricks.
+
+    **Arguments:**
+
+    - `true_a`: Iterable of selected brick or node identifiers.
+    - `h`: Haplotype mutation identifiers ordered by genomic position.
+    - `linarg_sample`: Sample-insertion helper object.
+
+    **Returns:**
+
+    - Dictionary mapping brick identifiers to covered mutation positions.
+    """
     ind_to_var = {
         linarg_sample.variant_indices[i]: i for i in range(len(linarg_sample.variant_indices))
     }  # map index on adjacency matrix to variant index
@@ -215,6 +389,16 @@ def plot_mutations(true_a, h, linarg_sample):
 
 
 def is_contiguous(muts):
+    """Return whether mutation indices form a contiguous integer run.
+
+    **Arguments:**
+
+    - `muts`: Iterable of integer mutation indices.
+
+    **Returns:**
+
+    - `True` when every integer between `min(muts)` and `max(muts)` is present.
+    """
     if len(muts) == 0:
         return True
     min_val = min(muts)
