@@ -10,14 +10,27 @@ from ..core.lineararg import LinearARG
 
 @dataclass
 class triangular_solver(LinearOperator):
+    """LinearOperator wrapper for triangular solves on $I - A$.
+
+    !!! Example
+
+        ```python
+        solver = triangular_solver(adjacency_submatrix)
+        x = solver @ b
+        y = solver.T @ b
+        ```
+    """
+
     A: csr_matrix
 
     @property
     def dtype(self):
+        """Return the scalar dtype used by the wrapped sparse matrix."""
         return self.A.dtype
 
     @property
     def shape(self):
+        """Return the matrix shape expected by `LinearOperator` consumers."""
         return self.A.shape
 
     def _matvec(self, other):
@@ -34,11 +47,23 @@ class triangular_solver(LinearOperator):
 
 
 def blup(linarg: LinearARG, heritability: float, y: np.ndarray):
-    """
-    Computes the best linear unbiased predictor (BLUP) for the phenotype vector y.
-    :param linarg: linear ARG for the genotype matrix
-    :param y: phenotype vector
-    :return: BLUP, a vector of the same size as y
+    """Compute the best linear unbiased predictor (BLUP) for a phenotype vector.
+
+    !!! info
+
+        `heritability` is interpreted as narrow-sense heritability in $[0, 1]$.
+        This function assumes `y` is already aligned to `linarg.sample_indices`.
+
+    **Arguments:**
+
+    - `linarg`: [`linear_dag.core.lineararg.LinearARG`][] operator for the
+      genotype matrix.
+    - `heritability`: Proportion of phenotypic variance attributed to genetic effects.
+    - `y`: Phenotype vector aligned to `linarg` samples.
+
+    **Returns:**
+
+    - BLUP estimate for `y` with the same shape as the input phenotype vector.
     """
 
     X = linarg

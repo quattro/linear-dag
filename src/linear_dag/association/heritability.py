@@ -13,11 +13,12 @@ from scipy.sparse import identity
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 from ..core.operators import get_inner_merge_operators
+from ..core.parallel_processing import GRMOperator
 from .util import impute_missing_with_mean, residualize_phenotypes
 
 
 def randomized_haseman_elston(
-    grm: LinearOperator,
+    grm: GRMOperator,
     data: pl.LazyFrame,
     pheno_cols: list[str],
     covar_cols: list[str],
@@ -27,38 +28,89 @@ def randomized_haseman_elston(
     seed: Optional[Union[int, Generator]] = None,
     logger: Optional[logging.Logger] = None,
 ) -> pl.DataFrame:
-    """
-    Implementation of the RHE algorithm from:
-        Pazokitoroudi, A. et al. Efficient variance components analysis across millions of genomes.
-        Nat Commun 11, 4020 (2020). https://doi.org/10.1038/s41467-020-17576-9
-    Notation below follows Methods section of this paper.
+    """Estimate SNP heritability with randomized Haseman-Elston regression.
 
-    :param grm: GRM operator
-    :param y: phenotype vector
-    :param b: number of random vectors to use when estimating Tr(GRM^2)
-    :return: the heritability estimate
+    Implementation follows Pazokitoroudi et al. (2020), Nature Communications
+    11:4020, https://doi.org/10.1038/s41467-020-17576-9.
+
+    !!! info
+
+        The estimator solves moment equations built from stochastic trace
+        estimates, including $\\mathrm{tr}(K)$ and
+        $\\mathrm{tr}(K^2)$, where $K$ is the GRM operator.
+
+    **Arguments:**
+
+    - `grm`: Genetic relatedness operator implemented as [`linear_dag.core.parallel_processing.GRMOperator`][]
+    - `data`: Input phenotype/covariate table containing IID labels.
+    - `pheno_cols`: Phenotype columns to estimate.
+    - `covar_cols`: Covariate columns; first column must be an intercept.
+    - `num_matvecs`: Number of probe vectors for randomized trace estimation.
+    - `trace_est`: Trace-estimator choice (`hutchinson`, `hutch++`, `xnystrace`).
+    - `sampler`: Probe distribution (`normal`, `sphere`, `rademacher`).
+    - `seed`: Optional random seed or generator for probe sampling.
+    - `logger`: Optional logger for diagnostics.
+
+    **Returns:**
+
+    - `polars.DataFrame` with per-phenotype estimates for `s2g`, `s2e`, `h2g`,
+      and their standard errors.
+
+    **Raises:**
+
+    - `ValueError`: If covariates are missing an intercept, if merge alignment
+      is invalid, or if `num_matvecs` exceeds sample count.
     """
+
+    def _info(msg, *args):
+        if logger is not None:
+            logger.info(msg, *args)
+        return
+
+    def _debug(msg, *args):
+        if logger is not None:
+            logger.debug(msg, *args)
+        return
+
+    _info(
+        "randomized_haseman_elston: starting with %d pheno, %d covar, num_matvecs=%d, trace_est=%s, sampler=%s",
+        len(pheno_cols),
+        len(covar_cols),
+        num_matvecs,
+        trace_est,
+        sampler,
+    )
 
     if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
 
     # align and residualize
+    _debug("randomized_haseman_elston: aligning phenotype rows to GRM identifiers")
     left_op, right_op = get_inner_merge_operators(data.select("iid").cast(pl.Utf8).collect().to_series(), grm.iids)
-    phenotypes = data.select(pheno_cols).collect().to_numpy()
-    covariates = data.select(covar_cols).collect().to_numpy()
+    phenotypes = data.select(pheno_cols).collect().to_numpy(writable=True)
+    covariates = data.select(covar_cols).collect().to_numpy(writable=True)
     yresid, covariates = _prep_for_h2_estimation(left_op, right_op, phenotypes, covariates)
+    _debug(
+        "randomized_haseman_elston: prepared residualized phenotypes with shape=%s and covariates shape=%s",
+        yresid.shape,
+        covariates.shape,
+    )
 
-    # length here represent N in haplotype space, we need to account for this otherwise wrong results!
-    N = len(yresid) // 2  # assumes diploid!!
+    N = len(yresid)
     grm = right_op @ grm @ right_op.T
+    grm = 0.5 * (left_op @ grm @ left_op.T)  # assumes diploid; comes from the normalization term being pq, not 2pq
 
-    if num_matvecs > N:
-        raise ValueError(f"num_matvecs={num_matvecs} should be << N={N}")
+    _validate_num_matvecs(num_matvecs, N, trace_est)
 
     # set up for randomized estimator
     generator = np.random.default_rng(seed=seed)
     estimator = _construct_estimator(trace_est)
     sampler = _construct_sampler(sampler, generator)
+    _info(
+        "randomized_haseman_elston: estimating traces with estimator=%s using %d probe vectors",
+        trace_est,
+        num_matvecs,
+    )
 
     # wrap the probe-sampler in a residualizer
     # these should be independent in expectation, but it's not much overhead to residualize for exact independence
@@ -72,30 +124,39 @@ def randomized_haseman_elston(
 
     # se not used atm, but for some trace estimators (eg xtrace, xnystrace) we can compute it
     grm_trace, grm_sq_trace, se = estimator(grm, num_matvecs, _resid_sampler)
+    _debug(
+        "randomized_haseman_elston: estimated traces tr(K)=%.6g tr(K^2)=%.6g",
+        grm_trace,
+        grm_sq_trace,
+    )
 
     # compute y_j' K y_j for each y_j \in y
     C = np.sum(grm.matmat(yresid) * yresid, axis=0)
 
-    # compute y_j' y_j for each y_j \in y
-    E = np.sum(yresid * yresid, axis=0)
+    # compute N_j := y_j' y_j for each y_j \in Y
+    N_j = np.sum(yresid * yresid, axis=0)
 
     # construct linear equations to solve
     LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, N]])
-    RHS = np.vstack([C, E])
+    RHS = np.vstack([C, N_j])
+    _info("randomized_haseman_elston: solving moment equations for %d phenotypes", RHS.shape[1])
     solution = np.linalg.solve(LHS, RHS)
 
     # compute the (co)variance of our estimates
-    var_s2g, var_s2e, covariances = _compute_err_variance(grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs)
+    _info("randomized_haseman_elston: estimating std err")
+    var_s2g, var_s2e, covariances = _compute_err_variance_vectorized(
+        grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs
+    )
 
     # we define h2g: = a * Tr(K) / (a * Tr(K) + b * Tr(I)), where a = solution[0] and b = solution[1]
     # this handles any possible rescaling of the 'grm' like object to compute the correct total genetic variance
     # rescale variances and covariances to trace(K) parameterization
     s2g = solution[0, :] * grm_trace
-    s2e = solution[1, :] * N
+    s2e = solution[1, :] * N_j
     heritability = s2g / (s2g + s2e)
     var_s2g = (grm_trace**2) * var_s2g
-    var_s2e = (N**2) * var_s2e
-    covariances = (grm_trace * N) * covariances
+    var_s2e = (N_j**2) * var_s2e
+    covariances = (grm_trace * N_j) * covariances
 
     # approx delta method to compute std err of h2g
     numer = (s2e**2) * var_s2g + (s2g**2) * var_s2e - 2 * s2g * s2e * covariances
@@ -112,6 +173,12 @@ def randomized_haseman_elston(
             "h2g": heritability,
             "h2g.se": np.sqrt(var_h2g),
         }
+    )
+
+    _info(
+        "randomized_haseman_elston: completed for %d phenotypes; mean h2g=%.6g",
+        len(pheno_cols),
+        float(np.mean(heritability)),
     )
 
     return df_result
@@ -139,13 +206,15 @@ def _prep_for_h2_estimation(
     two_n = np.sum(rows_matched_per_col > 0)
     assert two_n == 2 * np.sum(cols_matched_per_row > 0)
 
-    covariates = left_op.T @ covariates
-    phenotypes = left_op.T @ phenotypes
+    # covariates = left_op.T @ covariates
+    # phenotypes = left_op.T @ phenotypes
 
     # Handle missingness
     covariates = impute_missing_with_mean(covariates)
     is_missing = np.isnan(phenotypes)
     num_nonmissing = np.sum(~is_missing, axis=0)
+    if np.any(num_nonmissing == 0):
+        raise ValueError("Each phenotype must have at least one non-missing value")
     phenotypes.ravel()[is_missing.ravel()] = 0
 
     # Residualize phenotypes on covariates and standardize
@@ -153,6 +222,21 @@ def _prep_for_h2_estimation(
     y_resid /= np.sqrt(np.sum(y_resid**2, axis=0) / num_nonmissing)  # ||y_resid||^2 == num_nonmissing
 
     return y_resid, covariates
+
+
+def _validate_num_matvecs(num_matvecs: int, sample_count: int, trace_est: str) -> None:
+    if not isinstance(num_matvecs, (int, np.integer)):
+        raise TypeError(f"num_matvecs must be an integer, got {type(num_matvecs).__name__}")
+    if num_matvecs < 1:
+        raise ValueError(f"num_matvecs={num_matvecs} must be >= 1")
+    if num_matvecs > sample_count:
+        raise ValueError(f"num_matvecs={num_matvecs} should be <= N={sample_count}")
+
+    name = str(trace_est).lower()
+    if name in {"hutch++", "hutchpp"} and num_matvecs < 3:
+        raise ValueError("hutch++ requires num_matvecs >= 3")
+    if name in {"xnystrace", "xnystrom"} and num_matvecs < 2:
+        raise ValueError("xnystrace requires num_matvecs >= 2")
 
 
 _Sampler = Callable[[int, int], np.ndarray]
@@ -191,7 +275,7 @@ def _rademacher_sampler(n: int, k: int, generator: Generator) -> np.ndarray:
     return 2 * generator.binomial(1, 0.5, size=(n, k)) - 1
 
 
-_TraceEstimator = Callable[[LinearOperator, int, _Sampler], tuple[float, float, dict]]
+_TraceEstimator = Callable[[GRMOperator, int, _Sampler], tuple[float, float, dict]]
 
 
 def _construct_estimator(tr_est: str) -> _TraceEstimator:
@@ -215,7 +299,7 @@ def _construct_estimator(tr_est: str) -> _TraceEstimator:
     return estimator
 
 
-def _hutchinson_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
+def _hutchinson_estimator(GRM: GRMOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
     n, _ = GRM.shape
     samples = sampler(n, k)
 
@@ -230,7 +314,7 @@ def _hutchinson_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tup
     return trace_grm, trace_grm_sq, {}
 
 
-def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
+def _hutch_pp_estimator(GRM: GRMOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
     """
     Hutch++ trace estimator, but generalized to estimate tr(A) and tr(A^2) in an efficient manner.
 
@@ -252,6 +336,8 @@ def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple
     """
     n, _ = GRM.shape
     m = k // 3
+    if m < 1:
+        raise ValueError("hutch++ requires k >= 3")
 
     samples = sampler(n, 2 * m)
     X1 = samples[:, :m]
@@ -285,7 +371,7 @@ def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple
 
 
 def _xtrace_estimator(
-    GRM: LinearOperator,
+    GRM: GRMOperator,
     k: int,
     sampler: _Sampler,
     estimate_diag: bool = False,
@@ -341,7 +427,7 @@ def _xtrace_estimator(
     return trace_grm, trace_grm_sq, {"std.err": std_err}
 
 
-def _xnystrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
+def _xnystrace_estimator(GRM: GRMOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
     n, _ = GRM.shape
     m = k // 2
 
@@ -475,3 +561,86 @@ def _compute_err_variance(
         covariances.append(cov_ge)
 
     return np.array(var_s2g), np.array(var_s2e), np.array(covariances)
+
+
+def _compute_err_variance_vectorized(
+    grm,
+    yresid: np.ndarray,  # (n, m)
+    solutions: np.ndarray,  # (2, m), rows: [s2g, s2e]
+    grm_sq_trace: float,
+    grm_trace: float,
+    num_matvecs: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized version of `_compute_err_variance`.
+
+    !!! info
+
+        Uses three `matmat` calls total, then computes traitwise dot products
+        with vectorized einsum reductions.
+
+    **Returns:**
+
+    - `var_s2g`: Array with shape `(m,)`.
+    - `var_s2e`: Array with shape `(m,)`.
+    - `cov_ge`: Array with shape `(m,)`.
+    """
+    Y = yresid
+    n, m = Y.shape
+    dtype = Y.dtype
+
+    # Scalars / constants
+    denom = n * grm_sq_trace - grm_trace**2
+    denom2 = denom * denom
+    n2 = n * n
+
+    # Traitwise params (shape (m,))
+    s2g = solutions[0].astype(dtype, copy=False)
+    s2e = solutions[1].astype(dtype, copy=False)
+
+    # Broadcast helpers (shape (1, m)) for columnwise scaling
+    s2g_row = s2g[None, :]
+    s2e_row = s2e[None, :]
+
+    # --- 1) KY = K Y
+    KY = grm.matmat(Y)  # (n, m)
+
+    # resid operator R = n*K - tr(K) I, applied to Y:
+    # Proj = RY = n*(KY) - tr(K)*Y
+    Proj = n * KY - grm_trace * Y  # (n, m)
+
+    # --- 2) KProj = K (RY)
+    KProj = grm.matmat(Proj)  # (n, m)
+
+    # V(Proj) = s2g*KProj + s2e*Proj
+    VProj = s2g_row * KProj + s2e_row * Proj  # (n, m)
+
+    # term1_j = 2 * Proj[:,j]^T VProj[:,j]
+    term1 = 2.0 * np.einsum("ij,ij->j", Proj, VProj)  # (m,)
+
+    # --- 3) Tmp = VY = s2g*KY + s2e*Y
+    Tmp = s2g_row * KY + s2e_row * Y  # (n, m)
+
+    # KTmp = K (VY)
+    KTmp = grm.matmat(Tmp)  # (n, m)
+
+    # Rtmp = R(VY) = n*KTmp - tr(K)*Tmp
+    Rtmp = n * KTmp - grm_trace * Tmp  # (n, m)
+
+    # covUW_hat_j = 2 * y_j^T Rtmp_j
+    covUW_hat = 2.0 * np.einsum("ij,ij->j", Y, Rtmp)  # (m,)
+
+    # term2 (variance due to tr(K^2) estimate)
+    term2 = (s2g**2) * (grm_sq_trace / num_matvecs)  # (m,)
+
+    # tr(V^2) and varW_hat
+    trV2 = (s2g**2) * grm_sq_trace + 2.0 * s2g * s2e * grm_trace + (s2e**2) * n
+    varW_hat = 2.0 * trV2  # (m,)
+
+    # Outputs
+    var_s2g = (term1 + term2) / denom2
+
+    var_s2e = (grm_trace**2 / (n2 * denom2)) * term1 + varW_hat / n2 - (2.0 * grm_trace / (n2 * denom)) * covUW_hat
+
+    cov_ge = covUW_hat / (denom * n) - (grm_trace / n) * term1 / denom2
+
+    return var_s2g, var_s2e, cov_ge

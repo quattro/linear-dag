@@ -1,0 +1,78 @@
+pick 448de18 switched how RHE works with GRM. previously was explicitly staying in hap space; now in genotype space with addtl LinOps; also fixed accum bug for GRMOp
+pick 898714b chore: add project agent context and harden CLI boundaries
+pick addc4c0 fix: harden core lineararg copy and block sorting
+pick 8e1d53d feat: harden association GWAS guardrails and contracts
+pick e903b60 feat: harden structure PCA/SVD contracts
+pick 2dc0e7b refactor: align CLI setup and argument grouping
+pick e15e7cf refactor: enforce CLI command and exit-code contracts
+pick c083a02 refactor: pretty-print executable CLI command output
+pick d4929ca feat: warn when num-processes exceeds available CPUs
+pick dbffd90 docs(core): standardize public docstrings and remove grm_parallel
+pick 41939af docs: enforce AGENTS docstring contract across src/linear_dag
+pick 7ed93e9 docs: initialize mkdocs public-docs scaffold
+pick 6c18321 docs: align mkdocs config to linear-dag site structure
+pick aa21359 docs: add baseline mkdocs public pages
+pick a10fc4a docs: document local mkdocs build workflow
+pick 613c05d docs: refine baseline public pages for mkdocs
+pick 41aeef1 docs: replace stale mkdocs nav with public docs pages
+pick 9f87d0f docs: document public-vs-plan docs boundaries
+pick d28e64b docs: verify mkdocs nav excludes planning artifacts
+pick eb1fe55 docs: fix mkdocs build issues and stale references
+pick 77bd764 docs: finalize mkdocs cleanup and boundary validation
+pick 2324d68 initial mkdoc scaffold
+pick a5c18c9 docstring update
+pick 8d911a0 improve std err estimation for RHE. prev used global N; now uses N per trait; fixed bug for RHE in unit test when comparing witih HE and genotype matrix
+pick 531599f updated unit tests for rhe to TEST rather than print
+pick 26349dd cli: improve invalid-input validation and add coverage
+pick c33c07a docs: add cli error UX hardening design plan
+pick d4bf7fc feat: add cli suggestion helper primitives
+pick ef24d00 feat: harden cli error validation and context output
+pick 15c4a06 docs: add cli error ux hardening implementation plan
+pick 1a0b191 docs: add cli logging unification design plan
+pick 0e8c5ec docs: add cli logging unification implementation plan
+pick 4e61f82 feat: add unified cli logger bootstrap primitives
+pick 8ad06fb refactor: route cli handlers through shared invocation logger
+pick 605e360 refactor: propagate shared cli logger into pipeline steps
+pick aebac69 refactor: migrate downstream cli-relevant progress output to logger
+pick e660597 test: cover fallback pipeline logger injection
+pick a4b3688 refactor: simplify cli logger dispatch and trim downstream plumbing
+pick c14ccee refactor: remove cli logger coercion and replace verbosity with optional logger
+pick 244d350 fix: resolve targeted cli, grm, and structure test regressions
+pick a05e598 fix: restore cli logger propagate state between invocations
+pick 8d7eea0 refactor: remove internal GRM per-block variant scaling
+pick 195174f docs: add test organization and h5 fixtures design plan
+pick b046baf test: add shared h5 fixture foundation
+pick 0862a27 test: move core tests and adopt shared h5 fixtures
+pick 15d771d test: move association and structure tests to module folders
+pick 1ddad45 test: finalize cli module-folder migration
+pick 81c07b1 docs(test): add test guidance and no-capture compatibility
+pick bd4ee5b docs: add tests project context files
+pick b225da5 added more logging to RHE
+pick d5d7207 docs: normalize gwas association docstrings
+pick 1049365 docs: add core from_hdf5 constructor unification design plan
+pick e1c728b feat: unify from_hdf5 constructor contracts
+pick 0aa1b23 refactor: add shared from_hdf5 setup context
+pick ba944c5 feat: add grm filtering parity for maf and bed
+pick c92b73a refactor: align cli grm kwargs with unified constructor
+pick 88c8deb test: harden constructor validation and cleanup paths
+pick 8d89143 docs: add test plan for constructor unification
+pick ea3c0cb docs: refresh AGENTS for unified constructor contract
+pick 968dab8 refactor(cli): extract shared assoc/rhe input argparse helper
+pick 89ddb80 refactor(cli): extract shared phenotype/covariate argparse group helper
+pick b9f9176 refactor(cli): extract shared block and execution argparse helpers
+pick 2a645e8 refactor(cli): compose assoc/rhe shared parser from private primitives
+pick 2ade4b3 refactor(cli): extract assoc-specific argparse helpers
+pick d56a76d refactor(cli): extract rhe estimator argparse helper
+pick bb145d4 refactor(cli): add assoc and rhe parser assembler helpers
+pick f269827 test(cli): add parser regression checks for assoc/rhe assembler wiring
+pick 4ff219c test(cli): add assoc parser-shape regression coverage
+pick a5d54ae test(cli): add rhe parser-shape regression coverage
+pick 8c22f1a test(cli): add mutual-exclusion parse-failure regression tests
+pick 5ff9d2c test(cli): extend help section regression checks for rhe
+pick 8dffbf4 docs: add test plan for cli argparse modularization
+pick ee71818 feat(cli): expose variant filtering options for rhe
+pick 4ab32b8 fixed docs. updated pyproject
+pick 4f39f4f improved mkdoc support / building
+pick 36f517c improved mkdoc support / building
+pick f356172 removed agent defs
+pick 66b569a test scaffold
