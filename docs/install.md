@@ -2,6 +2,13 @@
 
 Use this page to install `linear-dag` for local development or scripted analysis runs.
 
+## Clone the repository
+
+```bash
+git clone https://github.com/quattro/linear-dag.git
+cd linear-dag
+```
+
 ## Install with `uv` (recommended)
 
 ```bash
@@ -13,6 +20,12 @@ uv sync
 ```bash
 pip install .
 ```
+
+## Download LinearARGs from Zenodo
+
+<!-- TODO: Add Zenodo DOI link and download instructions once the dataset is published. -->
+
+*Coming soon.*
 
 ## Verify the installation
 

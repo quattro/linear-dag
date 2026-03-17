@@ -30,3 +30,15 @@ kodama multi-step-compress step0 --vcf-metadata vcf_metadata.txt --partition-siz
 ```
 
 Use `--help` on each subcommand to inspect required files, IID/column conventions, and optional filtering flags.
+
+## Running GWAS
+
+<!-- TODO: Add detailed GWAS walkthrough. -->
+
+*Coming soon.*
+
+## Multi-Step Pipeline
+
+<!-- TODO: Add detailed multi-step pipeline walkthrough. -->
+
+*Coming soon.*

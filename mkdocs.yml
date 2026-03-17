@@ -105,7 +105,8 @@ nav:
   - Getting Started:
       - Install: install.md
       - Quickstart: quickstart.md
-  - CLI: cli.md
+  - CLI:
+      - Overview: cli.md
   - Python API:
     - Association / Heritability:
       - 'api/assoc.md'

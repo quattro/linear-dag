@@ -6,7 +6,6 @@
 
 - Build LinearARG objects from VCF inputs.
 - Run association tests and heritability estimation with aligned phenotype/covariate data.
-- Score polygenic risk and run structure inference (PCA/SVD) without materializing dense genotype matrices.
 
 ## Quick Commands
 
