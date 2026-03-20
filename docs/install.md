@@ -21,11 +21,15 @@ uv sync
 pip install .
 ```
 
-## Download LinearARGs from Zenodo
+## Data Availability
 
-<!-- TODO: Add Zenodo DOI link and download instructions once the dataset is published. -->
+### 1000 Genomes LinearARGs
 
-*Coming soon.*
+Pre-built LinearARGs for the 1000 Genomes Project are publicly available for download at:
+<https://zenodo.org/records/18893386>
+
+The phased VCF data used to build these LinearARGs is available from the 1000 Genomes FTP site:
+<https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/working/20220422_3202_phased_SNV_INDEL_SV/>
 
 ## Verify the installation
 
