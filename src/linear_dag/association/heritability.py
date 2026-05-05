@@ -1,5 +1,7 @@
+# pattern: Mixed (unavoidable)
+# Reason: Public RHE entrypoint aligns tabular inputs and orchestrates operator
+# calls, while private helpers contain the numerical estimator core.
 import logging
-import warnings
 
 from functools import partial
 from typing import Callable, Optional, Union
@@ -100,11 +102,13 @@ def randomized_haseman_elston(
         covariates.shape,
     )
 
-    N = len(yresid)
+    sample_count = len(yresid)
     grm = right_op @ grm @ right_op.T
     grm = 0.5 * (left_op @ grm @ left_op.T)  # assumes diploid; comes from the normalization term being pq, not 2pq
+    grm = _ResidualizedLinearOperator(grm, covariates)
+    identity_trace = grm.residual_rank
 
-    _validate_num_matvecs(num_matvecs, N, trace_est)
+    _validate_num_matvecs(num_matvecs, sample_count, trace_est)
 
     # set up for randomized estimator
     generator = np.random.default_rng(seed=seed)
@@ -116,18 +120,8 @@ def randomized_haseman_elston(
         num_matvecs,
     )
 
-    # wrap the probe-sampler in a residualizer
-    # these should be independent in expectation, but it's not much overhead to residualize for exact independence
-    def _resid_sampler(n, k):
-        omega = sampler(n, k)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            beta = np.linalg.lstsq(covariates, omega)[0]
-        return omega - covariates @ beta
-
     # se not used atm, but for some trace estimators (eg xtrace, xnystrace) we can compute it
-    grm_trace, grm_sq_trace, se = estimator(grm, num_matvecs, _resid_sampler)
+    grm_trace, grm_sq_trace, se = estimator(grm, num_matvecs, sampler)
     _debug(
         "randomized_haseman_elston: estimated traces tr(K)=%.6g tr(K^2)=%.6g",
         grm_trace,
@@ -141,7 +135,7 @@ def randomized_haseman_elston(
     N_j = np.sum(yresid * yresid, axis=0)
 
     # construct linear equations to solve
-    LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, N]])
+    LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, identity_trace]])
     RHS = np.vstack([C, N_j])
     _info("randomized_haseman_elston: solving moment equations for %d phenotypes", RHS.shape[1])
     solution = np.linalg.solve(LHS, RHS)
@@ -149,18 +143,18 @@ def randomized_haseman_elston(
     # compute the (co)variance of our estimates
     _info("randomized_haseman_elston: estimating std err")
     var_s2g, var_s2e, covariances = _compute_err_variance_vectorized(
-        grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs
+        grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs, identity_trace
     )
 
     # we define h2g: = a * Tr(K) / (a * Tr(K) + b * Tr(I)), where a = solution[0] and b = solution[1]
     # this handles any possible rescaling of the 'grm' like object to compute the correct total genetic variance
     # rescale variances and covariances to trace(K) parameterization
     s2g = solution[0, :] * grm_trace
-    s2e = solution[1, :] * N_j
+    s2e = solution[1, :] * identity_trace
     heritability = s2g / (s2g + s2e)
     var_s2g = (grm_trace**2) * var_s2g
-    var_s2e = (N_j**2) * var_s2e
-    covariances = (grm_trace * N_j) * covariances
+    var_s2e = (identity_trace**2) * var_s2e
+    covariances = (grm_trace * identity_trace) * covariances
 
     # approx delta method to compute std err of h2g
     numer = (s2e**2) * var_s2g + (s2g**2) * var_s2e - 2 * s2g * s2e * covariances
@@ -228,6 +222,50 @@ def _prep_for_h2_estimation(
     return y_resid, covariates
 
 
+class _ResidualizedLinearOperator(LinearOperator):
+    """Linear operator for $P K P$, where $P$ projects off covariates."""
+
+    def __init__(self, operator: LinearOperator, covariates: np.ndarray):
+        self.operator = aslinearoperator(operator)
+        if self.operator.shape[0] != self.operator.shape[1]:
+            raise ValueError("Residualized operator requires a square base operator")
+        if covariates.shape[0] != self.operator.shape[0]:
+            raise ValueError("Covariate row count must match operator dimensions")
+        self._basis = _orthonormal_covariate_basis(covariates)
+        self.residual_rank = self.operator.shape[0] - self._basis.shape[1]
+        dtype = np.result_type(self.operator.dtype, self._basis.dtype)
+        super().__init__(dtype=dtype, shape=self.operator.shape)
+
+    def _project(self, x: np.ndarray) -> np.ndarray:
+        if self._basis.shape[1] == 0:
+            return np.asarray(x)
+        return x - self._basis @ (self._basis.T @ x)
+
+    def _matmat(self, x: np.ndarray) -> np.ndarray:
+        projected = self._project(np.asarray(x))
+        return self._project(self.operator.matmat(projected))
+
+    def _matvec(self, x: np.ndarray) -> np.ndarray:
+        return self._matmat(x.reshape(-1, 1)).ravel()
+
+    def _rmatmat(self, x: np.ndarray) -> np.ndarray:
+        return self._matmat(x.T).T
+
+    def _rmatvec(self, x: np.ndarray) -> np.ndarray:
+        return self._rmatmat(x.reshape(1, -1)).ravel()
+
+
+def _orthonormal_covariate_basis(covariates: np.ndarray) -> np.ndarray:
+    covariates = np.asarray(covariates, dtype=np.float64)
+    q, r = np.linalg.qr(covariates, mode="reduced")
+    diag = np.abs(np.diag(r))
+    if diag.size == 0:
+        return q[:, :0]
+    tol = np.finfo(r.dtype).eps * max(covariates.shape) * float(diag.max())
+    rank = int(np.sum(diag > tol))
+    return q[:, :rank]
+
+
 def _validate_num_matvecs(num_matvecs: int, sample_count: int, trace_est: str) -> None:
     if not isinstance(num_matvecs, (int, np.integer)):
         raise TypeError(f"num_matvecs must be an integer, got {type(num_matvecs).__name__}")
@@ -279,7 +317,7 @@ def _rademacher_sampler(n: int, k: int, generator: Generator) -> np.ndarray:
     return 2 * generator.binomial(1, 0.5, size=(n, k)) - 1
 
 
-_TraceEstimator = Callable[[GRMOperator, int, _Sampler], tuple[float, float, dict]]
+_TraceEstimator = Callable[[LinearOperator, int, _Sampler], tuple[float, float, dict]]
 
 
 def _construct_estimator(tr_est: str) -> _TraceEstimator:
@@ -303,7 +341,7 @@ def _construct_estimator(tr_est: str) -> _TraceEstimator:
     return estimator
 
 
-def _hutchinson_estimator(GRM: GRMOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
+def _hutchinson_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
     n, _ = GRM.shape
     samples = sampler(n, k)
 
@@ -318,7 +356,7 @@ def _hutchinson_estimator(GRM: GRMOperator, k: int, sampler: _Sampler) -> tuple[
     return trace_grm, trace_grm_sq, {}
 
 
-def _hutch_pp_estimator(GRM: GRMOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
+def _hutch_pp_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
     """
     Hutch++ trace estimator, but generalized to estimate tr(A) and tr(A^2) in an efficient manner.
 
@@ -375,7 +413,7 @@ def _hutch_pp_estimator(GRM: GRMOperator, k: int, sampler: _Sampler) -> tuple[fl
 
 
 def _xtrace_estimator(
-    GRM: GRMOperator,
+    GRM: LinearOperator,
     k: int,
     sampler: _Sampler,
     estimate_diag: bool = False,
@@ -431,7 +469,7 @@ def _xtrace_estimator(
     return trace_grm, trace_grm_sq, {"std.err": std_err}
 
 
-def _xnystrace_estimator(GRM: GRMOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
+def _xnystrace_estimator(GRM: LinearOperator, k: int, sampler: _Sampler) -> tuple[float, float, dict]:
     n, _ = GRM.shape
     m = k // 2
 
@@ -574,6 +612,7 @@ def _compute_err_variance_vectorized(
     grm_sq_trace: float,
     grm_trace: float,
     num_matvecs: int,
+    identity_trace: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Vectorized version of `_compute_err_variance`.
 
@@ -589,13 +628,13 @@ def _compute_err_variance_vectorized(
     - `cov_ge`: Array with shape `(m,)`.
     """
     Y = yresid
-    n, m = Y.shape
+    _, m = Y.shape
     dtype = Y.dtype
 
     # Scalars / constants
-    denom = n * grm_sq_trace - grm_trace**2
+    denom = identity_trace * grm_sq_trace - grm_trace**2
     denom2 = denom * denom
-    n2 = n * n
+    identity_trace2 = identity_trace * identity_trace
 
     # Traitwise params (shape (m,))
     s2g = solutions[0].astype(dtype, copy=False)
@@ -608,9 +647,8 @@ def _compute_err_variance_vectorized(
     # --- 1) KY = K Y
     KY = grm.matmat(Y)  # (n, m)
 
-    # resid operator R = n*K - tr(K) I, applied to Y:
-    # Proj = RY = n*(KY) - tr(K)*Y
-    Proj = n * KY - grm_trace * Y  # (n, m)
+    # resid operator R = tr(P)*K - tr(K)*P, applied to residualized Y.
+    Proj = identity_trace * KY - grm_trace * Y  # (n, m)
 
     # --- 2) KProj = K (RY)
     KProj = grm.matmat(Proj)  # (n, m)
@@ -627,8 +665,8 @@ def _compute_err_variance_vectorized(
     # KTmp = K (VY)
     KTmp = grm.matmat(Tmp)  # (n, m)
 
-    # Rtmp = R(VY) = n*KTmp - tr(K)*Tmp
-    Rtmp = n * KTmp - grm_trace * Tmp  # (n, m)
+    # Rtmp = R(VY) = tr(P)*KTmp - tr(K)*Tmp
+    Rtmp = identity_trace * KTmp - grm_trace * Tmp  # (n, m)
 
     # covUW_hat_j = 2 * y_j^T Rtmp_j
     covUW_hat = 2.0 * np.einsum("ij,ij->j", Y, Rtmp)  # (m,)
@@ -637,14 +675,18 @@ def _compute_err_variance_vectorized(
     term2 = (s2g**2) * (grm_sq_trace / num_matvecs)  # (m,)
 
     # tr(V^2) and varW_hat
-    trV2 = (s2g**2) * grm_sq_trace + 2.0 * s2g * s2e * grm_trace + (s2e**2) * n
+    trV2 = (s2g**2) * grm_sq_trace + 2.0 * s2g * s2e * grm_trace + (s2e**2) * identity_trace
     varW_hat = 2.0 * trV2  # (m,)
 
     # Outputs
     var_s2g = (term1 + term2) / denom2
 
-    var_s2e = (grm_trace**2 / (n2 * denom2)) * term1 + varW_hat / n2 - (2.0 * grm_trace / (n2 * denom)) * covUW_hat
+    var_s2e = (
+        (grm_trace**2 / (identity_trace2 * denom2)) * term1
+        + varW_hat / identity_trace2
+        - (2.0 * grm_trace / (identity_trace2 * denom)) * covUW_hat
+    )
 
-    cov_ge = covUW_hat / (denom * n) - (grm_trace / n) * term1 / denom2
+    cov_ge = covUW_hat / (denom * identity_trace) - (grm_trace / identity_trace) * term1 / denom2
 
     return var_s2g, var_s2e, cov_ge

@@ -4,7 +4,11 @@ import numpy as np
 import polars as pl
 import pytest
 
-from linear_dag.association.heritability import randomized_haseman_elston
+from linear_dag.association.heritability import (
+    _hutchinson_estimator,
+    _ResidualizedLinearOperator,
+    randomized_haseman_elston,
+)
 from linear_dag.association.simulation import simulate_phenotype
 from linear_dag.core.operators import get_diploid_operator
 from linear_dag.core.parallel_processing import GRMOperator, ParallelOperator
@@ -45,19 +49,58 @@ def _exact_haseman_elston(grm: np.ndarray, phenotypes: np.ndarray, covariates: n
     yresid[is_missing] = 0.0
     yresid /= np.sqrt(np.sum(yresid**2, axis=0) / num_nonmissing)
 
-    C = np.sum(grm @ yresid * yresid, axis=0)
-    E = np.sum(yresid * yresid, axis=0)
-    N = grm.shape[0]
-    grm_trace = np.trace(grm)
-    grm_sq_trace = np.trace(grm @ grm)
+    q, r = np.linalg.qr(covariates, mode="reduced")
+    rank = int(np.linalg.matrix_rank(r))
+    q = q[:, :rank]
+    projection = np.eye(grm.shape[0]) - q @ q.T
+    projected_grm = projection @ grm @ projection
 
-    lhs = np.array([[grm_sq_trace, grm_trace], [grm_trace, N]], dtype=np.float64)
+    C = np.sum(projected_grm @ yresid * yresid, axis=0)
+    E = np.sum(yresid * yresid, axis=0)
+    identity_trace = grm.shape[0] - rank
+    grm_trace = np.trace(projected_grm)
+    grm_sq_trace = np.trace(projected_grm @ projected_grm)
+
+    lhs = np.array([[grm_sq_trace, grm_trace], [grm_trace, identity_trace]], dtype=np.float64)
     rhs = np.vstack([C, E])
     solution = np.linalg.solve(lhs, rhs)
 
     s2g = solution[0, :] * grm_trace
-    s2e = solution[1, :] * N
+    s2e = solution[1, :] * identity_trace
     return s2g / (s2g + s2e)
+
+
+def test_residualized_operator_hutchinson_targets_projected_kernel_traces():
+    rng = np.random.default_rng(BASE_SEED)
+    n = 8
+    basis = rng.normal(size=(n, 5))
+    grm = basis @ basis.T
+    covariates = np.column_stack(
+        [
+            np.ones(n),
+            np.linspace(-1.0, 1.0, n),
+            np.linspace(-1.0, 1.0, n),
+        ]
+    )
+    q, r = np.linalg.qr(covariates, mode="reduced")
+    rank = int(np.linalg.matrix_rank(r))
+    q = q[:, :rank]
+    projection = np.eye(n) - q @ q.T
+    projected_grm = projection @ grm @ projection
+
+    operator = _ResidualizedLinearOperator(grm, covariates)
+
+    assert operator.residual_rank == n - rank
+    np.testing.assert_allclose(operator.matmat(np.eye(n)), projected_grm, atol=1e-10)
+
+    trace, square_trace, _ = _hutchinson_estimator(
+        operator,
+        n,
+        lambda sample_count, num_samples: (np.sqrt(sample_count) * np.eye(sample_count, num_samples)),
+    )
+
+    np.testing.assert_allclose(trace, np.trace(projected_grm), atol=1e-10)
+    np.testing.assert_allclose(square_trace, np.trace(projected_grm @ projected_grm), atol=1e-10)
 
 
 def _build_rhe_fixture(
