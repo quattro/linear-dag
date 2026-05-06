@@ -8,7 +8,10 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from .kernels.pure_jax import pure_jax_solve_backward, pure_jax_solve_forward
+from .kernels.pure_jax import (
+    pure_jax_solve_backward_compressed,
+    pure_jax_solve_forward_compressed,
+)
 
 try:
     from enum import StrEnum
@@ -19,9 +22,6 @@ except ImportError:  # pragma: no cover - Python 3.10 compatibility.
             return self.value
 
 
-_KERNELS_MESSAGE = "JaxLinearARG numerical kernels are implemented in Phase 2"
-
-
 class Backend(StrEnum):
     AUTO = "auto"
     PURE_JAX = "pure_jax"
@@ -30,10 +30,11 @@ class Backend(StrEnum):
 
 
 class JaxLinearARG(eqx.Module):
-    r"""JAX-compatible LinearARG operator scaffold.
+    r"""JAX-compatible LinearARG operator.
 
     !!! info
-        Numerical products are intentionally unavailable until Phase 2.
+        Single-block numerical products are available on the pure-JAX backend.
+        FFI CPU and Pallas GPU backends are reserved for later phases.
 
     **Arguments:**
 
@@ -62,6 +63,8 @@ class JaxLinearARG(eqx.Module):
     nonunique_indices: Any = eqx.field(converter=jnp.asarray)
     n_variants: int = eqx.field(static=True)
     n_samples: int = eqx.field(static=True)
+    n_nonunique_indices: int = eqx.field(default=-1, static=True)
+    min_index_to_keep: int = eqx.field(default=0, static=True)
     backend: Backend = eqx.field(default=Backend.AUTO, converter=Backend, static=True)
     dtype: Any = eqx.field(default=jnp.float32, converter=jnp.dtype, static=True)
     transpose: bool = eqx.field(default=False, converter=bool, static=True)
@@ -86,6 +89,10 @@ class JaxLinearARG(eqx.Module):
         node_count = int(jnp.asarray(indptr).shape[0]) - 1
         if nonunique_indices is None:
             nonunique_indices = jnp.arange(node_count, dtype=jnp.int32)
+        nonunique_indices = jnp.asarray(nonunique_indices, dtype=jnp.int32)
+        n_nonunique_indices = int(jnp.max(nonunique_indices)) + 1 if nonunique_indices.size else 0
+        sample_indices = jnp.asarray(sample_indices, dtype=jnp.int32)
+        min_index_to_keep = int(sample_indices[-1]) if sample_indices.size else 0
         return cls(
             indptr=jnp.asarray(indptr, dtype=jnp.int32),
             indices=jnp.asarray(indices, dtype=jnp.int32),
@@ -93,10 +100,12 @@ class JaxLinearARG(eqx.Module):
             src_of_edge=jnp.asarray(src_of_edge, dtype=jnp.int32),
             variant_indices=jnp.asarray(variant_indices, dtype=jnp.int32),
             flip=jnp.asarray(flip, dtype=jnp.bool_),
-            sample_indices=jnp.asarray(sample_indices, dtype=jnp.int32),
-            nonunique_indices=jnp.asarray(nonunique_indices, dtype=jnp.int32),
+            sample_indices=sample_indices,
+            nonunique_indices=nonunique_indices,
             n_variants=int(n_variants),
             n_samples=int(n_samples),
+            n_nonunique_indices=n_nonunique_indices,
+            min_index_to_keep=min_index_to_keep,
             backend=backend,
             dtype=dtype,
         )
@@ -135,12 +144,33 @@ class JaxLinearARG(eqx.Module):
             raise ValueError("n_variants must be nonnegative")
         if self.n_samples < 0:
             raise ValueError("n_samples must be nonnegative")
+        if self.n_nonunique_indices < 0:
+            raise ValueError("n_nonunique_indices must be nonnegative")
         if int(self.indptr[-1]) != n_edges:
             raise ValueError("final indptr entry must match the edge count")
-        if self.src_of_edge.shape[0] and int(jnp.max(self.src_of_edge)) >= self.indptr.shape[0] - 1:
+
+        node_count = self.indptr.shape[0] - 1
+        for name in (
+            "indices",
+            "src_of_edge",
+            "variant_indices",
+            "sample_indices",
+            "nonunique_indices",
+        ):
+            _check_no_negative_index(name, arrays[name])
+
+        if self.src_of_edge.shape[0] and int(jnp.max(self.src_of_edge)) >= node_count:
             raise ValueError("src_of_edge contains an out-of-range node index")
-        if self.indices.shape[0] and int(jnp.max(self.indices)) >= self.indptr.shape[0] - 1:
+        if self.indices.shape[0] and int(jnp.max(self.indices)) >= node_count:
             raise ValueError("indices contains an out-of-range node index")
+        if self.variant_indices.shape[0] and int(jnp.max(self.variant_indices)) >= node_count:
+            raise ValueError("variant_indices contains an out-of-range node index")
+        if self.sample_indices.shape[0] and int(jnp.max(self.sample_indices)) >= node_count:
+            raise ValueError("sample_indices contains an out-of-range node index")
+        if self.nonunique_indices.shape[0] and int(jnp.max(self.nonunique_indices)) >= self.n_nonunique_indices:
+            raise ValueError("nonunique_indices contains an out-of-range compressed index")
+        if self.min_index_to_keep < 0 or self.min_index_to_keep > node_count:
+            raise ValueError("min_index_to_keep must be within the node range")
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -159,18 +189,42 @@ class JaxLinearARG(eqx.Module):
     def _matmat(self, x: Any) -> Any:
         x = jnp.asarray(x, dtype=self.dtype)
         flip_sign = jnp.where(self.flip, -1, 1).astype(x.dtype)
-        b = jnp.zeros((self.indptr.shape[0] - 1, x.shape[1]), dtype=x.dtype)
-        b = b.at[self.variant_indices, :].add(x * flip_sign[:, None])
-        solved = _solve(self.backend, "forward", self.indptr, self.indices, self.data, self.src_of_edge, b)
+        b = jnp.zeros((self.n_nonunique_indices, x.shape[1]), dtype=x.dtype)
+        variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
+        b = b.at[variant_nonunique_indices, :].add(x * flip_sign[:, None])
+        solved = _solve(
+            self.backend,
+            "forward",
+            self.indptr,
+            self.indices,
+            self.data,
+            self.src_of_edge,
+            self.nonunique_indices,
+            self.min_index_to_keep,
+            b,
+        )
         flip_sum = jnp.sum(x * self.flip.astype(x.dtype)[:, None], axis=0)
-        return solved[self.sample_indices, :] + flip_sum
+        sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
+        return solved[sample_nonunique_indices, :] + flip_sum
 
     def _rmatmat(self, x: Any) -> Any:
         x = jnp.asarray(x, dtype=self.dtype)
-        b = jnp.zeros((self.indptr.shape[0] - 1, x.shape[1]), dtype=x.dtype)
-        b = b.at[self.sample_indices, :].set(x)
-        solved = _solve(self.backend, "backward", self.indptr, self.indices, self.data, self.src_of_edge, b)
-        values = solved[self.variant_indices, :]
+        b = jnp.zeros((self.n_nonunique_indices, x.shape[1]), dtype=x.dtype)
+        sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
+        b = b.at[sample_nonunique_indices, :].set(x)
+        solved = _solve(
+            self.backend,
+            "backward",
+            self.indptr,
+            self.indices,
+            self.data,
+            self.src_of_edge,
+            self.nonunique_indices,
+            self.min_index_to_keep,
+            b,
+        )
+        variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
+        values = solved[variant_nonunique_indices, :]
         total = jnp.sum(x, axis=0)
         return jnp.where(self.flip[:, None], total[None, :] - values, values)
 
@@ -211,8 +265,20 @@ class _TransposeView(eqx.Module):
     def rmatvec(self, x: Any) -> Any:
         return self.rmatmat(x)
 
+    @property
+    def T(self) -> JaxLinearARG:
+        return self.transpose_view()
+
+    def transpose_view(self) -> JaxLinearARG:
+        return self.parent
+
     def __matmul__(self, x: Any) -> Any:
         return self.matmat(x)
+
+
+def _check_no_negative_index(name: str, array: Any) -> None:
+    if array.shape[0] and int(jnp.min(array)) < 0:
+        raise ValueError(f"{name} contains a negative index")
 
 
 def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Array, bool]:
@@ -236,14 +302,26 @@ def _solve(
     indices: Any,
     data: Any,
     src_of_edge: Any,
+    nonunique_indices: Any,
+    min_index_to_keep: int,
     b: Any,
 ) -> jax.Array:
-    return _solve_impl(backend, direction, indptr, indices, data, src_of_edge, b)
+    return _solve_impl(
+        backend,
+        direction,
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        min_index_to_keep,
+        b,
+    )
 
 
 # custom_vjp disables forward-mode differentiation for this wrapped function;
 # reverse-mode gradients are defined by the transpose-direction solve below.
-_solve = partial(jax.custom_vjp, nondiff_argnums=(0, 1))(_solve)
+_solve = partial(jax.custom_vjp, nondiff_argnums=(0, 1, 7))(_solve)
 
 
 def _solve_fwd(
@@ -253,22 +331,45 @@ def _solve_fwd(
     indices: Any,
     data: Any,
     src_of_edge: Any,
+    nonunique_indices: Any,
+    min_index_to_keep: int,
     b: Any,
-) -> tuple[jax.Array, tuple[Any, Any, Any, Any]]:
-    result = _solve_impl(backend, direction, indptr, indices, data, src_of_edge, b)
-    return result, (indptr, indices, data, src_of_edge)
+) -> tuple[jax.Array, tuple[Any, Any, Any, Any, Any]]:
+    result = _solve_impl(
+        backend,
+        direction,
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        min_index_to_keep,
+        b,
+    )
+    return result, (indptr, indices, data, src_of_edge, nonunique_indices)
 
 
 def _solve_bwd(
     backend: Backend,
     direction: str,
-    residual: tuple[Any, Any, Any, Any],
+    min_index_to_keep: int,
+    residual: tuple[Any, Any, Any, Any, Any],
     grad: Any,
-) -> tuple[None, None, None, None, jax.Array]:
-    indptr, indices, data, src_of_edge = residual
+) -> tuple[None, None, None, None, None, jax.Array]:
+    indptr, indices, data, src_of_edge, nonunique_indices = residual
     transpose_direction = "backward" if direction == "forward" else "forward"
-    grad_b = _solve_impl(backend, transpose_direction, indptr, indices, data, src_of_edge, grad)
-    return None, None, None, None, grad_b
+    grad_b = _solve_impl(
+        backend,
+        transpose_direction,
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        min_index_to_keep,
+        grad,
+    )
+    return None, None, None, None, None, grad_b
 
 
 _solve.defvjp(_solve_fwd, _solve_bwd)
@@ -281,6 +382,8 @@ def _solve_impl(
     indices: Any,
     data: Any,
     src_of_edge: Any,
+    nonunique_indices: Any,
+    min_index_to_keep: int,
     b: Any,
 ) -> jax.Array:
     if backend is Backend.AUTO:
@@ -288,7 +391,25 @@ def _solve_impl(
     if backend is not Backend.PURE_JAX:
         raise NotImplementedError(f"{backend} backend is implemented in a later phase")
     if direction == "forward":
-        return pure_jax_solve_forward(indptr, indices, data, src_of_edge, b, n_edges=int(indices.shape[0]))
+        return pure_jax_solve_forward_compressed(
+            indptr,
+            indices,
+            data,
+            src_of_edge,
+            nonunique_indices,
+            b,
+            min_index_to_keep=min_index_to_keep,
+            n_edges=int(indices.shape[0]),
+        )
     if direction == "backward":
-        return pure_jax_solve_backward(indptr, indices, data, src_of_edge, b, n_edges=int(indices.shape[0]))
+        return pure_jax_solve_backward_compressed(
+            indptr,
+            indices,
+            data,
+            src_of_edge,
+            nonunique_indices,
+            b,
+            min_index_to_keep=min_index_to_keep,
+            n_edges=int(indices.shape[0]),
+        )
     raise ValueError(f"unknown solve direction: {direction}")
