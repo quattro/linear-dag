@@ -1,6 +1,7 @@
 # pattern: Functional Core
 
 from enum import Enum
+from functools import partial
 from typing import Any
 
 import equinox as eqx
@@ -229,6 +230,51 @@ def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Arr
 
 
 def _solve(
+    backend: Backend,
+    direction: str,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    b: Any,
+) -> jax.Array:
+    return _solve_impl(backend, direction, indptr, indices, data, src_of_edge, b)
+
+
+# custom_vjp disables forward-mode differentiation for this wrapped function;
+# reverse-mode gradients are defined by the transpose-direction solve below.
+_solve = partial(jax.custom_vjp, nondiff_argnums=(0, 1))(_solve)
+
+
+def _solve_fwd(
+    backend: Backend,
+    direction: str,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    b: Any,
+) -> tuple[jax.Array, tuple[Any, Any, Any, Any]]:
+    result = _solve_impl(backend, direction, indptr, indices, data, src_of_edge, b)
+    return result, (indptr, indices, data, src_of_edge)
+
+
+def _solve_bwd(
+    backend: Backend,
+    direction: str,
+    residual: tuple[Any, Any, Any, Any],
+    grad: Any,
+) -> tuple[None, None, None, None, jax.Array]:
+    indptr, indices, data, src_of_edge = residual
+    transpose_direction = "backward" if direction == "forward" else "forward"
+    grad_b = _solve_impl(backend, transpose_direction, indptr, indices, data, src_of_edge, grad)
+    return None, None, None, None, grad_b
+
+
+_solve.defvjp(_solve_fwd, _solve_bwd)
+
+
+def _solve_impl(
     backend: Backend,
     direction: str,
     indptr: Any,
