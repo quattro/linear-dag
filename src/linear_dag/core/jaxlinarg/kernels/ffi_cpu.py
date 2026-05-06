@@ -1,0 +1,1 @@
+# pattern: Imperative Shell
