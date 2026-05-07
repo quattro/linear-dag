@@ -30,6 +30,10 @@ class Backend(StrEnum):
     PALLAS_GPU = "pallas_gpu"
 
 
+def _optional_jnp_array(value: Any) -> Any:
+    return None if value is None else jnp.asarray(value)
+
+
 class JaxLinearARG(eqx.Module):
     r"""JAX-compatible LinearARG operator.
 
@@ -47,6 +51,7 @@ class JaxLinearARG(eqx.Module):
     - `flip`: Allele flip flags aligned to `variant_indices`.
     - `sample_indices`: Sample node indices.
     - `nonunique_indices`: Nonunique sample index mapping.
+    - `allele_counts`: Optional cached allele counts aligned to variants.
     - `n_variants`: Number of variants in genotype space.
     - `n_samples`: Number of samples in genotype space.
     - `backend`: Requested numerical backend.
@@ -69,6 +74,7 @@ class JaxLinearARG(eqx.Module):
     backend: Backend = eqx.field(default=Backend.AUTO, converter=Backend, static=True)
     dtype: Any = eqx.field(default=jnp.float32, converter=jnp.dtype, static=True)
     transpose: bool = eqx.field(default=False, converter=bool, static=True)
+    allele_counts: Any = eqx.field(default=None, converter=_optional_jnp_array)
 
     @classmethod
     def from_lineararg_arrays(
@@ -84,6 +90,7 @@ class JaxLinearARG(eqx.Module):
         nonunique_indices: Any | None,
         n_variants: int,
         n_samples: int,
+        allele_counts: Any | None = None,
         backend: Backend = Backend.AUTO,
         dtype: Any = jnp.float32,
     ) -> "JaxLinearARG":
@@ -103,11 +110,47 @@ class JaxLinearARG(eqx.Module):
             flip=jnp.asarray(flip, dtype=jnp.bool_),
             sample_indices=sample_indices,
             nonunique_indices=nonunique_indices,
+            allele_counts=None if allele_counts is None else jnp.asarray(allele_counts, dtype=jnp.int32),
             n_variants=int(n_variants),
             n_samples=int(n_samples),
             n_nonunique_indices=n_nonunique_indices,
             min_index_to_keep=min_index_to_keep,
             backend=backend,
+            dtype=dtype,
+        )
+
+    @classmethod
+    def from_lineararg(
+        cls,
+        linarg: Any,
+        *,
+        backend: Backend = Backend.AUTO,
+        bucket: Any = None,
+        dtype: Any = None,
+    ) -> "JaxLinearARG":
+        from .ingress import from_lineararg
+
+        return from_lineararg(linarg, backend=backend, bucket=bucket, dtype=dtype)
+
+    @classmethod
+    def from_hdf5_block(
+        cls,
+        path: Any,
+        block: Any,
+        *,
+        backend: Backend = Backend.AUTO,
+        bucket: Any = None,
+        load_metadata: bool = False,
+        dtype: Any = None,
+    ) -> "JaxLinearARG":
+        from .ingress import from_hdf5_block
+
+        return from_hdf5_block(
+            path,
+            block,
+            backend=backend,
+            bucket=bucket,
+            load_metadata=load_metadata,
             dtype=dtype,
         )
 
@@ -144,6 +187,11 @@ class JaxLinearARG(eqx.Module):
             raise ValueError("variant_indices and flip must have the same length")
         if self.variant_indices.shape[0] != self.n_variants:
             raise ValueError("variant_indices length must match n_variants")
+        if self.allele_counts is not None:
+            if self.allele_counts.ndim != 1:
+                raise ValueError("allele_counts must be rank 1")
+            if self.allele_counts.shape[0] != self.n_variants:
+                raise ValueError("allele_counts length must match n_variants")
         if self.sample_indices.shape[0] != self.n_samples:
             raise ValueError("sample_indices length must match n_samples")
         if self.n_variants < 0:
@@ -172,7 +220,11 @@ class JaxLinearARG(eqx.Module):
         expected_src_of_edge = np.repeat(np.arange(node_count, dtype=np.int32), np.diff(indptr))
         if not np.array_equal(np.asarray(self.src_of_edge), expected_src_of_edge):
             raise ValueError("src_of_edge must match the sources implied by indptr")
-        if self.indices.shape[0] and np.any(np.asarray(self.indices) <= np.asarray(self.src_of_edge)):
+        indices = np.asarray(self.indices)
+        src_of_edge = np.asarray(self.src_of_edge)
+        data = np.asarray(self.data)
+        invalid_edge_order = (indices < src_of_edge) | ((indices == src_of_edge) & (data != 0))
+        if self.indices.shape[0] and np.any(invalid_edge_order):
             raise ValueError("indices must be greater than src_of_edge")
         if self.variant_indices.shape[0] and int(jnp.max(self.variant_indices)) >= node_count:
             raise ValueError("variant_indices contains an out-of-range node index")
