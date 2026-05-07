@@ -113,3 +113,40 @@ def test_from_lineararg_bucket_padding_reuses_jit_trace_for_bucket_shape() -> No
     np.testing.assert_allclose(np.asarray(jitted_product(first_op, x)), np.array([[2.0]], dtype=np.float32))
     np.testing.assert_allclose(np.asarray(jitted_product(second_op, x)), np.array([[2.0]], dtype=np.float32))
     assert trace_count == 1
+
+
+def test_from_lineararg_bucket_padding_reuses_jit_trace_with_optional_allele_counts() -> None:
+    with_cached_counts = LinearARG(
+        sparse.csc_matrix(([1.0], ([2], [0])), shape=(3, 3)),
+        variant_indices=np.array([0], dtype=np.int32),
+        flip=np.array([False]),
+        n_samples=np.int32(1),
+        nonunique_indices=np.array([0, 1, 1], dtype=np.int32),
+    )
+    with_cached_counts.set_allele_counts(np.array([1], dtype=np.int32))
+    without_cached_counts = LinearARG(
+        sparse.csc_matrix(([1.0], ([2], [0])), shape=(3, 3)),
+        variant_indices=np.array([0], dtype=np.int32),
+        flip=np.array([False]),
+        n_samples=np.int32(1),
+        nonunique_indices=np.array([0, 1, 1], dtype=np.int32),
+    )
+    bucket = BucketSpec(max_nodes=3, max_nnz=1)
+    first_op = JaxLinearARG.from_lineararg(with_cached_counts, backend=Backend.PURE_JAX, bucket=bucket)
+    second_op = JaxLinearARG.from_lineararg(without_cached_counts, backend=Backend.PURE_JAX, bucket=bucket)
+    x = jnp.array([[2.0]], dtype=jnp.float32)
+    trace_count = 0
+
+    def product(op: JaxLinearARG, values: jax.Array) -> jax.Array:
+        nonlocal trace_count
+        trace_count += 1
+        return op.matmat(values)
+
+    jitted_product = jax.jit(product)
+
+    assert with_cached_counts.shape == without_cached_counts.shape == (1, 1)
+    assert first_op.indptr.shape == second_op.indptr.shape == (bucket.max_nodes + 1,)
+    assert first_op.indices.shape == second_op.indices.shape == (bucket.max_nnz,)
+    np.testing.assert_allclose(np.asarray(jitted_product(first_op, x)), np.array([[2.0]], dtype=np.float32))
+    np.testing.assert_allclose(np.asarray(jitted_product(second_op, x)), np.array([[2.0]], dtype=np.float32))
+    assert trace_count == 1

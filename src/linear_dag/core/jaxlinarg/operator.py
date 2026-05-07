@@ -30,10 +30,6 @@ class Backend(StrEnum):
     PALLAS_GPU = "pallas_gpu"
 
 
-def _optional_jnp_array(value: Any) -> Any:
-    return None if value is None else jnp.asarray(value)
-
-
 class JaxLinearARG(eqx.Module):
     r"""JAX-compatible LinearARG operator.
 
@@ -51,7 +47,8 @@ class JaxLinearARG(eqx.Module):
     - `flip`: Allele flip flags aligned to `variant_indices`.
     - `sample_indices`: Sample node indices.
     - `nonunique_indices`: Nonunique sample index mapping.
-    - `allele_counts`: Optional cached allele counts aligned to variants.
+    - `allele_counts`: Cached allele counts aligned to variants, or `-1` for
+      missing entries.
     - `n_variants`: Number of variants in genotype space.
     - `n_samples`: Number of samples in genotype space.
     - `backend`: Requested numerical backend.
@@ -67,6 +64,7 @@ class JaxLinearARG(eqx.Module):
     flip: Any = eqx.field(converter=jnp.asarray)
     sample_indices: Any = eqx.field(converter=jnp.asarray)
     nonunique_indices: Any = eqx.field(converter=jnp.asarray)
+    allele_counts: Any = eqx.field(converter=jnp.asarray)
     n_variants: int = eqx.field(static=True)
     n_samples: int = eqx.field(static=True)
     n_nonunique_indices: int = eqx.field(default=-1, static=True)
@@ -74,7 +72,6 @@ class JaxLinearARG(eqx.Module):
     backend: Backend = eqx.field(default=Backend.AUTO, converter=Backend, static=True)
     dtype: Any = eqx.field(default=jnp.float32, converter=jnp.dtype, static=True)
     transpose: bool = eqx.field(default=False, converter=bool, static=True)
-    allele_counts: Any = eqx.field(default=None, converter=_optional_jnp_array)
 
     @classmethod
     def from_lineararg_arrays(
@@ -117,7 +114,7 @@ class JaxLinearARG(eqx.Module):
             flip=jnp.asarray(flip, dtype=jnp.bool_),
             sample_indices=sample_indices,
             nonunique_indices=nonunique_indices,
-            allele_counts=None if allele_counts is None else jnp.asarray(allele_counts, dtype=jnp.int32),
+            allele_counts=_canonical_allele_counts(allele_counts, n_variants=int(n_variants)),
             n_variants=int(n_variants),
             n_samples=int(n_samples),
             n_nonunique_indices=n_nonunique_indices,
@@ -194,11 +191,10 @@ class JaxLinearARG(eqx.Module):
             raise ValueError("variant_indices and flip must have the same length")
         if self.variant_indices.shape[0] != self.n_variants:
             raise ValueError("variant_indices length must match n_variants")
-        if self.allele_counts is not None:
-            if self.allele_counts.ndim != 1:
-                raise ValueError("allele_counts must be rank 1")
-            if self.allele_counts.shape[0] != self.n_variants:
-                raise ValueError("allele_counts length must match n_variants")
+        if self.allele_counts.ndim != 1:
+            raise ValueError("allele_counts must be rank 1")
+        if self.allele_counts.shape[0] != self.n_variants:
+            raise ValueError("allele_counts length must match n_variants")
         if self.sample_indices.shape[0] != self.n_samples:
             raise ValueError("sample_indices length must match n_samples")
         if self.n_variants < 0:
@@ -349,6 +345,12 @@ class _TransposeView(eqx.Module):
 def _check_no_negative_index(name: str, array: Any) -> None:
     if array.shape[0] and int(jnp.min(array)) < 0:
         raise ValueError(f"{name} contains a negative index")
+
+
+def _canonical_allele_counts(allele_counts: Any | None, *, n_variants: int) -> jax.Array:
+    if allele_counts is None:
+        return jnp.full((n_variants,), -1, dtype=jnp.int32)
+    return jnp.asarray(allele_counts, dtype=jnp.int32)
 
 
 def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Array, bool]:
