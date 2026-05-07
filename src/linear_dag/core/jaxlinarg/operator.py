@@ -1,4 +1,8 @@
-# pattern: Functional Core
+# pattern: Mixed (unavoidable)
+# Reason: Backend dispatch is pure, but module construction must normalize the
+# requested runtime backend and emit the required user-facing fallback warning.
+
+import warnings
 
 from enum import Enum
 from functools import partial
@@ -9,6 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from .kernels import ffi_cpu
 from .kernels.pure_jax import (
     pure_jax_solve_backward_compressed,
     pure_jax_solve_forward_compressed,
@@ -28,6 +33,34 @@ class Backend(StrEnum):
     PURE_JAX = "pure_jax"
     FFI_CPU = "ffi_cpu"
     PALLAS_GPU = "pallas_gpu"
+
+
+def resolve_backend(requested: Backend, *, platform: str | None = None) -> Backend:
+    """Resolve a requested backend to a concrete executable backend."""
+    requested = Backend(requested)
+    platform = (jax.default_backend() if platform is None else platform).lower()
+
+    if requested is Backend.PURE_JAX:
+        return Backend.PURE_JAX
+    if requested is Backend.PALLAS_GPU:
+        return Backend.PALLAS_GPU
+    if requested is Backend.FFI_CPU:
+        if ffi_cpu.is_ffi_cpu_available():
+            return Backend.FFI_CPU
+        warnings.warn(
+            "FFI_CPU backend is unavailable; falling back to PURE_JAX.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return Backend.PURE_JAX
+    if requested is Backend.AUTO:
+        if platform == "cpu":
+            return Backend.FFI_CPU if ffi_cpu.is_ffi_cpu_available() else Backend.PURE_JAX
+        if platform in {"gpu", "cuda", "rocm"}:
+            return Backend.PALLAS_GPU
+        if platform == "tpu":
+            return Backend.PURE_JAX
+    raise ValueError(f"unknown backend: {requested}")
 
 
 class JaxLinearARG(eqx.Module):
@@ -69,7 +102,7 @@ class JaxLinearARG(eqx.Module):
     n_samples: int = eqx.field(static=True)
     n_nonunique_indices: int = eqx.field(default=-1, static=True)
     min_index_to_keep: int = eqx.field(default=0, static=True)
-    backend: Backend = eqx.field(default=Backend.AUTO, converter=Backend, static=True)
+    backend: Backend = eqx.field(default=Backend.AUTO, converter=resolve_backend, static=True)
     dtype: Any = eqx.field(default=jnp.float32, converter=jnp.dtype, static=True)
     transpose: bool = eqx.field(default=False, converter=bool, static=True)
 
