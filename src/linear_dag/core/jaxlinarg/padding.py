@@ -73,8 +73,45 @@ def pad_to_bucket(indptr: Any, indices: Any, data: Any, *, max_nodes: int, max_n
 
 
 def choose_bucket(shape: BucketSpec, buckets: Iterable[BucketSpec]) -> BucketSpec:
-    raise NotImplementedError
+    shape = _as_bucket_spec(shape)
+    for bucket in buckets:
+        bucket = _as_bucket_spec(bucket)
+        if bucket.max_nodes >= shape.max_nodes and bucket.max_nnz >= shape.max_nnz:
+            return bucket
+    raise ValueError(f"No bucket can contain shape {shape}")
 
 
 def choose_buckets(shapes: Iterable[BucketSpec], *, max_buckets: int = 8) -> tuple[BucketSpec, ...]:
-    raise NotImplementedError
+    if max_buckets < 1:
+        raise ValueError("max_buckets must be at least 1")
+
+    sorted_shapes = sorted({_as_bucket_spec(shape) for shape in shapes}, key=_bucket_sort_key)
+    if len(sorted_shapes) <= max_buckets:
+        return tuple(sorted_shapes)
+
+    group_count = max_buckets
+    quotient, remainder = divmod(len(sorted_shapes), group_count)
+    buckets = []
+    start = 0
+    for group_index in range(group_count):
+        stop = start + quotient + (1 if group_index < remainder else 0)
+        group = sorted_shapes[start:stop]
+        buckets.append(
+            BucketSpec(
+                max_nodes=max(shape.max_nodes for shape in group),
+                max_nnz=max(shape.max_nnz for shape in group),
+            )
+        )
+        start = stop
+    return tuple(buckets)
+
+
+def _as_bucket_spec(shape: Any) -> BucketSpec:
+    if isinstance(shape, BucketSpec):
+        return shape
+    max_nodes, max_nnz = shape
+    return BucketSpec(int(max_nodes), int(max_nnz))
+
+
+def _bucket_sort_key(shape: BucketSpec) -> tuple[int, int, int]:
+    return (shape.max_nodes * shape.max_nnz, shape.max_nodes, shape.max_nnz)

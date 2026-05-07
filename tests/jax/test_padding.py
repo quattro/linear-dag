@@ -7,7 +7,13 @@ import numpy as np
 import pytest
 
 from linear_dag.core.jaxlinarg.kernels.pure_jax import pure_jax_solve_forward
-from linear_dag.core.jaxlinarg.padding import compute_src_of_edge, pad_to_bucket
+from linear_dag.core.jaxlinarg.padding import (
+    BucketSpec,
+    choose_bucket,
+    choose_buckets,
+    compute_src_of_edge,
+    pad_to_bucket,
+)
 from tests.helpers.linarg_fixtures import load_lineararg_block
 
 
@@ -103,3 +109,39 @@ def test_pad_to_bucket_rejects_shrinking_bucket(max_nodes: int, max_nnz: int, ma
 
     with pytest.raises(ValueError, match=match):
         pad_to_bucket(indptr, indices, data, max_nodes=max_nodes, max_nnz=max_nnz)
+
+
+def test_choose_buckets_returns_exact_sorted_unique_shapes_when_under_cap() -> None:
+    shapes = [(6, 7), (2, 10), (3, 3), (6, 7)]
+
+    buckets = choose_buckets(shapes, max_buckets=8)
+
+    assert buckets == (BucketSpec(3, 3), BucketSpec(2, 10), BucketSpec(6, 7))
+
+
+def test_choose_buckets_merges_heterogeneous_shapes_to_cap() -> None:
+    shapes = [(node_count, node_count * 3 + 1) for node_count in range(2, 14)]
+
+    buckets = choose_buckets(shapes, max_buckets=8)
+
+    assert len(buckets) == 8
+    for shape in shapes:
+        bucket = choose_bucket(shape, buckets)
+        assert bucket.max_nodes >= shape[0]
+        assert bucket.max_nnz >= shape[1]
+    assert buckets == choose_buckets(reversed(shapes), max_buckets=8)
+
+
+def test_choose_bucket_respects_first_explicit_bucket_that_fits() -> None:
+    buckets = (BucketSpec(5, 10), BucketSpec(8, 8), BucketSpec(12, 20))
+
+    assert choose_bucket((4, 9), buckets) == BucketSpec(5, 10)
+    assert choose_bucket((6, 8), buckets) == BucketSpec(8, 8)
+    assert choose_bucket((10, 12), buckets) == BucketSpec(12, 20)
+
+
+def test_choose_bucket_rejects_oversized_explicit_shape() -> None:
+    buckets = (BucketSpec(5, 10), BucketSpec(8, 8))
+
+    with pytest.raises(ValueError, match="No bucket"):
+        choose_bucket((9, 9), buckets)
