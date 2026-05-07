@@ -90,6 +90,7 @@ class JaxLinearARG(eqx.Module):
         nonunique_indices: Any | None,
         n_variants: int,
         n_samples: int,
+        n_nonunique_indices: int | None = None,
         allele_counts: Any | None = None,
         backend: Backend = Backend.AUTO,
         dtype: Any = jnp.float32,
@@ -98,7 +99,13 @@ class JaxLinearARG(eqx.Module):
         if nonunique_indices is None:
             nonunique_indices = jnp.arange(node_count, dtype=jnp.int32)
         nonunique_indices = jnp.asarray(nonunique_indices, dtype=jnp.int32)
-        n_nonunique_indices = int(jnp.max(nonunique_indices)) + 1 if nonunique_indices.size else 0
+        real_n_nonunique_indices = int(jnp.max(nonunique_indices)) + 1 if nonunique_indices.size else 0
+        if n_nonunique_indices is None:
+            n_nonunique_indices = real_n_nonunique_indices
+        else:
+            n_nonunique_indices = int(n_nonunique_indices)
+            if n_nonunique_indices < real_n_nonunique_indices:
+                raise ValueError("n_nonunique_indices cannot be smaller than the maximum nonunique index")
         sample_indices = jnp.asarray(sample_indices, dtype=jnp.int32)
         min_index_to_keep = int(sample_indices[-1]) if sample_indices.size else 0
         return cls(

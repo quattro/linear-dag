@@ -29,6 +29,7 @@ def from_lineararg(
     indices = np.asarray(graph.indices, dtype=np.int32)
     data = np.asarray(graph.data, dtype=np.dtype(dtype))
     src_of_edge = compute_src_of_edge(indptr)
+    n_nonunique_indices = None
 
     if bucket is not None:
         bucket = _as_bucket_spec(bucket)
@@ -44,6 +45,7 @@ def from_lineararg(
         data = padded.data
         src_of_edge = padded.src_of_edge
         nonunique_indices = _pad_nonunique_indices(nonunique_indices, bucket.max_nodes)
+        n_nonunique_indices = bucket.max_nodes
 
     return JaxLinearARG.from_lineararg_arrays(
         indptr=indptr,
@@ -57,6 +59,7 @@ def from_lineararg(
         allele_counts=_cached_allele_counts(linarg),
         n_variants=int(linarg.shape[1]),
         n_samples=int(linarg.shape[0]),
+        n_nonunique_indices=n_nonunique_indices,
         backend=backend,
         dtype=dtype,
     )
