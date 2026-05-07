@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+
+from scipy import sparse
 
 from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 from linear_dag.core.jaxlinarg.ingress import from_lineararg
@@ -73,3 +76,40 @@ def test_from_lineararg_bucket_padding_preserves_matmat_and_rmatmat(oracle_case)
         rtol=1e-5,
         atol=1e-5,
     )
+
+
+def test_from_lineararg_bucket_padding_reuses_jit_trace_for_bucket_shape() -> None:
+    first = LinearARG(
+        sparse.csc_matrix(([1.0], ([1], [0])), shape=(2, 2)),
+        variant_indices=np.array([0], dtype=np.int32),
+        flip=np.array([False]),
+        n_samples=np.int32(1),
+        nonunique_indices=np.array([0, 1], dtype=np.int32),
+    )
+    second = LinearARG(
+        sparse.csc_matrix(([1.0, 0.0], ([1, 2], [0, 2])), shape=(3, 3)),
+        variant_indices=np.array([0], dtype=np.int32),
+        flip=np.array([False]),
+        n_samples=np.int32(1),
+        n_individuals=np.int32(1),
+        nonunique_indices=np.array([0, 1, 0], dtype=np.int32),
+    )
+    bucket = BucketSpec(max_nodes=3, max_nnz=2)
+    first_op = JaxLinearARG.from_lineararg(first, backend=Backend.PURE_JAX, bucket=bucket)
+    second_op = JaxLinearARG.from_lineararg(second, backend=Backend.PURE_JAX, bucket=bucket)
+    x = jnp.array([[2.0]], dtype=jnp.float32)
+    trace_count = 0
+
+    def product(op: JaxLinearARG, values: jax.Array) -> jax.Array:
+        nonlocal trace_count
+        trace_count += 1
+        return op.matmat(values)
+
+    jitted_product = jax.jit(product)
+
+    assert first.A.shape != second.A.shape
+    assert first_op.indptr.shape == second_op.indptr.shape == (bucket.max_nodes + 1,)
+    assert first_op.indices.shape == second_op.indices.shape == (bucket.max_nnz,)
+    np.testing.assert_allclose(np.asarray(jitted_product(first_op, x)), np.array([[2.0]], dtype=np.float32))
+    np.testing.assert_allclose(np.asarray(jitted_product(second_op, x)), np.array([[2.0]], dtype=np.float32))
+    assert trace_count == 1
