@@ -7,7 +7,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import linear_dag.core.jaxlinarg.operator as jaxlinarg_operator
+
+from linear_dag.core.jaxlinarg import Backend
 from linear_dag.core.jaxlinarg.kernels import ffi_cpu
+from linear_dag.core.jaxlinarg.kernels.pure_jax import (
+    pure_jax_solve_backward_compressed,
+    pure_jax_solve_forward_compressed,
+)
 
 
 def _solve_args(dtype=np.float32) -> tuple:
@@ -83,3 +90,69 @@ def test_ffi_solve_wrapper_does_not_call_ffi_when_unavailable(monkeypatch):
 
     with pytest.raises(RuntimeError, match="FFI CPU backend is unavailable"):
         ffi_cpu.ffi_cpu_solve_forward(*_solve_args())
+
+
+def test_native_ffi_cpu_handler_is_available_on_cpu():
+    if jax.default_backend() != "cpu":
+        pytest.skip("native CPU FFI handler is only required on CPU platforms")
+    ffi_cpu.is_ffi_cpu_available.cache_clear()
+
+    assert ffi_cpu.is_ffi_cpu_available()
+
+
+def test_auto_backend_resolves_to_ffi_cpu_when_native_handler_is_available():
+    if jax.default_backend() != "cpu":
+        pytest.skip("native CPU FFI handler is only required on CPU platforms")
+    ffi_cpu.is_ffi_cpu_available.cache_clear()
+
+    assert jaxlinarg_operator.resolve_backend(Backend.AUTO, platform="cpu") is Backend.FFI_CPU
+
+
+def test_native_ffi_cpu_forward_and_backward_match_pure_jax_on_cpu():
+    if jax.default_backend() != "cpu":
+        pytest.skip("native CPU FFI handler is only required on CPU platforms")
+    ffi_cpu.is_ffi_cpu_available.cache_clear()
+    indptr, indices, data, src_of_edge, nonunique_indices, min_index_to_keep, b = _solve_args()
+    backward_b = jnp.asarray(np.array([[0.0], [3.0]], dtype=np.float32))
+
+    forward = ffi_cpu.ffi_cpu_solve_forward(
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        min_index_to_keep,
+        b,
+    )
+    expected_forward = pure_jax_solve_forward_compressed(
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        b,
+        min_index_to_keep=min_index_to_keep,
+        n_edges=int(indices.shape[0]),
+    )
+    backward = ffi_cpu.ffi_cpu_solve_backward(
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        min_index_to_keep,
+        backward_b,
+    )
+    expected_backward = pure_jax_solve_backward_compressed(
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        backward_b,
+        min_index_to_keep=min_index_to_keep,
+        n_edges=int(indices.shape[0]),
+    )
+
+    np.testing.assert_allclose(np.asarray(forward), np.asarray(expected_forward), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(backward), np.asarray(expected_backward), rtol=1e-6, atol=1e-6)

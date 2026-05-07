@@ -16,12 +16,21 @@ FFI_CPU_SOLVE_BACKWARD_F64 = "linear_dag_jaxlinarg_solve_backward_f64"
 
 @cache
 def is_ffi_cpu_available() -> bool:
-    """Return whether the native CPU FFI handler can be imported."""
+    """Return whether the native CPU FFI handler can be imported and registered."""
     try:
-        from linear_dag.core.jaxlinarg.kernels import _ffi_cpu_impl  # noqa: F401
+        _load_ffi_cpu_impl()
     except ImportError:
         return False
     return True
+
+
+@cache
+def _load_ffi_cpu_impl() -> Any:
+    from linear_dag.core.jaxlinarg.kernels import _ffi_cpu_impl
+
+    for name, capsule in _ffi_cpu_impl.registrations().items():
+        jax.ffi.register_ffi_target(name, capsule, platform="cpu", api_version=1)
+    return _ffi_cpu_impl
 
 
 def ffi_cpu_solve_forward(

@@ -1,5 +1,13 @@
 [build-system]
-requires = ["hatchling", "hatch-vcs", "hatch-cython"]
+requires = [
+  "hatchling",
+  "hatch-vcs",
+  "hatch-cython",
+  "jax>=0.5.0",
+  "numpy",
+  "scipy>=1.14.1",
+  "setuptools>=80.9.0",
+]
 build-backend = "hatchling.build"
 
 [project]
