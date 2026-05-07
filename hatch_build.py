@@ -1,8 +1,11 @@
 # pattern: Imperative Shell
 
 import glob
+import importlib.machinery
 import os
 import sys
+import sysconfig
+import warnings
 
 from pathlib import Path
 
@@ -14,16 +17,18 @@ from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from setuptools import Distribution, Extension
 from setuptools.command.build_ext import build_ext
 
+FFI_CPU_BUILD_REQUIRED_ENV = "LINEAR_DAG_REQUIRE_FFI_CPU"
+
 
 class CustomBuildHook(BuildHookInterface):
     def initialize(self, version, build_data):
         build_data["include-dirs"] = [os.path.dirname(scipy.__file__)]
         if self.target_name != "sdist":
-            build_ffi_cpu_extension(self.root)
+            build_ffi_cpu_extension_or_warn(self.root)
             for artifact in ffi_cpu_extension_artifacts(self.root):
                 relative_artifact = os.path.relpath(artifact, self.root)
-                build_data["artifacts"].append(f"/{relative_artifact}")
-                build_data["force_include"][relative_artifact] = relative_artifact
+                build_data.setdefault("artifacts", []).append(f"/{relative_artifact}")
+                build_data.setdefault("force_include", {})[relative_artifact] = relative_artifact
 
 
 def get_include_dirs():
@@ -32,6 +37,27 @@ def get_include_dirs():
 
 def build_hook(config):
     config["include-dirs"] = get_include_dirs()
+
+
+def build_ffi_cpu_extension_or_warn(root):
+    try:
+        build_ffi_cpu_extension(root)
+    except Exception as exc:
+        if is_ffi_cpu_build_required():
+            raise
+        warnings.warn(
+            "Could not build optional CPU FFI extension; continuing with PURE_JAX "
+            f"fallback. Set {FFI_CPU_BUILD_REQUIRED_ENV}=1 to make this fatal. "
+            f"Original error: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return False
+    return True
+
+
+def is_ffi_cpu_build_required():
+    return _truthy_env(os.environ.get(FFI_CPU_BUILD_REQUIRED_ENV))
 
 
 def build_ffi_cpu_extension(root):
@@ -64,16 +90,25 @@ def build_ffi_cpu_extension(root):
 
 
 def ffi_cpu_extension_artifacts(root):
-    pattern = os.path.join(
-        root,
-        "src",
-        "linear_dag",
-        "core",
-        "jaxlinarg",
-        "kernels",
-        "_ffi_cpu_impl*.so",
-    )
-    return glob.glob(pattern)
+    base = Path(root) / "src" / "linear_dag" / "core" / "jaxlinarg" / "kernels" / "_ffi_cpu_impl"
+    artifacts = []
+    for suffix in _extension_suffixes():
+        artifacts.extend(glob.glob(f"{base}*{suffix}"))
+    return sorted(set(artifacts))
+
+
+def _extension_suffixes():
+    suffixes = [
+        sysconfig.get_config_var("EXT_SUFFIX"),
+        *importlib.machinery.EXTENSION_SUFFIXES,
+    ]
+    return tuple(dict.fromkeys(suffix for suffix in suffixes if suffix))
+
+
+def _truthy_env(value):
+    if value is None:
+        return False
+    return value.lower() in {"1", "true", "yes", "on"}
 
 
 def _cxx_compile_args():

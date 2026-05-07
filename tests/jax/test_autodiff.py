@@ -15,7 +15,7 @@ def _src_of_edge(indptr: np.ndarray) -> np.ndarray:
     return np.repeat(np.arange(indptr.shape[0] - 1, dtype=np.int32), np.diff(indptr))
 
 
-def _operator_from_case(oracle_case) -> JaxLinearARG:
+def _operator_from_case(oracle_case, *, backend: Backend = Backend.PURE_JAX) -> JaxLinearARG:
     linarg = oracle_case.linarg
     return JaxLinearARG.from_lineararg_arrays(
         indptr=linarg.A.indptr,
@@ -28,7 +28,7 @@ def _operator_from_case(oracle_case) -> JaxLinearARG:
         nonunique_indices=linarg.nonunique_indices,
         n_variants=linarg.shape[1],
         n_samples=linarg.shape[0],
-        backend=Backend.PURE_JAX,
+        backend=backend,
         dtype=jnp.float32,
     )
 
@@ -160,6 +160,64 @@ def test_reverse_gradient_matches_adjoint_oracle_case_under_jit(
     residual = op.rmatmat(jnp.asarray(case.y, dtype=jnp.float32)) - target
     expected = op.matmat(residual)
     actual = jax.grad(loss)(jnp.asarray(case.y, dtype=jnp.float32))
+
+    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("case_name", ["unflipped_k3", "flipped_k3"])
+def test_ffi_cpu_forward_gradient_matches_pure_jax_adjoint_under_jit(
+    case_name,
+    linarg_h5_path,
+    first_block_name,
+):
+    if jax.default_backend() != "cpu":
+        pytest.skip("FFI_CPU AD coverage is only required on CPU platforms")
+    cases = {case.name: case for case in make_oracle_cases(linarg_h5_path, first_block_name)}
+    case = cases[case_name]
+    ffi_op = _operator_from_case(case, backend=Backend.FFI_CPU)
+    pure_op = _operator_from_case(case, backend=Backend.PURE_JAX)
+    target = jnp.zeros_like(jnp.asarray(case.Xw, dtype=jnp.float32))
+
+    assert ffi_op.backend is Backend.FFI_CPU
+
+    @jax.jit
+    def loss(values):
+        residual = ffi_op.matmat(values) - target
+        return 0.5 * jnp.sum(residual**2)
+
+    values = jnp.asarray(case.w, dtype=jnp.float32)
+    residual = ffi_op.matmat(values) - target
+    expected = pure_op.rmatmat(residual)
+    actual = jax.grad(loss)(values)
+
+    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("case_name", ["unflipped_k3", "flipped_k3"])
+def test_ffi_cpu_reverse_gradient_matches_pure_jax_adjoint_under_jit(
+    case_name,
+    linarg_h5_path,
+    first_block_name,
+):
+    if jax.default_backend() != "cpu":
+        pytest.skip("FFI_CPU AD coverage is only required on CPU platforms")
+    cases = {case.name: case for case in make_oracle_cases(linarg_h5_path, first_block_name)}
+    case = cases[case_name]
+    ffi_op = _operator_from_case(case, backend=Backend.FFI_CPU)
+    pure_op = _operator_from_case(case, backend=Backend.PURE_JAX)
+    target = jnp.zeros_like(jnp.asarray(case.XTy, dtype=jnp.float32))
+
+    assert ffi_op.backend is Backend.FFI_CPU
+
+    @jax.jit
+    def loss(values):
+        residual = ffi_op.T.matmat(values) - target
+        return 0.5 * jnp.sum(residual**2)
+
+    values = jnp.asarray(case.y, dtype=jnp.float32)
+    residual = ffi_op.rmatmat(values) - target
+    expected = pure_op.matmat(residual)
+    actual = jax.grad(loss)(values)
 
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
 

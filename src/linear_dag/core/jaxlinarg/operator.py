@@ -67,8 +67,11 @@ class JaxLinearARG(eqx.Module):
     r"""JAX-compatible LinearARG operator.
 
     !!! info
-        Single-block numerical products are available on the pure-JAX backend.
-        FFI CPU and Pallas GPU backends are reserved for later phases.
+        `Backend.PURE_JAX` is always available and supports JAX transforms.
+        `Backend.FFI_CPU` uses the native CPU FFI handler when it is installed;
+        if the handler is unavailable, explicit FFI CPU requests warn and fall
+        back to `Backend.PURE_JAX`. `Backend.PALLAS_GPU` is reserved for a later
+        GPU kernel phase and currently raises if selected for execution.
 
     **Arguments:**
 
