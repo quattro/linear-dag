@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -86,6 +87,25 @@ def test_jax_lineararg_forward_product_handles_flipped_variants(linarg_h5_path, 
 
     assert case.flip_prob > 0
     np.testing.assert_allclose(np.asarray(op.matmat(case.w)), case.Xw, rtol=1e-5, atol=1e-5)
+
+
+def test_jax_lineararg_vmapped_matvec_matches_matmat_for_flipped_variants(linarg_h5_path, first_block_name):
+    from tests.jax.oracle import make_oracle_cases
+
+    cases = {case.name: case for case in make_oracle_cases(linarg_h5_path, first_block_name)}
+    case = cases["flipped_k3"]
+    op = _operator_from_case(case)
+    w = jnp.asarray(case.w)
+
+    vmapped_matvec = jax.vmap(op.matvec, in_axes=1, out_axes=1)(w)
+
+    assert case.flip_prob > 0
+    np.testing.assert_allclose(
+        np.asarray(vmapped_matvec),
+        np.asarray(op.matmat(w)),
+        rtol=1e-5,
+        atol=1e-5,
+    )
 
 
 def test_jax_lineararg_one_dimensional_inputs_restore_vector_outputs(oracle_case):
