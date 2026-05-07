@@ -492,10 +492,37 @@ def _solve_impl(
     b: Any,
 ) -> jax.Array:
     if backend is Backend.AUTO:
+        backend = resolve_backend(backend)
+    if backend is Backend.FFI_CPU:
+        if ffi_cpu.is_ffi_cpu_available():
+            if direction == "forward":
+                return ffi_cpu.ffi_cpu_solve_forward(
+                    indptr,
+                    indices,
+                    data,
+                    src_of_edge,
+                    nonunique_indices,
+                    min_index_to_keep,
+                    b,
+                )
+            if direction == "backward":
+                return ffi_cpu.ffi_cpu_solve_backward(
+                    indptr,
+                    indices,
+                    data,
+                    src_of_edge,
+                    nonunique_indices,
+                    min_index_to_keep,
+                    b,
+                )
+            raise ValueError(f"unknown solve direction: {direction}")
+        warnings.warn(
+            "FFI_CPU backend is unavailable; falling back to PURE_JAX.",
+            UserWarning,
+            stacklevel=2,
+        )
         backend = Backend.PURE_JAX
-    if backend is not Backend.PURE_JAX:
-        raise NotImplementedError(f"{backend} backend is implemented in a later phase")
-    if direction == "forward":
+    if backend is Backend.PURE_JAX and direction == "forward":
         return pure_jax_solve_forward_compressed(
             indptr,
             indices,
@@ -506,7 +533,7 @@ def _solve_impl(
             min_index_to_keep=min_index_to_keep,
             n_edges=int(indices.shape[0]),
         )
-    if direction == "backward":
+    if backend is Backend.PURE_JAX and direction == "backward":
         return pure_jax_solve_backward_compressed(
             indptr,
             indices,
@@ -517,4 +544,6 @@ def _solve_impl(
             min_index_to_keep=min_index_to_keep,
             n_edges=int(indices.shape[0]),
         )
+    if backend is Backend.PALLAS_GPU:
+        raise NotImplementedError(f"{backend} backend is implemented in a later phase")
     raise ValueError(f"unknown solve direction: {direction}")
