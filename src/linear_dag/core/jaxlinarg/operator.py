@@ -7,6 +7,7 @@ from typing import Any
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from .kernels.pure_jax import (
     pure_jax_solve_backward_compressed,
@@ -132,6 +133,11 @@ class JaxLinearARG(eqx.Module):
             raise ValueError("src_of_edge must have the same length as indices")
         if self.indptr.shape[0] == 0:
             raise ValueError("indptr must contain at least one entry")
+        indptr = np.asarray(self.indptr)
+        if int(indptr[0]) != 0:
+            raise ValueError("indptr must start at 0")
+        if np.any(np.diff(indptr) < 0):
+            raise ValueError("indptr must be monotonic")
         if self.nonunique_indices.shape[0] != self.indptr.shape[0] - 1:
             raise ValueError("nonunique_indices length must match the node count from indptr")
         if self.variant_indices.shape[0] != self.flip.shape[0]:
@@ -163,6 +169,11 @@ class JaxLinearARG(eqx.Module):
             raise ValueError("src_of_edge contains an out-of-range node index")
         if self.indices.shape[0] and int(jnp.max(self.indices)) >= node_count:
             raise ValueError("indices contains an out-of-range node index")
+        expected_src_of_edge = np.repeat(np.arange(node_count, dtype=np.int32), np.diff(indptr))
+        if not np.array_equal(np.asarray(self.src_of_edge), expected_src_of_edge):
+            raise ValueError("src_of_edge must match the sources implied by indptr")
+        if self.indices.shape[0] and np.any(np.asarray(self.indices) <= np.asarray(self.src_of_edge)):
+            raise ValueError("indices must be greater than src_of_edge")
         if self.variant_indices.shape[0] and int(jnp.max(self.variant_indices)) >= node_count:
             raise ValueError("variant_indices contains an out-of-range node index")
         if self.sample_indices.shape[0] and int(jnp.max(self.sample_indices)) >= node_count:

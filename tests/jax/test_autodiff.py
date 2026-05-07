@@ -8,6 +8,29 @@ import numpy as np
 import pytest
 
 from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
+from tests.jax.oracle import make_oracle_cases
+
+
+def _src_of_edge(indptr: np.ndarray) -> np.ndarray:
+    return np.repeat(np.arange(indptr.shape[0] - 1, dtype=np.int32), np.diff(indptr))
+
+
+def _operator_from_case(oracle_case) -> JaxLinearARG:
+    linarg = oracle_case.linarg
+    return JaxLinearARG.from_lineararg_arrays(
+        indptr=linarg.A.indptr,
+        indices=linarg.A.indices,
+        data=linarg.A.data,
+        src_of_edge=_src_of_edge(linarg.A.indptr),
+        variant_indices=linarg.variant_indices,
+        flip=linarg.flip,
+        sample_indices=linarg.sample_indices,
+        nonunique_indices=linarg.nonunique_indices,
+        n_variants=linarg.shape[1],
+        n_samples=linarg.shape[0],
+        backend=Backend.PURE_JAX,
+        dtype=jnp.float32,
+    )
 
 
 def _tiny_two_by_two_operator() -> JaxLinearARG:
@@ -85,6 +108,60 @@ def test_reverse_product_reverse_mode_gradient_matches_finite_difference_under_j
     expected = _finite_difference_grad(lambda values: loss(jnp.asarray(values)), np.asarray(y))
 
     np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("case_name", ["unflipped_k3", "flipped_k3"])
+def test_forward_gradient_matches_adjoint_oracle_case_under_jit(
+    case_name,
+    linarg_h5_path,
+    first_block_name,
+):
+    cases = {case.name: case for case in make_oracle_cases(linarg_h5_path, first_block_name)}
+    case = cases[case_name]
+    op = _operator_from_case(case)
+    target = jnp.zeros_like(jnp.asarray(case.Xw, dtype=jnp.float32))
+
+    assert int(np.max(case.linarg.nonunique_indices)) + 1 < case.linarg.A.shape[0]
+    if case_name == "flipped_k3":
+        assert case.flip_prob > 0
+
+    @jax.jit
+    def loss(values):
+        residual = op.matmat(values) - target
+        return 0.5 * jnp.sum(residual**2)
+
+    residual = op.matmat(jnp.asarray(case.w, dtype=jnp.float32)) - target
+    expected = op.rmatmat(residual)
+    actual = jax.grad(loss)(jnp.asarray(case.w, dtype=jnp.float32))
+
+    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("case_name", ["unflipped_k3", "flipped_k3"])
+def test_reverse_gradient_matches_adjoint_oracle_case_under_jit(
+    case_name,
+    linarg_h5_path,
+    first_block_name,
+):
+    cases = {case.name: case for case in make_oracle_cases(linarg_h5_path, first_block_name)}
+    case = cases[case_name]
+    op = _operator_from_case(case)
+    target = jnp.zeros_like(jnp.asarray(case.XTy, dtype=jnp.float32))
+
+    assert int(np.max(case.linarg.nonunique_indices)) + 1 < case.linarg.A.shape[0]
+    if case_name == "flipped_k3":
+        assert case.flip_prob > 0
+
+    @jax.jit
+    def loss(values):
+        residual = op.T.matmat(values) - target
+        return 0.5 * jnp.sum(residual**2)
+
+    residual = op.rmatmat(jnp.asarray(case.y, dtype=jnp.float32)) - target
+    expected = op.matmat(residual)
+    actual = jax.grad(loss)(jnp.asarray(case.y, dtype=jnp.float32))
+
+    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
 
 
 def test_forward_product_gradient_is_zero_for_disconnected_variant_entry():

@@ -13,6 +13,23 @@ from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 _USE_CASE_NONUNIQUE = object()
 
 
+def _minimal_operator_kwargs() -> dict:
+    return {
+        "indptr": np.array([0, 1, 1], dtype=np.int32),
+        "indices": np.array([1], dtype=np.int32),
+        "data": np.ones(1, dtype=np.float32),
+        "src_of_edge": np.array([0], dtype=np.int32),
+        "variant_indices": np.array([0], dtype=np.int32),
+        "flip": np.array([False]),
+        "sample_indices": np.array([1], dtype=np.int32),
+        "nonunique_indices": np.array([0, 1], dtype=np.int32),
+        "n_variants": 1,
+        "n_samples": 1,
+        "backend": Backend.PURE_JAX,
+        "dtype": jnp.float32,
+    }
+
+
 def _src_of_edge(indptr: np.ndarray) -> np.ndarray:
     return np.repeat(np.arange(indptr.shape[0] - 1, dtype=np.int32), np.diff(indptr))
 
@@ -175,21 +192,29 @@ def test_from_lineararg_arrays_synthesizes_identity_nonunique_mapping(oracle_cas
     ],
 )
 def test_from_lineararg_arrays_rejects_negative_indices(field, bad_value):
-    kwargs = {
-        "indptr": np.array([0, 1, 1], dtype=np.int32),
-        "indices": np.array([1], dtype=np.int32),
-        "data": np.ones(1, dtype=np.float32),
-        "src_of_edge": np.array([0], dtype=np.int32),
-        "variant_indices": np.array([0], dtype=np.int32),
-        "flip": np.array([False]),
-        "sample_indices": np.array([1], dtype=np.int32),
-        "nonunique_indices": np.array([0, 1], dtype=np.int32),
-        "n_variants": 1,
-        "n_samples": 1,
-        "backend": Backend.PURE_JAX,
-        "dtype": jnp.float32,
-    }
+    kwargs = _minimal_operator_kwargs()
     kwargs[field] = bad_value
 
     with pytest.raises(ValueError, match=f"{field} contains a negative index"):
+        JaxLinearARG.from_lineararg_arrays(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value", "message"),
+    [
+        ("indptr", np.array([1, 2, 2], dtype=np.int32), "indptr must start at 0"),
+        ("indptr", np.array([0, 2, 1], dtype=np.int32), "indptr must be monotonic"),
+        (
+            "src_of_edge",
+            np.array([1], dtype=np.int32),
+            "src_of_edge must match the sources implied by indptr",
+        ),
+        ("indices", np.array([0], dtype=np.int32), "indices must be greater than src_of_edge"),
+    ],
+)
+def test_from_lineararg_arrays_rejects_malformed_graph_structure(field, bad_value, message):
+    kwargs = _minimal_operator_kwargs()
+    kwargs[field] = bad_value
+
+    with pytest.raises(ValueError, match=message):
         JaxLinearARG.from_lineararg_arrays(**kwargs)
