@@ -45,6 +45,32 @@ def test_jax_lineararg_ffi_cpu_forward_product_matches_oracle(oracle_case):
     np.testing.assert_allclose(np.asarray(op.matmat(oracle_case.w)), oracle_case.Xw, rtol=1e-5, atol=1e-5)
 
 
+def test_jax_lineararg_ffi_cpu_vmapped_matvec_matches_matmat_for_flipped_variants(
+    linarg_h5_path,
+    first_block_name,
+):
+    if jax.default_backend() != "cpu":
+        pytest.skip("FFI_CPU operator dispatch is only required on CPU platforms")
+    from tests.jax.oracle import make_oracle_cases
+
+    cases = {case.name: case for case in make_oracle_cases(linarg_h5_path, first_block_name)}
+    case = cases["flipped_k3"]
+    ffi_cpu.is_ffi_cpu_available.cache_clear()
+    op = _operator_from_case(case, backend=Backend.FFI_CPU)
+    w = jnp.asarray(case.w)
+
+    vmapped_matvec = jax.vmap(op.matvec, in_axes=1, out_axes=1)(w)
+
+    assert op.backend is Backend.FFI_CPU
+    assert case.flip_prob > 0
+    np.testing.assert_allclose(
+        np.asarray(vmapped_matvec),
+        np.asarray(op.matmat(w)),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
 def test_jax_lineararg_ffi_cpu_reverse_product_matches_oracle(oracle_case):
     if jax.default_backend() != "cpu":
         pytest.skip("FFI_CPU operator dispatch is only required on CPU platforms")
