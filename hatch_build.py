@@ -24,11 +24,11 @@ class CustomBuildHook(BuildHookInterface):
     def initialize(self, version, build_data):
         build_data["include-dirs"] = [os.path.dirname(scipy.__file__)]
         if self.target_name != "sdist":
-            build_ffi_cpu_extension_or_warn(self.root)
-            for artifact in ffi_cpu_extension_artifacts(self.root):
-                relative_artifact = os.path.relpath(artifact, self.root)
-                build_data.setdefault("artifacts", []).append(f"/{relative_artifact}")
-                build_data.setdefault("force_include", {})[relative_artifact] = relative_artifact
+            if build_ffi_cpu_extension_or_warn(self.root):
+                for artifact in ffi_cpu_extension_artifacts(self.root):
+                    relative_artifact = os.path.relpath(artifact, self.root)
+                    build_data.setdefault("artifacts", []).append(f"/{relative_artifact}")
+                    build_data.setdefault("force_include", {})[relative_artifact] = relative_artifact
 
 
 def get_include_dirs():
@@ -40,6 +40,7 @@ def build_hook(config):
 
 
 def build_ffi_cpu_extension_or_warn(root):
+    remove_ffi_cpu_extension_artifacts(root)
     try:
         build_ffi_cpu_extension(root)
     except Exception as exc:
@@ -54,6 +55,11 @@ def build_ffi_cpu_extension_or_warn(root):
         )
         return False
     return True
+
+
+def remove_ffi_cpu_extension_artifacts(root):
+    for artifact in ffi_cpu_extension_artifacts(root):
+        Path(artifact).unlink()
 
 
 def is_ffi_cpu_build_required():

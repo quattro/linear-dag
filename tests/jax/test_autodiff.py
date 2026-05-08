@@ -188,7 +188,7 @@ def test_ffi_cpu_forward_gradient_matches_pure_jax_adjoint_under_jit(
     values = jnp.asarray(case.w, dtype=jnp.float32)
     residual = ffi_op.matmat(values) - target
     expected = pure_op.rmatmat(residual)
-    actual = jax.grad(loss)(values)
+    actual = jax.jit(jax.grad(loss))(values)
 
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
 
@@ -217,7 +217,7 @@ def test_ffi_cpu_reverse_gradient_matches_pure_jax_adjoint_under_jit(
     values = jnp.asarray(case.y, dtype=jnp.float32)
     residual = ffi_op.rmatmat(values) - target
     expected = pure_op.matmat(residual)
-    actual = jax.grad(loss)(values)
+    actual = jax.jit(jax.grad(loss))(values)
 
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
 
