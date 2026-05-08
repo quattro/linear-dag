@@ -3,6 +3,8 @@
 from typing import Any
 
 import equinox as eqx
+import jax
+import jax.numpy as jnp
 import numpy as np
 import polars as pl
 
@@ -154,10 +156,38 @@ class JaxParallelOperator(eqx.Module):
         return (self.blocks[0].n_samples, self.variant_offsets[-1])
 
     def matmat(self, x: Any) -> Any:
-        raise NotImplementedError(_KERNELS_MESSAGE)
+        matrix, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[1], dtype=self.blocks[0].dtype)
+        result = self._matmat(matrix)
+        return result[:, 0] if was_vector else result
 
     def rmatmat(self, x: Any) -> Any:
-        raise NotImplementedError(_KERNELS_MESSAGE)
+        matrix, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.blocks[0].dtype)
+        result = self._rmatmat(matrix)
+        return result[:, 0] if was_vector else result
+
+    def _matmat(self, x: Any) -> Any:
+        contributions = [
+            block.matmat(x[start:end])
+            for block, start, end in zip(
+                self.blocks,
+                self.variant_offsets[:-1],
+                self.variant_offsets[1:],
+                strict=True,
+            )
+        ]
+        return jnp.sum(jnp.stack(contributions, axis=0), axis=0)
+
+    def _rmatmat(self, x: Any) -> Any:
+        return jnp.concatenate([block.rmatmat(x) for block in self.blocks], axis=0)
+
+    def matvec(self, x: Any) -> Any:
+        return self.matmat(x)
+
+    def rmatvec(self, x: Any) -> Any:
+        return self.rmatmat(x)
+
+    def __matmul__(self, x: Any) -> Any:
+        return self.matmat(x)
 
 
 def _zip_buckets(values: Any, buckets: Any) -> tuple[tuple[Any, Any], ...]:
@@ -211,3 +241,17 @@ def _mesh_blocks_axis_size(mesh: Any) -> int:
     if devices.ndim <= axis_index:
         return int(devices.size)
     return int(devices.shape[axis_index])
+
+
+def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Array, bool]:
+    array = jnp.asarray(x, dtype=dtype)
+    if array.ndim == 1:
+        array = array.reshape(-1, 1)
+        was_vector = True
+    elif array.ndim == 2:
+        was_vector = False
+    else:
+        raise ValueError(f"expected rank 1 or 2 input, got rank {array.ndim}")
+    if array.shape[0] != expected_rows:
+        raise ValueError(f"expected leading dimension {expected_rows}, got {array.shape[0]}")
+    return array, was_vector
