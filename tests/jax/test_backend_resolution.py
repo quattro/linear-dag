@@ -39,9 +39,10 @@ def _minimal_operator_kwargs() -> dict:
     ],
 )
 def test_auto_backend_resolves_by_platform_and_ffi_availability(monkeypatch, platform, available, expected):
+    monkeypatch.setattr(jaxlinarg_operator.jax, "default_backend", lambda: platform)
     monkeypatch.setattr(jaxlinarg_operator.ffi_cpu, "is_ffi_cpu_available", lambda: available)
 
-    assert jaxlinarg_operator.resolve_backend(Backend.AUTO, platform=platform) is expected
+    assert jaxlinarg_operator.resolve_backend(Backend.AUTO) is expected
 
 
 def test_explicit_ffi_cpu_resolves_to_pure_jax_when_handler_is_absent(monkeypatch):
@@ -57,6 +58,12 @@ def test_explicit_ffi_cpu_resolves_to_ffi_cpu_when_handler_is_available(monkeypa
     monkeypatch.setattr(jaxlinarg_operator.ffi_cpu, "is_ffi_cpu_available", lambda: True)
 
     assert jaxlinarg_operator.resolve_backend(Backend.FFI_CPU, platform="cpu") is Backend.FFI_CPU
+
+
+@pytest.mark.parametrize("platform", ["cpu", "tpu"])
+def test_explicit_pallas_gpu_rejects_non_gpu_platforms(platform):
+    with pytest.raises(ValueError, match=rf"PALLAS_GPU backend is unavailable.*{platform}"):
+        jaxlinarg_operator.resolve_backend(Backend.PALLAS_GPU, platform=platform)
 
 
 def test_ffi_availability_returns_false_when_registrations_raises(monkeypatch):

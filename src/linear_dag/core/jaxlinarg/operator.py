@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .kernels import ffi_cpu
+from .kernels import ffi_cpu, pallas_gpu
 from .kernels.pure_jax import (
     pure_jax_solve_backward_compressed,
     pure_jax_solve_forward_compressed,
@@ -43,6 +43,8 @@ def resolve_backend(requested: Backend, *, platform: str | None = None) -> Backe
     if requested is Backend.PURE_JAX:
         return Backend.PURE_JAX
     if requested is Backend.PALLAS_GPU:
+        if not _is_gpu_platform(platform):
+            raise ValueError(f"PALLAS_GPU backend is unavailable on current platform '{platform}'.")
         return Backend.PALLAS_GPU
     if requested is Backend.FFI_CPU:
         if ffi_cpu.is_ffi_cpu_available():
@@ -70,8 +72,8 @@ class JaxLinearARG(eqx.Module):
         `Backend.PURE_JAX` is always available and supports JAX transforms.
         `Backend.FFI_CPU` uses the native CPU FFI handler when it is installed;
         if the handler is unavailable, explicit FFI CPU requests warn and fall
-        back to `Backend.PURE_JAX`. `Backend.PALLAS_GPU` is reserved for a later
-        GPU kernel phase and currently raises if selected for execution.
+        back to `Backend.PURE_JAX`. `Backend.PALLAS_GPU` uses Pallas kernels and
+        is only available when the current JAX platform is GPU.
 
     **Arguments:**
 
@@ -396,6 +398,10 @@ def _ffi_cpu_unavailable_message() -> str:
     return f"FFI_CPU backend is unavailable ({error}); falling back to PURE_JAX."
 
 
+def _is_gpu_platform(platform: str) -> bool:
+    return platform in {"gpu", "cuda", "rocm"}
+
+
 def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Array, bool]:
     array = jnp.asarray(x, dtype=dtype)
     if array.ndim == 1:
@@ -554,6 +560,24 @@ def _solve_impl(
             min_index_to_keep=min_index_to_keep,
             n_edges=int(indices.shape[0]),
         )
-    if backend is Backend.PALLAS_GPU:
-        raise NotImplementedError(f"{backend} backend is implemented in a later phase")
+    if backend is Backend.PALLAS_GPU and direction == "forward":
+        return pallas_gpu.pallas_gpu_solve_forward(
+            indptr,
+            indices,
+            data,
+            src_of_edge,
+            nonunique_indices,
+            min_index_to_keep,
+            b,
+        )
+    if backend is Backend.PALLAS_GPU and direction == "backward":
+        return pallas_gpu.pallas_gpu_solve_backward(
+            indptr,
+            indices,
+            data,
+            src_of_edge,
+            nonunique_indices,
+            min_index_to_keep,
+            b,
+        )
     raise ValueError(f"unknown solve direction: {direction}")
