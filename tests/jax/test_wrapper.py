@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import jax
 import jax.numpy as jnp
 import numpy as np
+import polars as pl
 import pytest
 
 from jax.sharding import Mesh
@@ -160,6 +161,55 @@ def test_jax_parallel_operator_construction_rejects_offsets_that_mismatch_blocks
             mesh=_mesh(),
             backend=Backend.PURE_JAX,
             block_ranges=((0, 2),),
+        )
+
+
+def test_jax_parallel_operator_construction_rejects_block_ranges_that_do_not_cover_mesh_axis():
+    first = _tiny_block(n_variants=1)
+    second = _tiny_block(n_variants=1)
+    mesh = SimpleNamespace(devices=np.asarray([0, 1]), axis_names=("blocks",))
+
+    with pytest.raises(ValueError, match="block_ranges"):
+        JaxParallelOperator(
+            blocks=(first, second),
+            variant_offsets=(0, 1, 2),
+            mesh=mesh,
+            backend=Backend.PURE_JAX,
+            block_ranges=((0, 1),),
+        )
+
+
+def test_jax_parallel_operator_construction_rejects_noncontiguous_block_ranges():
+    first = _tiny_block(n_variants=1)
+    second = _tiny_block(n_variants=1)
+    mesh = SimpleNamespace(devices=np.asarray([0, 1]), axis_names=("blocks",))
+
+    with pytest.raises(ValueError, match="contiguous"):
+        JaxParallelOperator(
+            blocks=(first, second),
+            variant_offsets=(0, 1, 2),
+            mesh=mesh,
+            backend=Backend.PURE_JAX,
+            block_ranges=((0, 1), (2, 2)),
+        )
+
+
+def test_jax_parallel_operator_from_hdf5_rejects_block_metadata_variant_count_mismatch(
+    linarg_h5_path,
+    linarg_block_metadata,
+):
+    n_variants = linarg_block_metadata.get_column("n_variants").to_numpy().copy()
+    n_variants[0] += 1
+    bad_metadata = linarg_block_metadata.with_columns(
+        pl.Series("n_variants", n_variants),
+    )
+
+    with pytest.raises(ValueError, match="block n_variants"):
+        JaxParallelOperator.from_hdf5(
+            linarg_h5_path,
+            mesh=_mesh(),
+            block_metadata=bad_metadata,
+            backend=Backend.PURE_JAX,
         )
 
 

@@ -162,9 +162,11 @@ class JaxParallelOperator(eqx.Module):
         expected_variants = sum(block.n_variants for block in self.blocks)
         if self.variant_offsets[-1] != expected_variants:
             raise ValueError("final variant_offsets entry must match total block variants")
-        for start, end in self.block_ranges:
-            if start < 0 or end < start or end > len(self.blocks):
-                raise ValueError("block_ranges must be valid block index ranges")
+        _validate_block_ranges(
+            self.block_ranges,
+            n_blocks=len(self.blocks),
+            n_mesh_blocks=_mesh_blocks_axis_size(self.mesh),
+        )
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -396,6 +398,29 @@ def _validate_mesh(mesh: Any) -> None:
     axis_names = tuple(getattr(mesh, "axis_names", ()))
     if axis_names.count("blocks") != 1:
         raise ValueError('mesh axis names must include exactly one "blocks" axis')
+
+
+def _validate_block_ranges(
+    block_ranges: tuple[tuple[int, int], ...],
+    *,
+    n_blocks: int,
+    n_mesh_blocks: int,
+) -> None:
+    if len(block_ranges) != n_mesh_blocks:
+        raise ValueError(
+            "block_ranges length must match the mesh blocks axis size; "
+            f"observed {len(block_ranges)} ranges for axis size {n_mesh_blocks}"
+        )
+
+    expected_start = 0
+    for start, end in block_ranges:
+        if start < 0 or end < start or end > n_blocks:
+            raise ValueError("block_ranges must be valid block index ranges")
+        if start != expected_start:
+            raise ValueError("block_ranges must be contiguous and cover every block")
+        expected_start = end
+    if expected_start != n_blocks:
+        raise ValueError("block_ranges must be contiguous and cover every block")
 
 
 def _mesh_device_count(mesh: Any) -> int:
