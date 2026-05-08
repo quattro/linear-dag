@@ -189,3 +189,37 @@ def test_jax_parallel_operator_products_on_two_device_cpu_mesh(
 
     np.testing.assert_allclose(np.asarray(op.matmat(w)), np.asarray(expected_matmat), rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(np.asarray(op.rmatmat(y)), np.asarray(expected_rmatmat), rtol=1e-5, atol=1e-5)
+
+
+def test_jax_parallel_operator_autodiff_matches_concatenated_block_gradients(
+    linarg_h5_path,
+    linarg_block_metadata,
+):
+    op = _fixture_operator(linarg_h5_path, linarg_block_metadata)
+    w = jnp.arange(op.shape[1] * 2, dtype=jnp.float32).reshape(op.shape[1], 2) / 100.0
+    target = jnp.linspace(-1.0, 1.0, op.shape[0] * 2, dtype=jnp.float32).reshape(op.shape[0], 2)
+
+    @jax.jit
+    def loss(values):
+        residual = op.matmat(values) - target
+        return 0.5 * jnp.sum(residual**2)
+
+    residual = op.matmat(w) - target
+    expected_blocks = []
+    for block, start, end in zip(
+        op.blocks,
+        op.variant_offsets[:-1],
+        op.variant_offsets[1:],
+        strict=True,
+    ):
+
+        @jax.jit
+        def block_pullback(values, *, block=block):
+            return jnp.sum(block.matmat(values) * residual)
+
+        expected_blocks.append(jax.grad(block_pullback)(w[start:end]))
+
+    actual = jax.jit(jax.grad(loss))(w)
+    expected = jnp.concatenate(expected_blocks, axis=0)
+
+    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
