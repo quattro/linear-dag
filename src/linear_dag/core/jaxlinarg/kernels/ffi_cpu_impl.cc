@@ -17,10 +17,12 @@ ffi::Error ValidateBuffers(
     ffi::BufferR1<ffi::S32> src_of_edge,
     ffi::BufferR1<ffi::S32> nonunique_indices,
     ffi::BufferR2<dtype> b,
-    ffi::ResultBufferR2<dtype> out) {
+    ffi::ResultBufferR2<dtype> out,
+    int64_t min_index_to_keep) {
   if (indptr.dimensions()[0] == 0) {
     return ffi::Error::InvalidArgument("indptr must contain at least one entry");
   }
+  const int64_t node_count = indptr.dimensions()[0] - 1;
   const int64_t n_edges = indices.dimensions()[0];
   if (data.dimensions()[0] != n_edges) {
     return ffi::Error::InvalidArgument("data must have the same length as indices");
@@ -33,6 +35,38 @@ ffi::Error ValidateBuffers(
   }
   if (out->dimensions()[0] != b.dimensions()[0] || out->dimensions()[1] != b.dimensions()[1]) {
     return ffi::Error::InvalidArgument("output shape must match b");
+  }
+  const int32_t* indptr_data = indptr.typed_data();
+  if (indptr_data[0] != 0) {
+    return ffi::Error::InvalidArgument("indptr must start at 0");
+  }
+  if (indptr_data[node_count] != n_edges) {
+    return ffi::Error::InvalidArgument("indptr must end at the number of edges");
+  }
+  for (int64_t node = 0; node < node_count; ++node) {
+    if (indptr_data[node] > indptr_data[node + 1]) {
+      return ffi::Error::InvalidArgument("indptr must be monotonically nondecreasing");
+    }
+  }
+  if (min_index_to_keep < 0 || min_index_to_keep >= node_count) {
+    return ffi::Error::InvalidArgument("min_index_to_keep must be in node range");
+  }
+  const int32_t* indices_data = indices.typed_data();
+  const int32_t* src_data = src_of_edge.typed_data();
+  for (int64_t edge = 0; edge < n_edges; ++edge) {
+    if (src_data[edge] < 0 || src_data[edge] >= node_count) {
+      return ffi::Error::InvalidArgument("src_of_edge entries must be in node range");
+    }
+    if (indices_data[edge] < 0 || indices_data[edge] >= node_count) {
+      return ffi::Error::InvalidArgument("indices entries must be in node range");
+    }
+  }
+  const int64_t n_rows = b.dimensions()[0];
+  const int32_t* nonunique = nonunique_indices.typed_data();
+  for (int64_t node = 0; node < node_count; ++node) {
+    if (nonunique[node] < 0 || nonunique[node] >= n_rows) {
+      return ffi::Error::InvalidArgument("nonunique_indices entries must be in b row range");
+    }
   }
   return ffi::Error::Success();
 }
@@ -53,7 +87,8 @@ ffi::Error SolveForwardCompressed(
     ffi::BufferR2<dtype> b,
     ffi::ResultBufferR2<dtype> out,
     int64_t min_index_to_keep) {
-  if (auto error = ValidateBuffers(indptr, indices, data, src_of_edge, nonunique_indices, b, out);
+  if (auto error = ValidateBuffers(
+          indptr, indices, data, src_of_edge, nonunique_indices, b, out, min_index_to_keep);
       error.failure()) {
     return error;
   }
@@ -97,7 +132,8 @@ ffi::Error SolveBackwardCompressed(
     ffi::BufferR2<dtype> b,
     ffi::ResultBufferR2<dtype> out,
     int64_t min_index_to_keep) {
-  if (auto error = ValidateBuffers(indptr, indices, data, src_of_edge, nonunique_indices, b, out);
+  if (auto error = ValidateBuffers(
+          indptr, indices, data, src_of_edge, nonunique_indices, b, out, min_index_to_keep);
       error.failure()) {
     return error;
   }

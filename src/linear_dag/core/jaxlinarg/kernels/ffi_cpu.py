@@ -13,15 +13,25 @@ FFI_CPU_SOLVE_BACKWARD_F32 = "linear_dag_jaxlinarg_solve_backward_f32"
 FFI_CPU_SOLVE_FORWARD_F64 = "linear_dag_jaxlinarg_solve_forward_f64"
 FFI_CPU_SOLVE_BACKWARD_F64 = "linear_dag_jaxlinarg_solve_backward_f64"
 
+_last_ffi_cpu_error: Exception | None = None
+
 
 @cache
 def is_ffi_cpu_available() -> bool:
     """Return whether the native CPU FFI handler can be imported and registered."""
+    global _last_ffi_cpu_error
     try:
         _load_ffi_cpu_impl()
-    except ImportError:
+    except Exception as error:
+        _last_ffi_cpu_error = error
         return False
+    _last_ffi_cpu_error = None
     return True
+
+
+def last_ffi_cpu_error() -> Exception | None:
+    """Return the last native CPU FFI import or registration error."""
+    return _last_ffi_cpu_error
 
 
 @cache

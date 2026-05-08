@@ -156,3 +156,40 @@ def test_native_ffi_cpu_forward_and_backward_match_pure_jax_on_cpu():
 
     np.testing.assert_allclose(np.asarray(forward), np.asarray(expected_forward), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(np.asarray(backward), np.asarray(expected_backward), rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    [
+        ("indptr", np.array([1, 1, 1], dtype=np.int32), "indptr must start at 0"),
+        ("indptr", np.array([0, 1, 0], dtype=np.int32), "indptr must end at the number of edges"),
+        ("indptr", np.array([0, 2, 1], dtype=np.int32), "indptr must be monotonically nondecreasing"),
+        ("min_index_to_keep", -1, "min_index_to_keep must be in node range"),
+        ("min_index_to_keep", 2, "min_index_to_keep must be in node range"),
+        ("src_of_edge", np.array([2], dtype=np.int32), "src_of_edge entries must be in node range"),
+        ("indices", np.array([2], dtype=np.int32), "indices entries must be in node range"),
+        (
+            "nonunique_indices",
+            np.array([0, 2], dtype=np.int32),
+            "nonunique_indices entries must be in b row range",
+        ),
+    ],
+)
+def test_native_ffi_cpu_rejects_invalid_index_metadata_on_cpu(field, replacement, message):
+    if jax.default_backend() != "cpu":
+        pytest.skip("native CPU FFI handler is only required on CPU platforms")
+    ffi_cpu.is_ffi_cpu_available.cache_clear()
+    args = list(_solve_args())
+    fields = {
+        "indptr": 0,
+        "indices": 1,
+        "data": 2,
+        "src_of_edge": 3,
+        "nonunique_indices": 4,
+        "min_index_to_keep": 5,
+        "b": 6,
+    }
+    args[fields[field]] = jnp.asarray(replacement) if field != "min_index_to_keep" else replacement
+
+    with pytest.raises(Exception, match=message):
+        ffi_cpu.ffi_cpu_solve_forward(*args).block_until_ready()

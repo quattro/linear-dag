@@ -48,7 +48,7 @@ def resolve_backend(requested: Backend, *, platform: str | None = None) -> Backe
         if ffi_cpu.is_ffi_cpu_available():
             return Backend.FFI_CPU
         warnings.warn(
-            "FFI_CPU backend is unavailable; falling back to PURE_JAX.",
+            _ffi_cpu_unavailable_message(),
             UserWarning,
             stacklevel=2,
         )
@@ -389,6 +389,13 @@ def _canonical_allele_counts(allele_counts: Any | None, *, n_variants: int) -> j
     return jnp.asarray(allele_counts, dtype=jnp.int32)
 
 
+def _ffi_cpu_unavailable_message() -> str:
+    error = ffi_cpu.last_ffi_cpu_error()
+    if error is None:
+        return "FFI_CPU backend is unavailable; falling back to PURE_JAX."
+    return f"FFI_CPU backend is unavailable ({error}); falling back to PURE_JAX."
+
+
 def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Array, bool]:
     array = jnp.asarray(x, dtype=dtype)
     if array.ndim == 1:
@@ -520,7 +527,7 @@ def _solve_impl(
                 )
             raise ValueError(f"unknown solve direction: {direction}")
         warnings.warn(
-            "FFI_CPU backend is unavailable; falling back to PURE_JAX.",
+            _ffi_cpu_unavailable_message(),
             UserWarning,
             stacklevel=2,
         )
