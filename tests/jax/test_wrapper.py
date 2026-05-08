@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from jax.sharding import Mesh
+from scipy import sparse
 
 from linear_dag.core.jaxlinarg import (
     Backend,
@@ -18,6 +19,8 @@ from linear_dag.core.jaxlinarg import (
     split_blocks_by_n_entries,
     variant_offsets_from_metadata,
 )
+from linear_dag.core.jaxlinarg.padding import BucketSpec
+from linear_dag.core.lineararg import LinearARG
 
 
 def _mesh(axis_name: str = "blocks") -> Mesh:
@@ -57,6 +60,18 @@ def _tiny_block(*, n_samples: int = 1, n_variants: int = 1) -> JaxLinearARG:
         n_samples=n_samples,
         backend=Backend.PURE_JAX,
         dtype=jnp.float32,
+    )
+
+
+def _lineararg_with_graph_shape(*, n_nodes: int, n_edges: int) -> LinearARG:
+    rows = np.arange(1, n_edges + 1, dtype=np.int32)
+    cols = np.zeros(n_edges, dtype=np.int32)
+    return LinearARG(
+        sparse.csc_matrix((np.ones(n_edges, dtype=np.float32), (rows, cols)), shape=(n_nodes, n_nodes)),
+        variant_indices=np.array([0], dtype=np.int32),
+        flip=np.array([False]),
+        n_samples=np.int32(1),
+        nonunique_indices=np.arange(n_nodes, dtype=np.int32),
     )
 
 
@@ -134,6 +149,78 @@ def test_jax_parallel_operator_construction_rejects_bad_variant_offsets():
         )
 
 
+def test_jax_parallel_operator_construction_rejects_offsets_that_mismatch_blocks():
+    first = _tiny_block(n_variants=1)
+    second = _tiny_block(n_variants=1)
+
+    with pytest.raises(ValueError, match="block n_variants"):
+        JaxParallelOperator(
+            blocks=(first, second),
+            variant_offsets=(0, 2, 2),
+            mesh=_mesh(),
+            backend=Backend.PURE_JAX,
+            block_ranges=((0, 2),),
+        )
+
+
+def test_jax_parallel_operator_from_hdf5_uses_one_bucket_spec_for_all_blocks(
+    linarg_h5_path,
+    linarg_block_metadata,
+):
+    bucket = BucketSpec(
+        max_nodes=linarg_block_metadata.get_column("n").max(),
+        max_nnz=linarg_block_metadata.get_column("n_entries").max(),
+    )
+
+    op = JaxParallelOperator.from_hdf5(
+        linarg_h5_path,
+        mesh=_mesh(),
+        block_metadata=linarg_block_metadata,
+        backend=Backend.PURE_JAX,
+        buckets=bucket,
+    )
+
+    assert all(block.indptr.shape == (bucket.max_nodes + 1,) for block in op.blocks)
+    assert all(block.indices.shape == (bucket.max_nnz,) for block in op.blocks)
+
+
+def test_jax_parallel_operator_from_hdf5_uses_bucket_shaped_tuple_for_all_blocks(
+    linarg_h5_path,
+    linarg_block_metadata,
+):
+    bucket = (
+        linarg_block_metadata.get_column("n").max(),
+        linarg_block_metadata.get_column("n_entries").max(),
+    )
+
+    op = JaxParallelOperator.from_hdf5(
+        linarg_h5_path,
+        mesh=_mesh(),
+        block_metadata=linarg_block_metadata,
+        backend=Backend.PURE_JAX,
+        buckets=bucket,
+    )
+
+    assert all(block.indptr.shape == (bucket[0] + 1,) for block in op.blocks)
+    assert all(block.indices.shape == (bucket[1],) for block in op.blocks)
+
+
+def test_jax_parallel_operator_from_linearargs_auto_buckets_blocks():
+    lineargs = tuple(_lineararg_with_graph_shape(n_nodes=n_nodes, n_edges=n_nodes - 1) for n_nodes in range(3, 12))
+
+    op = JaxParallelOperator.from_linearargs(
+        lineargs,
+        mesh=_mesh(),
+        backend=Backend.PURE_JAX,
+        buckets="auto",
+    )
+    padded_shapes = tuple((block.indptr.shape[0] - 1, block.indices.shape[0]) for block in op.blocks)
+    original_shapes = tuple((linarg.A.shape[0], linarg.A.nnz) for linarg in lineargs)
+
+    assert len(set(padded_shapes)) <= 8
+    assert any(padded != original for padded, original in zip(padded_shapes, original_shapes, strict=True))
+
+
 def test_jax_parallel_operator_matmat_matches_sum_of_block_products(
     linarg_h5_path,
     linarg_block_metadata,
@@ -171,7 +258,16 @@ def test_jax_parallel_operator_rmatmat_matches_concatenated_block_products(
 def test_jax_parallel_operator_products_on_two_device_cpu_mesh(
     linarg_h5_path,
     linarg_block_metadata,
+    monkeypatch,
 ):
+    shard_map_calls = []
+
+    def recording_shard_map(*args, **kwargs):
+        shard_map_calls.append(kwargs)
+        return original_shard_map(*args, **kwargs)
+
+    original_shard_map = jax.shard_map
+    monkeypatch.setattr("linear_dag.core.jaxlinarg.wrapper.jax.shard_map", recording_shard_map)
     op = _fixture_operator(linarg_h5_path, linarg_block_metadata, mesh=_two_device_cpu_mesh_or_skip())
     w = jnp.ones((op.shape[1], 2), dtype=jnp.float32)
     y = jnp.ones((op.shape[0], 2), dtype=jnp.float32)
@@ -189,13 +285,24 @@ def test_jax_parallel_operator_products_on_two_device_cpu_mesh(
 
     np.testing.assert_allclose(np.asarray(op.matmat(w)), np.asarray(expected_matmat), rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(np.asarray(op.rmatmat(y)), np.asarray(expected_rmatmat), rtol=1e-5, atol=1e-5)
+    assert len(shard_map_calls) >= 2
+    assert all(call["axis_names"] == {"blocks"} for call in shard_map_calls)
 
 
 def test_jax_parallel_operator_autodiff_matches_concatenated_block_gradients(
     linarg_h5_path,
     linarg_block_metadata,
+    monkeypatch,
 ):
-    op = _fixture_operator(linarg_h5_path, linarg_block_metadata)
+    shard_map_calls = []
+
+    def recording_shard_map(*args, **kwargs):
+        shard_map_calls.append(kwargs)
+        return original_shard_map(*args, **kwargs)
+
+    original_shard_map = jax.shard_map
+    monkeypatch.setattr("linear_dag.core.jaxlinarg.wrapper.jax.shard_map", recording_shard_map)
+    op = _fixture_operator(linarg_h5_path, linarg_block_metadata, mesh=_two_device_cpu_mesh_or_skip())
     w = jnp.arange(op.shape[1] * 2, dtype=jnp.float32).reshape(op.shape[1], 2) / 100.0
     target = jnp.linspace(-1.0, 1.0, op.shape[0] * 2, dtype=jnp.float32).reshape(op.shape[0], 2)
 
@@ -223,3 +330,4 @@ def test_jax_parallel_operator_autodiff_matches_concatenated_block_gradients(
     expected = jnp.concatenate(expected_blocks, axis=0)
 
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
+    assert shard_map_calls

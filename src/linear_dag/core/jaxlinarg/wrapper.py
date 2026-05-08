@@ -8,9 +8,12 @@ import jax.numpy as jnp
 import numpy as np
 import polars as pl
 
+from jax.sharding import PartitionSpec as P
+
 from linear_dag.core.lineararg import list_blocks
 
 from .operator import Backend, JaxLinearARG
+from .padding import BucketSpec, choose_bucket, choose_buckets
 
 _KERNELS_MESSAGE = "JaxLinearARG numerical kernels are implemented in Phase 2"
 
@@ -92,11 +95,16 @@ class JaxParallelOperator(eqx.Module):
         backend: Backend = Backend.AUTO,
         buckets: Any = "auto",
     ) -> "JaxParallelOperator":
+        lineargs = tuple(lineargs)
+        metadata = _metadata_from_lineargs(lineargs)
         blocks = tuple(
             _as_jax_block(linearg, backend=backend, bucket=bucket)
-            for linearg, bucket in _zip_buckets(lineargs, buckets)
+            for linearg, bucket in _zip_buckets(
+                lineargs,
+                buckets,
+                shapes=_bucket_shapes_from_metadata(metadata),
+            )
         )
-        metadata = _metadata_from_blocks(blocks)
         return cls(
             blocks=blocks,
             variant_offsets=variant_offsets_from_metadata(metadata),
@@ -119,7 +127,11 @@ class JaxParallelOperator(eqx.Module):
         block_names = metadata.get_column("block_name").to_list()
         blocks = tuple(
             JaxLinearARG.from_hdf5_block(path, block_name, backend=backend, bucket=bucket)
-            for block_name, bucket in _zip_buckets(block_names, buckets)
+            for block_name, bucket in _zip_buckets(
+                block_names,
+                buckets,
+                shapes=_bucket_shapes_from_metadata(metadata),
+            )
         )
         return cls(
             blocks=blocks,
@@ -144,6 +156,9 @@ class JaxParallelOperator(eqx.Module):
         offsets = np.asarray(self.variant_offsets, dtype=np.int64)
         if np.any(np.diff(offsets) < 0):
             raise ValueError("variant_offsets must be monotone")
+        block_n_variants = np.asarray([block.n_variants for block in self.blocks], dtype=np.int64)
+        if not np.array_equal(np.diff(offsets), block_n_variants):
+            raise ValueError("variant_offsets increments must match each block n_variants")
         expected_variants = sum(block.n_variants for block in self.blocks)
         if self.variant_offsets[-1] != expected_variants:
             raise ValueError("final variant_offsets entry must match total block variants")
@@ -166,6 +181,8 @@ class JaxParallelOperator(eqx.Module):
         return result[:, 0] if was_vector else result
 
     def _matmat(self, x: Any) -> Any:
+        if _mesh_blocks_axis_size(self.mesh) > 1:
+            return self._sharded_matmat(x)
         contributions = [
             block.matmat(x[start:end])
             for block, start, end in zip(
@@ -178,7 +195,89 @@ class JaxParallelOperator(eqx.Module):
         return jnp.sum(jnp.stack(contributions, axis=0), axis=0)
 
     def _rmatmat(self, x: Any) -> Any:
+        if _mesh_blocks_axis_size(self.mesh) > 1:
+            return self._sharded_rmatmat(x)
         return jnp.concatenate([block.rmatmat(x) for block in self.blocks], axis=0)
+
+    def _sharded_matmat(self, x: Any) -> Any:
+        @jax.custom_vjp
+        def product(values: Any) -> Any:
+            return self._sharded_matmat_primal(values)
+
+        def product_fwd(values: Any) -> tuple[Any, None]:
+            return self._sharded_matmat_primal(values), None
+
+        def product_bwd(_residual: None, cotangent: Any) -> tuple[Any]:
+            return (self._sharded_rmatmat(cotangent),)
+
+        product.defvjp(product_fwd, product_bwd)
+        return product(x)
+
+    def _sharded_matmat_primal(self, x: Any) -> Any:
+        branches = tuple(self._matmat_branch(start, end) for start, end in self.block_ranges)
+
+        def mapped(values: Any) -> Any:
+            axis_index = jax.lax.axis_index("blocks")
+            local = jax.lax.switch(axis_index, branches, values)
+            return jax.lax.psum(local, "blocks")
+
+        product = jax.shard_map(
+            mapped,
+            mesh=self.mesh,
+            in_specs=P(),
+            out_specs=P("blocks"),
+            axis_names={"blocks"},
+        )
+        stacked_total = product(x)
+        return stacked_total[: self.shape[0]]
+
+    def _matmat_branch(self, start: int, end: int) -> Any:
+        def branch(values: Any) -> Any:
+            local = jnp.zeros((self.shape[0], values.shape[1]), dtype=values.dtype)
+            for block_index in range(start, end):
+                block_start = self.variant_offsets[block_index]
+                block_end = self.variant_offsets[block_index + 1]
+                local = local + self.blocks[block_index].matmat(values[block_start:block_end])
+            return local
+
+        return branch
+
+    def _sharded_rmatmat(self, x: Any) -> Any:
+        device_variant_counts = tuple(
+            int(self.variant_offsets[end] - self.variant_offsets[start]) for start, end in self.block_ranges
+        )
+        max_device_variants = max(device_variant_counts)
+        branches = tuple(self._rmatmat_branch(start, end, max_device_variants) for start, end in self.block_ranges)
+
+        def mapped(values: Any) -> Any:
+            axis_index = jax.lax.axis_index("blocks")
+            return jax.lax.switch(axis_index, branches, values)
+
+        product = jax.shard_map(
+            mapped,
+            mesh=self.mesh,
+            in_specs=P(),
+            out_specs=P("blocks"),
+            axis_names={"blocks"},
+        )
+        padded_segments = product(x)
+        segments = []
+        for device_index, variant_count in enumerate(device_variant_counts):
+            start = device_index * max_device_variants
+            segments.append(padded_segments[start : start + variant_count])
+        return jnp.concatenate(segments, axis=0)
+
+    def _rmatmat_branch(self, start: int, end: int, max_device_variants: int) -> Any:
+        def branch(values: Any) -> Any:
+            local_blocks = [self.blocks[block_index].rmatmat(values) for block_index in range(start, end)]
+            if local_blocks:
+                local = jnp.concatenate(local_blocks, axis=0)
+            else:
+                local = jnp.zeros((0, values.shape[1]), dtype=values.dtype)
+            padding = max_device_variants - local.shape[0]
+            return jnp.pad(local, ((0, padding), (0, 0)))
+
+        return branch
 
     def matvec(self, x: Any) -> Any:
         return self.matmat(x)
@@ -190,10 +289,24 @@ class JaxParallelOperator(eqx.Module):
         return self.matmat(x)
 
 
-def _zip_buckets(values: Any, buckets: Any) -> tuple[tuple[Any, Any], ...]:
+def _zip_buckets(
+    values: Any,
+    buckets: Any,
+    *,
+    shapes: tuple[BucketSpec, ...] | None = None,
+) -> tuple[tuple[Any, Any], ...]:
     values = tuple(values)
-    if buckets == "auto" or buckets is None:
+    if buckets == "auto":
+        if shapes is None:
+            raise ValueError('buckets="auto" requires block shapes')
+        chosen_buckets = choose_buckets(shapes)
+        bucket_values = tuple(choose_bucket(shape, chosen_buckets) for shape in shapes)
+        return tuple(zip(values, bucket_values, strict=True))
+    if buckets is None:
         return tuple((value, None) for value in values)
+    shared_bucket = _as_single_bucket_spec(buckets)
+    if shared_bucket is not None:
+        return tuple((value, shared_bucket) for value in values)
     if isinstance(buckets, (str, bytes)):
         raise ValueError("buckets must be 'auto', None, a bucket spec, or one bucket per block")
     try:
@@ -211,14 +324,70 @@ def _as_jax_block(linearg: Any, *, backend: Backend, bucket: Any) -> JaxLinearAR
     return JaxLinearARG.from_lineararg(linearg, backend=backend, bucket=bucket)
 
 
-def _metadata_from_blocks(blocks: tuple[JaxLinearARG, ...]) -> pl.DataFrame:
+def _metadata_from_lineargs(lineargs: tuple[Any, ...]) -> pl.DataFrame:
     return pl.DataFrame(
         {
-            "n_entries": [int(block.data.shape[0]) for block in blocks],
-            "n_variants": [block.n_variants for block in blocks],
-            "n_samples": [block.n_samples for block in blocks],
+            "n_entries": [_edge_count(linearg) for linearg in lineargs],
+            "n_variants": [_n_variants(linearg) for linearg in lineargs],
+            "n_samples": [_n_samples(linearg) for linearg in lineargs],
+            "n": [_node_count(linearg) for linearg in lineargs],
         }
     )
+
+
+def _bucket_shapes_from_metadata(metadata: pl.DataFrame) -> tuple[BucketSpec, ...]:
+    if "n" not in metadata.columns:
+        raise ValueError('metadata must contain an "n" column for bucket assignment')
+    return tuple(
+        BucketSpec(max_nodes=int(n_nodes), max_nnz=int(n_entries))
+        for n_nodes, n_entries in zip(
+            metadata.get_column("n").to_list(),
+            metadata.get_column("n_entries").to_list(),
+            strict=True,
+        )
+    )
+
+
+def _node_count(linearg: Any) -> int:
+    if isinstance(linearg, JaxLinearARG):
+        return int(linearg.indptr.shape[0] - 1)
+    return int(linearg.A.shape[0])
+
+
+def _edge_count(linearg: Any) -> int:
+    if isinstance(linearg, JaxLinearARG):
+        return int(linearg.indices.shape[0])
+    return int(linearg.A.nnz)
+
+
+def _n_variants(linearg: Any) -> int:
+    if isinstance(linearg, JaxLinearARG):
+        return int(linearg.n_variants)
+    return int(linearg.shape[1])
+
+
+def _n_samples(linearg: Any) -> int:
+    if isinstance(linearg, JaxLinearARG):
+        return int(linearg.n_samples)
+    return int(linearg.shape[0])
+
+
+def _as_single_bucket_spec(bucket: Any) -> BucketSpec | None:
+    if isinstance(bucket, BucketSpec):
+        return bucket
+    if isinstance(bucket, (str, bytes)):
+        return None
+    try:
+        values = tuple(bucket)
+    except TypeError:
+        return None
+    if len(values) != 2 or not all(_is_int_like(value) for value in values):
+        return None
+    return BucketSpec(max_nodes=int(values[0]), max_nnz=int(values[1]))
+
+
+def _is_int_like(value: Any) -> bool:
+    return isinstance(value, (int, np.integer))
 
 
 def _validate_mesh(mesh: Any) -> None:
