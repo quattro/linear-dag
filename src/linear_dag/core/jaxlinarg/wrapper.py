@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import polars as pl
 
-from jax.sharding import PartitionSpec as P
+from jax.sharding import AbstractMesh, Mesh, PartitionSpec as P
 
 from linear_dag.core.lineararg import list_blocks
 
@@ -148,6 +148,9 @@ class JaxParallelOperator(eqx.Module):
         n_samples = {block.n_samples for block in self.blocks}
         if len(n_samples) != 1:
             raise ValueError("all blocks must have the same n_samples")
+        dtypes = {jnp.dtype(block.dtype) for block in self.blocks}
+        if len(dtypes) != 1:
+            raise ValueError("all blocks must have the same dtype")
 
         if len(self.variant_offsets) != len(self.blocks) + 1:
             raise ValueError("variant_offsets length must be n_blocks + 1")
@@ -393,6 +396,8 @@ def _is_int_like(value: Any) -> bool:
 
 
 def _validate_mesh(mesh: Any) -> None:
+    if not isinstance(mesh, (Mesh, AbstractMesh)):
+        raise TypeError("mesh must be a jax.sharding.Mesh or jax.sharding.AbstractMesh")
     if _mesh_device_count(mesh) < 1:
         raise ValueError("mesh must contain at least one device")
     axis_names = tuple(getattr(mesh, "axis_names", ()))
@@ -424,12 +429,16 @@ def _validate_block_ranges(
 
 
 def _mesh_device_count(mesh: Any) -> int:
+    if isinstance(mesh, AbstractMesh):
+        return int(np.prod(tuple(mesh.shape.values()), dtype=np.int64))
     return int(np.asarray(getattr(mesh, "devices", ())).size)
 
 
 def _mesh_blocks_axis_size(mesh: Any) -> int:
     _validate_mesh(mesh)
     axis_names = tuple(getattr(mesh, "axis_names", ()))
+    if isinstance(mesh, AbstractMesh):
+        return int(mesh.shape["blocks"])
     devices = np.asarray(mesh.devices)
     axis_index = axis_names.index("blocks")
     if devices.ndim <= axis_index:

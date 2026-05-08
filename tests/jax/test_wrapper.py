@@ -10,7 +10,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from jax.sharding import Mesh
+from jax.sharding import AbstractMesh, Mesh
 from scipy import sparse
 
 from linear_dag.core.jaxlinarg import (
@@ -47,11 +47,11 @@ def _fixture_operator(linarg_h5_path, linarg_block_metadata, *, mesh: Mesh | Non
     )
 
 
-def _tiny_block(*, n_samples: int = 1, n_variants: int = 1) -> JaxLinearARG:
+def _tiny_block(*, n_samples: int = 1, n_variants: int = 1, dtype=jnp.float32) -> JaxLinearARG:
     return JaxLinearARG.from_lineararg_arrays(
         indptr=np.array([0, 1, 1], dtype=np.int32),
         indices=np.array([1], dtype=np.int32),
-        data=np.ones(1, dtype=np.float32),
+        data=np.ones(1, dtype=np.dtype(dtype)),
         src_of_edge=np.array([0], dtype=np.int32),
         variant_indices=np.array([0], dtype=np.int32),
         flip=np.array([False]),
@@ -60,7 +60,7 @@ def _tiny_block(*, n_samples: int = 1, n_variants: int = 1) -> JaxLinearARG:
         n_variants=n_variants,
         n_samples=n_samples,
         backend=Backend.PURE_JAX,
-        dtype=jnp.float32,
+        dtype=dtype,
     )
 
 
@@ -98,13 +98,27 @@ def test_jax_parallel_operator_construction_from_hdf5_blocks(
 
 def test_jax_parallel_operator_construction_rejects_empty_mesh():
     block = _tiny_block()
-    empty_mesh = SimpleNamespace(devices=np.asarray([]), axis_names=("blocks",))
+    empty_mesh = Mesh(np.asarray([]), ("blocks",))
 
     with pytest.raises(ValueError, match="mesh must contain at least one device"):
         JaxParallelOperator(
             blocks=(block,),
             variant_offsets=(0, 1),
             mesh=empty_mesh,
+            backend=Backend.PURE_JAX,
+            block_ranges=((0, 1),),
+        )
+
+
+def test_jax_parallel_operator_construction_rejects_fake_mesh():
+    block = _tiny_block()
+    fake_mesh = SimpleNamespace(devices=np.asarray(jax.devices()[:1]), axis_names=("blocks",))
+
+    with pytest.raises(TypeError, match="jax.sharding.Mesh"):
+        JaxParallelOperator(
+            blocks=(block,),
+            variant_offsets=(0, 1),
+            mesh=fake_mesh,
             backend=Backend.PURE_JAX,
             block_ranges=((0, 1),),
         )
@@ -128,6 +142,24 @@ def test_jax_parallel_operator_construction_rejects_mismatched_sample_counts():
     second = _tiny_block(n_samples=2)
 
     with pytest.raises(ValueError, match="same n_samples"):
+        JaxParallelOperator(
+            blocks=(first, second),
+            variant_offsets=(0, 1, 2),
+            mesh=_mesh(),
+            backend=Backend.PURE_JAX,
+            block_ranges=((0, 2),),
+        )
+
+
+@pytest.mark.skipif(
+    not jax.config.read("jax_enable_x64"),
+    reason="requires JAX_ENABLE_X64=1 to preserve float64 block dtype",
+)
+def test_jax_parallel_operator_construction_rejects_mixed_block_dtypes():
+    first = _tiny_block(dtype=jnp.float32)
+    second = _tiny_block(dtype=jnp.float64)
+
+    with pytest.raises(ValueError, match="same dtype"):
         JaxParallelOperator(
             blocks=(first, second),
             variant_offsets=(0, 1, 2),
@@ -167,7 +199,7 @@ def test_jax_parallel_operator_construction_rejects_offsets_that_mismatch_blocks
 def test_jax_parallel_operator_construction_rejects_block_ranges_that_do_not_cover_mesh_axis():
     first = _tiny_block(n_variants=1)
     second = _tiny_block(n_variants=1)
-    mesh = SimpleNamespace(devices=np.asarray([0, 1]), axis_names=("blocks",))
+    mesh = AbstractMesh((2,), ("blocks",))
 
     with pytest.raises(ValueError, match="block_ranges"):
         JaxParallelOperator(
@@ -182,7 +214,7 @@ def test_jax_parallel_operator_construction_rejects_block_ranges_that_do_not_cov
 def test_jax_parallel_operator_construction_rejects_noncontiguous_block_ranges():
     first = _tiny_block(n_variants=1)
     second = _tiny_block(n_variants=1)
-    mesh = SimpleNamespace(devices=np.asarray([0, 1]), axis_names=("blocks",))
+    mesh = AbstractMesh((2,), ("blocks",))
 
     with pytest.raises(ValueError, match="contiguous"):
         JaxParallelOperator(
