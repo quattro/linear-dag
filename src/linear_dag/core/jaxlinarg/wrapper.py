@@ -12,7 +12,7 @@ from jax.sharding import AbstractMesh, Mesh, PartitionSpec as P
 
 from linear_dag.core.lineararg import list_blocks
 
-from .operator import Backend, JaxLinearARG
+from .operator import Backend, JaxLinearARG, resolve_backend
 from .padding import BucketSpec, choose_bucket, choose_buckets
 
 _KERNELS_MESSAGE = "JaxLinearARG numerical kernels are implemented in Phase 2"
@@ -169,6 +169,11 @@ class JaxParallelOperator(eqx.Module):
         dtypes = {jnp.dtype(block.dtype) for block in self.blocks}
         if len(dtypes) != 1:
             raise ValueError("all blocks must have the same dtype")
+        _validate_jax_block_settings(
+            self.blocks,
+            backend=self.backend,
+            level_schedule=self.level_schedule,
+        )
 
         if len(self.variant_offsets) != len(self.blocks) + 1:
             raise ValueError("variant_offsets length must be n_blocks + 1")
@@ -349,6 +354,11 @@ def _as_jax_block(
     level_schedule: bool,
 ) -> JaxLinearARG:
     if isinstance(linearg, JaxLinearARG):
+        _validate_jax_block_settings(
+            (linearg,),
+            backend=backend,
+            level_schedule=level_schedule,
+        )
         return linearg
     return JaxLinearARG.from_lineararg(
         linearg,
@@ -356,6 +366,27 @@ def _as_jax_block(
         bucket=bucket,
         level_schedule=level_schedule,
     )
+
+
+def _validate_jax_block_settings(
+    blocks: tuple[JaxLinearARG, ...],
+    *,
+    backend: Backend,
+    level_schedule: bool,
+) -> None:
+    expected_backend = resolve_backend(backend)
+    expected_level_schedule = bool(level_schedule)
+    for block in blocks:
+        if block.backend is not expected_backend:
+            raise ValueError(
+                "prebuilt JaxLinearARG block backend must match requested wrapper backend; "
+                f"expected {expected_backend.value}, observed {block.backend.value}"
+            )
+        if block.level_schedule is not expected_level_schedule:
+            raise ValueError(
+                "prebuilt JaxLinearARG block level_schedule must match requested wrapper level_schedule; "
+                f"expected {expected_level_schedule}, observed {block.level_schedule}"
+            )
 
 
 def _metadata_from_lineargs(lineargs: tuple[Any, ...]) -> pl.DataFrame:
