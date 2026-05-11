@@ -18,6 +18,7 @@ def from_lineararg(
     *,
     backend: Backend = Backend.AUTO,
     bucket: BucketSpec | None = None,
+    level_schedule: bool = False,
     dtype: Any = None,
 ) -> JaxLinearARG:
     dtype = jnp.float32 if dtype is None else jnp.dtype(dtype)
@@ -61,6 +62,7 @@ def from_lineararg(
         n_samples=int(linarg.shape[0]),
         n_nonunique_indices=n_nonunique_indices,
         backend=backend,
+        level_schedule=level_schedule,
         dtype=dtype,
     )
 
@@ -71,11 +73,18 @@ def from_hdf5_block(
     *,
     backend: Backend = Backend.AUTO,
     bucket: BucketSpec | None = None,
+    level_schedule: bool = False,
     load_metadata: bool = False,
     dtype: Any = None,
 ) -> JaxLinearARG:
     linarg = LinearARG.read(path, block=block, load_metadata=load_metadata)
-    return from_lineararg(linarg, backend=backend, bucket=bucket, dtype=dtype)
+    return from_lineararg(
+        linarg,
+        backend=backend,
+        bucket=bucket,
+        level_schedule=level_schedule,
+        dtype=dtype,
+    )
 
 
 def _as_csc(matrix: Any) -> sparse.csc_matrix:

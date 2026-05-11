@@ -18,9 +18,14 @@ class LevelSchedule(NamedTuple):
     level_offsets: np.ndarray
 
 
+def is_pallas_import_available() -> bool:
+    """Return whether the Pallas module imported successfully."""
+    return pl is not None
+
+
 def is_pallas_gpu_available() -> bool:
     """Return whether the Pallas GPU backend can be used by this process."""
-    return jax.default_backend() == "gpu" and pl is not None
+    return jax.default_backend() in {"gpu", "cuda", "rocm"} and is_pallas_import_available()
 
 
 def compute_level_schedule(indptr: Any, indices: Any) -> LevelSchedule:
@@ -250,15 +255,17 @@ def _call_kernel(
 
 
 def _check_level_schedule(schedule: LevelSchedule, *, n_edges: int) -> None:
-    if schedule.edge_order.ndim != 1:
+    edge_order = np.asarray(schedule.edge_order, dtype=np.int32)
+    level_offsets = np.asarray(schedule.level_offsets, dtype=np.int32)
+    if edge_order.ndim != 1:
         raise ValueError("level schedule edge_order must be rank 1")
-    if schedule.level_offsets.ndim != 1:
+    if level_offsets.ndim != 1:
         raise ValueError("level schedule level_offsets must be rank 1")
-    if int(schedule.edge_order.shape[0]) != n_edges:
+    if int(edge_order.shape[0]) != n_edges:
         raise ValueError("level schedule edge_order length must match the edge count")
-    if schedule.level_offsets.shape[0] == 0:
+    if level_offsets.shape[0] == 0:
         raise ValueError("level schedule level_offsets must contain at least one entry")
-    if int(schedule.level_offsets[0]) != 0 or int(schedule.level_offsets[-1]) != n_edges:
+    if int(level_offsets[0]) != 0 or int(level_offsets[-1]) != n_edges:
         raise ValueError("level schedule offsets must span the edge count")
 
 

@@ -50,8 +50,27 @@ def _isolate_ffi_cpu_availability_cache():
 def test_auto_backend_resolves_by_platform_and_ffi_availability(monkeypatch, platform, available, expected):
     monkeypatch.setattr(jaxlinarg_operator.jax, "default_backend", lambda: platform)
     monkeypatch.setattr(jaxlinarg_operator.ffi_cpu, "is_ffi_cpu_available", lambda: available)
+    if expected is Backend.PALLAS_GPU:
+        monkeypatch.setattr(jaxlinarg_operator.pallas_gpu, "pl", object())
 
     assert jaxlinarg_operator.resolve_backend(Backend.AUTO) is expected
+
+
+def test_auto_backend_falls_back_to_pure_jax_when_pallas_import_is_unavailable(monkeypatch):
+    monkeypatch.setattr(jaxlinarg_operator.jax, "default_backend", lambda: "gpu")
+    monkeypatch.setattr(jaxlinarg_operator.pallas_gpu, "pl", None)
+
+    assert jaxlinarg_operator.resolve_backend(Backend.AUTO) is Backend.PURE_JAX
+
+
+def test_explicit_pallas_gpu_rejects_gpu_platform_when_pallas_import_is_unavailable(monkeypatch):
+    monkeypatch.setattr(jaxlinarg_operator.pallas_gpu, "pl", None)
+
+    with pytest.raises(
+        ValueError,
+        match="PALLAS_GPU backend is unavailable.*platform 'gpu'.*Pallas import",
+    ):
+        jaxlinarg_operator.resolve_backend(Backend.PALLAS_GPU, platform="gpu")
 
 
 def test_explicit_ffi_cpu_resolves_to_pure_jax_when_handler_is_absent(monkeypatch):

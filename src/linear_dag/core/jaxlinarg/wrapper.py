@@ -77,6 +77,8 @@ class JaxParallelOperator(eqx.Module):
     - `variant_offsets`: Leading-zero cumulative variant offsets.
     - `mesh`: JAX mesh containing a `"blocks"` axis.
     - `backend`: Requested numerical backend.
+    - `level_schedule`: Whether block-level Pallas GPU dispatch should use
+      precomputed level schedules.
     - `block_ranges`: Contiguous block ranges assigned to mesh devices.
     """
 
@@ -85,6 +87,7 @@ class JaxParallelOperator(eqx.Module):
     mesh: Any = eqx.field(static=True)
     block_ranges: tuple[tuple[int, int], ...] = eqx.field(converter=_range_tuple, static=True)
     backend: Backend = eqx.field(default=Backend.AUTO, converter=Backend, static=True)
+    level_schedule: bool = eqx.field(default=False, converter=bool, static=True)
 
     @classmethod
     def from_linearargs(
@@ -94,11 +97,17 @@ class JaxParallelOperator(eqx.Module):
         mesh: Any,
         backend: Backend = Backend.AUTO,
         buckets: Any = "auto",
+        level_schedule: bool = False,
     ) -> "JaxParallelOperator":
         lineargs = tuple(lineargs)
         metadata = _metadata_from_lineargs(lineargs)
         blocks = tuple(
-            _as_jax_block(linearg, backend=backend, bucket=bucket)
+            _as_jax_block(
+                linearg,
+                backend=backend,
+                bucket=bucket,
+                level_schedule=level_schedule,
+            )
             for linearg, bucket in _zip_buckets(
                 lineargs,
                 buckets,
@@ -110,6 +119,7 @@ class JaxParallelOperator(eqx.Module):
             variant_offsets=variant_offsets_from_metadata(metadata),
             mesh=mesh,
             backend=backend,
+            level_schedule=level_schedule,
             block_ranges=split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh)),
         )
 
@@ -122,11 +132,18 @@ class JaxParallelOperator(eqx.Module):
         block_metadata: pl.DataFrame | None = None,
         backend: Backend = Backend.AUTO,
         buckets: Any = "auto",
+        level_schedule: bool = False,
     ) -> "JaxParallelOperator":
         metadata = list_blocks(path) if block_metadata is None else block_metadata
         block_names = metadata.get_column("block_name").to_list()
         blocks = tuple(
-            JaxLinearARG.from_hdf5_block(path, block_name, backend=backend, bucket=bucket)
+            JaxLinearARG.from_hdf5_block(
+                path,
+                block_name,
+                backend=backend,
+                bucket=bucket,
+                level_schedule=level_schedule,
+            )
             for block_name, bucket in _zip_buckets(
                 block_names,
                 buckets,
@@ -138,6 +155,7 @@ class JaxParallelOperator(eqx.Module):
             variant_offsets=variant_offsets_from_metadata(metadata),
             mesh=mesh,
             backend=backend,
+            level_schedule=level_schedule,
             block_ranges=split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh)),
         )
 
@@ -323,10 +341,21 @@ def _zip_buckets(
     return tuple(zip(values, bucket_values, strict=True))
 
 
-def _as_jax_block(linearg: Any, *, backend: Backend, bucket: Any) -> JaxLinearARG:
+def _as_jax_block(
+    linearg: Any,
+    *,
+    backend: Backend,
+    bucket: Any,
+    level_schedule: bool,
+) -> JaxLinearARG:
     if isinstance(linearg, JaxLinearARG):
         return linearg
-    return JaxLinearARG.from_lineararg(linearg, backend=backend, bucket=bucket)
+    return JaxLinearARG.from_lineararg(
+        linearg,
+        backend=backend,
+        bucket=bucket,
+        level_schedule=level_schedule,
+    )
 
 
 def _metadata_from_lineargs(lineargs: tuple[Any, ...]) -> pl.DataFrame:
