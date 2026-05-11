@@ -100,6 +100,7 @@ class JaxParallelOperator(eqx.Module):
         level_schedule: bool = False,
     ) -> "JaxParallelOperator":
         lineargs = tuple(lineargs)
+        backend = _backend_for_lineargs(lineargs, backend=backend)
         metadata = _metadata_from_lineargs(lineargs)
         blocks = tuple(
             _as_jax_block(
@@ -368,13 +369,36 @@ def _as_jax_block(
     )
 
 
+def _backend_for_lineargs(lineargs: tuple[Any, ...], *, backend: Backend) -> Backend:
+    requested_backend = Backend(backend)
+    if requested_backend is not Backend.AUTO:
+        return requested_backend
+    if not lineargs or not all(isinstance(linearg, JaxLinearARG) for linearg in lineargs):
+        return requested_backend
+
+    prebuilt_backends = {linearg.backend for linearg in lineargs}
+    if len(prebuilt_backends) != 1:
+        observed = ", ".join(sorted(block_backend.value for block_backend in prebuilt_backends))
+        raise ValueError(
+            "prebuilt JaxLinearARG block backends must be consistent when wrapper backend is AUTO; "
+            f"observed {observed}"
+        )
+    return next(iter(prebuilt_backends))
+
+
 def _validate_jax_block_settings(
     blocks: tuple[JaxLinearARG, ...],
     *,
     backend: Backend,
     level_schedule: bool,
 ) -> None:
-    expected_backend = resolve_backend(backend)
+    requested_backend = Backend(backend)
+    if requested_backend is Backend.AUTO:
+        expected_backend = _backend_for_lineargs(blocks, backend=requested_backend)
+        if expected_backend is Backend.AUTO:
+            expected_backend = resolve_backend(expected_backend)
+    else:
+        expected_backend = resolve_backend(requested_backend)
     expected_level_schedule = bool(level_schedule)
     for block in blocks:
         if block.backend is not expected_backend:

@@ -356,18 +356,45 @@ def test_jax_parallel_operator_from_linearargs_rejects_prebuilt_level_schedule_m
         )
 
 
-def test_jax_parallel_operator_from_linearargs_rejects_prebuilt_backend_mismatch(monkeypatch):
+def test_jax_parallel_operator_from_linearargs_auto_accepts_consistent_prebuilt_backend(monkeypatch):
     block = JaxLinearARG.from_lineararg(
         _lineararg_with_graph_shape(n_nodes=3, n_edges=2),
         backend=Backend.PURE_JAX,
     )
-    monkeypatch.setattr("linear_dag.core.jaxlinarg.wrapper.resolve_backend", lambda backend: Backend.FFI_CPU)
+
+    def resolve_backend(requested):
+        requested = Backend(requested)
+        return Backend.FFI_CPU if requested is Backend.AUTO else requested
+
+    monkeypatch.setattr("linear_dag.core.jaxlinarg.wrapper.resolve_backend", resolve_backend)
+
+    op = JaxParallelOperator.from_linearargs(
+        (block,),
+        mesh=_mesh(),
+        buckets=None,
+    )
+
+    assert op.backend is Backend.PURE_JAX
+    assert op.blocks == (block,)
+
+
+def test_jax_parallel_operator_from_linearargs_rejects_explicit_prebuilt_backend_mismatch(monkeypatch):
+    block = JaxLinearARG.from_lineararg(
+        _lineararg_with_graph_shape(n_nodes=3, n_edges=2),
+        backend=Backend.PURE_JAX,
+    )
+
+    def resolve_backend(requested):
+        requested = Backend(requested)
+        return Backend.FFI_CPU if requested is Backend.FFI_CPU else requested
+
+    monkeypatch.setattr("linear_dag.core.jaxlinarg.wrapper.resolve_backend", resolve_backend)
 
     with pytest.raises(ValueError, match="backend"):
         JaxParallelOperator.from_linearargs(
             (block,),
             mesh=_mesh(),
-            backend=Backend.AUTO,
+            backend=Backend.FFI_CPU,
             buckets=None,
         )
 
