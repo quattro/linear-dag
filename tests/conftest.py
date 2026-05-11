@@ -8,6 +8,15 @@ import pytest
 from tests.helpers.linarg_fixtures import get_first_block_name, load_block_metadata
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--runbench",
+        action="store_true",
+        default=False,
+        help="run opt-in benchmark tests",
+    )
+
+
 @pytest.fixture(scope="session")
 def test_data_dir() -> Path:
     return Path(__file__).parent / "testdata"
