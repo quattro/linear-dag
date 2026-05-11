@@ -85,11 +85,11 @@ def _time_backend(
     cython_results: dict[int, float],
 ) -> list[BenchmarkResult]:
     op = JaxLinearARG.from_lineararg(linarg, backend=backend, dtype=jnp.float32)
-    matmat = jax.jit(lambda matrix: op.matmat(matrix))
     results = []
     for k, matrix in inputs.items():
         jax_matrix = jnp.asarray(matrix)
-        runtime = _time_call(lambda matrix=jax_matrix: matmat(matrix), block_until_ready=True)
+        matmat = jax.jit(lambda values: op.matmat(values)).lower(jax_matrix).compile()
+        runtime = _time_call(lambda matrix=jax_matrix, matmat=matmat: matmat(matrix), block_until_ready=True)
         results.append(
             BenchmarkResult(
                 str(op.backend),
@@ -107,19 +107,19 @@ def _time_pure_jax_cpu(linarg: LinearARG, inputs: dict[int, np.ndarray]) -> list
         pytest.skip("GPU benchmark requires a CPU device for PURE_JAX_CPU baseline")
     with jax.default_device(cpu_devices[0]):
         op = JaxLinearARG.from_lineararg(linarg, backend=Backend.PURE_JAX, dtype=jnp.float32)
-        matmat = jax.jit(lambda matrix: op.matmat(matrix))
-        return [
-            BenchmarkResult(
-                "pure_jax_cpu",
-                k,
-                _time_call(
-                    lambda matrix=jnp.asarray(matrix): matmat(matrix),
-                    block_until_ready=True,
-                ),
-                None,
+        results = []
+        for k, matrix in inputs.items():
+            jax_matrix = jnp.asarray(matrix)
+            matmat = jax.jit(lambda values: op.matmat(values)).lower(jax_matrix).compile()
+            results.append(
+                BenchmarkResult(
+                    "pure_jax_cpu",
+                    k,
+                    _time_call(lambda matrix=jax_matrix, matmat=matmat: matmat(matrix), block_until_ready=True),
+                    None,
+                )
             )
-            for k, matrix in inputs.items()
-        ]
+        return results
 
 
 def _time_call(call: Callable[[], Any], *, block_until_ready: bool = False) -> float:
