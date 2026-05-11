@@ -29,6 +29,15 @@ def _minimal_operator_kwargs() -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _isolate_ffi_cpu_availability_cache():
+    jaxlinarg_operator.ffi_cpu._load_ffi_cpu_impl.cache_clear()
+    jaxlinarg_operator.ffi_cpu.is_ffi_cpu_available.cache_clear()
+    yield
+    jaxlinarg_operator.ffi_cpu._load_ffi_cpu_impl.cache_clear()
+    jaxlinarg_operator.ffi_cpu.is_ffi_cpu_available.cache_clear()
+
+
 @pytest.mark.parametrize(
     ("platform", "available", "expected"),
     [
