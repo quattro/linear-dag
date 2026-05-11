@@ -3,14 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from tests.helpers.linarg_fixtures import get_first_block_name, load_lineararg_block
 
 
-def test_fixture_paths_are_resolved(test_data_dir: Path, linarg_h5_path: Path, phenotypes_tsv_path: Path):
+def test_fixture_paths_are_resolved(
+    request: pytest.FixtureRequest,
+    test_data_dir: Path,
+    linarg_h5_path: Path,
+    phenotypes_tsv_path: Path,
+):
     assert test_data_dir.exists()
     assert linarg_h5_path.exists()
-    assert linarg_h5_path.name == "test_chr21_50.h5"
+    if request.config.getoption("--linarg-h5-path") is None:
+        assert linarg_h5_path.name == "test_chr21_50.h5"
     assert phenotypes_tsv_path.exists()
     assert phenotypes_tsv_path.name == "phenotypes_50.tsv"
 
