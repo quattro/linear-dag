@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 from linear_dag.core.jaxlinarg.kernels import pallas_gpu
 
 
@@ -21,11 +22,59 @@ def _require_pallas_gpu() -> None:
         )
 
 
+def _src_of_edge(indptr: np.ndarray) -> np.ndarray:
+    return np.repeat(np.arange(indptr.shape[0] - 1, dtype=np.int32), np.diff(indptr))
+
+
+def _operator_from_case(oracle_case, *, level_schedule: bool) -> JaxLinearARG:
+    linarg = oracle_case.linarg
+    return JaxLinearARG.from_lineararg_arrays(
+        indptr=linarg.A.indptr,
+        indices=linarg.A.indices,
+        data=linarg.A.data,
+        src_of_edge=_src_of_edge(linarg.A.indptr),
+        variant_indices=linarg.variant_indices,
+        flip=linarg.flip,
+        sample_indices=linarg.sample_indices,
+        nonunique_indices=linarg.nonunique_indices,
+        n_variants=linarg.shape[1],
+        n_samples=linarg.shape[0],
+        backend=Backend.PALLAS_GPU,
+        dtype=jnp.float32,
+        level_schedule=level_schedule,
+    )
+
+
 def test_pallas_gpu_availability_is_false_without_gpu_backend() -> None:
     if jax.default_backend() == "gpu":
         pytest.skip("default JAX backend is GPU; availability is covered by integration tests")
 
     assert not pallas_gpu.is_pallas_gpu_available()
+
+
+def test_compute_level_schedule_groups_edges_by_source_wavefront() -> None:
+    schedule = pallas_gpu.compute_level_schedule(
+        np.asarray([0, 2, 3, 3], dtype=np.int32),
+        np.asarray([1, 2, 2], dtype=np.int32),
+    )
+
+    np.testing.assert_array_equal(schedule.edge_order, np.asarray([0, 1, 2], dtype=np.int32))
+    np.testing.assert_array_equal(schedule.level_offsets, np.asarray([0, 2, 3], dtype=np.int32))
+
+
+def test_jax_lineararg_pallas_gpu_level_schedule_matches_oracle(oracle_case) -> None:
+    _require_pallas_gpu()
+    op = _operator_from_case(oracle_case, level_schedule=True)
+
+    xw = np.asarray(op.matmat(oracle_case.w))
+    xty = np.asarray(op.rmatmat(oracle_case.y))
+
+    assert op.backend is Backend.PALLAS_GPU
+    assert op.level_schedule is True
+    assert xw.shape == oracle_case.Xw.shape
+    assert xty.shape == oracle_case.XTy.shape
+    np.testing.assert_allclose(xw, oracle_case.Xw, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(xty, oracle_case.XTy, rtol=1e-5, atol=1e-5)
 
 
 def test_pallas_gpu_forward_kernel_matches_oracle_case(oracle_case) -> None:

@@ -90,6 +90,8 @@ class JaxLinearARG(eqx.Module):
     - `n_variants`: Number of variants in genotype space.
     - `n_samples`: Number of samples in genotype space.
     - `backend`: Requested numerical backend.
+    - `level_schedule`: Whether Pallas GPU dispatch should use the
+      level-scheduling branch.
     - `dtype`: Computation dtype.
     - `transpose`: Whether this view is transposed.
     """
@@ -108,6 +110,7 @@ class JaxLinearARG(eqx.Module):
     n_nonunique_indices: int = eqx.field(default=-1, static=True)
     min_index_to_keep: int = eqx.field(default=0, static=True)
     backend: Backend = eqx.field(default=Backend.AUTO, converter=resolve_backend, static=True)
+    level_schedule: bool = eqx.field(default=False, converter=bool, static=True)
     dtype: Any = eqx.field(default=jnp.float32, converter=jnp.dtype, static=True)
     transpose: bool = eqx.field(default=False, converter=bool, static=True)
 
@@ -128,6 +131,7 @@ class JaxLinearARG(eqx.Module):
         n_nonunique_indices: int | None = None,
         allele_counts: Any | None = None,
         backend: Backend = Backend.AUTO,
+        level_schedule: bool = False,
         dtype: Any = jnp.float32,
     ) -> "JaxLinearARG":
         node_count = int(jnp.asarray(indptr).shape[0]) - 1
@@ -158,6 +162,7 @@ class JaxLinearARG(eqx.Module):
             n_nonunique_indices=n_nonunique_indices,
             min_index_to_keep=min_index_to_keep,
             backend=backend,
+            level_schedule=level_schedule,
             dtype=dtype,
         )
 
@@ -305,6 +310,7 @@ class JaxLinearARG(eqx.Module):
             self.src_of_edge,
             self.nonunique_indices,
             self.min_index_to_keep,
+            self.level_schedule,
             b,
         )
         flip_sum = jnp.sum(x * self.flip.astype(x.dtype)[:, None], axis=0)
@@ -325,6 +331,7 @@ class JaxLinearARG(eqx.Module):
             self.src_of_edge,
             self.nonunique_indices,
             self.min_index_to_keep,
+            self.level_schedule,
             b,
         )
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
@@ -425,6 +432,7 @@ def _solve(
     src_of_edge: Any,
     nonunique_indices: Any,
     min_index_to_keep: int,
+    level_schedule: bool,
     b: Any,
 ) -> jax.Array:
     return _solve_impl(
@@ -436,13 +444,14 @@ def _solve(
         src_of_edge,
         nonunique_indices,
         min_index_to_keep,
+        level_schedule,
         b,
     )
 
 
 # custom_vjp disables forward-mode differentiation for this wrapped function;
 # reverse-mode gradients are defined by the transpose-direction solve below.
-_solve = partial(jax.custom_vjp, nondiff_argnums=(0, 1, 7))(_solve)
+_solve = partial(jax.custom_vjp, nondiff_argnums=(0, 1, 7, 8))(_solve)
 
 
 def _solve_fwd(
@@ -454,6 +463,7 @@ def _solve_fwd(
     src_of_edge: Any,
     nonunique_indices: Any,
     min_index_to_keep: int,
+    level_schedule: bool,
     b: Any,
 ) -> tuple[jax.Array, tuple[Any, Any, Any, Any, Any]]:
     result = _solve_impl(
@@ -465,6 +475,7 @@ def _solve_fwd(
         src_of_edge,
         nonunique_indices,
         min_index_to_keep,
+        level_schedule,
         b,
     )
     return result, (indptr, indices, data, src_of_edge, nonunique_indices)
@@ -474,6 +485,7 @@ def _solve_bwd(
     backend: Backend,
     direction: str,
     min_index_to_keep: int,
+    level_schedule: bool,
     residual: tuple[Any, Any, Any, Any, Any],
     grad: Any,
 ) -> tuple[None, None, None, None, None, jax.Array]:
@@ -488,6 +500,7 @@ def _solve_bwd(
         src_of_edge,
         nonunique_indices,
         min_index_to_keep,
+        level_schedule,
         grad,
     )
     return None, None, None, None, None, grad_b
@@ -505,6 +518,7 @@ def _solve_impl(
     src_of_edge: Any,
     nonunique_indices: Any,
     min_index_to_keep: int,
+    level_schedule: bool,
     b: Any,
 ) -> jax.Array:
     if backend is Backend.AUTO:
@@ -560,6 +574,31 @@ def _solve_impl(
             min_index_to_keep=min_index_to_keep,
             n_edges=int(indices.shape[0]),
         )
+    if backend is Backend.PALLAS_GPU and level_schedule:
+        schedule = pallas_gpu.compute_level_schedule(indptr, indices)
+        if direction == "forward":
+            return pallas_gpu.pallas_gpu_solve_forward_level_scheduled(
+                indptr,
+                indices,
+                data,
+                src_of_edge,
+                nonunique_indices,
+                min_index_to_keep,
+                schedule,
+                b,
+            )
+        if direction == "backward":
+            return pallas_gpu.pallas_gpu_solve_backward_level_scheduled(
+                indptr,
+                indices,
+                data,
+                src_of_edge,
+                nonunique_indices,
+                min_index_to_keep,
+                schedule,
+                b,
+            )
+        raise ValueError(f"unknown solve direction: {direction}")
     if backend is Backend.PALLAS_GPU and direction == "forward":
         return pallas_gpu.pallas_gpu_solve_forward(
             indptr,
