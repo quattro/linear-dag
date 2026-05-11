@@ -19,8 +19,9 @@ from linear_dag.core.jaxlinarg.kernels import ffi_cpu, pallas_gpu
 from linear_dag.core.lineararg import LinearARG
 
 K_VALUES = (1, 8, 64)
-WARMUP_ITERATIONS = 1
-TIMED_ITERATIONS = 3
+MIN_SAMPLE_SECONDS = 0.005
+WARMUP_ITERATIONS = 2
+TIMED_ITERATIONS = 9
 
 
 @dataclass(frozen=True)
@@ -43,23 +44,27 @@ def test_jax_lineararg_benchmark_gates(request: pytest.FixtureRequest, linarg_h5
 
     pure_jax_results = _time_backend(linarg, Backend.PURE_JAX, inputs, cython_results)
     results.extend(pure_jax_results)
-    _assert_ratio(
-        pure_jax_results,
-        backend="pure_jax",
-        k=1,
-        threshold=2.0,
-        criterion="jaxlinarg.AC8.1",
-    )
+    gate_checks = [
+        lambda: _assert_ratio(
+            pure_jax_results,
+            backend="pure_jax",
+            k=1,
+            threshold=2.0,
+            criterion="jaxlinarg.AC8.1",
+        )
+    ]
 
     if ffi_cpu.is_ffi_cpu_available():
         ffi_results = _time_backend(linarg, Backend.FFI_CPU, inputs, cython_results)
         results.extend(ffi_results)
-        _assert_ratio(
-            ffi_results,
-            backend="ffi_cpu",
-            k=1,
-            threshold=2.0,
-            criterion="jaxlinarg.AC8.2",
+        gate_checks.append(
+            lambda: _assert_ratio(
+                ffi_results,
+                backend="ffi_cpu",
+                k=1,
+                threshold=2.0,
+                criterion="jaxlinarg.AC8.2",
+            )
         )
 
     if pallas_gpu.is_pallas_gpu_available():
@@ -67,10 +72,16 @@ def test_jax_lineararg_benchmark_gates(request: pytest.FixtureRequest, linarg_h5
         results.extend(pallas_results)
         pure_jax_cpu_results = _time_pure_jax_cpu(linarg, inputs)
         results.extend(pure_jax_cpu_results)
-        _assert_gpu_speedup(pallas_results, pure_jax_cpu_results, k=8, criterion="jaxlinarg.AC7.1")
-        _assert_gpu_speedup(pallas_results, pure_jax_cpu_results, k=64, criterion="jaxlinarg.AC7.2")
+        gate_checks.extend(
+            [
+                lambda: _assert_gpu_speedup(pallas_results, pure_jax_cpu_results, k=8, criterion="jaxlinarg.AC7.1"),
+                lambda: _assert_gpu_speedup(pallas_results, pure_jax_cpu_results, k=64, criterion="jaxlinarg.AC7.2"),
+            ]
+        )
 
     _print_results(results)
+    for gate_check in gate_checks:
+        gate_check()
 
 
 def _benchmark_inputs(linarg: LinearARG) -> dict[int, np.ndarray]:
@@ -124,18 +135,34 @@ def _time_pure_jax_cpu(linarg: LinearARG, inputs: dict[int, np.ndarray]) -> list
 
 def _time_call(call: Callable[[], Any], *, block_until_ready: bool = False) -> float:
     for _ in range(WARMUP_ITERATIONS):
-        result = call()
-        if block_until_ready:
-            result.block_until_ready()
+        _call_repeated(call, repetitions=1, block_until_ready=block_until_ready)
+
+    repetitions = _calibrate_repetitions(call, block_until_ready=block_until_ready)
 
     timings = []
     for _ in range(TIMED_ITERATIONS):
         start = time.perf_counter()
+        _call_repeated(call, repetitions=repetitions, block_until_ready=block_until_ready)
+        timings.append(time.perf_counter() - start)
+    return statistics.median(timings) / repetitions
+
+
+def _calibrate_repetitions(call: Callable[[], Any], *, block_until_ready: bool) -> int:
+    repetitions = 1
+    while True:
+        start = time.perf_counter()
+        _call_repeated(call, repetitions=repetitions, block_until_ready=block_until_ready)
+        elapsed = time.perf_counter() - start
+        if elapsed >= MIN_SAMPLE_SECONDS:
+            return repetitions
+        repetitions *= 2
+
+
+def _call_repeated(call: Callable[[], Any], *, repetitions: int, block_until_ready: bool) -> None:
+    for _ in range(repetitions):
         result = call()
         if block_until_ready:
             result.block_until_ready()
-        timings.append(time.perf_counter() - start)
-    return statistics.median(timings)
 
 
 def _assert_ratio(

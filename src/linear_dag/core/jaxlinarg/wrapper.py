@@ -260,6 +260,10 @@ class JaxParallelOperator(eqx.Module):
         **Returns:**
 
         - Product with leading dimension equal to the sample count.
+
+        **Raises:**
+
+        - `ValueError`: If `x` has an incompatible rank or leading dimension.
         """
         matrix, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[1], dtype=self.blocks[0].dtype)
         result = self._matmat(matrix)
@@ -276,6 +280,10 @@ class JaxParallelOperator(eqx.Module):
         **Returns:**
 
         - Product with leading dimension equal to the total variant count.
+
+        **Raises:**
+
+        - `ValueError`: If `x` has an incompatible rank or leading dimension.
         """
         matrix, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.blocks[0].dtype)
         result = self._rmatmat(matrix)

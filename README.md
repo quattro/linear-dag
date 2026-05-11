@@ -111,6 +111,8 @@ parallel_op = JaxParallelOperator.from_hdf5(
 `Backend.FFI_CPU` when the native handler is registered and otherwise falls back
 to `Backend.PURE_JAX`. On GPU it uses `Backend.PALLAS_GPU` when Pallas is
 available and otherwise falls back to `Backend.PURE_JAX`. Explicit
+`Backend.FFI_CPU` requests also fall back to `Backend.PURE_JAX` with a warning
+when the native handler is unavailable. Explicit
 `Backend.PALLAS_GPU` requests fail fast when the current platform or Pallas
 import is unavailable.
 
