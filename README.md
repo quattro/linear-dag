@@ -11,6 +11,7 @@
 - [Installation](#installation)
 - [Python API](#python-api)
   - [The `LinearARG` object](#the-lineararg-object)
+  - [JAX LinearARG operators](#jax-lineararg-operators)
   - [Genome-wide association studies (GWAS)](#genome-wide-association-studies-gwas)
   - [Parallel and out-of-core computation](#parallel-and-out-of-core-computation)
 - [Command-line interface](#command-line-interface)
@@ -75,6 +76,48 @@ print(available_blocks)
 # Load a specific block by name
 block_to_load = available_blocks['block_name'][0]
 linarg = LinearARG.read(hdf5_path, block=block_to_load)
+```
+
+### JAX LinearARG operators
+
+The JAX operator API exposes `JaxLinearARG`, `JaxParallelOperator`, and `Backend`
+from the top-level package.
+
+```python
+import jax
+import numpy as np
+
+from jax.sharding import Mesh
+from linear_dag import Backend, JaxLinearARG, JaxParallelOperator, list_blocks
+
+hdf5_path = "path/to/merged_linarg.h5"
+block_name = list_blocks(hdf5_path)["block_name"][0]
+
+op = JaxLinearARG.from_hdf5_block(
+    hdf5_path,
+    block_name,
+    backend=Backend.AUTO,
+)
+
+mesh = Mesh(np.asarray(jax.devices()[:1]), ("blocks",))
+parallel_op = JaxParallelOperator.from_hdf5(
+    hdf5_path,
+    mesh=mesh,
+    backend=Backend.AUTO,
+)
+```
+
+`Backend.AUTO` resolves from the active JAX platform. On CPU it uses
+`Backend.FFI_CPU` when the native handler is registered and otherwise falls back
+to `Backend.PURE_JAX`. On GPU it uses `Backend.PALLAS_GPU` when Pallas is
+available and otherwise falls back to `Backend.PURE_JAX`. Explicit
+`Backend.PALLAS_GPU` requests fail fast when the current platform or Pallas
+import is unavailable.
+
+Benchmark gates are opt-in so normal test runs stay fast:
+
+```console
+pytest -p no:capture tests/jax/bench --runbench
 ```
 
 ### Genome-wide association studies (GWAS)

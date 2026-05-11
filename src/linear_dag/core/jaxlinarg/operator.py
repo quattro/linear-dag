@@ -137,6 +137,40 @@ class JaxLinearARG(eqx.Module):
         level_schedule: bool = False,
         dtype: Any = jnp.float32,
     ) -> "JaxLinearARG":
+        """Construct a JAX operator from LinearARG array components.
+
+        !!! info
+            `bucket` padding is handled by ingress helpers before this method.
+            Arrays passed here should already describe the static shape that JAX
+            will trace.
+
+        **Arguments:**
+
+        - `indptr`: CSC index pointer array.
+        - `indices`: CSC row index array.
+        - `data`: CSC edge value array.
+        - `src_of_edge`: Source node index for each edge.
+        - `variant_indices`: Variant node indices.
+        - `flip`: Allele flip flags aligned to `variant_indices`.
+        - `sample_indices`: Sample node indices.
+        - `nonunique_indices`: Optional compressed node mapping.
+        - `n_variants`: Number of variants in genotype space.
+        - `n_samples`: Number of samples in genotype space.
+        - `n_nonunique_indices`: Optional compressed-node count.
+        - `allele_counts`: Optional allele counts aligned to variants.
+        - `backend`: Requested numerical backend.
+        - `level_schedule`: Whether Pallas GPU dispatch should use a
+          precomputed level schedule.
+        - `dtype`: Computation dtype.
+
+        **Returns:**
+
+        - A [`linear_dag.core.jaxlinarg.JaxLinearARG`][].
+
+        **Raises:**
+
+        - `ValueError`: If array shapes, indices, or backend settings are invalid.
+        """
         node_count = int(jnp.asarray(indptr).shape[0]) - 1
         if nonunique_indices is None:
             nonunique_indices = jnp.arange(node_count, dtype=jnp.int32)
@@ -186,6 +220,26 @@ class JaxLinearARG(eqx.Module):
         level_schedule: bool = False,
         dtype: Any = None,
     ) -> "JaxLinearARG":
+        """Construct a JAX operator from a [`linear_dag.core.lineararg.LinearARG`][].
+
+        !!! info
+            `Backend.AUTO` resolves from the active JAX platform. CPU uses
+            `Backend.FFI_CPU` when the native handler is registered and
+            otherwise falls back to `Backend.PURE_JAX`.
+
+        **Arguments:**
+
+        - `linarg`: Source LinearARG object.
+        - `backend`: Requested numerical backend.
+        - `bucket`: Optional static padding bucket.
+        - `level_schedule`: Whether Pallas GPU dispatch should use a
+          precomputed level schedule.
+        - `dtype`: Optional computation dtype.
+
+        **Returns:**
+
+        - A [`linear_dag.core.jaxlinarg.JaxLinearARG`][].
+        """
         from .ingress import from_lineararg
 
         return from_lineararg(
@@ -208,6 +262,28 @@ class JaxLinearARG(eqx.Module):
         load_metadata: bool = False,
         dtype: Any = None,
     ) -> "JaxLinearARG":
+        """Construct a JAX operator from one HDF5 LinearARG block.
+
+        !!! info
+            `Backend.PALLAS_GPU` is only valid on GPU platforms with Pallas
+            available. Explicit Pallas requests fail fast when unavailable;
+            `Backend.AUTO` falls back according to platform rules.
+
+        **Arguments:**
+
+        - `path`: HDF5 file path.
+        - `block`: Block name inside the HDF5 file.
+        - `backend`: Requested numerical backend.
+        - `bucket`: Optional static padding bucket.
+        - `level_schedule`: Whether Pallas GPU dispatch should use a
+          precomputed level schedule.
+        - `load_metadata`: Whether to load optional LinearARG metadata.
+        - `dtype`: Optional computation dtype.
+
+        **Returns:**
+
+        - A [`linear_dag.core.jaxlinarg.JaxLinearARG`][].
+        """
         from .ingress import from_hdf5_block
 
         return from_hdf5_block(
@@ -307,11 +383,39 @@ class JaxLinearARG(eqx.Module):
         return (self.n_samples, self.n_variants)
 
     def matmat(self, x: Any) -> Any:
+        """Multiply by the represented genotype matrix.
+
+        **Arguments:**
+
+        - `x`: Rank-1 or rank-2 array with leading dimension `n_variants`.
+
+        **Returns:**
+
+        - Product with leading dimension `n_samples`.
+
+        **Raises:**
+
+        - `ValueError`: If `x` has an incompatible rank or leading dimension.
+        """
         matrix, was_vector = _as_rank2_matrix(x, expected_rows=self.n_variants, dtype=self.dtype)
         result = self._matmat(matrix)
         return result[:, 0] if was_vector else result
 
     def rmatmat(self, x: Any) -> Any:
+        """Multiply by the transpose of the represented genotype matrix.
+
+        **Arguments:**
+
+        - `x`: Rank-1 or rank-2 array with leading dimension `n_samples`.
+
+        **Returns:**
+
+        - Product with leading dimension `n_variants`.
+
+        **Raises:**
+
+        - `ValueError`: If `x` has an incompatible rank or leading dimension.
+        """
         matrix, was_vector = _as_rank2_matrix(x, expected_rows=self.n_samples, dtype=self.dtype)
         result = self._rmatmat(matrix)
         return result[:, 0] if was_vector else result

@@ -7,8 +7,11 @@ from .association import (
     run_gwas as run_gwas,
 )
 from .core import (
+    Backend as Backend,
     BrickGraph as BrickGraph,
     GRMOperator as GRMOperator,
+    JaxLinearARG as JaxLinearARG,
+    JaxParallelOperator as JaxParallelOperator,
     linear_arg_from_genotypes as linear_arg_from_genotypes,
     LinearARG as LinearARG,
     list_blocks as list_blocks,

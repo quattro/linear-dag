@@ -99,6 +99,31 @@ class JaxParallelOperator(eqx.Module):
         buckets: Any = "auto",
         level_schedule: bool = False,
     ) -> "JaxParallelOperator":
+        """Construct a multi-block JAX operator from LinearARG objects.
+
+        !!! info
+            `mesh` must have a `"blocks"` axis. When all inputs are already
+            [`linear_dag.core.jaxlinarg.JaxLinearARG`][] objects and `backend`
+            is `Backend.AUTO`, the wrapper preserves their common concrete
+            backend.
+
+        **Arguments:**
+
+        - `lineargs`: Iterable of LinearARG or JAX LinearARG blocks.
+        - `mesh`: JAX mesh with a `"blocks"` axis.
+        - `backend`: Requested numerical backend.
+        - `buckets`: Padding policy, a shared bucket, or one bucket per block.
+        - `level_schedule`: Whether Pallas GPU blocks should use precomputed
+          level schedules.
+
+        **Returns:**
+
+        - A [`linear_dag.core.jaxlinarg.JaxParallelOperator`][].
+
+        **Raises:**
+
+        - `ValueError`: If block settings, shapes, or mesh ranges are invalid.
+        """
         lineargs = tuple(lineargs)
         backend = _backend_for_lineargs(lineargs, backend=backend)
         metadata = _metadata_from_lineargs(lineargs)
@@ -135,6 +160,31 @@ class JaxParallelOperator(eqx.Module):
         buckets: Any = "auto",
         level_schedule: bool = False,
     ) -> "JaxParallelOperator":
+        """Construct a multi-block JAX operator from an HDF5 LinearARG file.
+
+        !!! info
+            Blocks are assigned to contiguous mesh ranges using HDF5 block
+            metadata. `Backend.AUTO` keeps CPU-only environments usable through
+            FFI or pure-JAX fallback.
+
+        **Arguments:**
+
+        - `path`: HDF5 file path.
+        - `mesh`: JAX mesh with a `"blocks"` axis.
+        - `block_metadata`: Optional preloaded block metadata.
+        - `backend`: Requested numerical backend.
+        - `buckets`: Padding policy, a shared bucket, or one bucket per block.
+        - `level_schedule`: Whether Pallas GPU blocks should use precomputed
+          level schedules.
+
+        **Returns:**
+
+        - A [`linear_dag.core.jaxlinarg.JaxParallelOperator`][].
+
+        **Raises:**
+
+        - `ValueError`: If metadata, block settings, shapes, or mesh ranges are invalid.
+        """
         metadata = list_blocks(path) if block_metadata is None else block_metadata
         block_names = metadata.get_column("block_name").to_list()
         blocks = tuple(
@@ -200,11 +250,33 @@ class JaxParallelOperator(eqx.Module):
         return (self.blocks[0].n_samples, self.variant_offsets[-1])
 
     def matmat(self, x: Any) -> Any:
+        """Multiply by the concatenated multi-block genotype matrix.
+
+        **Arguments:**
+
+        - `x`: Rank-1 or rank-2 array with leading dimension equal to the total
+          variant count.
+
+        **Returns:**
+
+        - Product with leading dimension equal to the sample count.
+        """
         matrix, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[1], dtype=self.blocks[0].dtype)
         result = self._matmat(matrix)
         return result[:, 0] if was_vector else result
 
     def rmatmat(self, x: Any) -> Any:
+        """Multiply by the transpose of the multi-block genotype matrix.
+
+        **Arguments:**
+
+        - `x`: Rank-1 or rank-2 array with leading dimension equal to the
+          sample count.
+
+        **Returns:**
+
+        - Product with leading dimension equal to the total variant count.
+        """
         matrix, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.blocks[0].dtype)
         result = self._rmatmat(matrix)
         return result[:, 0] if was_vector else result
