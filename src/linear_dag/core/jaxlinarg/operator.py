@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .kernels import ffi_cpu, pallas_gpu
+from .kernels import ffi_cpu, pallas_gpu, pallas_tpu
 from .kernels.pure_jax import (
     pure_jax_solve_backward_compressed,
     pure_jax_solve_forward_compressed,
@@ -33,6 +33,7 @@ class Backend(StrEnum):
     PURE_JAX = "pure_jax"
     FFI_CPU = "ffi_cpu"
     PALLAS_GPU = "pallas_gpu"
+    PALLAS_TPU = "pallas_tpu"
 
 
 def resolve_backend(requested: Backend, *, platform: str | None = None) -> Backend:
@@ -46,6 +47,10 @@ def resolve_backend(requested: Backend, *, platform: str | None = None) -> Backe
         if not _is_gpu_platform(platform) or not pallas_gpu.is_pallas_import_available():
             raise ValueError(_pallas_gpu_unavailable_message(platform))
         return Backend.PALLAS_GPU
+    if requested is Backend.PALLAS_TPU:
+        if platform != "tpu" or not pallas_tpu.is_pallas_import_available():
+            raise ValueError(_pallas_tpu_unavailable_message(platform))
+        return Backend.PALLAS_TPU
     if requested is Backend.FFI_CPU:
         if ffi_cpu.is_ffi_cpu_available():
             return Backend.FFI_CPU
@@ -74,6 +79,8 @@ class JaxLinearARG(eqx.Module):
         if the handler is unavailable, explicit FFI CPU requests warn and fall
         back to `Backend.PURE_JAX`. `Backend.PALLAS_GPU` uses Pallas kernels and
         is only available when the current JAX platform is GPU and Pallas imports.
+        `Backend.PALLAS_TPU` is an experimental TPU backend and is not selected
+        by `Backend.AUTO` while Pallas TPU support remains experimental.
 
     **Arguments:**
 
@@ -541,6 +548,15 @@ def _pallas_gpu_unavailable_message(platform: str) -> str:
     )
 
 
+def _pallas_tpu_unavailable_message(platform: str) -> str:
+    tpu_state = "available" if platform == "tpu" else "unavailable"
+    import_state = "available" if pallas_tpu.is_pallas_import_available() else "unavailable"
+    return (
+        f"PALLAS_TPU backend is unavailable on current platform '{platform}' "
+        f"(TPU platform: {tpu_state}; Pallas import: {import_state})."
+    )
+
+
 def _static_level_schedule_metadata(schedule: pallas_gpu.LevelSchedule) -> pallas_gpu.LevelSchedule:
     edge_order = tuple(int(value) for value in np.asarray(schedule.edge_order, dtype=np.int32))
     level_offsets = tuple(int(value) for value in np.asarray(schedule.level_offsets, dtype=np.int32))
@@ -760,6 +776,26 @@ def _solve_impl(
         )
     if backend is Backend.PALLAS_GPU and direction == "backward":
         return pallas_gpu.pallas_gpu_solve_backward(
+            indptr,
+            indices,
+            data,
+            src_of_edge,
+            nonunique_indices,
+            min_index_to_keep,
+            b,
+        )
+    if backend is Backend.PALLAS_TPU and direction == "forward":
+        return pallas_tpu.pallas_tpu_solve_forward(
+            indptr,
+            indices,
+            data,
+            src_of_edge,
+            nonunique_indices,
+            min_index_to_keep,
+            b,
+        )
+    if backend is Backend.PALLAS_TPU and direction == "backward":
+        return pallas_tpu.pallas_tpu_solve_backward(
             indptr,
             indices,
             data,
