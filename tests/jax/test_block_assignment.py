@@ -49,9 +49,23 @@ def test_split_blocks_by_n_entries_rejects_nonpositive_device_count(
         split_blocks_by_n_entries(linarg_block_metadata, 0)
 
 
+def test_split_blocks_by_n_entries_requires_n_entries_column():
+    metadata = pl.DataFrame({"n_variants": [2, 3]})
+
+    with pytest.raises(ValueError, match='metadata must contain columns "n_entries"'):
+        split_blocks_by_n_entries(metadata, 1)
+
+
 def test_variant_offsets_from_metadata_returns_leading_zero_cumulative_offsets():
     metadata = pl.DataFrame({"n_variants": [2, 3, 5]})
 
     offsets = variant_offsets_from_metadata(metadata)
 
     np.testing.assert_array_equal(offsets, np.array([0, 2, 5, 10], dtype=np.int64))
+
+
+def test_variant_offsets_from_metadata_requires_n_variants_column():
+    metadata = pl.DataFrame({"n_entries": [2, 3]})
+
+    with pytest.raises(ValueError, match='metadata must contain columns "n_variants"'):
+        variant_offsets_from_metadata(metadata)

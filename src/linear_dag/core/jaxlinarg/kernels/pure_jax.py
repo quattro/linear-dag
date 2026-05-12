@@ -16,11 +16,10 @@ def pure_jax_solve_forward(
     data: Any,
     src_of_edge: Any,
     b: Any,
-    *,
-    n_edges: int,
 ) -> jax.Array:
     """Solve a lower-triangular LinearARG node buffer by forward edge scan."""
     del indptr
+    n_edges = indices.shape[0]
 
     def step(carry: jax.Array, edge_index: jax.Array) -> tuple[jax.Array, None]:
         src = src_of_edge[edge_index]
@@ -39,11 +38,10 @@ def pure_jax_solve_backward(
     data: Any,
     src_of_edge: Any,
     b: Any,
-    *,
-    n_edges: int,
 ) -> jax.Array:
     """Solve a transposed LinearARG node buffer by backward edge scan."""
     del indptr
+    n_edges = indices.shape[0]
 
     def step(carry: jax.Array, edge_index: jax.Array) -> tuple[jax.Array, None]:
         src = src_of_edge[edge_index]
@@ -62,12 +60,11 @@ def pure_jax_solve_forward_compressed(
     data: Any,
     src_of_edge: Any,
     nonunique_indices: Any,
-    b: Any,
-    *,
     min_index_to_keep: int,
-    n_edges: int,
+    b: Any,
 ) -> jax.Array:
     """Solve a compressed LinearARG node buffer by forward edge scan."""
+    n_edges = indices.shape[0]
 
     def step(carry: jax.Array, edge_index: jax.Array) -> tuple[jax.Array, None]:
         src = src_of_edge[edge_index]
@@ -96,12 +93,11 @@ def pure_jax_solve_backward_compressed(
     data: Any,
     src_of_edge: Any,
     nonunique_indices: Any,
-    b: Any,
-    *,
     min_index_to_keep: int,
-    n_edges: int,
+    b: Any,
 ) -> jax.Array:
     """Solve a compressed transposed LinearARG node buffer by backward edge scan."""
+    n_edges = indices.shape[0]
 
     def step(carry: jax.Array, edge_index: jax.Array) -> tuple[jax.Array, None]:
         src = src_of_edge[edge_index]

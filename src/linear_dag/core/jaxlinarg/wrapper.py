@@ -15,13 +15,12 @@ from linear_dag.core.lineararg import list_blocks
 from .operator import Backend, JaxLinearARG, resolve_backend
 from .padding import BucketSpec, choose_bucket, choose_buckets
 
-_KERNELS_MESSAGE = "JaxLinearARG numerical kernels are implemented in Phase 2"
-
 
 def split_blocks_by_n_entries(metadata: pl.DataFrame, num_devices: int) -> tuple[tuple[int, int], ...]:
     """Split contiguous block ranges by cumulative `n_entries` weight."""
     if num_devices < 1:
         raise ValueError(f"num_devices must be positive. Observed {num_devices}.")
+    _require_metadata_columns(metadata, "n_entries")
 
     size_array = metadata.get_column("n_entries").to_numpy()
     size_cumsum = np.insert(np.cumsum(size_array), 0, 0)
@@ -40,6 +39,7 @@ def split_blocks_by_n_entries(metadata: pl.DataFrame, num_devices: int) -> tuple
 
 def variant_offsets_from_metadata(metadata: pl.DataFrame) -> np.ndarray:
     """Return leading-zero cumulative variant offsets from block metadata."""
+    _require_metadata_columns(metadata, "n_variants")
     n_variants = metadata.get_column("n_variants").to_numpy()
     return np.insert(np.cumsum(n_variants), 0, 0).astype(np.int64)
 
@@ -501,6 +501,8 @@ def _validate_jax_block_settings(
 
 
 def _metadata_from_lineargs(lineargs: tuple[Any, ...]) -> pl.DataFrame:
+    # Accept both already-converted JAX blocks and source LinearARG blocks so
+    # callers can build wrappers before or after per-block conversion.
     n_entries = []
     n_variants = []
     n_samples = []
@@ -528,8 +530,7 @@ def _metadata_from_lineargs(lineargs: tuple[Any, ...]) -> pl.DataFrame:
 
 
 def _bucket_shapes_from_metadata(metadata: pl.DataFrame) -> tuple[BucketSpec, ...]:
-    if "n" not in metadata.columns:
-        raise ValueError('metadata must contain an "n" column for bucket assignment')
+    _require_metadata_columns(metadata, "n", "n_entries")
     return tuple(
         BucketSpec(max_nodes=int(n_nodes), max_nnz=int(n_entries))
         for n_nodes, n_entries in zip(
@@ -552,6 +553,14 @@ def _as_single_bucket_spec(bucket: Any) -> BucketSpec | None:
     if len(values) != 2 or not all(isinstance(value, (int, np.integer)) for value in values):
         return None
     return BucketSpec(max_nodes=int(values[0]), max_nnz=int(values[1]))
+
+
+def _require_metadata_columns(metadata: pl.DataFrame, *columns: str) -> None:
+    missing = tuple(column for column in columns if column not in metadata.columns)
+    if missing:
+        expected = ", ".join(f'"{column}"' for column in columns)
+        observed = ", ".join(f'"{column}"' for column in metadata.columns)
+        raise ValueError(f"metadata must contain columns {expected}; observed columns: {observed}")
 
 
 def _validate_mesh(mesh: Any) -> None:

@@ -8,6 +8,8 @@ import numpy as np
 
 from scipy import sparse
 
+import linear_dag.core.jaxlinarg.operator as jaxlinarg_operator
+
 from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 from linear_dag.core.jaxlinarg.ingress import from_lineararg
 from linear_dag.core.jaxlinarg.kernels import pallas_gpu
@@ -115,7 +117,7 @@ def test_level_schedule_is_precomputed_before_solve_dispatch(monkeypatch) -> Non
         assert args[-2] == expected_schedule
         return args[-1]
 
-    monkeypatch.setattr(pallas_gpu, "pallas_gpu_solve_forward_level_scheduled", fake_forward_level_scheduled)
+    monkeypatch.setitem(jaxlinarg_operator._LEVEL_SOLVERS, "forward", fake_forward_level_scheduled)
 
     result = op.matmat(np.asarray([[2.0]], dtype=np.float32))
 

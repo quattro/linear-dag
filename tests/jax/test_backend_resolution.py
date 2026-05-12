@@ -128,7 +128,7 @@ def test_pallas_tpu_solve_dispatch_uses_tpu_kernel(monkeypatch):
         calls.append(args)
         return args[-1] + 1
 
-    monkeypatch.setattr(jaxlinarg_operator.pallas_tpu, "pallas_tpu_solve_forward", fake_solve_forward)
+    monkeypatch.setitem(jaxlinarg_operator._SOLVERS, ("forward", Backend.PALLAS_TPU), fake_solve_forward)
     op = JaxLinearARG(
         **_minimal_operator_kwargs(),
         backend=Backend.PALLAS_TPU,

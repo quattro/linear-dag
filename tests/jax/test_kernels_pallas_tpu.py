@@ -63,9 +63,8 @@ def test_pallas_tpu_forward_and_backward_match_pure_jax_in_interpret_mode() -> N
         data,
         src_of_edge,
         nonunique_indices,
+        min_index_to_keep,
         b,
-        min_index_to_keep=min_index_to_keep,
-        n_edges=int(indices.shape[0]),
     )
     backward = pallas_tpu.pallas_tpu_solve_backward(
         indptr,
@@ -83,9 +82,8 @@ def test_pallas_tpu_forward_and_backward_match_pure_jax_in_interpret_mode() -> N
         data,
         src_of_edge,
         nonunique_indices,
+        min_index_to_keep,
         backward_b,
-        min_index_to_keep=min_index_to_keep,
-        n_edges=int(indices.shape[0]),
     )
 
     np.testing.assert_allclose(np.asarray(forward), np.asarray(expected_forward), rtol=1e-6, atol=1e-6)

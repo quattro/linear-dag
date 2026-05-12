@@ -32,7 +32,6 @@ def test_pure_jax_forward_kernel_matches_oracle_case(oracle_case):
         jnp.asarray(linarg.A.data, dtype=w.dtype),
         jnp.asarray(_src_of_edge(linarg.A.indptr), dtype=jnp.int32),
         jnp.asarray(b),
-        n_edges=int(linarg.A.nnz),
     )
     actual = np.asarray(solved)[linarg.sample_indices] + np.sum(w[linarg.flip], axis=0)
 
@@ -51,7 +50,6 @@ def test_pure_jax_backward_kernel_matches_oracle_case(oracle_case):
         jnp.asarray(linarg.A.data, dtype=y.dtype),
         jnp.asarray(_src_of_edge(linarg.A.indptr), dtype=jnp.int32),
         jnp.asarray(b),
-        n_edges=int(linarg.A.nnz),
     )
     actual = np.asarray(solved)[linarg.variant_indices]
     if np.any(linarg.flip):

@@ -40,7 +40,6 @@ def test_pad_to_bucket_preserves_forward_solve_for_small_graph() -> None:
         jnp.asarray(data),
         jnp.asarray(compute_src_of_edge(indptr)),
         b,
-        n_edges=data.shape[0],
     )
     actual = pure_jax_solve_forward(
         jnp.asarray(padded.indptr),
@@ -48,7 +47,6 @@ def test_pad_to_bucket_preserves_forward_solve_for_small_graph() -> None:
         jnp.asarray(padded.data),
         jnp.asarray(padded.src_of_edge),
         padded_b,
-        n_edges=padded.data.shape[0],
     )
 
     np.testing.assert_array_equal(padded.indptr[: indptr.shape[0]], indptr)
@@ -81,7 +79,6 @@ def test_pad_to_bucket_preserves_forward_solve_for_real_lineararg_block(
         jnp.asarray(linarg.A.data.astype(np.float32)),
         jnp.asarray(compute_src_of_edge(linarg.A.indptr)),
         jnp.asarray(b),
-        n_edges=linarg.A.nnz,
     )
     actual = pure_jax_solve_forward(
         jnp.asarray(padded.indptr),
@@ -89,7 +86,6 @@ def test_pad_to_bucket_preserves_forward_solve_for_real_lineararg_block(
         jnp.asarray(padded.data),
         jnp.asarray(padded.src_of_edge),
         jnp.pad(jnp.asarray(b), ((0, 2), (0, 0))),
-        n_edges=padded.data.shape[0],
     )
 
     np.testing.assert_allclose(np.asarray(actual[: linarg.A.shape[0], :]), np.asarray(expected), rtol=1e-5, atol=1e-5)

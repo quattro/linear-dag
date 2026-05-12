@@ -38,6 +38,23 @@ class Backend(StrEnum):
     PALLAS_TPU = "pallas_tpu"
 
 
+_SOLVERS = {
+    ("forward", Backend.PURE_JAX): pure_jax_solve_forward_compressed,
+    ("backward", Backend.PURE_JAX): pure_jax_solve_backward_compressed,
+    ("forward", Backend.FFI_CPU): ffi_cpu.ffi_cpu_solve_forward,
+    ("backward", Backend.FFI_CPU): ffi_cpu.ffi_cpu_solve_backward,
+    ("forward", Backend.PALLAS_GPU): pallas_gpu.pallas_gpu_solve_forward,
+    ("backward", Backend.PALLAS_GPU): pallas_gpu.pallas_gpu_solve_backward,
+    ("forward", Backend.PALLAS_TPU): pallas_tpu.pallas_tpu_solve_forward,
+    ("backward", Backend.PALLAS_TPU): pallas_tpu.pallas_tpu_solve_backward,
+}
+
+_LEVEL_SOLVERS = {
+    "forward": pallas_gpu.pallas_gpu_solve_forward_level_scheduled,
+    "backward": pallas_gpu.pallas_gpu_solve_backward_level_scheduled,
+}
+
+
 def resolve_backend(requested: Backend, *, platform: str | None = None) -> Backend:
     """Resolve a requested backend to a concrete executable backend."""
     requested = Backend(requested)
@@ -83,6 +100,8 @@ class JaxLinearARG(eqx.Module):
         is only available when the current JAX platform is GPU and Pallas imports.
         `Backend.PALLAS_TPU` is an experimental TPU backend and is not selected
         by `Backend.AUTO` while Pallas TPU support remains experimental.
+        Reverse-mode autodiff is supported through custom VJP rules; forward
+        mode is not supported for the solve primitive.
 
     **Arguments:**
 
@@ -104,7 +123,6 @@ class JaxLinearARG(eqx.Module):
     - `level_schedule_metadata`: Precomputed host-side Pallas level schedule,
       present only when `level_schedule=True`.
     - `dtype`: Computation dtype.
-    - `transpose`: Whether this view is transposed.
     """
 
     indptr: Any = eqx.field(converter=jnp.asarray)
@@ -124,7 +142,6 @@ class JaxLinearARG(eqx.Module):
     level_schedule: bool = eqx.field(default=False, converter=bool, static=True)
     level_schedule_metadata: Any = eqx.field(default=None, static=True)
     dtype: Any = eqx.field(default=jnp.float32, converter=jnp.dtype, static=True)
-    transpose: bool = eqx.field(default=False, converter=bool, static=True)
 
     @classmethod
     def from_lineararg_arrays(
@@ -616,122 +633,43 @@ def _solve(
     if backend is Backend.AUTO:
         backend = resolve_backend(backend)
     if backend is Backend.FFI_CPU:
-        if ffi_cpu.is_ffi_cpu_available():
-            if direction == "forward":
-                return ffi_cpu.ffi_cpu_solve_forward(
-                    indptr,
-                    indices,
-                    data,
-                    src_of_edge,
-                    nonunique_indices,
-                    min_index_to_keep,
-                    b,
-                )
-            if direction == "backward":
-                return ffi_cpu.ffi_cpu_solve_backward(
-                    indptr,
-                    indices,
-                    data,
-                    src_of_edge,
-                    nonunique_indices,
-                    min_index_to_keep,
-                    b,
-                )
-            raise ValueError(f"unknown solve direction: {direction}")
-        warnings.warn(
-            _ffi_cpu_unavailable_message(),
-            UserWarning,
-            stacklevel=2,
-        )
-        backend = Backend.PURE_JAX
-    if backend is Backend.PURE_JAX and direction == "forward":
-        return pure_jax_solve_forward_compressed(
-            indptr,
-            indices,
-            data,
-            src_of_edge,
-            nonunique_indices,
-            b,
-            min_index_to_keep=min_index_to_keep,
-            n_edges=int(indices.shape[0]),
-        )
-    if backend is Backend.PURE_JAX and direction == "backward":
-        return pure_jax_solve_backward_compressed(
-            indptr,
-            indices,
-            data,
-            src_of_edge,
-            nonunique_indices,
-            b,
-            min_index_to_keep=min_index_to_keep,
-            n_edges=int(indices.shape[0]),
-        )
+        if not ffi_cpu.is_ffi_cpu_available():
+            warnings.warn(
+                _ffi_cpu_unavailable_message(),
+                UserWarning,
+                stacklevel=2,
+            )
+            backend = Backend.PURE_JAX
     if backend is Backend.PALLAS_GPU and level_schedule:
         schedule = _require_level_schedule_metadata(level_schedule_metadata)
-        if direction == "forward":
-            return pallas_gpu.pallas_gpu_solve_forward_level_scheduled(
-                indptr,
-                indices,
-                data,
-                src_of_edge,
-                nonunique_indices,
-                min_index_to_keep,
-                schedule,
-                b,
-            )
-        if direction == "backward":
-            return pallas_gpu.pallas_gpu_solve_backward_level_scheduled(
-                indptr,
-                indices,
-                data,
-                src_of_edge,
-                nonunique_indices,
-                min_index_to_keep,
-                schedule,
-                b,
-            )
-        raise ValueError(f"unknown solve direction: {direction}")
-    if backend is Backend.PALLAS_GPU and direction == "forward":
-        return pallas_gpu.pallas_gpu_solve_forward(
+        try:
+            solve = _LEVEL_SOLVERS[direction]
+        except KeyError as error:
+            raise ValueError(f"unknown backend/direction combination: {backend.value}/{direction}") from error
+        return solve(
             indptr,
             indices,
             data,
             src_of_edge,
             nonunique_indices,
             min_index_to_keep,
+            schedule,
             b,
         )
-    if backend is Backend.PALLAS_GPU and direction == "backward":
-        return pallas_gpu.pallas_gpu_solve_backward(
-            indptr,
-            indices,
-            data,
-            src_of_edge,
-            nonunique_indices,
-            min_index_to_keep,
-            b,
-        )
-    if backend is Backend.PALLAS_TPU and direction == "forward":
-        return pallas_tpu.pallas_tpu_solve_forward(
-            indptr,
-            indices,
-            data,
-            src_of_edge,
-            nonunique_indices,
-            min_index_to_keep,
-            b,
-        )
-    if backend is Backend.PALLAS_TPU and direction == "backward":
-        return pallas_tpu.pallas_tpu_solve_backward(
-            indptr,
-            indices,
-            data,
-            src_of_edge,
-            nonunique_indices,
-            min_index_to_keep,
-            b,
-        )
-    raise ValueError(f"unknown solve direction: {direction}")
+
+    try:
+        solve = _SOLVERS[(direction, backend)]
+    except KeyError as error:
+        raise ValueError(f"unknown backend/direction combination: {backend.value}/{direction}") from error
+    return solve(
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        min_index_to_keep,
+        b,
+    )
 
 
 def _solve_fwd(
