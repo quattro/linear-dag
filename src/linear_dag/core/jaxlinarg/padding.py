@@ -7,11 +7,15 @@ import numpy as np
 
 
 class BucketSpec(NamedTuple):
+    """Static graph dimensions used to pad a LinearARG block for JAX tracing."""
+
     max_nodes: int
     max_nnz: int
 
 
 class PaddedGraph(NamedTuple):
+    """Padded CSC graph arrays and edge-source metadata."""
+
     indptr: np.ndarray
     indices: np.ndarray
     data: np.ndarray
@@ -19,12 +23,32 @@ class PaddedGraph(NamedTuple):
 
 
 def compute_src_of_edge(indptr: Any) -> Any:
+    """Return the CSC source node for each edge implied by `indptr`."""
     indptr = np.asarray(indptr)
     n_nodes = indptr.shape[0] - 1
     return np.repeat(np.arange(n_nodes, dtype=np.int32), np.diff(indptr).astype(np.int64))
 
 
 def pad_to_bucket(indptr: Any, indices: Any, data: Any, *, max_nodes: int, max_nnz: int) -> Any:
+    """Pad CSC graph arrays to a static node and edge bucket.
+
+    **Arguments:**
+
+    - `indptr`: CSC index pointer array of length `n_nodes + 1`.
+    - `indices`: CSC destination node indices.
+    - `data`: CSC edge weights aligned to `indices`.
+    - `max_nodes`: Static node count for the padded graph.
+    - `max_nnz`: Static edge count for the padded graph.
+
+    **Returns:**
+
+    - A [`linear_dag.core.jaxlinarg.padding.PaddedGraph`][].
+
+    **Raises:**
+
+    - `ValueError`: If the input arrays are not valid CSC arrays or the bucket
+      is too small.
+    """
     indptr = np.asarray(indptr)
     indices = np.asarray(indices)
     data = np.asarray(data)
@@ -73,6 +97,21 @@ def pad_to_bucket(indptr: Any, indices: Any, data: Any, *, max_nodes: int, max_n
 
 
 def choose_bucket(shape: BucketSpec, buckets: Iterable[BucketSpec]) -> BucketSpec:
+    """Choose the first bucket that can contain `shape`.
+
+    **Arguments:**
+
+    - `shape`: Required node and edge dimensions.
+    - `buckets`: Candidate buckets in preference order.
+
+    **Returns:**
+
+    - The first bucket whose dimensions are both at least those of `shape`.
+
+    **Raises:**
+
+    - `ValueError`: If no candidate bucket can contain `shape`.
+    """
     shape = _as_bucket_spec(shape)
     for bucket in buckets:
         bucket = _as_bucket_spec(bucket)
@@ -82,6 +121,21 @@ def choose_bucket(shape: BucketSpec, buckets: Iterable[BucketSpec]) -> BucketSpe
 
 
 def choose_buckets(shapes: Iterable[BucketSpec], *, max_buckets: int = 8) -> tuple[BucketSpec, ...]:
+    """Choose a small set of static buckets for a collection of graph shapes.
+
+    **Arguments:**
+
+    - `shapes`: Required node and edge dimensions.
+    - `max_buckets`: Maximum number of buckets to return.
+
+    **Returns:**
+
+    - Bucket specs covering every input shape.
+
+    **Raises:**
+
+    - `ValueError`: If `max_buckets` is less than one.
+    """
     if max_buckets < 1:
         raise ValueError("max_buckets must be at least 1")
 

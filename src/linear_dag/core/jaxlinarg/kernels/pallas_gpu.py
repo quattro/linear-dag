@@ -18,6 +18,8 @@ except Exception:  # pragma: no cover - depends on the installed JAX build.
 
 
 class LevelSchedule(NamedTuple):
+    """Edge ordering grouped into dependency-safe graph levels."""
+
     edge_order: np.ndarray
     level_offsets: np.ndarray
 
@@ -54,6 +56,8 @@ def compute_level_schedule(indptr: Any, indices: Any) -> LevelSchedule:
     if indices.shape[0] and (np.any(indices < 0) or np.any(indices >= node_count)):
         raise ValueError("indices contains an out-of-range node index")
 
+    # Edges from the same level read sources whose incoming updates have already
+    # completed. Their writes may collide, so GPU execution still uses atomics.
     node_levels = np.zeros(node_count, dtype=np.int32)
     edge_levels = np.zeros(n_edges, dtype=np.int32)
     for src in range(node_count):
@@ -311,11 +315,12 @@ def _scheduled_solve_forward(
         edge_count = level_stop - level_start
         if edge_count == 0:
             continue
+        # Forward evaluation reads each source before that source is retired.
+        # Keep update and zeroing in separate kernels so a zero cannot race a
+        # same-level read from another edge.
         state = _call_scheduled_update_kernel(
             _forward_level_update_kernel(
-                n_cols=n_cols,
                 level_start=level_start,
-                min_index_to_keep=min_index_to_keep,
                 interpret=interpret,
             ),
             state,
@@ -331,7 +336,6 @@ def _scheduled_solve_forward(
         )
         state = _call_scheduled_update_kernel(
             _forward_level_zero_kernel(
-                n_cols=n_cols,
                 level_start=level_start,
                 min_index_to_keep=min_index_to_keep,
             ),
@@ -370,9 +374,10 @@ def _scheduled_solve_backward(
         edge_count = level_stop - level_start
         if edge_count == 0:
             continue
+        # Backward evaluation mirrors the serial reverse scan: a source row is
+        # cleared before receiving transpose contributions from its descendants.
         state = _call_scheduled_update_kernel(
             _backward_level_zero_kernel(
-                n_cols=n_cols,
                 level_start=level_start,
                 min_index_to_keep=min_index_to_keep,
             ),
@@ -389,9 +394,7 @@ def _scheduled_solve_backward(
         )
         state = _call_scheduled_update_kernel(
             _backward_level_update_kernel(
-                n_cols=n_cols,
                 level_start=level_start,
-                min_index_to_keep=min_index_to_keep,
                 interpret=interpret,
             ),
             state,
@@ -410,9 +413,7 @@ def _scheduled_solve_backward(
 
 def _forward_level_update_kernel(
     *,
-    n_cols: int,
     level_start: int,
-    min_index_to_keep: int,
     interpret: bool,
 ) -> Any:
     def kernel(
@@ -439,7 +440,7 @@ def _forward_level_update_kernel(
     return kernel
 
 
-def _forward_level_zero_kernel(*, n_cols: int, level_start: int, min_index_to_keep: int) -> Any:
+def _forward_level_zero_kernel(*, level_start: int, min_index_to_keep: int) -> Any:
     def kernel(
         state_ref: Any,
         indptr_ref: Any,
@@ -465,7 +466,7 @@ def _forward_level_zero_kernel(*, n_cols: int, level_start: int, min_index_to_ke
     return kernel
 
 
-def _backward_level_zero_kernel(*, n_cols: int, level_start: int, min_index_to_keep: int) -> Any:
+def _backward_level_zero_kernel(*, level_start: int, min_index_to_keep: int) -> Any:
     def kernel(
         state_ref: Any,
         indptr_ref: Any,
@@ -493,9 +494,7 @@ def _backward_level_zero_kernel(*, n_cols: int, level_start: int, min_index_to_k
 
 def _backward_level_update_kernel(
     *,
-    n_cols: int,
     level_start: int,
-    min_index_to_keep: int,
     interpret: bool,
 ) -> Any:
     def kernel(
@@ -550,6 +549,8 @@ def _call_scheduled_update_kernel(
 
 def _add_to_ref(out_ref: Any, row: Any, col: Any, increment: Any, *, interpret: bool) -> None:
     if interpret:
+        # CPU interpretation runs one program instance at a time, so ordinary
+        # addition is deterministic and keeps tests independent of GPU support.
         out_ref[row, col] = out_ref[row, col] + increment
         return
     if mosaic_gpu is None:  # pragma: no cover - guarded by import availability.

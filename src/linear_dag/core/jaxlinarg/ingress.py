@@ -21,6 +21,21 @@ def from_lineararg(
     level_schedule: bool = False,
     dtype: Any = None,
 ) -> JaxLinearARG:
+    """Convert a [`linear_dag.core.lineararg.LinearARG`][] to a JAX operator.
+
+    **Arguments:**
+
+    - `linarg`: Source LinearARG object.
+    - `backend`: Requested numerical backend.
+    - `bucket`: Optional static padding bucket for JIT cache stability.
+    - `level_schedule`: Whether Pallas GPU dispatch should use a precomputed
+      edge level schedule.
+    - `dtype`: Optional computation dtype. Defaults to `jax.numpy.float32`.
+
+    **Returns:**
+
+    - A [`linear_dag.core.jaxlinarg.JaxLinearARG`][].
+    """
     dtype = jnp.float32 if dtype is None else jnp.dtype(dtype)
     graph = _as_csc(linarg.A)
     n_nodes = graph.shape[0]
@@ -77,6 +92,23 @@ def from_hdf5_block(
     load_metadata: bool = False,
     dtype: Any = None,
 ) -> JaxLinearARG:
+    """Read one HDF5 LinearARG block as a JAX operator.
+
+    **Arguments:**
+
+    - `path`: HDF5 file path.
+    - `block`: Block name inside the HDF5 file.
+    - `backend`: Requested numerical backend.
+    - `bucket`: Optional static padding bucket for JIT cache stability.
+    - `level_schedule`: Whether Pallas GPU dispatch should use a precomputed
+      edge level schedule.
+    - `load_metadata`: Whether to load optional LinearARG metadata.
+    - `dtype`: Optional computation dtype. Defaults to `jax.numpy.float32`.
+
+    **Returns:**
+
+    - A [`linear_dag.core.jaxlinarg.JaxLinearARG`][].
+    """
     linarg = LinearARG.read(path, block=block, load_metadata=load_metadata)
     return from_lineararg(
         linarg,

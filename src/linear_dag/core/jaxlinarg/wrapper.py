@@ -247,6 +247,7 @@ class JaxParallelOperator(eqx.Module):
 
     @property
     def shape(self) -> tuple[int, int]:
+        """Return the composed operator shape `(n_samples, total_variants)`."""
         return (self.blocks[0].n_samples, self.variant_offsets[-1])
 
     def matmat(self, x: Any) -> Any:
@@ -328,6 +329,8 @@ class JaxParallelOperator(eqx.Module):
         def mapped(values: Any) -> Any:
             axis_index = jax.lax.axis_index("blocks")
             local = jax.lax.switch(axis_index, branches, values)
+            # Each device owns a contiguous subset of variant blocks and returns
+            # a sample-sized partial product. The full matmat is their sum.
             return jax.lax.psum(local, "blocks")
 
         product = jax.shard_map(
@@ -373,6 +376,8 @@ class JaxParallelOperator(eqx.Module):
         segments = []
         for device_index, variant_count in enumerate(device_variant_counts):
             start = device_index * max_device_variants
+            # shard_map needs a static output shape, so device-local variant
+            # segments are padded to a common length and trimmed here.
             segments.append(padded_segments[start : start + variant_count])
         return jnp.concatenate(segments, axis=0)
 
@@ -389,9 +394,11 @@ class JaxParallelOperator(eqx.Module):
         return branch
 
     def matvec(self, x: Any) -> Any:
+        """Multiply a vector by the composed genotype matrix."""
         return self.matmat(x)
 
     def rmatvec(self, x: Any) -> Any:
+        """Multiply a vector by the transpose of the composed matrix."""
         return self.rmatmat(x)
 
     def __matmul__(self, x: Any) -> Any:

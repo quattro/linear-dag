@@ -29,6 +29,8 @@ except ImportError:  # pragma: no cover - Python 3.10 compatibility.
 
 
 class Backend(StrEnum):
+    """Numerical backend choices for JAX LinearARG solves."""
+
     AUTO = "auto"
     PURE_JAX = "pure_jax"
     FFI_CPU = "ffi_cpu"
@@ -387,6 +389,7 @@ class JaxLinearARG(eqx.Module):
 
     @property
     def shape(self) -> tuple[int, int]:
+        """Return the operator shape `(n_samples, n_variants)`."""
         return (self.n_samples, self.n_variants)
 
     def matmat(self, x: Any) -> Any:
@@ -474,16 +477,20 @@ class JaxLinearARG(eqx.Module):
         return jnp.where(self.flip[:, None], total[None, :] - values, values)
 
     def matvec(self, x: Any) -> Any:
+        """Multiply a vector by the represented genotype matrix."""
         return self.matmat(x)
 
     def rmatvec(self, x: Any) -> Any:
+        """Multiply a vector by the transpose of the represented matrix."""
         return self.rmatmat(x)
 
     @property
     def T(self) -> "_TransposeView":
+        """Return a lightweight transpose view."""
         return self.transpose_view()
 
     def transpose_view(self) -> "_TransposeView":
+        """Return a lightweight transpose view of this operator."""
         return _TransposeView(self)
 
     def __matmul__(self, x: Any) -> Any:
@@ -491,30 +498,39 @@ class JaxLinearARG(eqx.Module):
 
 
 class _TransposeView(eqx.Module):
+    """Lightweight transpose view for [`linear_dag.core.jaxlinarg.JaxLinearARG`][]."""
+
     parent: JaxLinearARG
 
     @property
     def shape(self) -> tuple[int, int]:
+        """Return the transposed operator shape."""
         rows, cols = self.parent.shape
         return (cols, rows)
 
     def matmat(self, x: Any) -> Any:
+        """Multiply by the transposed matrix."""
         return self.parent.rmatmat(x)
 
     def rmatmat(self, x: Any) -> Any:
+        """Multiply by the original matrix."""
         return self.parent.matmat(x)
 
     def matvec(self, x: Any) -> Any:
+        """Multiply a vector by the transposed matrix."""
         return self.matmat(x)
 
     def rmatvec(self, x: Any) -> Any:
+        """Multiply a vector by the original matrix."""
         return self.rmatmat(x)
 
     @property
     def T(self) -> JaxLinearARG:
+        """Return the original non-transposed operator."""
         return self.transpose_view()
 
     def transpose_view(self) -> JaxLinearARG:
+        """Return the original non-transposed operator."""
         return self.parent
 
     def __matmul__(self, x: Any) -> Any:
