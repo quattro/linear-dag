@@ -62,6 +62,58 @@ def test_compute_level_schedule_groups_edges_by_source_wavefront() -> None:
     np.testing.assert_array_equal(schedule.level_offsets, np.asarray([0, 2, 3], dtype=np.int32))
 
 
+def test_compute_level_schedule_can_reorder_noncontiguous_wavefront_edges() -> None:
+    schedule = pallas_gpu.compute_level_schedule(
+        np.asarray([0, 1, 2, 3, 3], dtype=np.int32),
+        np.asarray([1, 3, 3], dtype=np.int32),
+    )
+
+    np.testing.assert_array_equal(schedule.edge_order, np.asarray([0, 2, 1], dtype=np.int32))
+    np.testing.assert_array_equal(schedule.level_offsets, np.asarray([0, 2, 3], dtype=np.int32))
+
+
+def test_pallas_gpu_level_scheduled_kernels_use_schedule_in_interpret_mode(monkeypatch) -> None:
+    def fail_serial(*args, **kwargs):
+        raise AssertionError("level-scheduled path must not delegate to serial Pallas GPU solve")
+
+    monkeypatch.setattr(pallas_gpu, "pallas_gpu_solve_forward", fail_serial)
+    monkeypatch.setattr(pallas_gpu, "pallas_gpu_solve_backward", fail_serial)
+    indptr = jnp.asarray(np.array([0, 1, 2, 3, 3], dtype=np.int32))
+    indices = jnp.asarray(np.array([1, 3, 3], dtype=np.int32))
+    data = jnp.asarray(np.ones(3, dtype=np.float32))
+    src_of_edge = jnp.asarray(_src_of_edge(np.asarray(indptr)))
+    nonunique_indices = jnp.arange(4, dtype=jnp.int32)
+    schedule = pallas_gpu.compute_level_schedule(np.asarray(indptr), np.asarray(indices))
+    forward_b = jnp.asarray(np.array([[2.0], [0.0], [5.0], [0.0]], dtype=np.float32))
+    backward_b = jnp.asarray(np.array([[0.0], [0.0], [0.0], [3.0]], dtype=np.float32))
+
+    forward = pallas_gpu.pallas_gpu_solve_forward_level_scheduled(
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        3,
+        schedule,
+        forward_b,
+        interpret=True,
+    )
+    backward = pallas_gpu.pallas_gpu_solve_backward_level_scheduled(
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        3,
+        schedule,
+        backward_b,
+        interpret=True,
+    )
+
+    np.testing.assert_allclose(np.asarray(forward), np.array([[0.0], [0.0], [0.0], [7.0]], dtype=np.float32))
+    np.testing.assert_allclose(np.asarray(backward), np.array([[3.0], [3.0], [3.0], [3.0]], dtype=np.float32))
+
+
 def test_jax_lineararg_pallas_gpu_level_schedule_matches_oracle(oracle_case) -> None:
     _require_pallas_gpu()
     op = _operator_from_case(oracle_case, level_schedule=True)

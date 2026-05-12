@@ -5,12 +5,16 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 try:
     import jax.experimental.pallas as pl
+
+    from jax.experimental.pallas import mosaic_gpu
 except Exception:  # pragma: no cover - depends on the installed JAX build.
     pl = None
+    mosaic_gpu = None
 
 
 class LevelSchedule(NamedTuple):
@@ -133,17 +137,23 @@ def pallas_gpu_solve_forward_level_scheduled(
     min_index_to_keep: int,
     schedule: LevelSchedule,
     b: Any,
+    *,
+    interpret: bool = False,
 ) -> jax.Array:
-    """Solve with the level-scheduling branch, currently backed by the serial scan."""
-    _check_level_schedule(schedule, n_edges=int(indices.shape[0]))
-    return pallas_gpu_solve_forward(
+    """Solve by applying scheduled edge wavefronts with per-element atomics."""
+    if not interpret:
+        _require_pallas_gpu()
+    schedule = _check_level_schedule(schedule, n_edges=int(indices.shape[0]))
+    return _scheduled_solve_forward(
         indptr,
         indices,
         data,
         src_of_edge,
         nonunique_indices,
         min_index_to_keep,
+        schedule,
         b,
+        interpret=interpret,
     )
 
 
@@ -211,17 +221,23 @@ def pallas_gpu_solve_backward_level_scheduled(
     min_index_to_keep: int,
     schedule: LevelSchedule,
     b: Any,
+    *,
+    interpret: bool = False,
 ) -> jax.Array:
-    """Solve transpose with the level-scheduling branch, currently serial."""
-    _check_level_schedule(schedule, n_edges=int(indices.shape[0]))
-    return pallas_gpu_solve_backward(
+    """Solve transpose by applying scheduled edge wavefronts in reverse."""
+    if not interpret:
+        _require_pallas_gpu()
+    schedule = _check_level_schedule(schedule, n_edges=int(indices.shape[0]))
+    return _scheduled_solve_backward(
         indptr,
         indices,
         data,
         src_of_edge,
         nonunique_indices,
         min_index_to_keep,
+        schedule,
         b,
+        interpret=interpret,
     )
 
 
@@ -254,7 +270,7 @@ def _call_kernel(
     )(indptr, indices, data, src_of_edge, nonunique_indices, b)
 
 
-def _check_level_schedule(schedule: LevelSchedule, *, n_edges: int) -> None:
+def _check_level_schedule(schedule: LevelSchedule, *, n_edges: int) -> LevelSchedule:
     edge_order = np.asarray(schedule.edge_order, dtype=np.int32)
     level_offsets = np.asarray(schedule.level_offsets, dtype=np.int32)
     if edge_order.ndim != 1:
@@ -267,6 +283,278 @@ def _check_level_schedule(schedule: LevelSchedule, *, n_edges: int) -> None:
         raise ValueError("level schedule level_offsets must contain at least one entry")
     if int(level_offsets[0]) != 0 or int(level_offsets[-1]) != n_edges:
         raise ValueError("level schedule offsets must span the edge count")
+    if np.any(np.diff(level_offsets) < 0):
+        raise ValueError("level schedule offsets must be monotonic")
+    if edge_order.size and not np.array_equal(np.sort(edge_order), np.arange(n_edges, dtype=np.int32)):
+        raise ValueError("level schedule edge_order must be a permutation of edge indices")
+    return LevelSchedule(edge_order=edge_order, level_offsets=level_offsets)
+
+
+def _scheduled_solve_forward(
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    nonunique_indices: Any,
+    min_index_to_keep: int,
+    schedule: LevelSchedule,
+    b: Any,
+    *,
+    interpret: bool,
+) -> jax.Array:
+    n_cols = b.shape[1]
+    edge_order = jnp.asarray(schedule.edge_order, dtype=jnp.int32)
+    level_offsets = tuple(int(value) for value in schedule.level_offsets)
+    state = b
+
+    for level_start, level_stop in zip(level_offsets[:-1], level_offsets[1:], strict=True):
+        edge_count = level_stop - level_start
+        if edge_count == 0:
+            continue
+        state = _call_scheduled_update_kernel(
+            _forward_level_update_kernel(
+                n_cols=n_cols,
+                level_start=level_start,
+                min_index_to_keep=min_index_to_keep,
+                interpret=interpret,
+            ),
+            state,
+            indptr,
+            indices,
+            data,
+            src_of_edge,
+            nonunique_indices,
+            edge_order,
+            grid=(edge_count, n_cols),
+            name="linear_dag_jaxlinarg_pallas_gpu_scheduled_forward_update",
+            interpret=interpret,
+        )
+        state = _call_scheduled_update_kernel(
+            _forward_level_zero_kernel(
+                n_cols=n_cols,
+                level_start=level_start,
+                min_index_to_keep=min_index_to_keep,
+            ),
+            state,
+            indptr,
+            indices,
+            data,
+            src_of_edge,
+            nonunique_indices,
+            edge_order,
+            grid=(edge_count, n_cols),
+            name="linear_dag_jaxlinarg_pallas_gpu_scheduled_forward_zero",
+            interpret=interpret,
+        )
+    return state
+
+
+def _scheduled_solve_backward(
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    nonunique_indices: Any,
+    min_index_to_keep: int,
+    schedule: LevelSchedule,
+    b: Any,
+    *,
+    interpret: bool,
+) -> jax.Array:
+    n_cols = b.shape[1]
+    edge_order = jnp.asarray(schedule.edge_order, dtype=jnp.int32)
+    level_offsets = tuple(int(value) for value in schedule.level_offsets)
+    state = b
+
+    for level_start, level_stop in reversed(tuple(zip(level_offsets[:-1], level_offsets[1:], strict=True))):
+        edge_count = level_stop - level_start
+        if edge_count == 0:
+            continue
+        state = _call_scheduled_update_kernel(
+            _backward_level_zero_kernel(
+                n_cols=n_cols,
+                level_start=level_start,
+                min_index_to_keep=min_index_to_keep,
+            ),
+            state,
+            indptr,
+            indices,
+            data,
+            src_of_edge,
+            nonunique_indices,
+            edge_order,
+            grid=(edge_count, n_cols),
+            name="linear_dag_jaxlinarg_pallas_gpu_scheduled_backward_zero",
+            interpret=interpret,
+        )
+        state = _call_scheduled_update_kernel(
+            _backward_level_update_kernel(
+                n_cols=n_cols,
+                level_start=level_start,
+                min_index_to_keep=min_index_to_keep,
+                interpret=interpret,
+            ),
+            state,
+            indptr,
+            indices,
+            data,
+            src_of_edge,
+            nonunique_indices,
+            edge_order,
+            grid=(edge_count, n_cols),
+            name="linear_dag_jaxlinarg_pallas_gpu_scheduled_backward_update",
+            interpret=interpret,
+        )
+    return state
+
+
+def _forward_level_update_kernel(
+    *,
+    n_cols: int,
+    level_start: int,
+    min_index_to_keep: int,
+    interpret: bool,
+) -> Any:
+    def kernel(
+        state_ref: Any,
+        indptr_ref: Any,
+        indices_ref: Any,
+        data_ref: Any,
+        src_of_edge_ref: Any,
+        nonunique_indices_ref: Any,
+        edge_order_ref: Any,
+        out_ref: Any,
+    ) -> None:
+        del indptr_ref
+        edge_position = pl.program_id(0)
+        col = pl.program_id(1)
+        edge_index = edge_order_ref[level_start + edge_position]
+        src = src_of_edge_ref[edge_index]
+        dst = indices_ref[edge_index]
+        src_row = nonunique_indices_ref[src]
+        dst_row = nonunique_indices_ref[dst]
+        increment = state_ref[src_row, col] * data_ref[edge_index]
+        _add_to_ref(out_ref, dst_row, col, increment, interpret=interpret)
+
+    return kernel
+
+
+def _forward_level_zero_kernel(*, n_cols: int, level_start: int, min_index_to_keep: int) -> Any:
+    def kernel(
+        state_ref: Any,
+        indptr_ref: Any,
+        indices_ref: Any,
+        data_ref: Any,
+        src_of_edge_ref: Any,
+        nonunique_indices_ref: Any,
+        edge_order_ref: Any,
+        out_ref: Any,
+    ) -> None:
+        del state_ref, indices_ref, data_ref
+        edge_position = pl.program_id(0)
+        col = pl.program_id(1)
+        edge_index = edge_order_ref[level_start + edge_position]
+        src = src_of_edge_ref[edge_index]
+        src_row = nonunique_indices_ref[src]
+        should_zero = (edge_index == indptr_ref[src + 1] - 1) & (src < min_index_to_keep)
+
+        @pl.when(should_zero)
+        def zero_source() -> None:
+            out_ref[src_row, col] = 0.0
+
+    return kernel
+
+
+def _backward_level_zero_kernel(*, n_cols: int, level_start: int, min_index_to_keep: int) -> Any:
+    def kernel(
+        state_ref: Any,
+        indptr_ref: Any,
+        indices_ref: Any,
+        data_ref: Any,
+        src_of_edge_ref: Any,
+        nonunique_indices_ref: Any,
+        edge_order_ref: Any,
+        out_ref: Any,
+    ) -> None:
+        del state_ref, indices_ref, data_ref
+        edge_position = pl.program_id(0)
+        col = pl.program_id(1)
+        edge_index = edge_order_ref[level_start + edge_position]
+        src = src_of_edge_ref[edge_index]
+        src_row = nonunique_indices_ref[src]
+        should_zero = (edge_index == indptr_ref[src + 1] - 1) & (src < min_index_to_keep)
+
+        @pl.when(should_zero)
+        def zero_source() -> None:
+            out_ref[src_row, col] = 0.0
+
+    return kernel
+
+
+def _backward_level_update_kernel(
+    *,
+    n_cols: int,
+    level_start: int,
+    min_index_to_keep: int,
+    interpret: bool,
+) -> Any:
+    def kernel(
+        state_ref: Any,
+        indptr_ref: Any,
+        indices_ref: Any,
+        data_ref: Any,
+        src_of_edge_ref: Any,
+        nonunique_indices_ref: Any,
+        edge_order_ref: Any,
+        out_ref: Any,
+    ) -> None:
+        del indptr_ref
+        edge_position = pl.program_id(0)
+        col = pl.program_id(1)
+        edge_index = edge_order_ref[level_start + edge_position]
+        src = src_of_edge_ref[edge_index]
+        dst = indices_ref[edge_index]
+        src_row = nonunique_indices_ref[src]
+        dst_row = nonunique_indices_ref[dst]
+        increment = state_ref[dst_row, col] * data_ref[edge_index]
+        _add_to_ref(out_ref, src_row, col, increment, interpret=interpret)
+
+    return kernel
+
+
+def _call_scheduled_update_kernel(
+    kernel: Any,
+    state: Any,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    nonunique_indices: Any,
+    edge_order: Any,
+    *,
+    grid: tuple[int, int],
+    name: str,
+    interpret: bool,
+) -> jax.Array:
+    if pl is None:
+        raise RuntimeError("Pallas is unavailable.")
+    return pl.pallas_call(
+        kernel,
+        out_shape=jax.ShapeDtypeStruct(state.shape, state.dtype),
+        grid=grid,
+        name=name,
+        input_output_aliases={0: 0},
+        interpret=interpret,
+    )(state, indptr, indices, data, src_of_edge, nonunique_indices, edge_order)
+
+
+def _add_to_ref(out_ref: Any, row: Any, col: Any, increment: Any, *, interpret: bool) -> None:
+    if interpret:
+        out_ref[row, col] = out_ref[row, col] + increment
+        return
+    if mosaic_gpu is None:  # pragma: no cover - guarded by import availability.
+        raise RuntimeError("Pallas Mosaic GPU helpers are unavailable.")
+    mosaic_gpu.atomic_add(out_ref.at[row, col], increment)
 
 
 def _copy_buffer(b_ref: Any, out_ref: Any, *, n_rows: int, n_cols: int) -> None:
