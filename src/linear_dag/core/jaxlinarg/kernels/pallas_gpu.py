@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import warnings
+
 from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+from .pure_jax import pure_jax_solve_backward_compressed, pure_jax_solve_forward_compressed
 
 try:
     import jax.experimental.pallas as pl
@@ -24,6 +28,18 @@ class LevelSchedule(NamedTuple):
     level_offsets: np.ndarray
 
 
+class PallasGpuKernelSupport(NamedTuple):
+    """Whether the current whole-buffer Mosaic GPU kernels support a shape."""
+
+    supported: bool
+    reason: str
+
+
+_WARP_GROUP_TRANSFER_BYTES = 128
+_PALLAS_GPU_FALLBACK_COUNT = 0
+_PALLAS_GPU_FALLBACK_WARNED = False
+
+
 def is_pallas_import_available() -> bool:
     """Return whether the Pallas module imported successfully."""
     return pl is not None
@@ -32,6 +48,58 @@ def is_pallas_import_available() -> bool:
 def is_pallas_gpu_available() -> bool:
     """Return whether the Pallas GPU backend can be used by this process."""
     return jax.default_backend() in {"gpu", "cuda", "rocm"} and is_pallas_import_available()
+
+
+def pallas_gpu_fallback_count() -> int:
+    """Return how many Pallas GPU solves fell back to pure JAX in this process."""
+    return _PALLAS_GPU_FALLBACK_COUNT
+
+
+def reset_pallas_gpu_fallback_count(*, clear_warnings: bool = True) -> None:
+    """Reset Pallas GPU fallback diagnostics for tests and benchmarks."""
+    global _PALLAS_GPU_FALLBACK_COUNT, _PALLAS_GPU_FALLBACK_WARNED
+    _PALLAS_GPU_FALLBACK_COUNT = 0
+    if clear_warnings:
+        _PALLAS_GPU_FALLBACK_WARNED = False
+
+
+def check_pallas_gpu_kernel_support(
+    *,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    nonunique_indices: Any,
+    b: Any,
+    max_shared_memory_bytes: int | None = None,
+) -> PallasGpuKernelSupport:
+    """Return whether the current Mosaic GPU kernels support this static shape."""
+    refs = (
+        ("indptr", indptr),
+        ("indices", indices),
+        ("data", data),
+        ("src_of_edge", src_of_edge),
+        ("nonunique_indices", nonunique_indices),
+        ("b", b),
+        ("out", b),
+    )
+    for name, value in refs:
+        nbytes = _array_nbytes(value)
+        if nbytes % _WARP_GROUP_TRANSFER_BYTES != 0:
+            return PallasGpuKernelSupport(
+                False,
+                f"{name} transfer is {nbytes} bytes; Mosaic GPU requires 128-byte aligned transfers",
+            )
+
+    shared_memory_bytes = sum(_array_nbytes(value) for _name, value in refs)
+    shared_memory_bytes += _WARP_GROUP_TRANSFER_BYTES
+    max_shared_memory_bytes = _max_shared_memory_bytes() if max_shared_memory_bytes is None else max_shared_memory_bytes
+    if shared_memory_bytes > max_shared_memory_bytes:
+        return PallasGpuKernelSupport(
+            False,
+            f"estimated shared memory {shared_memory_bytes} bytes exceeds available {max_shared_memory_bytes} bytes",
+        )
+    return PallasGpuKernelSupport(True, "")
 
 
 def compute_level_schedule(indptr: Any, indices: Any) -> LevelSchedule:
@@ -88,6 +156,25 @@ def pallas_gpu_solve_forward(
 ) -> jax.Array:
     """Solve a compressed LinearARG node buffer with a serial Pallas edge scan."""
     _require_pallas_gpu()
+    support = check_pallas_gpu_kernel_support(
+        indptr=indptr,
+        indices=indices,
+        data=data,
+        src_of_edge=src_of_edge,
+        nonunique_indices=nonunique_indices,
+        b=b,
+    )
+    if not support.supported:
+        return _fallback_forward(
+            support.reason,
+            indptr,
+            indices,
+            data,
+            src_of_edge,
+            nonunique_indices,
+            min_index_to_keep,
+            b,
+        )
     n_edges = int(indices.shape[0])
     n_rows, n_cols = b.shape
 
@@ -148,6 +235,26 @@ def pallas_gpu_solve_forward_level_scheduled(
     if not interpret:
         _require_pallas_gpu()
     schedule = _check_level_schedule(schedule, n_edges=int(indices.shape[0]))
+    if not interpret:
+        support = check_pallas_gpu_kernel_support(
+            indptr=indptr,
+            indices=indices,
+            data=data,
+            src_of_edge=src_of_edge,
+            nonunique_indices=nonunique_indices,
+            b=b,
+        )
+        if not support.supported:
+            return _fallback_forward(
+                support.reason,
+                indptr,
+                indices,
+                data,
+                src_of_edge,
+                nonunique_indices,
+                min_index_to_keep,
+                b,
+            )
     return _scheduled_solve_forward(
         indptr,
         indices,
@@ -172,6 +279,25 @@ def pallas_gpu_solve_backward(
 ) -> jax.Array:
     """Solve a compressed transposed LinearARG buffer with a serial Pallas edge scan."""
     _require_pallas_gpu()
+    support = check_pallas_gpu_kernel_support(
+        indptr=indptr,
+        indices=indices,
+        data=data,
+        src_of_edge=src_of_edge,
+        nonunique_indices=nonunique_indices,
+        b=b,
+    )
+    if not support.supported:
+        return _fallback_backward(
+            support.reason,
+            indptr,
+            indices,
+            data,
+            src_of_edge,
+            nonunique_indices,
+            min_index_to_keep,
+            b,
+        )
     n_edges = int(indices.shape[0])
     n_rows, n_cols = b.shape
 
@@ -232,6 +358,26 @@ def pallas_gpu_solve_backward_level_scheduled(
     if not interpret:
         _require_pallas_gpu()
     schedule = _check_level_schedule(schedule, n_edges=int(indices.shape[0]))
+    if not interpret:
+        support = check_pallas_gpu_kernel_support(
+            indptr=indptr,
+            indices=indices,
+            data=data,
+            src_of_edge=src_of_edge,
+            nonunique_indices=nonunique_indices,
+            b=b,
+        )
+        if not support.supported:
+            return _fallback_backward(
+                support.reason,
+                indptr,
+                indices,
+                data,
+                src_of_edge,
+                nonunique_indices,
+                min_index_to_keep,
+                b,
+            )
     return _scheduled_solve_backward(
         indptr,
         indices,
@@ -251,6 +397,76 @@ def _require_pallas_gpu() -> None:
             "Pallas GPU backend is unavailable; expected jax.default_backend() == 'gpu' "
             "and importable jax.experimental.pallas."
         )
+
+
+def _fallback_forward(
+    reason: str,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    nonunique_indices: Any,
+    min_index_to_keep: int,
+    b: Any,
+) -> jax.Array:
+    _record_pallas_gpu_fallback(reason)
+    return pure_jax_solve_forward_compressed(
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        min_index_to_keep,
+        b,
+    )
+
+
+def _fallback_backward(
+    reason: str,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    nonunique_indices: Any,
+    min_index_to_keep: int,
+    b: Any,
+) -> jax.Array:
+    _record_pallas_gpu_fallback(reason)
+    return pure_jax_solve_backward_compressed(
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        min_index_to_keep,
+        b,
+    )
+
+
+def _record_pallas_gpu_fallback(reason: str) -> None:
+    global _PALLAS_GPU_FALLBACK_COUNT, _PALLAS_GPU_FALLBACK_WARNED
+    _PALLAS_GPU_FALLBACK_COUNT += 1
+    if _PALLAS_GPU_FALLBACK_WARNED:
+        return
+    _PALLAS_GPU_FALLBACK_WARNED = True
+    warnings.warn(
+        f"Pallas GPU kernel unsupported for this shape/device ({reason}); falling back to pure JAX.",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
+def _array_nbytes(value: Any) -> int:
+    shape = tuple(int(dim) for dim in value.shape)
+    return int(np.prod(shape, dtype=np.int64)) * np.dtype(value.dtype).itemsize
+
+
+def _max_shared_memory_bytes() -> int:
+    try:
+        device = jax.local_devices()[0]
+    except (RuntimeError, IndexError):
+        return 48 * 1024
+    return int(getattr(device, "shared_memory_per_block_optin", 48 * 1024))
 
 
 def _call_kernel(

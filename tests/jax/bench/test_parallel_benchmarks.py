@@ -118,11 +118,12 @@ def _time_jax_parallel_operator(
     for k, matrix in variant_inputs.items():
         with jax.default_device(config.devices[0]):
             jax_matrix = jnp.asarray(matrix)
+        pallas_gpu.reset_pallas_gpu_fallback_count(clear_warnings=False)
         matmat = jax.jit(lambda values: op.matmat(values)).lower(jax_matrix).compile()
         runtime = _time_call(lambda matrix=jax_matrix, matmat=matmat: matmat(matrix), block_until_ready=True)
         results.append(
             ParallelBenchmarkResult(
-                config.name,
+                _result_operator_name(config),
                 "matmat",
                 k,
                 runtime,
@@ -132,11 +133,12 @@ def _time_jax_parallel_operator(
     for k, matrix in sample_inputs.items():
         with jax.default_device(config.devices[0]):
             jax_matrix = jnp.asarray(matrix)
+        pallas_gpu.reset_pallas_gpu_fallback_count(clear_warnings=False)
         rmatmat = jax.jit(lambda values: op.rmatmat(values)).lower(jax_matrix).compile()
         runtime = _time_call(lambda matrix=jax_matrix, rmatmat=rmatmat: rmatmat(matrix), block_until_ready=True)
         results.append(
             ParallelBenchmarkResult(
-                config.name,
+                _result_operator_name(config),
                 "rmatmat",
                 k,
                 runtime,
@@ -213,6 +215,12 @@ def _devices_for_backend(backend: str) -> list[jax.Device]:
         return list(jax.devices(backend))
     except RuntimeError:
         return []
+
+
+def _result_operator_name(config: JaxParallelBenchmarkConfig) -> str:
+    if config.backend is Backend.PALLAS_GPU and pallas_gpu.pallas_gpu_fallback_count():
+        return f"{config.name}_fallback_jax"
+    return config.name
 
 
 def _time_call(call: Callable[[], Any], *, block_until_ready: bool = False) -> float:

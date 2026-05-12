@@ -114,6 +114,111 @@ def test_pallas_gpu_level_scheduled_kernels_use_schedule_in_interpret_mode(monke
     np.testing.assert_allclose(np.asarray(backward), np.array([[3.0], [3.0], [3.0], [3.0]], dtype=np.float32))
 
 
+def test_pallas_gpu_support_check_rejects_unaligned_current_kernel_shape() -> None:
+    support = pallas_gpu.check_pallas_gpu_kernel_support(
+        indptr=jnp.zeros((835,), dtype=jnp.int32),
+        indices=jnp.zeros((2008,), dtype=jnp.int32),
+        data=jnp.zeros((2008,), dtype=jnp.float32),
+        src_of_edge=jnp.zeros((2008,), dtype=jnp.int32),
+        nonunique_indices=jnp.zeros((834,), dtype=jnp.int32),
+        b=jnp.zeros((834, 1), dtype=jnp.float32),
+        max_shared_memory_bytes=48 * 1024,
+    )
+
+    assert not support.supported
+    assert "128-byte" in support.reason
+
+
+def test_pallas_gpu_support_check_rejects_excessive_shared_memory() -> None:
+    support = pallas_gpu.check_pallas_gpu_kernel_support(
+        indptr=jnp.zeros((32,), dtype=jnp.int32),
+        indices=jnp.zeros((32,), dtype=jnp.int32),
+        data=jnp.zeros((32,), dtype=jnp.float32),
+        src_of_edge=jnp.zeros((32,), dtype=jnp.int32),
+        nonunique_indices=jnp.zeros((32,), dtype=jnp.int32),
+        b=jnp.zeros((32, 128), dtype=jnp.float32),
+        max_shared_memory_bytes=8 * 1024,
+    )
+
+    assert not support.supported
+    assert "shared memory" in support.reason
+
+
+def test_pallas_gpu_support_check_accepts_aligned_small_shape() -> None:
+    support = pallas_gpu.check_pallas_gpu_kernel_support(
+        indptr=jnp.zeros((32,), dtype=jnp.int32),
+        indices=jnp.zeros((32,), dtype=jnp.int32),
+        data=jnp.zeros((32,), dtype=jnp.float32),
+        src_of_edge=jnp.zeros((32,), dtype=jnp.int32),
+        nonunique_indices=jnp.zeros((32,), dtype=jnp.int32),
+        b=jnp.zeros((32, 32), dtype=jnp.float32),
+        max_shared_memory_bytes=64 * 1024,
+    )
+
+    assert support.supported
+
+
+def test_pallas_gpu_forward_falls_back_to_pure_jax_for_unsupported_shape(monkeypatch) -> None:
+    monkeypatch.setattr(pallas_gpu, "is_pallas_gpu_available", lambda: True)
+    monkeypatch.setattr(
+        pallas_gpu,
+        "check_pallas_gpu_kernel_support",
+        lambda **_kwargs: pallas_gpu.PallasGpuKernelSupport(False, "test unsupported shape"),
+    )
+    indptr = jnp.asarray(np.array([0, 1, 1], dtype=np.int32))
+    indices = jnp.asarray(np.array([1], dtype=np.int32))
+    data = jnp.asarray(np.array([2.0], dtype=np.float32))
+    src_of_edge = jnp.asarray(np.array([0], dtype=np.int32))
+    nonunique_indices = jnp.arange(2, dtype=jnp.int32)
+    b = jnp.asarray(np.array([[3.0], [0.0]], dtype=np.float32))
+    pallas_gpu.reset_pallas_gpu_fallback_count()
+
+    with pytest.warns(UserWarning, match="falling back to pure JAX"):
+        actual = pallas_gpu.pallas_gpu_solve_forward(
+            indptr,
+            indices,
+            data,
+            src_of_edge,
+            nonunique_indices,
+            0,
+            b,
+        )
+
+    np.testing.assert_allclose(np.asarray(actual), np.array([[3.0], [6.0]], dtype=np.float32))
+    assert pallas_gpu.pallas_gpu_fallback_count() == 1
+
+
+def test_pallas_gpu_forward_uses_kernel_when_shape_is_supported(monkeypatch) -> None:
+    monkeypatch.setattr(pallas_gpu, "is_pallas_gpu_available", lambda: True)
+    monkeypatch.setattr(
+        pallas_gpu,
+        "check_pallas_gpu_kernel_support",
+        lambda **_kwargs: pallas_gpu.PallasGpuKernelSupport(True, ""),
+    )
+    calls = []
+
+    def fake_call_kernel(kernel, indptr, indices, data, src_of_edge, nonunique_indices, b, *, name):
+        del kernel, indptr, indices, data, src_of_edge, nonunique_indices, name
+        calls.append(b)
+        return b + 1
+
+    monkeypatch.setattr(pallas_gpu, "_call_kernel", fake_call_kernel)
+    b = jnp.zeros((2, 1), dtype=jnp.float32)
+
+    actual = pallas_gpu.pallas_gpu_solve_forward(
+        jnp.asarray(np.array([0, 1, 1], dtype=np.int32)),
+        jnp.asarray(np.array([1], dtype=np.int32)),
+        jnp.asarray(np.array([2.0], dtype=np.float32)),
+        jnp.asarray(np.array([0], dtype=np.int32)),
+        jnp.arange(2, dtype=jnp.int32),
+        0,
+        b,
+    )
+
+    assert len(calls) == 1
+    np.testing.assert_allclose(np.asarray(actual), np.ones((2, 1), dtype=np.float32))
+
+
 def test_jax_lineararg_pallas_gpu_level_schedule_matches_oracle(oracle_case) -> None:
     _require_pallas_gpu()
     op = _operator_from_case(oracle_case, level_schedule=True)
