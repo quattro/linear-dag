@@ -378,7 +378,9 @@ class JaxLinearARG(eqx.Module):
             "sample_indices",
             "nonunique_indices",
         ):
-            _check_no_negative_index(name, arrays[name])
+            array = arrays[name]
+            if array.shape[0] and int(jnp.min(array)) < 0:
+                raise ValueError(f"{name} contains a negative index")
 
         if self.src_of_edge.shape[0] and int(jnp.max(self.src_of_edge)) >= node_count:
             raise ValueError("src_of_edge contains an out-of-range node index")
@@ -546,11 +548,6 @@ class _TransposeView(eqx.Module):
         return self.matmat(x)
 
 
-def _check_no_negative_index(name: str, array: Any) -> None:
-    if array.shape[0] and int(jnp.min(array)) < 0:
-        raise ValueError(f"{name} contains a negative index")
-
-
 def _canonical_allele_counts(allele_counts: Any | None, *, n_variants: int) -> jax.Array:
     if allele_counts is None:
         return jnp.full((n_variants,), -1, dtype=jnp.int32)
@@ -633,7 +630,8 @@ def _solve(
             )
             backend = Backend.PURE_JAX
     if backend is Backend.PALLAS_GPU and level_schedule:
-        schedule = _require_level_schedule_metadata(level_schedule_metadata)
+        if level_schedule_metadata is None:
+            raise ValueError("level_schedule_metadata is required when level_schedule=True")
         try:
             solve = _LEVEL_SOLVERS[direction]
         except KeyError as error:
@@ -645,7 +643,7 @@ def _solve(
             src_of_edge,
             nonunique_indices,
             min_index_to_keep,
-            schedule,
+            level_schedule_metadata,
             b,
         )
 
@@ -721,9 +719,3 @@ def _solve_bwd(
 
 
 _solve.defvjp(_solve_fwd, _solve_bwd)
-
-
-def _require_level_schedule_metadata(level_schedule_metadata: Any) -> Any:
-    if level_schedule_metadata is None:
-        raise ValueError("level_schedule_metadata is required when level_schedule=True")
-    return level_schedule_metadata

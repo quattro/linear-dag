@@ -268,16 +268,14 @@ class JaxParallelOperator(eqx.Module):
         elif len(self.block_ranges) > 1:
             result = self._sharded_matmat(x)
         else:
-            contributions = [
-                block.matmat(x[start:end])
-                for block, start, end in zip(
-                    self.blocks,
-                    self.variant_offsets[:-1],
-                    self.variant_offsets[1:],
-                    strict=True,
-                )
-            ]
-            result = jnp.sum(jnp.stack(contributions, axis=0), axis=0)
+            result = jnp.zeros((self.shape[0], x.shape[1]), dtype=x.dtype)
+            for block, start, end in zip(
+                self.blocks,
+                self.variant_offsets[:-1],
+                self.variant_offsets[1:],
+                strict=True,
+            ):
+                result = result + block.matmat(x[start:end])
         return result[:, 0] if was_vector else result
 
     def rmatmat(self, x: Any) -> Any:
