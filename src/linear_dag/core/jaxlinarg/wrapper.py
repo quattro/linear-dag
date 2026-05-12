@@ -236,9 +236,6 @@ class JaxParallelOperator(eqx.Module):
         block_n_variants = np.asarray([block.n_variants for block in self.blocks], dtype=np.int64)
         if not np.array_equal(np.diff(offsets), block_n_variants):
             raise ValueError("variant_offsets increments must match each block n_variants")
-        expected_variants = sum(block.n_variants for block in self.blocks)
-        if self.variant_offsets[-1] != expected_variants:
-            raise ValueError("final variant_offsets entry must match total block variants")
         _validate_block_ranges(
             self.block_ranges,
             n_blocks=len(self.blocks),
@@ -266,8 +263,20 @@ class JaxParallelOperator(eqx.Module):
 
         - `ValueError`: If `x` has an incompatible rank or leading dimension.
         """
-        matrix, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[1], dtype=self.blocks[0].dtype)
-        result = self._matmat(matrix)
+        x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[1], dtype=self.blocks[0].dtype)
+        if len(self.block_ranges) > 1:
+            result = self._sharded_matmat(x)
+        else:
+            contributions = [
+                block.matmat(x[start:end])
+                for block, start, end in zip(
+                    self.blocks,
+                    self.variant_offsets[:-1],
+                    self.variant_offsets[1:],
+                    strict=True,
+                )
+            ]
+            result = jnp.sum(jnp.stack(contributions, axis=0), axis=0)
         return result[:, 0] if was_vector else result
 
     def rmatmat(self, x: Any) -> Any:
@@ -286,28 +295,12 @@ class JaxParallelOperator(eqx.Module):
 
         - `ValueError`: If `x` has an incompatible rank or leading dimension.
         """
-        matrix, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.blocks[0].dtype)
-        result = self._rmatmat(matrix)
+        x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.blocks[0].dtype)
+        if len(self.block_ranges) > 1:
+            result = self._sharded_rmatmat(x)
+        else:
+            result = jnp.concatenate([block.rmatmat(x) for block in self.blocks], axis=0)
         return result[:, 0] if was_vector else result
-
-    def _matmat(self, x: Any) -> Any:
-        if _mesh_blocks_axis_size(self.mesh) > 1:
-            return self._sharded_matmat(x)
-        contributions = [
-            block.matmat(x[start:end])
-            for block, start, end in zip(
-                self.blocks,
-                self.variant_offsets[:-1],
-                self.variant_offsets[1:],
-                strict=True,
-            )
-        ]
-        return jnp.sum(jnp.stack(contributions, axis=0), axis=0)
-
-    def _rmatmat(self, x: Any) -> Any:
-        if _mesh_blocks_axis_size(self.mesh) > 1:
-            return self._sharded_rmatmat(x)
-        return jnp.concatenate([block.rmatmat(x) for block in self.blocks], axis=0)
 
     def _sharded_matmat(self, x: Any) -> Any:
         @jax.custom_vjp

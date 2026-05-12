@@ -424,31 +424,7 @@ class JaxLinearARG(eqx.Module):
 
         - `ValueError`: If `x` has an incompatible rank or leading dimension.
         """
-        matrix, was_vector = _as_rank2_matrix(x, expected_rows=self.n_variants, dtype=self.dtype)
-        result = self._matmat(matrix)
-        return result[:, 0] if was_vector else result
-
-    def rmatmat(self, x: Any) -> Any:
-        """Multiply by the transpose of the represented genotype matrix.
-
-        **Arguments:**
-
-        - `x`: Rank-1 or rank-2 array with leading dimension `n_samples`.
-
-        **Returns:**
-
-        - Product with leading dimension `n_variants`.
-
-        **Raises:**
-
-        - `ValueError`: If `x` has an incompatible rank or leading dimension.
-        """
-        matrix, was_vector = _as_rank2_matrix(x, expected_rows=self.n_samples, dtype=self.dtype)
-        result = self._rmatmat(matrix)
-        return result[:, 0] if was_vector else result
-
-    def _matmat(self, x: Any) -> Any:
-        x = jnp.asarray(x, dtype=self.dtype)
+        x, was_vector = _as_rank2_matrix(x, expected_rows=self.n_variants, dtype=self.dtype)
         flip_sign = jnp.where(self.flip, -1, 1).astype(x.dtype)
         b = jnp.zeros((self.n_nonunique_indices, x.shape[1]), dtype=x.dtype)
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
@@ -468,10 +444,25 @@ class JaxLinearARG(eqx.Module):
         )
         flip_sum = jnp.sum(x * self.flip.astype(x.dtype)[:, None], axis=0)
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
-        return solved[sample_nonunique_indices, :] + flip_sum
+        result = solved[sample_nonunique_indices, :] + flip_sum
+        return result[:, 0] if was_vector else result
 
-    def _rmatmat(self, x: Any) -> Any:
-        x = jnp.asarray(x, dtype=self.dtype)
+    def rmatmat(self, x: Any) -> Any:
+        """Multiply by the transpose of the represented genotype matrix.
+
+        **Arguments:**
+
+        - `x`: Rank-1 or rank-2 array with leading dimension `n_samples`.
+
+        **Returns:**
+
+        - Product with leading dimension `n_variants`.
+
+        **Raises:**
+
+        - `ValueError`: If `x` has an incompatible rank or leading dimension.
+        """
+        x, was_vector = _as_rank2_matrix(x, expected_rows=self.n_samples, dtype=self.dtype)
         b = jnp.zeros((self.n_nonunique_indices, x.shape[1]), dtype=x.dtype)
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
         b = b.at[sample_nonunique_indices, :].set(x)
@@ -491,7 +482,8 @@ class JaxLinearARG(eqx.Module):
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
         values = solved[variant_nonunique_indices, :]
         total = jnp.sum(x, axis=0)
-        return jnp.where(self.flip[:, None], total[None, :] - values, values)
+        result = jnp.where(self.flip[:, None], total[None, :] - values, values)
+        return result[:, 0] if was_vector else result
 
     def matvec(self, x: Any) -> Any:
         """Multiply a vector by the represented genotype matrix."""
