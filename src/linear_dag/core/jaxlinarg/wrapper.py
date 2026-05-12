@@ -213,7 +213,6 @@ class JaxParallelOperator(eqx.Module):
     def __check_init__(self) -> None:
         if not self.blocks:
             raise ValueError("blocks must contain at least one JaxLinearARG")
-        _validate_mesh(self.mesh)
         n_samples = {block.n_samples for block in self.blocks}
         if len(n_samples) != 1:
             raise ValueError("all blocks must have the same n_samples")
@@ -264,7 +263,9 @@ class JaxParallelOperator(eqx.Module):
         - `ValueError`: If `x` has an incompatible rank or leading dimension.
         """
         x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[1], dtype=self.blocks[0].dtype)
-        if len(self.block_ranges) > 1:
+        if len(self.blocks) == 1:
+            result = self.blocks[0].matmat(x)
+        elif len(self.block_ranges) > 1:
             result = self._sharded_matmat(x)
         else:
             contributions = [
@@ -296,7 +297,9 @@ class JaxParallelOperator(eqx.Module):
         - `ValueError`: If `x` has an incompatible rank or leading dimension.
         """
         x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.blocks[0].dtype)
-        if len(self.block_ranges) > 1:
+        if len(self.blocks) == 1:
+            result = self.blocks[0].rmatmat(x)
+        elif len(self.block_ranges) > 1:
             result = self._sharded_rmatmat(x)
         else:
             result = jnp.concatenate([block.rmatmat(x) for block in self.blocks], axis=0)
@@ -435,11 +438,6 @@ def _as_jax_block(
     level_schedule: bool,
 ) -> JaxLinearARG:
     if isinstance(linearg, JaxLinearARG):
-        _validate_jax_block_settings(
-            (linearg,),
-            backend=backend,
-            level_schedule=level_schedule,
-        )
         return linearg
     return JaxLinearARG.from_lineararg(
         linearg,
@@ -559,7 +557,11 @@ def _require_metadata_columns(metadata: pl.DataFrame, *columns: str) -> None:
 def _validate_mesh(mesh: Any) -> None:
     if not isinstance(mesh, (Mesh, AbstractMesh)):
         raise TypeError("mesh must be a jax.sharding.Mesh or jax.sharding.AbstractMesh")
-    if _mesh_device_count(mesh) < 1:
+    if isinstance(mesh, AbstractMesh):
+        device_count = int(np.prod(tuple(mesh.shape.values()), dtype=np.int64))
+    else:
+        device_count = int(np.asarray(getattr(mesh, "devices", ())).size)
+    if device_count < 1:
         raise ValueError("mesh must contain at least one device")
     axis_names = tuple(getattr(mesh, "axis_names", ()))
     if axis_names.count("blocks") != 1:
@@ -587,12 +589,6 @@ def _validate_block_ranges(
         expected_start = end
     if expected_start != n_blocks:
         raise ValueError("block_ranges must be contiguous and cover every block")
-
-
-def _mesh_device_count(mesh: Any) -> int:
-    if isinstance(mesh, AbstractMesh):
-        return int(np.prod(tuple(mesh.shape.values()), dtype=np.int64))
-    return int(np.asarray(getattr(mesh, "devices", ())).size)
 
 
 def _mesh_blocks_axis_size(mesh: Any) -> int:
