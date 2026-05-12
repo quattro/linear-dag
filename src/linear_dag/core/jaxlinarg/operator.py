@@ -597,99 +597,10 @@ def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Arr
     return array, was_vector
 
 
-def _solve(
-    backend: Backend,
-    direction: str,
-    indptr: Any,
-    indices: Any,
-    data: Any,
-    src_of_edge: Any,
-    nonunique_indices: Any,
-    min_index_to_keep: int,
-    level_schedule: bool,
-    level_schedule_metadata: Any,
-    b: Any,
-) -> jax.Array:
-    return _solve_impl(
-        backend,
-        direction,
-        indptr,
-        indices,
-        data,
-        src_of_edge,
-        nonunique_indices,
-        min_index_to_keep,
-        level_schedule,
-        level_schedule_metadata,
-        b,
-    )
-
-
 # custom_vjp disables forward-mode differentiation for this wrapped function;
 # reverse-mode gradients are defined by the transpose-direction solve below.
-_solve = partial(jax.custom_vjp, nondiff_argnums=(0, 1, 7, 8, 9))(_solve)
-
-
-def _solve_fwd(
-    backend: Backend,
-    direction: str,
-    indptr: Any,
-    indices: Any,
-    data: Any,
-    src_of_edge: Any,
-    nonunique_indices: Any,
-    min_index_to_keep: int,
-    level_schedule: bool,
-    level_schedule_metadata: Any,
-    b: Any,
-) -> tuple[jax.Array, tuple[Any, Any, Any, Any, Any]]:
-    result = _solve_impl(
-        backend,
-        direction,
-        indptr,
-        indices,
-        data,
-        src_of_edge,
-        nonunique_indices,
-        min_index_to_keep,
-        level_schedule,
-        level_schedule_metadata,
-        b,
-    )
-    return result, (indptr, indices, data, src_of_edge, nonunique_indices)
-
-
-def _solve_bwd(
-    backend: Backend,
-    direction: str,
-    min_index_to_keep: int,
-    level_schedule: bool,
-    level_schedule_metadata: Any,
-    residual: tuple[Any, Any, Any, Any, Any],
-    grad: Any,
-) -> tuple[None, None, None, None, None, jax.Array]:
-    indptr, indices, data, src_of_edge, nonunique_indices = residual
-    transpose_direction = "backward" if direction == "forward" else "forward"
-    grad_b = _solve_impl(
-        backend,
-        transpose_direction,
-        indptr,
-        indices,
-        data,
-        src_of_edge,
-        nonunique_indices,
-        min_index_to_keep,
-        level_schedule,
-        level_schedule_metadata,
-        grad,
-    )
-    return None, None, None, None, None, grad_b
-
-
-_solve.defvjp(_solve_fwd, _solve_bwd)
-
-
-def _solve_impl(
+@partial(jax.custom_vjp, nondiff_argnums=(0, 1, 7, 8, 9))
+def _solve(
     backend: Backend,
     direction: str,
     indptr: Any,
@@ -821,6 +732,65 @@ def _solve_impl(
             b,
         )
     raise ValueError(f"unknown solve direction: {direction}")
+
+
+def _solve_fwd(
+    backend: Backend,
+    direction: str,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    nonunique_indices: Any,
+    min_index_to_keep: int,
+    level_schedule: bool,
+    level_schedule_metadata: Any,
+    b: Any,
+) -> tuple[jax.Array, tuple[Any, Any, Any, Any, Any]]:
+    result = _solve.fun(
+        backend,
+        direction,
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        min_index_to_keep,
+        level_schedule,
+        level_schedule_metadata,
+        b,
+    )
+    return result, (indptr, indices, data, src_of_edge, nonunique_indices)
+
+
+def _solve_bwd(
+    backend: Backend,
+    direction: str,
+    min_index_to_keep: int,
+    level_schedule: bool,
+    level_schedule_metadata: Any,
+    residual: tuple[Any, Any, Any, Any, Any],
+    grad: Any,
+) -> tuple[None, None, None, None, None, jax.Array]:
+    indptr, indices, data, src_of_edge, nonunique_indices = residual
+    transpose_direction = "backward" if direction == "forward" else "forward"
+    grad_b = _solve.fun(
+        backend,
+        transpose_direction,
+        indptr,
+        indices,
+        data,
+        src_of_edge,
+        nonunique_indices,
+        min_index_to_keep,
+        level_schedule,
+        level_schedule_metadata,
+        grad,
+    )
+    return None, None, None, None, None, grad_b
+
+
+_solve.defvjp(_solve_fwd, _solve_bwd)
 
 
 def _require_level_schedule_metadata(level_schedule_metadata: Any) -> Any:

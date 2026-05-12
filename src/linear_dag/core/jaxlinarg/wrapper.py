@@ -501,12 +501,28 @@ def _validate_jax_block_settings(
 
 
 def _metadata_from_lineargs(lineargs: tuple[Any, ...]) -> pl.DataFrame:
+    n_entries = []
+    n_variants = []
+    n_samples = []
+    n_nodes = []
+    for linearg in lineargs:
+        if isinstance(linearg, JaxLinearARG):
+            n_entries.append(int(linearg.indices.shape[0]))
+            n_variants.append(int(linearg.n_variants))
+            n_samples.append(int(linearg.n_samples))
+            n_nodes.append(int(linearg.indptr.shape[0] - 1))
+        else:
+            n_entries.append(int(linearg.A.nnz))
+            n_variants.append(int(linearg.shape[1]))
+            n_samples.append(int(linearg.shape[0]))
+            n_nodes.append(int(linearg.A.shape[0]))
+
     return pl.DataFrame(
         {
-            "n_entries": [_edge_count(linearg) for linearg in lineargs],
-            "n_variants": [_n_variants(linearg) for linearg in lineargs],
-            "n_samples": [_n_samples(linearg) for linearg in lineargs],
-            "n": [_node_count(linearg) for linearg in lineargs],
+            "n_entries": n_entries,
+            "n_variants": n_variants,
+            "n_samples": n_samples,
+            "n": n_nodes,
         }
     )
 
@@ -524,30 +540,6 @@ def _bucket_shapes_from_metadata(metadata: pl.DataFrame) -> tuple[BucketSpec, ..
     )
 
 
-def _node_count(linearg: Any) -> int:
-    if isinstance(linearg, JaxLinearARG):
-        return int(linearg.indptr.shape[0] - 1)
-    return int(linearg.A.shape[0])
-
-
-def _edge_count(linearg: Any) -> int:
-    if isinstance(linearg, JaxLinearARG):
-        return int(linearg.indices.shape[0])
-    return int(linearg.A.nnz)
-
-
-def _n_variants(linearg: Any) -> int:
-    if isinstance(linearg, JaxLinearARG):
-        return int(linearg.n_variants)
-    return int(linearg.shape[1])
-
-
-def _n_samples(linearg: Any) -> int:
-    if isinstance(linearg, JaxLinearARG):
-        return int(linearg.n_samples)
-    return int(linearg.shape[0])
-
-
 def _as_single_bucket_spec(bucket: Any) -> BucketSpec | None:
     if isinstance(bucket, BucketSpec):
         return bucket
@@ -557,13 +549,9 @@ def _as_single_bucket_spec(bucket: Any) -> BucketSpec | None:
         values = tuple(bucket)
     except TypeError:
         return None
-    if len(values) != 2 or not all(_is_int_like(value) for value in values):
+    if len(values) != 2 or not all(isinstance(value, (int, np.integer)) for value in values):
         return None
     return BucketSpec(max_nodes=int(values[0]), max_nnz=int(values[1]))
-
-
-def _is_int_like(value: Any) -> bool:
-    return isinstance(value, (int, np.integer))
 
 
 def _validate_mesh(mesh: Any) -> None:
