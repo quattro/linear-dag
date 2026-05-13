@@ -18,7 +18,7 @@ import pytest
 from jax.sharding import Mesh
 
 from linear_dag.core.jaxlinarg import Backend, JaxParallelOperator
-from linear_dag.core.jaxlinarg.kernels import ffi_cpu, pallas_gpu
+from linear_dag.core.jaxlinarg.kernels import ffi_cpu
 from linear_dag.core.parallel_processing import ParallelOperator
 
 MIN_SAMPLE_SECONDS = 0.005
@@ -126,7 +126,6 @@ def _time_jax_parallel_operator(
     for k, matrix in variant_inputs.items():
         with jax.default_device(config.devices[0]):
             jax_matrix = jnp.asarray(matrix)
-        pallas_gpu.reset_pallas_gpu_fallback_count(clear_warnings=False)
         matmat = jax.jit(lambda values: op.matmat(values)).lower(jax_matrix).compile()
         runtime = _time_call(lambda matrix=jax_matrix, matmat=matmat: matmat(matrix), block_until_ready=True)
         results.append(
@@ -141,7 +140,6 @@ def _time_jax_parallel_operator(
     for k, matrix in sample_inputs.items():
         with jax.default_device(config.devices[0]):
             jax_matrix = jnp.asarray(matrix)
-        pallas_gpu.reset_pallas_gpu_fallback_count(clear_warnings=False)
         rmatmat = jax.jit(lambda values: op.rmatmat(values)).lower(jax_matrix).compile()
         runtime = _time_call(lambda matrix=jax_matrix, rmatmat=rmatmat: rmatmat(matrix), block_until_ready=True)
         results.append(
@@ -181,16 +179,13 @@ class JaxParallelBenchmarkConfig:
 
 def _jax_parallel_configs(linarg_block_metadata: pl.DataFrame) -> list[JaxParallelBenchmarkConfig]:
     cpu_devices = tuple(_devices_for_backend("cpu"))
-    gpu_devices = tuple(_devices_for_backend("gpu"))
-    if not cpu_devices and not gpu_devices:
+    if not cpu_devices:
         pytest.skip("JAX parallel benchmark requires at least one JAX device")
 
     configs = []
     configs.extend(_configs_for_backend(Backend.PURE_JAX, "pure_jax_cpu", cpu_devices, linarg_block_metadata))
     if ffi_cpu.is_ffi_cpu_available():
         configs.extend(_configs_for_backend(Backend.FFI_CPU, "ffi_cpu", cpu_devices, linarg_block_metadata))
-    if pallas_gpu.is_pallas_import_available() and gpu_devices:
-        configs.extend(_configs_for_backend(Backend.PALLAS_GPU, "pallas_gpu", gpu_devices, linarg_block_metadata))
     return configs
 
 
@@ -230,8 +225,6 @@ def _devices_for_backend(backend: str) -> list[jax.Device]:
 
 
 def _result_operator_name(config: JaxParallelBenchmarkConfig) -> str:
-    if config.backend is Backend.PALLAS_GPU and pallas_gpu.pallas_gpu_fallback_count():
-        return f"{config.name}_fallback_jax"
     return config.name
 
 

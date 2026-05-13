@@ -77,8 +77,6 @@ class JaxParallelOperator(eqx.Module):
     - `variant_offsets`: Leading-zero cumulative variant offsets.
     - `mesh`: JAX mesh containing a `"blocks"` axis.
     - `backend`: Requested numerical backend.
-    - `level_schedule`: Whether block-level Pallas GPU dispatch should use
-      precomputed level schedules.
     - `block_ranges`: Contiguous block ranges assigned to mesh devices.
     """
 
@@ -87,7 +85,6 @@ class JaxParallelOperator(eqx.Module):
     mesh: Any = eqx.field(static=True)
     block_ranges: tuple[tuple[int, int], ...] = eqx.field(converter=_range_tuple, static=True)
     backend: Backend = eqx.field(default=Backend.AUTO, converter=Backend, static=True)
-    level_schedule: bool = eqx.field(default=False, converter=bool, static=True)
 
     @classmethod
     def from_linearargs(
@@ -97,7 +94,6 @@ class JaxParallelOperator(eqx.Module):
         mesh: Any,
         backend: Backend = Backend.AUTO,
         buckets: Any = "auto",
-        level_schedule: bool = False,
     ) -> "JaxParallelOperator":
         """Construct a multi-block JAX operator from LinearARG objects.
 
@@ -113,8 +109,6 @@ class JaxParallelOperator(eqx.Module):
         - `mesh`: JAX mesh with a `"blocks"` axis.
         - `backend`: Requested numerical backend.
         - `buckets`: Padding policy, a shared bucket, or one bucket per block.
-        - `level_schedule`: Whether Pallas GPU blocks should use precomputed
-          level schedules.
 
         **Returns:**
 
@@ -132,7 +126,6 @@ class JaxParallelOperator(eqx.Module):
                 linearg,
                 backend=backend,
                 bucket=bucket,
-                level_schedule=level_schedule,
             )
             for linearg, bucket in _zip_buckets(
                 lineargs,
@@ -145,7 +138,6 @@ class JaxParallelOperator(eqx.Module):
             variant_offsets=variant_offsets_from_metadata(metadata),
             mesh=mesh,
             backend=backend,
-            level_schedule=level_schedule,
             block_ranges=split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh)),
         )
 
@@ -158,7 +150,6 @@ class JaxParallelOperator(eqx.Module):
         block_metadata: pl.DataFrame | None = None,
         backend: Backend = Backend.AUTO,
         buckets: Any = "auto",
-        level_schedule: bool = False,
     ) -> "JaxParallelOperator":
         """Construct a multi-block JAX operator from an HDF5 LinearARG file.
 
@@ -174,8 +165,6 @@ class JaxParallelOperator(eqx.Module):
         - `block_metadata`: Optional preloaded block metadata.
         - `backend`: Requested numerical backend.
         - `buckets`: Padding policy, a shared bucket, or one bucket per block.
-        - `level_schedule`: Whether Pallas GPU blocks should use precomputed
-          level schedules.
 
         **Returns:**
 
@@ -193,7 +182,6 @@ class JaxParallelOperator(eqx.Module):
                 block_name,
                 backend=backend,
                 bucket=bucket,
-                level_schedule=level_schedule,
             )
             for block_name, bucket in _zip_buckets(
                 block_names,
@@ -206,7 +194,6 @@ class JaxParallelOperator(eqx.Module):
             variant_offsets=variant_offsets_from_metadata(metadata),
             mesh=mesh,
             backend=backend,
-            level_schedule=level_schedule,
             block_ranges=split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh)),
         )
 
@@ -222,7 +209,6 @@ class JaxParallelOperator(eqx.Module):
         _validate_jax_block_settings(
             self.blocks,
             backend=self.backend,
-            level_schedule=self.level_schedule,
         )
 
         if len(self.variant_offsets) != len(self.blocks) + 1:
@@ -433,7 +419,6 @@ def _as_jax_block(
     *,
     backend: Backend,
     bucket: Any,
-    level_schedule: bool,
 ) -> JaxLinearARG:
     if isinstance(linearg, JaxLinearARG):
         return linearg
@@ -441,7 +426,6 @@ def _as_jax_block(
         linearg,
         backend=backend,
         bucket=bucket,
-        level_schedule=level_schedule,
     )
 
 
@@ -466,7 +450,6 @@ def _validate_jax_block_settings(
     blocks: tuple[JaxLinearARG, ...],
     *,
     backend: Backend,
-    level_schedule: bool,
 ) -> None:
     requested_backend = Backend(backend)
     if requested_backend is Backend.AUTO:
@@ -475,17 +458,11 @@ def _validate_jax_block_settings(
             expected_backend = resolve_backend(expected_backend)
     else:
         expected_backend = resolve_backend(requested_backend)
-    expected_level_schedule = bool(level_schedule)
     for block in blocks:
         if block.backend is not expected_backend:
             raise ValueError(
                 "prebuilt JaxLinearARG block backend must match requested wrapper backend; "
                 f"expected {expected_backend.value}, observed {block.backend.value}"
-            )
-        if block.level_schedule is not expected_level_schedule:
-            raise ValueError(
-                "prebuilt JaxLinearARG block level_schedule must match requested wrapper level_schedule; "
-                f"expected {expected_level_schedule}, observed {block.level_schedule}"
             )
 
 

@@ -8,8 +8,6 @@ import pytest
 
 from linear_dag.core.jaxlinarg.kernels.pure_jax import pure_jax_solve_forward
 from linear_dag.core.jaxlinarg.padding import (
-    align_bucket_for_mosaic_gpu,
-    aligned_length_for_mosaic_gpu_transfer,
     BucketSpec,
     choose_bucket,
     choose_buckets,
@@ -143,26 +141,3 @@ def test_choose_bucket_rejects_oversized_explicit_shape() -> None:
 
     with pytest.raises(ValueError, match="No bucket"):
         choose_bucket((9, 9), buckets)
-
-
-def test_align_bucket_for_mosaic_gpu_separates_indptr_and_node_ref_padding() -> None:
-    padding = align_bucket_for_mosaic_gpu(
-        BucketSpec(max_nodes=834, max_nnz=2008),
-        nonunique_count=834,
-        data_dtype=np.float32,
-    )
-
-    assert padding.bucket.max_nodes == 863
-    assert padding.bucket.max_nnz == 2016
-    assert padding.nonunique_indices_length == 864
-    assert padding.state_rows == 864
-    assert (padding.bucket.max_nodes + 1) * np.dtype(np.int32).itemsize % 128 == 0
-    assert padding.bucket.max_nnz * np.dtype(np.int32).itemsize % 128 == 0
-    assert padding.bucket.max_nnz * np.dtype(np.float32).itemsize % 128 == 0
-    assert padding.nonunique_indices_length * np.dtype(np.int32).itemsize % 128 == 0
-    assert padding.state_rows * np.dtype(np.float32).itemsize % 128 == 0
-
-
-def test_aligned_length_for_mosaic_gpu_transfer_respects_dtype_width() -> None:
-    assert aligned_length_for_mosaic_gpu_transfer(np.int32, 835) == 864
-    assert aligned_length_for_mosaic_gpu_transfer(np.float64, 2008) == 2016

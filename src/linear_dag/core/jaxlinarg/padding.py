@@ -1,13 +1,9 @@
 # pattern: Functional Core
 
-import math
-
 from collections.abc import Iterable
 from typing import Any, NamedTuple
 
 import numpy as np
-
-MOSAIC_GPU_TRANSFER_BYTES = 128
 
 
 class BucketSpec(NamedTuple):
@@ -24,14 +20,6 @@ class PaddedGraph(NamedTuple):
     indices: np.ndarray
     data: np.ndarray
     src_of_edge: np.ndarray
-
-
-class MosaicGpuPaddingSpec(NamedTuple):
-    """Static storage dimensions needed by the current Mosaic GPU lowering."""
-
-    bucket: BucketSpec
-    nonunique_indices_length: int
-    state_rows: int
 
 
 def compute_src_of_edge(indptr: Any) -> Any:
@@ -132,48 +120,6 @@ def choose_bucket(shape: BucketSpec, buckets: Iterable[BucketSpec]) -> BucketSpe
     raise ValueError(f"No bucket can contain shape {shape}")
 
 
-def align_bucket_for_mosaic_gpu(
-    bucket: Any,
-    *,
-    nonunique_count: int | None = None,
-    index_dtype: Any = np.int32,
-    data_dtype: Any = np.float32,
-) -> MosaicGpuPaddingSpec:
-    """Return storage padding that satisfies current Mosaic GPU transfers.
-
-    Mosaic GPU lowering currently requires whole-ref transfers to have byte
-    sizes divisible by 128. That is a backend lowering constraint, not a
-    mathematical requirement of the LinearARG solve. The graph bucket aligns
-    `indptr` by padding `max_nodes + 1`, and edge arrays by padding `max_nnz`.
-    The nonunique-index buffer and solve-state rows are padded separately
-    because their natural length is `max_nodes`, not `max_nodes + 1`.
-    """
-    bucket = _as_bucket_spec(bucket)
-    index_dtype = np.dtype(index_dtype)
-    data_dtype = np.dtype(data_dtype)
-    index_multiple = _elements_per_mosaic_transfer(index_dtype)
-    data_multiple = _elements_per_mosaic_transfer(data_dtype)
-    edge_multiple = math.lcm(index_multiple, data_multiple)
-
-    aligned_bucket = BucketSpec(
-        max_nodes=aligned_length_for_mosaic_gpu_transfer(index_dtype, bucket.max_nodes + 1) - 1,
-        max_nnz=_round_up(bucket.max_nnz, edge_multiple),
-    )
-    nonunique_count = bucket.max_nodes if nonunique_count is None else int(nonunique_count)
-    nonunique_indices_length = aligned_length_for_mosaic_gpu_transfer(index_dtype, aligned_bucket.max_nodes)
-    state_rows = aligned_length_for_mosaic_gpu_transfer(data_dtype, max(nonunique_count, 1))
-    return MosaicGpuPaddingSpec(
-        bucket=aligned_bucket,
-        nonunique_indices_length=nonunique_indices_length,
-        state_rows=state_rows,
-    )
-
-
-def aligned_length_for_mosaic_gpu_transfer(dtype: Any, length: int) -> int:
-    """Round an array length up to a 128-byte Mosaic GPU transfer boundary."""
-    return _round_up(int(length), _elements_per_mosaic_transfer(np.dtype(dtype)))
-
-
 def choose_buckets(shapes: Iterable[BucketSpec], *, max_buckets: int = 8) -> tuple[BucketSpec, ...]:
     """Choose a small set of static buckets for a collection of graph shapes.
 
@@ -219,17 +165,6 @@ def _as_bucket_spec(shape: Any) -> BucketSpec:
         return shape
     max_nodes, max_nnz = shape
     return BucketSpec(int(max_nodes), int(max_nnz))
-
-
-def _elements_per_mosaic_transfer(dtype: np.dtype) -> int:
-    itemsize = np.dtype(dtype).itemsize
-    if MOSAIC_GPU_TRANSFER_BYTES % itemsize != 0:
-        raise ValueError(f"dtype itemsize {itemsize} does not divide {MOSAIC_GPU_TRANSFER_BYTES} bytes")
-    return MOSAIC_GPU_TRANSFER_BYTES // itemsize
-
-
-def _round_up(value: int, multiple: int) -> int:
-    return ((int(value) + int(multiple) - 1) // int(multiple)) * int(multiple)
 
 
 def _bucket_sort_key(shape: BucketSpec) -> tuple[int, int, int]:

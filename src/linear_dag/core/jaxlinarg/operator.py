@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .kernels import ffi_cpu, pallas_gpu, pallas_tpu
+from .kernels import ffi_cpu
 from .kernels.pure_jax import (
     pure_jax_solve_backward_compressed,
     pure_jax_solve_forward_compressed,
@@ -34,8 +34,6 @@ class Backend(StrEnum):
     AUTO = "auto"
     PURE_JAX = "pure_jax"
     FFI_CPU = "ffi_cpu"
-    PALLAS_GPU = "pallas_gpu"
-    PALLAS_TPU = "pallas_tpu"
 
 
 _SOLVERS = {
@@ -43,15 +41,6 @@ _SOLVERS = {
     ("backward", Backend.PURE_JAX): pure_jax_solve_backward_compressed,
     ("forward", Backend.FFI_CPU): ffi_cpu.ffi_cpu_solve_forward,
     ("backward", Backend.FFI_CPU): ffi_cpu.ffi_cpu_solve_backward,
-    ("forward", Backend.PALLAS_GPU): pallas_gpu.pallas_gpu_solve_forward,
-    ("backward", Backend.PALLAS_GPU): pallas_gpu.pallas_gpu_solve_backward,
-    ("forward", Backend.PALLAS_TPU): pallas_tpu.pallas_tpu_solve_forward,
-    ("backward", Backend.PALLAS_TPU): pallas_tpu.pallas_tpu_solve_backward,
-}
-
-_LEVEL_SOLVERS = {
-    "forward": pallas_gpu.pallas_gpu_solve_forward_level_scheduled,
-    "backward": pallas_gpu.pallas_gpu_solve_backward_level_scheduled,
 }
 
 
@@ -62,14 +51,6 @@ def resolve_backend(requested: Backend, *, platform: str | None = None) -> Backe
 
     if requested is Backend.PURE_JAX:
         return Backend.PURE_JAX
-    if requested is Backend.PALLAS_GPU:
-        if not _is_gpu_platform(platform) or not pallas_gpu.is_pallas_import_available():
-            raise ValueError(_pallas_gpu_unavailable_message(platform))
-        return Backend.PALLAS_GPU
-    if requested is Backend.PALLAS_TPU:
-        if platform != "tpu" or not pallas_tpu.is_pallas_import_available():
-            raise ValueError(_pallas_tpu_unavailable_message(platform))
-        return Backend.PALLAS_TPU
     if requested is Backend.FFI_CPU:
         if ffi_cpu.is_ffi_cpu_available():
             return Backend.FFI_CPU
@@ -82,9 +63,7 @@ def resolve_backend(requested: Backend, *, platform: str | None = None) -> Backe
     if requested is Backend.AUTO:
         if platform == "cpu":
             return Backend.FFI_CPU if ffi_cpu.is_ffi_cpu_available() else Backend.PURE_JAX
-        if platform in {"gpu", "cuda", "rocm"}:
-            return Backend.PALLAS_GPU if pallas_gpu.is_pallas_import_available() else Backend.PURE_JAX
-        if platform == "tpu":
+        if platform in {"gpu", "cuda", "rocm", "tpu"}:
             return Backend.PURE_JAX
     raise ValueError(f"unknown backend: {requested}")
 
@@ -96,12 +75,9 @@ class JaxLinearARG(eqx.Module):
         `Backend.PURE_JAX` is always available and supports JAX transforms.
         `Backend.FFI_CPU` uses the native CPU FFI handler when it is installed;
         if the handler is unavailable, explicit FFI CPU requests warn and fall
-        back to `Backend.PURE_JAX`. `Backend.PALLAS_GPU` uses Pallas kernels and
-        is only available when the current JAX platform is GPU and Pallas imports.
-        `Backend.PALLAS_TPU` is an experimental TPU backend and is not selected
-        by `Backend.AUTO` while Pallas TPU support remains experimental.
-        Reverse-mode autodiff is supported through custom VJP rules; forward
-        mode is not supported for the solve primitive.
+        back to `Backend.PURE_JAX`. Accelerator platforms currently use
+        `Backend.PURE_JAX`. Reverse-mode autodiff is supported through custom
+        VJP rules; forward mode is not supported for the solve primitive.
 
     **Arguments:**
 
@@ -118,10 +94,6 @@ class JaxLinearARG(eqx.Module):
     - `n_variants`: Number of variants in genotype space.
     - `n_samples`: Number of samples in genotype space.
     - `backend`: Requested numerical backend.
-    - `level_schedule`: Whether Pallas GPU dispatch should use the
-      level-scheduling branch.
-    - `level_schedule_metadata`: Precomputed host-side Pallas level schedule,
-      present only when `level_schedule=True`.
     - `dtype`: Computation dtype.
     """
 
@@ -139,8 +111,6 @@ class JaxLinearARG(eqx.Module):
     n_nonunique_indices: int = eqx.field(default=-1, static=True)
     min_index_to_keep: int = eqx.field(default=0, static=True)
     backend: Backend = eqx.field(default=Backend.AUTO, converter=resolve_backend, static=True)
-    level_schedule: bool = eqx.field(default=False, converter=bool, static=True)
-    level_schedule_metadata: Any = eqx.field(default=None, static=True)
     dtype: Any = eqx.field(default=jnp.float32, converter=jnp.dtype, static=True)
 
     @classmethod
@@ -160,7 +130,6 @@ class JaxLinearARG(eqx.Module):
         n_nonunique_indices: int | None = None,
         allele_counts: Any | None = None,
         backend: Backend = Backend.AUTO,
-        level_schedule: bool = False,
         dtype: Any = jnp.float32,
     ) -> "JaxLinearARG":
         """Construct a JAX operator from LinearARG array components.
@@ -185,8 +154,6 @@ class JaxLinearARG(eqx.Module):
         - `n_nonunique_indices`: Optional compressed-node count.
         - `allele_counts`: Optional allele counts aligned to variants.
         - `backend`: Requested numerical backend.
-        - `level_schedule`: Whether Pallas GPU dispatch should use a
-          precomputed level schedule.
         - `dtype`: Computation dtype.
 
         **Returns:**
@@ -210,11 +177,6 @@ class JaxLinearARG(eqx.Module):
                 raise ValueError("n_nonunique_indices cannot be smaller than the maximum nonunique index")
         sample_indices = jnp.asarray(sample_indices, dtype=jnp.int32)
         min_index_to_keep = int(sample_indices[-1]) if sample_indices.size else 0
-        level_schedule_metadata = (
-            _static_level_schedule_metadata(pallas_gpu.compute_level_schedule(indptr, indices))
-            if level_schedule
-            else None
-        )
 
         return cls(
             indptr=jnp.asarray(indptr, dtype=jnp.int32),
@@ -231,8 +193,6 @@ class JaxLinearARG(eqx.Module):
             n_nonunique_indices=n_nonunique_indices,
             min_index_to_keep=min_index_to_keep,
             backend=backend,
-            level_schedule=level_schedule,
-            level_schedule_metadata=level_schedule_metadata,
             dtype=dtype,
         )
 
@@ -243,7 +203,6 @@ class JaxLinearARG(eqx.Module):
         *,
         backend: Backend = Backend.AUTO,
         bucket: Any = None,
-        level_schedule: bool = False,
         dtype: Any = None,
     ) -> "JaxLinearARG":
         """Construct a JAX operator from a [`linear_dag.core.lineararg.LinearARG`][].
@@ -258,8 +217,6 @@ class JaxLinearARG(eqx.Module):
         - `linarg`: Source LinearARG object.
         - `backend`: Requested numerical backend.
         - `bucket`: Optional static padding bucket.
-        - `level_schedule`: Whether Pallas GPU dispatch should use a
-          precomputed level schedule.
         - `dtype`: Optional computation dtype.
 
         **Returns:**
@@ -272,7 +229,6 @@ class JaxLinearARG(eqx.Module):
             linarg,
             backend=backend,
             bucket=bucket,
-            level_schedule=level_schedule,
             dtype=dtype,
         )
 
@@ -284,16 +240,10 @@ class JaxLinearARG(eqx.Module):
         *,
         backend: Backend = Backend.AUTO,
         bucket: Any = None,
-        level_schedule: bool = False,
         load_metadata: bool = False,
         dtype: Any = None,
     ) -> "JaxLinearARG":
         """Construct a JAX operator from one HDF5 LinearARG block.
-
-        !!! info
-            `Backend.PALLAS_GPU` is only valid on GPU platforms with Pallas
-            available. Explicit Pallas requests fail fast when unavailable;
-            `Backend.AUTO` falls back according to platform rules.
 
         **Arguments:**
 
@@ -301,8 +251,6 @@ class JaxLinearARG(eqx.Module):
         - `block`: Block name inside the HDF5 file.
         - `backend`: Requested numerical backend.
         - `bucket`: Optional static padding bucket.
-        - `level_schedule`: Whether Pallas GPU dispatch should use a
-          precomputed level schedule.
         - `load_metadata`: Whether to load optional LinearARG metadata.
         - `dtype`: Optional computation dtype.
 
@@ -317,7 +265,6 @@ class JaxLinearARG(eqx.Module):
             block,
             backend=backend,
             bucket=bucket,
-            level_schedule=level_schedule,
             load_metadata=load_metadata,
             dtype=dtype,
         )
@@ -403,8 +350,6 @@ class JaxLinearARG(eqx.Module):
             raise ValueError("nonunique_indices contains an out-of-range compressed index")
         if self.min_index_to_keep < 0 or self.min_index_to_keep > node_count:
             raise ValueError("min_index_to_keep must be within the node range")
-        if self.level_schedule and self.level_schedule_metadata is None:
-            raise ValueError("level_schedule_metadata is required when level_schedule=True")
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -440,8 +385,6 @@ class JaxLinearARG(eqx.Module):
             self.src_of_edge,
             self.nonunique_indices,
             self.min_index_to_keep,
-            self.level_schedule,
-            self.level_schedule_metadata,
             b,
         )
         flip_sum = jnp.sum(x * self.flip.astype(x.dtype)[:, None], axis=0)
@@ -477,8 +420,6 @@ class JaxLinearARG(eqx.Module):
             self.src_of_edge,
             self.nonunique_indices,
             self.min_index_to_keep,
-            self.level_schedule,
-            self.level_schedule_metadata,
             b,
         )
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
@@ -561,34 +502,6 @@ def _ffi_cpu_unavailable_message() -> str:
     return f"FFI_CPU backend is unavailable ({error}); falling back to PURE_JAX."
 
 
-def _pallas_gpu_unavailable_message(platform: str) -> str:
-    gpu_state = "available" if _is_gpu_platform(platform) else "unavailable"
-    import_state = "available" if pallas_gpu.is_pallas_import_available() else "unavailable"
-    return (
-        f"PALLAS_GPU backend is unavailable on current platform '{platform}' "
-        f"(GPU platform: {gpu_state}; Pallas import: {import_state})."
-    )
-
-
-def _pallas_tpu_unavailable_message(platform: str) -> str:
-    tpu_state = "available" if platform == "tpu" else "unavailable"
-    import_state = "available" if pallas_tpu.is_pallas_import_available() else "unavailable"
-    return (
-        f"PALLAS_TPU backend is unavailable on current platform '{platform}' "
-        f"(TPU platform: {tpu_state}; Pallas import: {import_state})."
-    )
-
-
-def _static_level_schedule_metadata(schedule: pallas_gpu.LevelSchedule) -> pallas_gpu.LevelSchedule:
-    edge_order = tuple(int(value) for value in np.asarray(schedule.edge_order, dtype=np.int32))
-    level_offsets = tuple(int(value) for value in np.asarray(schedule.level_offsets, dtype=np.int32))
-    return pallas_gpu.LevelSchedule(edge_order=edge_order, level_offsets=level_offsets)
-
-
-def _is_gpu_platform(platform: str) -> bool:
-    return platform in {"gpu", "cuda", "rocm"}
-
-
 def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Array, bool]:
     array = jnp.asarray(x, dtype=dtype)
     if array.ndim == 1:
@@ -605,7 +518,7 @@ def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Arr
 
 # custom_vjp disables forward-mode differentiation for this wrapped function;
 # reverse-mode gradients are defined by the transpose-direction solve below.
-@partial(jax.custom_vjp, nondiff_argnums=(0, 1, 7, 8, 9))
+@partial(jax.custom_vjp, nondiff_argnums=(0, 1, 7))
 def _solve(
     backend: Backend,
     direction: str,
@@ -615,8 +528,6 @@ def _solve(
     src_of_edge: Any,
     nonunique_indices: Any,
     min_index_to_keep: int,
-    level_schedule: bool,
-    level_schedule_metadata: Any,
     b: Any,
 ) -> jax.Array:
     if backend is Backend.AUTO:
@@ -629,23 +540,6 @@ def _solve(
                 stacklevel=2,
             )
             backend = Backend.PURE_JAX
-    if backend is Backend.PALLAS_GPU and level_schedule:
-        if level_schedule_metadata is None:
-            raise ValueError("level_schedule_metadata is required when level_schedule=True")
-        try:
-            solve = _LEVEL_SOLVERS[direction]
-        except KeyError as error:
-            raise ValueError(f"unknown backend/direction combination: {backend.value}/{direction}") from error
-        return solve(
-            indptr,
-            indices,
-            data,
-            src_of_edge,
-            nonunique_indices,
-            min_index_to_keep,
-            level_schedule_metadata,
-            b,
-        )
 
     try:
         solve = _SOLVERS[(direction, backend)]
@@ -671,8 +565,6 @@ def _solve_fwd(
     src_of_edge: Any,
     nonunique_indices: Any,
     min_index_to_keep: int,
-    level_schedule: bool,
-    level_schedule_metadata: Any,
     b: Any,
 ) -> tuple[jax.Array, tuple[Any, Any, Any, Any, Any]]:
     result = _solve.fun(
@@ -684,8 +576,6 @@ def _solve_fwd(
         src_of_edge,
         nonunique_indices,
         min_index_to_keep,
-        level_schedule,
-        level_schedule_metadata,
         b,
     )
     return result, (indptr, indices, data, src_of_edge, nonunique_indices)
@@ -695,8 +585,6 @@ def _solve_bwd(
     backend: Backend,
     direction: str,
     min_index_to_keep: int,
-    level_schedule: bool,
-    level_schedule_metadata: Any,
     residual: tuple[Any, Any, Any, Any, Any],
     grad: Any,
 ) -> tuple[None, None, None, None, None, jax.Array]:
@@ -711,8 +599,6 @@ def _solve_bwd(
         src_of_edge,
         nonunique_indices,
         min_index_to_keep,
-        level_schedule,
-        level_schedule_metadata,
         grad,
     )
     return None, None, None, None, None, grad_b

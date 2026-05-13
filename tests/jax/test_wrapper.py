@@ -303,59 +303,6 @@ def test_jax_parallel_operator_from_linearargs_auto_buckets_blocks():
     assert any(padded != original for padded, original in zip(padded_shapes, original_shapes, strict=True))
 
 
-def test_jax_parallel_operator_from_linearargs_threads_level_schedule_to_raw_blocks():
-    lineargs = (_lineararg_with_graph_shape(n_nodes=3, n_edges=2),)
-
-    op = JaxParallelOperator.from_linearargs(
-        lineargs,
-        mesh=_mesh(),
-        backend=Backend.PURE_JAX,
-        buckets=None,
-        level_schedule=True,
-    )
-
-    assert op.level_schedule is True
-    assert op.blocks[0].level_schedule is True
-    assert op.blocks[0].level_schedule_metadata is not None
-
-
-def test_jax_parallel_operator_from_linearargs_accepts_matching_prebuilt_level_schedule_blocks():
-    block = JaxLinearARG.from_lineararg(
-        _lineararg_with_graph_shape(n_nodes=3, n_edges=2),
-        backend=Backend.PURE_JAX,
-        level_schedule=True,
-    )
-
-    op = JaxParallelOperator.from_linearargs(
-        (block,),
-        mesh=_mesh(),
-        backend=Backend.PURE_JAX,
-        buckets=None,
-        level_schedule=True,
-    )
-
-    assert op.level_schedule is True
-    assert op.blocks == (block,)
-    assert op.blocks[0].level_schedule is True
-
-
-def test_jax_parallel_operator_from_linearargs_rejects_prebuilt_level_schedule_mismatch():
-    block = JaxLinearARG.from_lineararg(
-        _lineararg_with_graph_shape(n_nodes=3, n_edges=2),
-        backend=Backend.PURE_JAX,
-        level_schedule=False,
-    )
-
-    with pytest.raises(ValueError, match="level_schedule"):
-        JaxParallelOperator.from_linearargs(
-            (block,),
-            mesh=_mesh(),
-            backend=Backend.PURE_JAX,
-            buckets=None,
-            level_schedule=True,
-        )
-
-
 def test_jax_parallel_operator_from_linearargs_auto_accepts_consistent_prebuilt_backend(monkeypatch):
     block = JaxLinearARG.from_lineararg(
         _lineararg_with_graph_shape(n_nodes=3, n_edges=2),

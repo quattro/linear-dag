@@ -8,11 +8,8 @@ import numpy as np
 
 from scipy import sparse
 
-import linear_dag.core.jaxlinarg.operator as jaxlinarg_operator
-
 from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 from linear_dag.core.jaxlinarg.ingress import from_lineararg
-from linear_dag.core.jaxlinarg.kernels import pallas_gpu
 from linear_dag.core.jaxlinarg.padding import BucketSpec
 from linear_dag.core.lineararg import LinearARG
 
@@ -40,13 +37,6 @@ def test_from_lineararg_canonicalizes_arrays_and_preserves_cached_allele_counts(
     np.testing.assert_array_equal(np.asarray(op.allele_counts), linarg.allele_counts.astype(np.int32))
 
 
-def test_from_lineararg_threads_level_schedule_to_operator(oracle_case) -> None:
-    op = from_lineararg(oracle_case.linarg, backend=Backend.PURE_JAX, level_schedule=True)
-
-    assert op.level_schedule is True
-    assert op.level_schedule_metadata is not None
-
-
 def test_jax_lineararg_from_hdf5_block_matches_lineararg_read(
     linarg_h5_path,
     first_block_name,
@@ -60,69 +50,6 @@ def test_jax_lineararg_from_hdf5_block_matches_lineararg_read(
     assert op.shape == linarg.shape
     np.testing.assert_allclose(np.asarray(op.matmat(w)), np.asarray(linarg @ w), rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(np.asarray(op.rmatmat(y)), np.asarray(linarg.T @ y), rtol=1e-5, atol=1e-5)
-
-
-def test_jax_lineararg_from_hdf5_block_threads_level_schedule(
-    linarg_h5_path,
-    first_block_name,
-) -> None:
-    op = JaxLinearARG.from_hdf5_block(
-        linarg_h5_path,
-        first_block_name,
-        backend=Backend.PURE_JAX,
-        level_schedule=True,
-    )
-
-    assert op.level_schedule is True
-    assert op.level_schedule_metadata is not None
-
-
-def test_level_schedule_is_precomputed_before_solve_dispatch(monkeypatch) -> None:
-    calls = []
-    schedule = pallas_gpu.LevelSchedule(
-        edge_order=np.asarray([0], dtype=np.int32),
-        level_offsets=np.asarray([0, 1], dtype=np.int32),
-    )
-
-    def fake_compute_level_schedule(indptr, indices):
-        calls.append((np.asarray(indptr), np.asarray(indices)))
-        return schedule
-
-    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    monkeypatch.setattr(pallas_gpu, "pl", object())
-    monkeypatch.setattr(pallas_gpu, "compute_level_schedule", fake_compute_level_schedule)
-    op = JaxLinearARG.from_lineararg_arrays(
-        indptr=np.array([0, 1, 1], dtype=np.int32),
-        indices=np.array([1], dtype=np.int32),
-        data=np.ones(1, dtype=np.float32),
-        src_of_edge=np.array([0], dtype=np.int32),
-        variant_indices=np.array([0], dtype=np.int32),
-        flip=np.array([False]),
-        sample_indices=np.array([1], dtype=np.int32),
-        nonunique_indices=np.array([0, 1], dtype=np.int32),
-        n_variants=1,
-        n_samples=1,
-        backend=Backend.PALLAS_GPU,
-        level_schedule=True,
-    )
-
-    monkeypatch.setattr(
-        pallas_gpu,
-        "compute_level_schedule",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("schedule computed during solve")),
-    )
-    expected_schedule = pallas_gpu.LevelSchedule(edge_order=(0,), level_offsets=(0, 1))
-
-    def fake_forward_level_scheduled(*args):
-        assert args[-2] == expected_schedule
-        return args[-1]
-
-    monkeypatch.setitem(jaxlinarg_operator._LEVEL_SOLVERS, "forward", fake_forward_level_scheduled)
-
-    result = op.matmat(np.asarray([[2.0]], dtype=np.float32))
-
-    assert len(calls) == 1
-    assert result.shape == (1, 1)
 
 
 def test_from_lineararg_bucket_padding_preserves_matmat_and_rmatmat(oracle_case) -> None:
@@ -223,27 +150,3 @@ def test_from_lineararg_bucket_padding_reuses_jit_trace_with_optional_allele_cou
     np.testing.assert_allclose(np.asarray(jitted_product(first_op, x)), np.array([[2.0]], dtype=np.float32))
     np.testing.assert_allclose(np.asarray(jitted_product(second_op, x)), np.array([[2.0]], dtype=np.float32))
     assert trace_count == 1
-
-
-def test_from_lineararg_pallas_gpu_pads_mosaic_visible_storage(monkeypatch) -> None:
-    linarg = LinearARG(
-        sparse.csc_matrix(([1.0], ([2], [0])), shape=(3, 3)),
-        variant_indices=np.array([0], dtype=np.int32),
-        flip=np.array([False]),
-        n_samples=np.int32(1),
-        nonunique_indices=np.array([0, 1, 1], dtype=np.int32),
-    )
-
-    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    monkeypatch.setattr(pallas_gpu, "pl", object())
-
-    op = from_lineararg(linarg, backend=Backend.PALLAS_GPU, dtype=jnp.float32)
-
-    assert op.shape == linarg.shape
-    assert op.indptr.shape[0] % 32 == 0
-    assert op.indices.shape[0] % 32 == 0
-    assert op.data.shape[0] % 32 == 0
-    assert op.src_of_edge.shape[0] % 32 == 0
-    assert op.nonunique_indices.shape[0] % 32 == 0
-    assert op.n_nonunique_indices % 32 == 0
-    np.testing.assert_array_equal(np.asarray(op.nonunique_indices[: linarg.A.shape[0]]), linarg.nonunique_indices)

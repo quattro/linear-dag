@@ -109,12 +109,9 @@ parallel_op = JaxParallelOperator.from_hdf5(
 
 `Backend.AUTO` resolves from the active JAX platform. On CPU it uses
 `Backend.FFI_CPU` when the native handler is registered and otherwise falls back
-to `Backend.PURE_JAX`. On GPU it uses `Backend.PALLAS_GPU` when Pallas is
-available and otherwise falls back to `Backend.PURE_JAX`. Explicit
-`Backend.FFI_CPU` requests also fall back to `Backend.PURE_JAX` with a warning
-when the native handler is unavailable. Explicit
-`Backend.PALLAS_GPU` requests fail fast when the current platform or Pallas
-import is unavailable.
+to `Backend.PURE_JAX`. Accelerator platforms currently use `Backend.PURE_JAX`.
+Explicit `Backend.FFI_CPU` requests also fall back to `Backend.PURE_JAX` with a
+warning when the native handler is unavailable.
 
 Benchmark gates are opt-in so normal test runs stay fast:
 

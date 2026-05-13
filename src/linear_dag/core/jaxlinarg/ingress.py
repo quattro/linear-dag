@@ -10,7 +10,7 @@ from scipy import sparse
 from linear_dag.core.lineararg import LinearARG
 
 from .operator import Backend, JaxLinearARG, resolve_backend
-from .padding import align_bucket_for_mosaic_gpu, BucketSpec, compute_src_of_edge, pad_to_bucket
+from .padding import BucketSpec, compute_src_of_edge, pad_to_bucket
 
 
 def from_lineararg(
@@ -18,7 +18,6 @@ def from_lineararg(
     *,
     backend: Backend = Backend.AUTO,
     bucket: BucketSpec | None = None,
-    level_schedule: bool = False,
     dtype: Any = None,
 ) -> JaxLinearARG:
     """Convert a [`linear_dag.core.lineararg.LinearARG`][] to a JAX operator.
@@ -28,8 +27,6 @@ def from_lineararg(
     - `linarg`: Source LinearARG object.
     - `backend`: Requested numerical backend.
     - `bucket`: Optional static padding bucket for JIT cache stability.
-    - `level_schedule`: Whether Pallas GPU dispatch should use a precomputed
-      edge level schedule.
     - `dtype`: Optional computation dtype. Defaults to `jax.numpy.float32`.
 
     **Returns:**
@@ -48,26 +45,10 @@ def from_lineararg(
     n_nonunique_indices = None
     resolved_backend = resolve_backend(backend)
 
-    if bucket is None and resolved_backend is Backend.PALLAS_GPU:
-        bucket = BucketSpec(max_nodes=n_nodes, max_nnz=indices.shape[0])
-
     if bucket is not None:
         bucket = _as_bucket_spec(bucket)
         nonunique_indices_length = bucket.max_nodes
         n_nonunique_indices = bucket.max_nodes
-        if resolved_backend is Backend.PALLAS_GPU:
-            # This padding is for Mosaic GPU lowering, not for the LinearARG
-            # math. Current Mosaic transfers require 128-byte-compatible ref
-            # sizes, so graph refs, the nonunique-index ref, and the internal
-            # solve state are padded to independently aligned storage lengths.
-            padding = align_bucket_for_mosaic_gpu(
-                bucket,
-                nonunique_count=_nonunique_count(nonunique_indices),
-                data_dtype=np.dtype(dtype),
-            )
-            bucket = padding.bucket
-            nonunique_indices_length = padding.nonunique_indices_length
-            n_nonunique_indices = padding.state_rows
         padded = pad_to_bucket(
             indptr,
             indices,
@@ -95,7 +76,6 @@ def from_lineararg(
         n_samples=int(linarg.shape[0]),
         n_nonunique_indices=n_nonunique_indices,
         backend=resolved_backend,
-        level_schedule=level_schedule,
         dtype=dtype,
     )
 
@@ -106,7 +86,6 @@ def from_hdf5_block(
     *,
     backend: Backend = Backend.AUTO,
     bucket: BucketSpec | None = None,
-    level_schedule: bool = False,
     load_metadata: bool = False,
     dtype: Any = None,
 ) -> JaxLinearARG:
@@ -118,8 +97,6 @@ def from_hdf5_block(
     - `block`: Block name inside the HDF5 file.
     - `backend`: Requested numerical backend.
     - `bucket`: Optional static padding bucket for JIT cache stability.
-    - `level_schedule`: Whether Pallas GPU dispatch should use a precomputed
-      edge level schedule.
     - `load_metadata`: Whether to load optional LinearARG metadata.
     - `dtype`: Optional computation dtype. Defaults to `jax.numpy.float32`.
 
@@ -132,7 +109,6 @@ def from_hdf5_block(
         linarg,
         backend=backend,
         bucket=bucket,
-        level_schedule=level_schedule,
         dtype=dtype,
     )
 
@@ -163,10 +139,6 @@ def _pad_nonunique_indices(nonunique_indices: np.ndarray, max_nodes: int) -> np.
     padded = np.zeros(max_nodes, dtype=np.int32)
     padded[: nonunique_indices.shape[0]] = nonunique_indices
     return padded
-
-
-def _nonunique_count(nonunique_indices: np.ndarray) -> int:
-    return int(np.max(nonunique_indices)) + 1 if nonunique_indices.size else 0
 
 
 def _cached_allele_counts(linarg: LinearARG) -> np.ndarray | None:

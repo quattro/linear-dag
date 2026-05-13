@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
-from linear_dag.core.jaxlinarg.kernels import ffi_cpu, pallas_gpu
+from linear_dag.core.jaxlinarg.kernels import ffi_cpu
 from linear_dag.core.lineararg import LinearARG
 
 MIN_SAMPLE_SECONDS = 0.005
@@ -71,18 +71,6 @@ def test_jax_lineararg_benchmark_gates(
             )
         )
 
-    if pallas_gpu.is_pallas_gpu_available():
-        pallas_results = _time_backend(linarg, Backend.PALLAS_GPU, inputs, cython_results)
-        results.extend(pallas_results)
-        pure_jax_cpu_results = _time_pure_jax_cpu(linarg, inputs)
-        results.extend(pure_jax_cpu_results)
-        gate_checks.extend(
-            [
-                lambda: _assert_gpu_speedup(pallas_results, pure_jax_cpu_results, k=8, criterion="jaxlinarg.AC7.1"),
-                lambda: _assert_gpu_speedup(pallas_results, pure_jax_cpu_results, k=64, criterion="jaxlinarg.AC7.2"),
-            ]
-        )
-
     _print_results(results)
     for gate_check in gate_checks:
         gate_check()
@@ -114,27 +102,6 @@ def _time_backend(
             )
         )
     return results
-
-
-def _time_pure_jax_cpu(linarg: LinearARG, inputs: dict[int, np.ndarray]) -> list[BenchmarkResult]:
-    cpu_devices = jax.devices("cpu")
-    if not cpu_devices:
-        pytest.skip("GPU benchmark requires a CPU device for PURE_JAX_CPU baseline")
-    with jax.default_device(cpu_devices[0]):
-        op = JaxLinearARG.from_lineararg(linarg, backend=Backend.PURE_JAX, dtype=jnp.float32)
-        results = []
-        for k, matrix in inputs.items():
-            jax_matrix = jnp.asarray(matrix)
-            matmat = jax.jit(lambda values: op.matmat(values)).lower(jax_matrix).compile()
-            results.append(
-                BenchmarkResult(
-                    "pure_jax_cpu",
-                    k,
-                    _time_call(lambda matrix=jax_matrix, matmat=matmat: matmat(matrix), block_until_ready=True),
-                    None,
-                )
-            )
-        return results
 
 
 def _time_call(call: Callable[[], Any], *, block_until_ready: bool = False) -> float:
@@ -183,19 +150,6 @@ def _assert_ratio(
         f"{criterion} failed: {backend} / cython at k={k} was "
         f"{result.ratio_to_cython:.3f}, expected <= {threshold:.3f}"
     )
-
-
-def _assert_gpu_speedup(
-    pallas_results: list[BenchmarkResult],
-    pure_jax_cpu_results: list[BenchmarkResult],
-    *,
-    k: int,
-    criterion: str,
-) -> None:
-    pallas = _find_result(pallas_results, backend="pallas_gpu", k=k)
-    pure_jax_cpu = _find_result(pure_jax_cpu_results, backend="pure_jax_cpu", k=k)
-    ratio = pallas.median_seconds / pure_jax_cpu.median_seconds
-    assert ratio < 1.0, f"{criterion} failed: pallas_gpu / pure_jax_cpu at k={k} was " f"{ratio:.3f}, expected < 1.000"
 
 
 def _find_result(results: list[BenchmarkResult], *, backend: str, k: int) -> BenchmarkResult:
