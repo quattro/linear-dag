@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -29,15 +29,29 @@ class LevelSchedule(NamedTuple):
 
 
 class PallasGpuKernelSupport(NamedTuple):
-    """Whether the current whole-buffer Mosaic GPU kernels support a shape."""
+    """Whether a Mosaic GPU kernel supports a shape."""
 
     supported: bool
     reason: str
 
 
-_WARP_GROUP_TRANSFER_BYTES = 128
+class PallasGpuResourceEstimate(NamedTuple):
+    """Approximate per-program/block resources for a Pallas GPU kernel."""
+
+    kernel_kind: str
+    n_edges: int
+    n_rows: int
+    n_cols: int
+    dtype: np.dtype
+    index_dtype: np.dtype
+    estimated_smem_bytes: int
+    estimated_work_items: int
+    reason: str
+
+
 _PALLAS_GPU_FALLBACK_COUNT = 0
 _PALLAS_GPU_FALLBACK_WARNED = False
+_WARP_GROUP_TRANSFER_BYTES = 128
 
 
 def is_pallas_import_available() -> bool:
@@ -71,33 +85,71 @@ def check_pallas_gpu_kernel_support(
     src_of_edge: Any,
     nonunique_indices: Any,
     b: Any,
+    kernel_kind: Literal["serial", "scheduled"] = "serial",
     max_shared_memory_bytes: int | None = None,
 ) -> PallasGpuKernelSupport:
     """Return whether the current Mosaic GPU kernels support this static shape."""
-    refs = (
-        ("indptr", indptr),
-        ("indices", indices),
-        ("data", data),
-        ("src_of_edge", src_of_edge),
-        ("nonunique_indices", nonunique_indices),
-        ("b", b),
-        ("out", b),
+    common_support = _check_common_pallas_inputs(
+        indptr=indptr,
+        indices=indices,
+        data=data,
+        src_of_edge=src_of_edge,
+        nonunique_indices=nonunique_indices,
+        b=b,
+        kernel_kind=kernel_kind,
     )
-    for name, value in refs:
-        nbytes = _array_nbytes(value)
-        if nbytes % _WARP_GROUP_TRANSFER_BYTES != 0:
-            return PallasGpuKernelSupport(
-                False,
-                f"{name} transfer is {nbytes} bytes; Mosaic GPU requires 128-byte aligned transfers",
-            )
+    if not common_support.supported:
+        return common_support
 
-    shared_memory_bytes = sum(_array_nbytes(value) for _name, value in refs)
-    shared_memory_bytes += _WARP_GROUP_TRANSFER_BYTES
+    refs = _mosaic_visible_refs(
+        indptr=indptr,
+        indices=indices,
+        data=data,
+        src_of_edge=src_of_edge,
+        nonunique_indices=nonunique_indices,
+        b=b,
+    )
+    copy_support = _check_mosaic_gpu_copy_constraints(refs)
+    if not copy_support.supported:
+        return copy_support
+
+    if kernel_kind == "serial":
+        logical_estimate = _estimate_serial_kernel_resources(
+            indptr=indptr,
+            indices=indices,
+            data=data,
+            src_of_edge=src_of_edge,
+            nonunique_indices=nonunique_indices,
+            b=b,
+        )
+    elif kernel_kind == "scheduled":
+        logical_estimate = _estimate_scheduled_kernel_resources(
+            indptr=indptr,
+            indices=indices,
+            data=data,
+            src_of_edge=src_of_edge,
+            nonunique_indices=nonunique_indices,
+            b=b,
+        )
+    else:
+        raise ValueError(f"unknown Pallas GPU kernel kind: {kernel_kind}")
+
+    lowering_smem_bytes = _estimate_mosaic_lowering_smem_bytes(
+        indptr=indptr,
+        indices=indices,
+        data=data,
+        src_of_edge=src_of_edge,
+        nonunique_indices=nonunique_indices,
+        b=b,
+        kernel_kind=kernel_kind,
+    )
+    effective_smem_bytes = max(logical_estimate.estimated_smem_bytes, lowering_smem_bytes)
     max_shared_memory_bytes = _max_shared_memory_bytes() if max_shared_memory_bytes is None else max_shared_memory_bytes
-    if shared_memory_bytes > max_shared_memory_bytes:
+    if effective_smem_bytes > max_shared_memory_bytes:
         return PallasGpuKernelSupport(
             False,
-            f"estimated shared memory {shared_memory_bytes} bytes exceeds available {max_shared_memory_bytes} bytes",
+            f"{kernel_kind} kernel estimated Mosaic lowering shared memory {effective_smem_bytes} bytes exceeds "
+            f"available {max_shared_memory_bytes} bytes",
         )
     return PallasGpuKernelSupport(True, "")
 
@@ -163,6 +215,7 @@ def pallas_gpu_solve_forward(
         src_of_edge=src_of_edge,
         nonunique_indices=nonunique_indices,
         b=b,
+        kernel_kind="serial",
     )
     if not support.supported:
         return _fallback_forward(
@@ -243,6 +296,7 @@ def pallas_gpu_solve_forward_level_scheduled(
             src_of_edge=src_of_edge,
             nonunique_indices=nonunique_indices,
             b=b,
+            kernel_kind="scheduled",
         )
         if not support.supported:
             return _fallback_forward(
@@ -286,6 +340,7 @@ def pallas_gpu_solve_backward(
         src_of_edge=src_of_edge,
         nonunique_indices=nonunique_indices,
         b=b,
+        kernel_kind="serial",
     )
     if not support.supported:
         return _fallback_backward(
@@ -366,6 +421,7 @@ def pallas_gpu_solve_backward_level_scheduled(
             src_of_edge=src_of_edge,
             nonunique_indices=nonunique_indices,
             b=b,
+            kernel_kind="scheduled",
         )
         if not support.supported:
             return _fallback_backward(
@@ -454,6 +510,190 @@ def _record_pallas_gpu_fallback(reason: str) -> None:
         UserWarning,
         stacklevel=3,
     )
+
+
+def _check_common_pallas_inputs(
+    *,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    nonunique_indices: Any,
+    b: Any,
+    kernel_kind: str,
+) -> PallasGpuKernelSupport:
+    if kernel_kind not in {"serial", "scheduled"}:
+        raise ValueError(f"unknown Pallas GPU kernel kind: {kernel_kind}")
+
+    arrays = {
+        "indptr": indptr,
+        "indices": indices,
+        "data": data,
+        "src_of_edge": src_of_edge,
+        "nonunique_indices": nonunique_indices,
+    }
+    for name, value in arrays.items():
+        if value.ndim != 1:
+            return PallasGpuKernelSupport(False, f"{name} must be rank 1")
+    if b.ndim != 2:
+        return PallasGpuKernelSupport(False, "b must be rank 2")
+
+    n_edges = int(indices.shape[0])
+    if data.shape[0] != n_edges:
+        return PallasGpuKernelSupport(False, "data must have the same length as indices")
+    if src_of_edge.shape[0] != n_edges:
+        return PallasGpuKernelSupport(False, "src_of_edge must have the same length as indices")
+    if indptr.shape[0] == 0:
+        return PallasGpuKernelSupport(False, "indptr must contain at least one entry")
+
+    index_dtype = np.dtype(indices.dtype)
+    for name in ("indptr", "indices", "src_of_edge", "nonunique_indices"):
+        if np.dtype(arrays[name].dtype) != index_dtype:
+            return PallasGpuKernelSupport(False, "index arrays must have matching dtypes")
+    if index_dtype != np.dtype(np.int32):
+        return PallasGpuKernelSupport(False, "Pallas GPU kernels currently require int32 indices")
+
+    dtype = np.dtype(data.dtype)
+    if dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
+        return PallasGpuKernelSupport(False, "Pallas GPU kernels currently require float32 or float64 data")
+    if np.dtype(b.dtype) != dtype:
+        return PallasGpuKernelSupport(False, "b dtype must match data dtype")
+
+    return PallasGpuKernelSupport(True, "")
+
+
+def _estimate_serial_kernel_resources(
+    *,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    nonunique_indices: Any,
+    b: Any,
+) -> PallasGpuResourceEstimate:
+    del indptr, src_of_edge, nonunique_indices
+    n_edges = int(indices.shape[0])
+    n_rows, n_cols = (int(b.shape[0]), int(b.shape[1]))
+    dtype = np.dtype(data.dtype)
+    index_dtype = np.dtype(indices.dtype)
+
+    # Pallas refs address full input/output arrays in global memory. This
+    # estimate intentionally counts only per-program working state used by the
+    # serial grid=(1,) kernel: loop counters, scalar indices, the edge weight,
+    # and one scalar value per active column operation. It does not count the
+    # total bytes of graph arrays or the node buffer.
+    scalar_state_bytes = 8 * index_dtype.itemsize + 2 * dtype.itemsize
+    column_loop_bytes = max(1, n_cols) * dtype.itemsize
+    estimated_smem_bytes = _align_bytes(scalar_state_bytes + column_loop_bytes, 128)
+    return PallasGpuResourceEstimate(
+        kernel_kind="serial",
+        n_edges=n_edges,
+        n_rows=n_rows,
+        n_cols=n_cols,
+        dtype=dtype,
+        index_dtype=index_dtype,
+        estimated_smem_bytes=estimated_smem_bytes,
+        estimated_work_items=max(1, n_edges) * max(1, n_cols),
+        reason="serial kernel uses scalar loop state; full arrays remain in global memory",
+    )
+
+
+def _estimate_scheduled_kernel_resources(
+    *,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    nonunique_indices: Any,
+    b: Any,
+) -> PallasGpuResourceEstimate:
+    del indptr, src_of_edge, nonunique_indices
+    n_edges = int(indices.shape[0])
+    n_rows, n_cols = (int(b.shape[0]), int(b.shape[1]))
+    dtype = np.dtype(data.dtype)
+    index_dtype = np.dtype(indices.dtype)
+
+    # Scheduled kernels launch one program for one (edge, col) pair. Their
+    # per-program state is scalar: edge position, column, source/destination
+    # rows, one weight, and one increment. The total graph and state arrays are
+    # global-memory refs and should not be charged as per-program shared memory.
+    scalar_state_bytes = 7 * index_dtype.itemsize + 2 * dtype.itemsize
+    estimated_smem_bytes = _align_bytes(scalar_state_bytes, 128)
+    return PallasGpuResourceEstimate(
+        kernel_kind="scheduled",
+        n_edges=n_edges,
+        n_rows=n_rows,
+        n_cols=n_cols,
+        dtype=dtype,
+        index_dtype=index_dtype,
+        estimated_smem_bytes=estimated_smem_bytes,
+        estimated_work_items=max(1, n_edges) * max(1, n_cols),
+        reason="scheduled kernel work item is one edge-column scalar update",
+    )
+
+
+def _align_bytes(value: int, alignment: int) -> int:
+    return ((int(value) + alignment - 1) // alignment) * alignment
+
+
+def _mosaic_visible_refs(
+    *,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    nonunique_indices: Any,
+    b: Any,
+) -> tuple[tuple[str, Any], ...]:
+    return (
+        ("indptr", indptr),
+        ("indices", indices),
+        ("data", data),
+        ("src_of_edge", src_of_edge),
+        ("nonunique_indices", nonunique_indices),
+        ("b", b),
+        ("out", b),
+    )
+
+
+def _check_mosaic_gpu_copy_constraints(refs: tuple[tuple[str, Any], ...]) -> PallasGpuKernelSupport:
+    for name, value in refs:
+        nbytes = _array_nbytes(value)
+        if nbytes % _WARP_GROUP_TRANSFER_BYTES != 0:
+            return PallasGpuKernelSupport(
+                False,
+                f"{name} transfer is {nbytes} bytes; Mosaic GPU requires 128-byte aligned transfers",
+            )
+    return PallasGpuKernelSupport(True, "")
+
+
+def _estimate_mosaic_lowering_smem_bytes(
+    *,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    src_of_edge: Any,
+    nonunique_indices: Any,
+    b: Any,
+    kernel_kind: str,
+) -> int:
+    refs = _mosaic_visible_refs(
+        indptr=indptr,
+        indices=indices,
+        data=data,
+        src_of_edge=src_of_edge,
+        nonunique_indices=nonunique_indices,
+        b=b,
+    )
+    if kernel_kind not in {"serial", "scheduled"}:
+        raise ValueError(f"unknown Pallas GPU kernel kind: {kernel_kind}")
+    # Pallas refs point at global memory, so full graph/state arrays are not the
+    # logical per-program scratch used by the algorithm. However, Mosaic GPU
+    # lowering for both current serial and scheduled kernels has been observed
+    # to reserve shared memory proportional to the whole visible ref set. Keep
+    # this as a backend-lowering guard so large blocks fall back before
+    # pallas_call raises `Mosaic GPU kernel exceeds available shared memory`.
+    return _align_bytes(sum(_array_nbytes(value) for _name, value in refs), _WARP_GROUP_TRANSFER_BYTES)
 
 
 def _array_nbytes(value: Any) -> int:

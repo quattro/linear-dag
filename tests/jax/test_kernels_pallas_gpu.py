@@ -9,6 +9,14 @@ import pytest
 
 from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 from linear_dag.core.jaxlinarg.kernels import pallas_gpu
+from linear_dag.core.jaxlinarg.padding import aligned_length_for_mosaic_gpu_transfer
+
+
+class _ArrayShape:
+    def __init__(self, shape, dtype):
+        self.shape = tuple(shape)
+        self.dtype = np.dtype(dtype)
+        self.ndim = len(self.shape)
 
 
 def _as_matrix(x: np.ndarray) -> np.ndarray:
@@ -114,7 +122,13 @@ def test_pallas_gpu_level_scheduled_kernels_use_schedule_in_interpret_mode(monke
     np.testing.assert_allclose(np.asarray(backward), np.array([[3.0], [3.0], [3.0], [3.0]], dtype=np.float32))
 
 
-def test_pallas_gpu_support_check_rejects_unaligned_current_kernel_shape() -> None:
+def test_mosaic_alignment_helpers_round_lengths_to_128_byte_transfers() -> None:
+    assert aligned_length_for_mosaic_gpu_transfer(np.int32, 835) == 864
+    assert aligned_length_for_mosaic_gpu_transfer(np.float32, 2008) == 2016
+    assert aligned_length_for_mosaic_gpu_transfer(np.float64, 2008) == 2016
+
+
+def test_mosaic_copy_constraints_reject_unpadded_hpc_shape() -> None:
     support = pallas_gpu.check_pallas_gpu_kernel_support(
         indptr=jnp.zeros((835,), dtype=jnp.int32),
         indices=jnp.zeros((2008,), dtype=jnp.int32),
@@ -126,36 +140,124 @@ def test_pallas_gpu_support_check_rejects_unaligned_current_kernel_shape() -> No
     )
 
     assert not support.supported
-    assert "128-byte" in support.reason
+    assert "128-byte aligned transfers" in support.reason
 
 
-def test_pallas_gpu_support_check_rejects_excessive_shared_memory() -> None:
+def test_mosaic_copy_constraints_accept_padded_transfer_lengths() -> None:
+    n_indptr = aligned_length_for_mosaic_gpu_transfer(np.int32, 835)
+    n_edges = aligned_length_for_mosaic_gpu_transfer(np.int32, 2008)
+    n_rows = aligned_length_for_mosaic_gpu_transfer(np.float32, 834)
+    refs = pallas_gpu._mosaic_visible_refs(
+        indptr=jnp.zeros((n_indptr,), dtype=jnp.int32),
+        indices=jnp.zeros((n_edges,), dtype=jnp.int32),
+        data=jnp.zeros((n_edges,), dtype=jnp.float32),
+        src_of_edge=jnp.zeros((n_edges,), dtype=jnp.int32),
+        nonunique_indices=jnp.zeros((n_indptr,), dtype=jnp.int32),
+        b=jnp.zeros((n_rows, 1), dtype=jnp.float32),
+    )
+
+    support = pallas_gpu._check_mosaic_gpu_copy_constraints(refs)
+
+    assert support.supported
+
+
+def test_scheduled_resource_estimate_does_not_scale_with_total_edges() -> None:
+    small = pallas_gpu._estimate_scheduled_kernel_resources(
+        indptr=jnp.zeros((32,), dtype=jnp.int32),
+        indices=jnp.zeros((32,), dtype=jnp.int32),
+        data=jnp.zeros((32,), dtype=jnp.float32),
+        src_of_edge=jnp.zeros((32,), dtype=jnp.int32),
+        nonunique_indices=jnp.zeros((32,), dtype=jnp.int32),
+        b=jnp.zeros((32, 3), dtype=jnp.float32),
+    )
+    large = pallas_gpu._estimate_scheduled_kernel_resources(
+        indptr=jnp.zeros((835,), dtype=jnp.int32),
+        indices=jnp.zeros((2008,), dtype=jnp.int32),
+        data=jnp.zeros((2008,), dtype=jnp.float32),
+        src_of_edge=jnp.zeros((2008,), dtype=jnp.int32),
+        nonunique_indices=jnp.zeros((834,), dtype=jnp.int32),
+        b=jnp.zeros((834, 3), dtype=jnp.float32),
+    )
+
+    assert small.estimated_smem_bytes == large.estimated_smem_bytes
+    assert large.estimated_work_items > small.estimated_work_items
+
+
+def test_pallas_gpu_support_check_rejects_mosaic_lowering_smem_limit() -> None:
     support = pallas_gpu.check_pallas_gpu_kernel_support(
         indptr=jnp.zeros((32,), dtype=jnp.int32),
         indices=jnp.zeros((32,), dtype=jnp.int32),
         data=jnp.zeros((32,), dtype=jnp.float32),
         src_of_edge=jnp.zeros((32,), dtype=jnp.int32),
         nonunique_indices=jnp.zeros((32,), dtype=jnp.int32),
-        b=jnp.zeros((32, 128), dtype=jnp.float32),
-        max_shared_memory_bytes=8 * 1024,
+        b=jnp.zeros((32, 3), dtype=jnp.float32),
+        max_shared_memory_bytes=64,
     )
 
     assert not support.supported
-    assert "shared memory" in support.reason
+    assert "Mosaic lowering shared memory" in support.reason
 
 
-def test_pallas_gpu_support_check_accepts_aligned_small_shape() -> None:
+def test_pallas_gpu_support_check_rejects_large_serial_refs_as_mosaic_lowering_smem() -> None:
     support = pallas_gpu.check_pallas_gpu_kernel_support(
-        indptr=jnp.zeros((32,), dtype=jnp.int32),
-        indices=jnp.zeros((32,), dtype=jnp.int32),
-        data=jnp.zeros((32,), dtype=jnp.float32),
-        src_of_edge=jnp.zeros((32,), dtype=jnp.int32),
-        nonunique_indices=jnp.zeros((32,), dtype=jnp.int32),
-        b=jnp.zeros((32, 32), dtype=jnp.float32),
-        max_shared_memory_bytes=64 * 1024,
+        indptr=_ArrayShape((572384,), np.int32),
+        indices=_ArrayShape((4_000_000,), np.int32),
+        data=_ArrayShape((4_000_000,), np.float32),
+        src_of_edge=_ArrayShape((4_000_000,), np.int32),
+        nonunique_indices=_ArrayShape((572384,), np.int32),
+        b=_ArrayShape((3200, 1), np.float32),
+        kernel_kind="serial",
+        max_shared_memory_bytes=48 * 1024,
     )
 
-    assert support.supported
+    assert not support.supported
+    assert "Mosaic lowering shared memory" in support.reason
+
+
+def test_pallas_gpu_support_check_rejects_large_scheduled_refs_as_mosaic_lowering_smem() -> None:
+    support = pallas_gpu.check_pallas_gpu_kernel_support(
+        indptr=_ArrayShape((572384,), np.int32),
+        indices=_ArrayShape((4_000_000,), np.int32),
+        data=_ArrayShape((4_000_000,), np.float32),
+        src_of_edge=_ArrayShape((4_000_000,), np.int32),
+        nonunique_indices=_ArrayShape((572384,), np.int32),
+        b=_ArrayShape((3200, 1), np.float32),
+        kernel_kind="scheduled",
+        max_shared_memory_bytes=48 * 1024,
+    )
+
+    assert not support.supported
+    assert "Mosaic lowering shared memory" in support.reason
+
+
+def test_pallas_gpu_support_check_rejects_scheduled_unpadded_transfers() -> None:
+    support = pallas_gpu.check_pallas_gpu_kernel_support(
+        indptr=jnp.zeros((835,), dtype=jnp.int32),
+        indices=jnp.zeros((2008,), dtype=jnp.int32),
+        data=jnp.zeros((2008,), dtype=jnp.float32),
+        src_of_edge=jnp.zeros((2008,), dtype=jnp.int32),
+        nonunique_indices=jnp.zeros((834,), dtype=jnp.int32),
+        b=jnp.zeros((834, 3), dtype=jnp.float32),
+        kernel_kind="scheduled",
+        max_shared_memory_bytes=48 * 1024,
+    )
+
+    assert not support.supported
+    assert "128-byte aligned transfers" in support.reason
+
+
+def test_pallas_gpu_support_check_rejects_unsupported_dtypes() -> None:
+    support = pallas_gpu.check_pallas_gpu_kernel_support(
+        indptr=np.zeros((32,), dtype=np.int64),
+        indices=np.zeros((32,), dtype=np.int64),
+        data=jnp.zeros((32,), dtype=jnp.float32),
+        src_of_edge=np.zeros((32,), dtype=np.int64),
+        nonunique_indices=np.zeros((32,), dtype=np.int64),
+        b=jnp.zeros((32, 3), dtype=jnp.float32),
+    )
+
+    assert not support.supported
+    assert "int32" in support.reason
 
 
 def test_pallas_gpu_forward_falls_back_to_pure_jax_for_unsupported_shape(monkeypatch) -> None:

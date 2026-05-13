@@ -9,8 +9,8 @@ from scipy import sparse
 
 from linear_dag.core.lineararg import LinearARG
 
-from .operator import Backend, JaxLinearARG
-from .padding import BucketSpec, compute_src_of_edge, pad_to_bucket
+from .operator import Backend, JaxLinearARG, resolve_backend
+from .padding import align_bucket_for_mosaic_gpu, BucketSpec, compute_src_of_edge, pad_to_bucket
 
 
 def from_lineararg(
@@ -46,9 +46,28 @@ def from_lineararg(
     data = np.asarray(graph.data, dtype=np.dtype(dtype))
     src_of_edge = compute_src_of_edge(indptr)
     n_nonunique_indices = None
+    resolved_backend = resolve_backend(backend)
+
+    if bucket is None and resolved_backend is Backend.PALLAS_GPU:
+        bucket = BucketSpec(max_nodes=n_nodes, max_nnz=indices.shape[0])
 
     if bucket is not None:
         bucket = _as_bucket_spec(bucket)
+        nonunique_indices_length = bucket.max_nodes
+        n_nonunique_indices = bucket.max_nodes
+        if resolved_backend is Backend.PALLAS_GPU:
+            # This padding is for Mosaic GPU lowering, not for the LinearARG
+            # math. Current Mosaic transfers require 128-byte-compatible ref
+            # sizes, so graph refs, the nonunique-index ref, and the internal
+            # solve state are padded to independently aligned storage lengths.
+            padding = align_bucket_for_mosaic_gpu(
+                bucket,
+                nonunique_count=_nonunique_count(nonunique_indices),
+                data_dtype=np.dtype(dtype),
+            )
+            bucket = padding.bucket
+            nonunique_indices_length = padding.nonunique_indices_length
+            n_nonunique_indices = padding.state_rows
         padded = pad_to_bucket(
             indptr,
             indices,
@@ -60,8 +79,7 @@ def from_lineararg(
         indices = padded.indices
         data = padded.data
         src_of_edge = padded.src_of_edge
-        nonunique_indices = _pad_nonunique_indices(nonunique_indices, bucket.max_nodes)
-        n_nonunique_indices = bucket.max_nodes
+        nonunique_indices = _pad_nonunique_indices(nonunique_indices, nonunique_indices_length)
 
     return JaxLinearARG.from_lineararg_arrays(
         indptr=indptr,
@@ -76,7 +94,7 @@ def from_lineararg(
         n_variants=int(linarg.shape[1]),
         n_samples=int(linarg.shape[0]),
         n_nonunique_indices=n_nonunique_indices,
-        backend=backend,
+        backend=resolved_backend,
         level_schedule=level_schedule,
         dtype=dtype,
     )
@@ -145,6 +163,10 @@ def _pad_nonunique_indices(nonunique_indices: np.ndarray, max_nodes: int) -> np.
     padded = np.zeros(max_nodes, dtype=np.int32)
     padded[: nonunique_indices.shape[0]] = nonunique_indices
     return padded
+
+
+def _nonunique_count(nonunique_indices: np.ndarray) -> int:
+    return int(np.max(nonunique_indices)) + 1 if nonunique_indices.size else 0
 
 
 def _cached_allele_counts(linarg: LinearARG) -> np.ndarray | None:

@@ -223,3 +223,27 @@ def test_from_lineararg_bucket_padding_reuses_jit_trace_with_optional_allele_cou
     np.testing.assert_allclose(np.asarray(jitted_product(first_op, x)), np.array([[2.0]], dtype=np.float32))
     np.testing.assert_allclose(np.asarray(jitted_product(second_op, x)), np.array([[2.0]], dtype=np.float32))
     assert trace_count == 1
+
+
+def test_from_lineararg_pallas_gpu_pads_mosaic_visible_storage(monkeypatch) -> None:
+    linarg = LinearARG(
+        sparse.csc_matrix(([1.0], ([2], [0])), shape=(3, 3)),
+        variant_indices=np.array([0], dtype=np.int32),
+        flip=np.array([False]),
+        n_samples=np.int32(1),
+        nonunique_indices=np.array([0, 1, 1], dtype=np.int32),
+    )
+
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    monkeypatch.setattr(pallas_gpu, "pl", object())
+
+    op = from_lineararg(linarg, backend=Backend.PALLAS_GPU, dtype=jnp.float32)
+
+    assert op.shape == linarg.shape
+    assert op.indptr.shape[0] % 32 == 0
+    assert op.indices.shape[0] % 32 == 0
+    assert op.data.shape[0] % 32 == 0
+    assert op.src_of_edge.shape[0] % 32 == 0
+    assert op.nonunique_indices.shape[0] % 32 == 0
+    assert op.n_nonunique_indices % 32 == 0
+    np.testing.assert_array_equal(np.asarray(op.nonunique_indices[: linarg.A.shape[0]]), linarg.nonunique_indices)

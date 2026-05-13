@@ -349,8 +349,8 @@ class JaxLinearARG(eqx.Module):
             raise ValueError("indptr must start at 0")
         if np.any(np.diff(indptr) < 0):
             raise ValueError("indptr must be monotonic")
-        if self.nonunique_indices.shape[0] != self.indptr.shape[0] - 1:
-            raise ValueError("nonunique_indices length must match the node count from indptr")
+        if self.nonunique_indices.shape[0] < self.indptr.shape[0] - 1:
+            raise ValueError("nonunique_indices length must cover the node count from indptr")
         if self.variant_indices.shape[0] != self.flip.shape[0]:
             raise ValueError("variant_indices and flip must have the same length")
         if self.variant_indices.shape[0] != self.n_variants:
