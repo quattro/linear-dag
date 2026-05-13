@@ -51,6 +51,10 @@ def resolve_backend(requested: Backend, *, platform: str | None = None) -> Backe
 
     if requested is Backend.PURE_JAX:
         return Backend.PURE_JAX
+    if requested is Backend.AUTO:
+        if platform == "cpu" and ffi_cpu.is_ffi_cpu_available():
+            return Backend.FFI_CPU
+        return Backend.PURE_JAX
     if requested is Backend.FFI_CPU:
         if ffi_cpu.is_ffi_cpu_available():
             return Backend.FFI_CPU
@@ -60,11 +64,6 @@ def resolve_backend(requested: Backend, *, platform: str | None = None) -> Backe
             stacklevel=2,
         )
         return Backend.PURE_JAX
-    if requested is Backend.AUTO:
-        if platform == "cpu":
-            return Backend.FFI_CPU if ffi_cpu.is_ffi_cpu_available() else Backend.PURE_JAX
-        if platform in {"gpu", "cuda", "rocm", "tpu"}:
-            return Backend.PURE_JAX
     raise ValueError(f"unknown backend: {requested}")
 
 
@@ -112,6 +111,7 @@ class JaxLinearARG(eqx.Module):
     min_index_to_keep: int = eqx.field(default=0, static=True)
     backend: Backend = eqx.field(default=Backend.AUTO, converter=resolve_backend, static=True)
     dtype: Any = eqx.field(default=jnp.float32, converter=jnp.dtype, static=True)
+    _arrays_validated: bool = eqx.field(default=False, converter=bool, static=True)
 
     @classmethod
     def from_lineararg_arrays(
@@ -164,19 +164,48 @@ class JaxLinearARG(eqx.Module):
 
         - `ValueError`: If array shapes, indices, or backend settings are invalid.
         """
-        node_count = int(jnp.asarray(indptr).shape[0]) - 1
+        dtype = jnp.dtype(dtype)
+        n_variants = int(n_variants)
+        n_samples = int(n_samples)
+
+        indptr = np.asarray(indptr, dtype=np.int32)
+        indices = np.asarray(indices, dtype=np.int32)
+        data = np.asarray(data, dtype=np.dtype(dtype))
+        src_of_edge = np.asarray(src_of_edge, dtype=np.int32)
+        variant_indices = np.asarray(variant_indices, dtype=np.int32)
+        flip = np.asarray(flip, dtype=np.bool_)
+        sample_indices = np.asarray(sample_indices, dtype=np.int32)
+        allele_counts = _canonical_allele_counts_array(allele_counts, n_variants=n_variants)
+
+        node_count = int(indptr.shape[0]) - 1
         if nonunique_indices is None:
-            nonunique_indices = jnp.arange(node_count, dtype=jnp.int32)
-        nonunique_indices = jnp.asarray(nonunique_indices, dtype=jnp.int32)
-        real_n_nonunique_indices = int(jnp.max(nonunique_indices)) + 1 if nonunique_indices.size else 0
+            nonunique_indices = np.arange(node_count, dtype=np.int32)
+        nonunique_indices = np.asarray(nonunique_indices, dtype=np.int32)
+        real_n_nonunique_indices = int(np.max(nonunique_indices)) + 1 if nonunique_indices.size else 0
         if n_nonunique_indices is None:
             n_nonunique_indices = real_n_nonunique_indices
         else:
             n_nonunique_indices = int(n_nonunique_indices)
             if n_nonunique_indices < real_n_nonunique_indices:
                 raise ValueError("n_nonunique_indices cannot be smaller than the maximum nonunique index")
-        sample_indices = jnp.asarray(sample_indices, dtype=jnp.int32)
         min_index_to_keep = int(sample_indices[-1]) if sample_indices.size else 0
+        _validate_array_contract(
+            {
+                "indptr": indptr,
+                "indices": indices,
+                "data": data,
+                "src_of_edge": src_of_edge,
+                "variant_indices": variant_indices,
+                "flip": flip,
+                "sample_indices": sample_indices,
+                "nonunique_indices": nonunique_indices,
+                "allele_counts": allele_counts,
+            },
+            n_variants=n_variants,
+            n_samples=n_samples,
+            n_nonunique_indices=n_nonunique_indices,
+            min_index_to_keep=min_index_to_keep,
+        )
 
         return cls(
             indptr=jnp.asarray(indptr, dtype=jnp.int32),
@@ -187,13 +216,14 @@ class JaxLinearARG(eqx.Module):
             flip=jnp.asarray(flip, dtype=jnp.bool_),
             sample_indices=sample_indices,
             nonunique_indices=nonunique_indices,
-            allele_counts=_canonical_allele_counts(allele_counts, n_variants=int(n_variants)),
-            n_variants=int(n_variants),
-            n_samples=int(n_samples),
+            allele_counts=jnp.asarray(allele_counts, dtype=jnp.int32),
+            n_variants=n_variants,
+            n_samples=n_samples,
             n_nonunique_indices=n_nonunique_indices,
             min_index_to_keep=min_index_to_keep,
             backend=backend,
             dtype=dtype,
+            _arrays_validated=True,
         )
 
     @classmethod
@@ -270,86 +300,46 @@ class JaxLinearARG(eqx.Module):
         )
 
     def __check_init__(self) -> None:
-        arrays = {
-            "indptr": self.indptr,
-            "indices": self.indices,
-            "data": self.data,
-            "src_of_edge": self.src_of_edge,
-            "variant_indices": self.variant_indices,
-            "flip": self.flip,
-            "sample_indices": self.sample_indices,
-            "nonunique_indices": self.nonunique_indices,
-        }
-        for name, array in arrays.items():
-            if array.ndim != 1:
-                raise ValueError(f"{name} must be rank 1")
+        if self._arrays_validated:
+            _validate_array_shapes(
+                {
+                    "indptr": self.indptr,
+                    "indices": self.indices,
+                    "data": self.data,
+                    "src_of_edge": self.src_of_edge,
+                    "variant_indices": self.variant_indices,
+                    "flip": self.flip,
+                    "sample_indices": self.sample_indices,
+                    "nonunique_indices": self.nonunique_indices,
+                    "allele_counts": self.allele_counts,
+                },
+                n_variants=self.n_variants,
+                n_samples=self.n_samples,
+                n_nonunique_indices=self.n_nonunique_indices,
+                min_index_to_keep=self.min_index_to_keep,
+            )
+            return
 
-        n_edges = self.indices.shape[0]
-        if self.data.shape[0] != n_edges:
-            raise ValueError("data must have the same length as indices")
-        if self.src_of_edge.shape[0] != n_edges:
-            raise ValueError("src_of_edge must have the same length as indices")
-        if self.indptr.shape[0] == 0:
-            raise ValueError("indptr must contain at least one entry")
-        indptr = np.asarray(self.indptr)
-        if int(indptr[0]) != 0:
-            raise ValueError("indptr must start at 0")
-        if np.any(np.diff(indptr) < 0):
-            raise ValueError("indptr must be monotonic")
-        if self.nonunique_indices.shape[0] < self.indptr.shape[0] - 1:
-            raise ValueError("nonunique_indices length must cover the node count from indptr")
-        if self.variant_indices.shape[0] != self.flip.shape[0]:
-            raise ValueError("variant_indices and flip must have the same length")
-        if self.variant_indices.shape[0] != self.n_variants:
-            raise ValueError("variant_indices length must match n_variants")
-        if self.allele_counts.ndim != 1:
-            raise ValueError("allele_counts must be rank 1")
-        if self.allele_counts.shape[0] != self.n_variants:
-            raise ValueError("allele_counts length must match n_variants")
-        if self.sample_indices.shape[0] != self.n_samples:
-            raise ValueError("sample_indices length must match n_samples")
-        if self.n_variants < 0:
-            raise ValueError("n_variants must be nonnegative")
-        if self.n_samples < 0:
-            raise ValueError("n_samples must be nonnegative")
-        if self.n_nonunique_indices < 0:
-            raise ValueError("n_nonunique_indices must be nonnegative")
-        if int(self.indptr[-1]) != n_edges:
-            raise ValueError("final indptr entry must match the edge count")
-
-        node_count = self.indptr.shape[0] - 1
-        for name in (
-            "indices",
-            "src_of_edge",
-            "variant_indices",
-            "sample_indices",
-            "nonunique_indices",
-        ):
-            array = arrays[name]
-            if array.shape[0] and int(jnp.min(array)) < 0:
-                raise ValueError(f"{name} contains a negative index")
-
-        if self.src_of_edge.shape[0] and int(jnp.max(self.src_of_edge)) >= node_count:
-            raise ValueError("src_of_edge contains an out-of-range node index")
-        if self.indices.shape[0] and int(jnp.max(self.indices)) >= node_count:
-            raise ValueError("indices contains an out-of-range node index")
-        expected_src_of_edge = np.repeat(np.arange(node_count, dtype=np.int32), np.diff(indptr))
-        if not np.array_equal(np.asarray(self.src_of_edge), expected_src_of_edge):
-            raise ValueError("src_of_edge must match the sources implied by indptr")
-        indices = np.asarray(self.indices)
-        src_of_edge = np.asarray(self.src_of_edge)
-        data = np.asarray(self.data)
-        invalid_edge_order = (indices < src_of_edge) | ((indices == src_of_edge) & (data != 0))
-        if self.indices.shape[0] and np.any(invalid_edge_order):
-            raise ValueError("indices must be greater than src_of_edge")
-        if self.variant_indices.shape[0] and int(jnp.max(self.variant_indices)) >= node_count:
-            raise ValueError("variant_indices contains an out-of-range node index")
-        if self.sample_indices.shape[0] and int(jnp.max(self.sample_indices)) >= node_count:
-            raise ValueError("sample_indices contains an out-of-range node index")
-        if self.nonunique_indices.shape[0] and int(jnp.max(self.nonunique_indices)) >= self.n_nonunique_indices:
-            raise ValueError("nonunique_indices contains an out-of-range compressed index")
-        if self.min_index_to_keep < 0 or self.min_index_to_keep > node_count:
-            raise ValueError("min_index_to_keep must be within the node range")
+        # Direct constructor calls have not passed through the NumPy ingress
+        # validation above. Validate them on the host once; these checks produce
+        # Python exceptions and are intentionally outside traced numerical code.
+        _validate_array_contract(
+            {
+                "indptr": np.asarray(self.indptr),
+                "indices": np.asarray(self.indices),
+                "data": np.asarray(self.data),
+                "src_of_edge": np.asarray(self.src_of_edge),
+                "variant_indices": np.asarray(self.variant_indices),
+                "flip": np.asarray(self.flip),
+                "sample_indices": np.asarray(self.sample_indices),
+                "nonunique_indices": np.asarray(self.nonunique_indices),
+                "allele_counts": np.asarray(self.allele_counts),
+            },
+            n_variants=self.n_variants,
+            n_samples=self.n_samples,
+            n_nonunique_indices=self.n_nonunique_indices,
+            min_index_to_keep=self.min_index_to_keep,
+        )
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -489,10 +479,107 @@ class _TransposeView(eqx.Module):
         return self.matmat(x)
 
 
-def _canonical_allele_counts(allele_counts: Any | None, *, n_variants: int) -> jax.Array:
+def _canonical_allele_counts_array(allele_counts: Any | None, *, n_variants: int) -> np.ndarray:
     if allele_counts is None:
-        return jnp.full((n_variants,), -1, dtype=jnp.int32)
-    return jnp.asarray(allele_counts, dtype=jnp.int32)
+        return np.full((n_variants,), -1, dtype=np.int32)
+    return np.asarray(allele_counts, dtype=np.int32)
+
+
+def _validate_array_shapes(
+    arrays: dict[str, Any],
+    *,
+    n_variants: int,
+    n_samples: int,
+    n_nonunique_indices: int,
+    min_index_to_keep: int,
+) -> None:
+    for name, array in arrays.items():
+        if array.ndim != 1:
+            raise ValueError(f"{name} must be rank 1")
+
+    n_edges = arrays["indices"].shape[0]
+    if arrays["data"].shape[0] != n_edges:
+        raise ValueError("data must have the same length as indices")
+    if arrays["src_of_edge"].shape[0] != n_edges:
+        raise ValueError("src_of_edge must have the same length as indices")
+    if arrays["indptr"].shape[0] == 0:
+        raise ValueError("indptr must contain at least one entry")
+    if arrays["nonunique_indices"].shape[0] < arrays["indptr"].shape[0] - 1:
+        raise ValueError("nonunique_indices length must cover the node count from indptr")
+    if arrays["variant_indices"].shape[0] != arrays["flip"].shape[0]:
+        raise ValueError("variant_indices and flip must have the same length")
+    if arrays["variant_indices"].shape[0] != n_variants:
+        raise ValueError("variant_indices length must match n_variants")
+    if arrays["allele_counts"].shape[0] != n_variants:
+        raise ValueError("allele_counts length must match n_variants")
+    if arrays["sample_indices"].shape[0] != n_samples:
+        raise ValueError("sample_indices length must match n_samples")
+    if n_variants < 0:
+        raise ValueError("n_variants must be nonnegative")
+    if n_samples < 0:
+        raise ValueError("n_samples must be nonnegative")
+    if n_nonunique_indices < 0:
+        raise ValueError("n_nonunique_indices must be nonnegative")
+
+
+def _validate_array_contract(
+    arrays: dict[str, np.ndarray],
+    *,
+    n_variants: int,
+    n_samples: int,
+    n_nonunique_indices: int,
+    min_index_to_keep: int,
+) -> None:
+    _validate_array_shapes(
+        arrays,
+        n_variants=n_variants,
+        n_samples=n_samples,
+        n_nonunique_indices=n_nonunique_indices,
+        min_index_to_keep=min_index_to_keep,
+    )
+    indptr = arrays["indptr"]
+    indices = arrays["indices"]
+    src_of_edge = arrays["src_of_edge"]
+    data = arrays["data"]
+    node_count = indptr.shape[0] - 1
+    n_edges = indices.shape[0]
+
+    if int(indptr[0]) != 0:
+        raise ValueError("indptr must start at 0")
+    if np.any(np.diff(indptr) < 0):
+        raise ValueError("indptr must be monotonic")
+    if int(indptr[-1]) != n_edges:
+        raise ValueError("final indptr entry must match the edge count")
+
+    for name in (
+        "indices",
+        "src_of_edge",
+        "variant_indices",
+        "sample_indices",
+        "nonunique_indices",
+    ):
+        array = arrays[name]
+        if array.shape[0] and int(np.min(array)) < 0:
+            raise ValueError(f"{name} contains a negative index")
+
+    if min_index_to_keep < 0 or min_index_to_keep > node_count:
+        raise ValueError("min_index_to_keep must be within the node range")
+    if src_of_edge.shape[0] and int(np.max(src_of_edge)) >= node_count:
+        raise ValueError("src_of_edge contains an out-of-range node index")
+    if indices.shape[0] and int(np.max(indices)) >= node_count:
+        raise ValueError("indices contains an out-of-range node index")
+    expected_src_of_edge = np.repeat(np.arange(node_count, dtype=np.int32), np.diff(indptr))
+    if not np.array_equal(src_of_edge, expected_src_of_edge):
+        raise ValueError("src_of_edge must match the sources implied by indptr")
+    invalid_edge_order = (indices < src_of_edge) | ((indices == src_of_edge) & (data != 0))
+    if indices.shape[0] and np.any(invalid_edge_order):
+        raise ValueError("indices must be greater than src_of_edge")
+    if arrays["variant_indices"].shape[0] and int(np.max(arrays["variant_indices"])) >= node_count:
+        raise ValueError("variant_indices contains an out-of-range node index")
+    if arrays["sample_indices"].shape[0] and int(np.max(arrays["sample_indices"])) >= node_count:
+        raise ValueError("sample_indices contains an out-of-range node index")
+    if arrays["nonunique_indices"].shape[0] and int(np.max(arrays["nonunique_indices"])) >= n_nonunique_indices:
+        raise ValueError("nonunique_indices contains an out-of-range compressed index")
 
 
 def _ffi_cpu_unavailable_message() -> str:

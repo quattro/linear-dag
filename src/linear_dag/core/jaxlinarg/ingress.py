@@ -47,7 +47,6 @@ def from_lineararg(
 
     if bucket is not None:
         bucket = _as_bucket_spec(bucket)
-        nonunique_indices_length = bucket.max_nodes
         n_nonunique_indices = bucket.max_nodes
         padded = pad_to_bucket(
             indptr,
@@ -60,7 +59,7 @@ def from_lineararg(
         indices = padded.indices
         data = padded.data
         src_of_edge = padded.src_of_edge
-        nonunique_indices = _pad_nonunique_indices(nonunique_indices, nonunique_indices_length)
+        nonunique_indices = _pad_nonunique_indices(nonunique_indices, bucket.max_nodes)
 
     return JaxLinearARG.from_lineararg_arrays(
         indptr=indptr,

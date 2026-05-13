@@ -122,11 +122,9 @@ class JaxParallelOperator(eqx.Module):
         backend = _backend_for_lineargs(lineargs, backend=backend)
         metadata = _metadata_from_lineargs(lineargs)
         blocks = tuple(
-            _as_jax_block(
-                linearg,
-                backend=backend,
-                bucket=bucket,
-            )
+            linearg
+            if isinstance(linearg, JaxLinearARG)
+            else JaxLinearARG.from_lineararg(linearg, backend=backend, bucket=bucket)
             for linearg, bucket in _zip_buckets(
                 lineargs,
                 buckets,
@@ -414,21 +412,6 @@ def _zip_buckets(
     return tuple(zip(values, bucket_values, strict=True))
 
 
-def _as_jax_block(
-    linearg: Any,
-    *,
-    backend: Backend,
-    bucket: Any,
-) -> JaxLinearARG:
-    if isinstance(linearg, JaxLinearARG):
-        return linearg
-    return JaxLinearARG.from_lineararg(
-        linearg,
-        backend=backend,
-        bucket=bucket,
-    )
-
-
 def _backend_for_lineargs(lineargs: tuple[Any, ...], *, backend: Backend) -> Backend:
     requested_backend = Backend(backend)
     if requested_backend is not Backend.AUTO:
@@ -451,13 +434,8 @@ def _validate_jax_block_settings(
     *,
     backend: Backend,
 ) -> None:
-    requested_backend = Backend(backend)
-    if requested_backend is Backend.AUTO:
-        expected_backend = _backend_for_lineargs(blocks, backend=requested_backend)
-        if expected_backend is Backend.AUTO:
-            expected_backend = resolve_backend(expected_backend)
-    else:
-        expected_backend = resolve_backend(requested_backend)
+    expected_backend = _backend_for_lineargs(blocks, backend=Backend(backend))
+    expected_backend = resolve_backend(expected_backend)
     for block in blocks:
         if block.backend is not expected_backend:
             raise ValueError(
