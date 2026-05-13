@@ -18,7 +18,6 @@ from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 from linear_dag.core.jaxlinarg.kernels import ffi_cpu, pallas_gpu
 from linear_dag.core.lineararg import LinearARG
 
-K_VALUES = (1, 8, 64)
 MIN_SAMPLE_SECONDS = 0.005
 WARMUP_ITERATIONS = 2
 TIMED_ITERATIONS = 9
@@ -32,12 +31,17 @@ class BenchmarkResult:
     ratio_to_cython: float | None
 
 
-def test_jax_lineararg_benchmark_gates(request: pytest.FixtureRequest, linarg_h5_path, first_block_name):
+def test_jax_lineararg_benchmark_gates(
+    request: pytest.FixtureRequest,
+    linarg_h5_path,
+    first_block_name,
+    linarg_benchmark_k_values: tuple[int, ...],
+):
     if not request.config.getoption("--runbench"):
         pytest.skip("benchmarks require --runbench")
 
     linarg = LinearARG.read(linarg_h5_path, block=first_block_name, load_metadata=True)
-    inputs = _benchmark_inputs(linarg)
+    inputs = _benchmark_inputs(linarg, k_values=linarg_benchmark_k_values)
 
     cython_results = {k: _time_call(lambda matrix=matrix: linarg._matmat(matrix)) for k, matrix in inputs.items()}
     results = [BenchmarkResult("cython", k, runtime, 1.0) for k, runtime in cython_results.items()]
@@ -84,9 +88,9 @@ def test_jax_lineararg_benchmark_gates(request: pytest.FixtureRequest, linarg_h5
         gate_check()
 
 
-def _benchmark_inputs(linarg: LinearARG) -> dict[int, np.ndarray]:
+def _benchmark_inputs(linarg: LinearARG, *, k_values: tuple[int, ...]) -> dict[int, np.ndarray]:
     rng = np.random.default_rng(20260506)
-    return {k: rng.normal(size=(linarg.shape[1], k)).astype(np.float32) for k in K_VALUES}
+    return {k: rng.normal(size=(linarg.shape[1], k)).astype(np.float32) for k in k_values}
 
 
 def _time_backend(

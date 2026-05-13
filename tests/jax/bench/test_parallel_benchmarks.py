@@ -21,7 +21,6 @@ from linear_dag.core.jaxlinarg import Backend, JaxParallelOperator
 from linear_dag.core.jaxlinarg.kernels import ffi_cpu, pallas_gpu
 from linear_dag.core.parallel_processing import ParallelOperator
 
-K_VALUES = (1, 8, 64)
 MIN_SAMPLE_SECONDS = 0.005
 WARMUP_ITERATIONS = 2
 TIMED_ITERATIONS = 9
@@ -36,7 +35,12 @@ class ParallelBenchmarkResult:
     ratio_to_parallel_operator: float | None
 
 
-def test_jax_parallel_operator_benchmark(request: pytest.FixtureRequest, linarg_h5_path, linarg_block_metadata):
+def test_jax_parallel_operator_benchmark(
+    request: pytest.FixtureRequest,
+    linarg_h5_path,
+    linarg_block_metadata,
+    linarg_benchmark_k_values: tuple[int, ...],
+):
     if not request.config.getoption("--runbench"):
         pytest.skip("benchmarks require --runbench")
 
@@ -45,6 +49,7 @@ def test_jax_parallel_operator_benchmark(request: pytest.FixtureRequest, linarg_
         linarg_h5_path,
         linarg_block_metadata,
         num_processes=num_processes,
+        k_values=linarg_benchmark_k_values,
     )
     baselines = {(result.operation, result.k): result.median_seconds for result in process_results}
     results = list(process_results)
@@ -56,6 +61,7 @@ def test_jax_parallel_operator_benchmark(request: pytest.FixtureRequest, linarg_
                 linarg_block_metadata,
                 config=config,
                 baselines=baselines,
+                k_values=linarg_benchmark_k_values,
             )
         )
 
@@ -67,14 +73,15 @@ def _time_parallel_operator(
     linarg_block_metadata: pl.DataFrame,
     *,
     num_processes: int,
+    k_values: tuple[int, ...],
 ) -> list[ParallelBenchmarkResult]:
     with ParallelOperator.from_hdf5(
         str(linarg_h5_path),
         num_processes=num_processes,
-        max_num_traits=max(K_VALUES),
+        max_num_traits=max(k_values),
         block_metadata=linarg_block_metadata,
     ) as op:
-        variant_inputs, sample_inputs = _benchmark_inputs(op.shape)
+        variant_inputs, sample_inputs = _benchmark_inputs(op.shape, k_values=k_values)
         results = []
         for k, matrix in variant_inputs.items():
             results.append(
@@ -105,6 +112,7 @@ def _time_jax_parallel_operator(
     *,
     config: "JaxParallelBenchmarkConfig",
     baselines: dict[tuple[str, int], float],
+    k_values: tuple[int, ...],
 ) -> list[ParallelBenchmarkResult]:
     with jax.default_device(config.devices[0]):
         op = JaxParallelOperator.from_hdf5(
@@ -113,7 +121,7 @@ def _time_jax_parallel_operator(
             block_metadata=linarg_block_metadata,
             backend=config.backend,
         )
-    variant_inputs, sample_inputs = _benchmark_inputs(op.shape)
+    variant_inputs, sample_inputs = _benchmark_inputs(op.shape, k_values=k_values)
     results = []
     for k, matrix in variant_inputs.items():
         with jax.default_device(config.devices[0]):
@@ -148,11 +156,15 @@ def _time_jax_parallel_operator(
     return results
 
 
-def _benchmark_inputs(shape: tuple[int, int]) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
+def _benchmark_inputs(
+    shape: tuple[int, int],
+    *,
+    k_values: tuple[int, ...],
+) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
     rng = np.random.default_rng(20260506)
     n_samples, n_variants = shape
-    variant_inputs = {k: rng.normal(size=(n_variants, k)).astype(np.float32) for k in K_VALUES}
-    sample_inputs = {k: rng.normal(size=(n_samples, k)).astype(np.float32) for k in K_VALUES}
+    variant_inputs = {k: rng.normal(size=(n_variants, k)).astype(np.float32) for k in k_values}
+    sample_inputs = {k: rng.normal(size=(n_samples, k)).astype(np.float32) for k in k_values}
     return variant_inputs, sample_inputs
 
 

@@ -122,6 +122,14 @@ Benchmark gates are opt-in so normal test runs stay fast:
 pytest -p no:capture tests/jax/bench --runbench
 ```
 
+Use `--linarg-benchmark-k` to choose matrix widths for benchmark inputs. For
+multi-trait GWAS-style workloads, values such as `42`, `64`, `89`, and `100`
+are more representative than single-vector products:
+
+```console
+pytest -p no:capture tests/jax/bench --runbench --linarg-benchmark-k 1 42 64 89 100
+```
+
 ### Genome-wide association studies (GWAS)
 
 You can perform a GWAS using the `run_gwas` function from `linear_dag.association.gwas`. This function takes a `LinearOperator` (such as a `LinearARG` instance), and a `polars.DataFrame` containing phenotype and covariate data.

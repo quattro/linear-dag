@@ -27,6 +27,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
         help="limit LinearARG HDF5 block metadata to the first N blocks for tests and benchmarks",
     )
+    parser.addoption(
+        "--linarg-benchmark-k",
+        nargs="+",
+        type=int,
+        default=(1, 8, 64),
+        help="matrix widths to use for LinearARG benchmark inputs",
+    )
 
 
 @pytest.fixture(scope="session")
@@ -61,3 +68,13 @@ def linarg_block_metadata(request: pytest.FixtureRequest, linarg_h5_path: Path) 
 @pytest.fixture(scope="session")
 def first_block_name(linarg_h5_path: Path) -> str:
     return get_first_block_name(linarg_h5_path)
+
+
+@pytest.fixture(scope="session")
+def linarg_benchmark_k_values(request: pytest.FixtureRequest) -> tuple[int, ...]:
+    k_values = tuple(request.config.getoption("--linarg-benchmark-k"))
+    if not k_values:
+        raise ValueError("--linarg-benchmark-k must contain at least one value")
+    if any(k < 1 for k in k_values):
+        raise ValueError("--linarg-benchmark-k values must be positive")
+    return k_values
