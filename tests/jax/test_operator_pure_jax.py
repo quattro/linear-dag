@@ -83,6 +83,17 @@ def test_jax_lineararg_forward_product_handles_flipped_variants(linarg_h5_path, 
     np.testing.assert_allclose(np.asarray(op.matmat(case.w)), case.Xw, rtol=1e-5, atol=1e-5)
 
 
+def test_jax_lineararg_caches_flipped_variant_indices(linarg_h5_path, first_block_name):
+    from tests.jax.oracle import make_oracle_cases
+
+    cases = {case.name: case for case in make_oracle_cases(linarg_h5_path, first_block_name)}
+    case = cases["flipped_k3"]
+    op = _operator_from_case(case)
+
+    np.testing.assert_array_equal(np.asarray(op._flipped_variant_indices), np.flatnonzero(case.linarg.flip))
+    np.testing.assert_allclose(np.asarray(op.matmat(case.w)), case.Xw, rtol=1e-5, atol=1e-5)
+
+
 def test_jax_lineararg_vmapped_matvec_matches_matmat_for_flipped_variants(linarg_h5_path, first_block_name):
     from tests.jax.oracle import make_oracle_cases
 

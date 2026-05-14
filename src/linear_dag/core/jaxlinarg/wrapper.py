@@ -315,11 +315,13 @@ class JaxParallelOperator(eqx.Module):
             mapped,
             mesh=self.mesh,
             in_specs=P(),
-            out_specs=P("blocks"),
+            # `psum` leaves each device with the full sample-sized product.
+            # Returning a replicated value avoids forcing XLA to slice and
+            # exchange an already-replicated result into a sharded layout.
+            out_specs=P(),
             axis_names={"blocks"},
         )
-        stacked_total = product(x)
-        return stacked_total[: self.shape[0]]
+        return product(x)
 
     def _matmat_branch(self, start: int, end: int) -> Any:
         def branch(values: Any) -> Any:

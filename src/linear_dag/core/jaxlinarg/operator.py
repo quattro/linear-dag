@@ -110,6 +110,10 @@ class JaxLinearARG(eqx.Module):
     backend: Backend = eqx.field(default=Backend.AUTO, converter=resolve_backend, static=True)
     dtype: Any = eqx.field(default=jnp.float32, converter=jnp.dtype, static=True)
     _arrays_validated: bool = eqx.field(default=False, converter=bool, static=True)
+    _flipped_variant_indices: Any = eqx.field(
+        default_factory=lambda: jnp.asarray([], dtype=jnp.int32),
+        converter=jnp.asarray,
+    )
 
     @classmethod
     def from_lineararg_arrays(
@@ -207,6 +211,7 @@ class JaxLinearARG(eqx.Module):
             data=jnp.asarray(data, dtype=dtype),
             variant_indices=jnp.asarray(variant_indices, dtype=jnp.int32),
             flip=jnp.asarray(flip, dtype=jnp.bool_),
+            _flipped_variant_indices=jnp.asarray(np.flatnonzero(flip), dtype=jnp.int32),
             sample_indices=sample_indices,
             nonunique_indices=nonunique_indices,
             allele_counts=jnp.asarray(allele_counts, dtype=jnp.int32),
@@ -367,7 +372,9 @@ class JaxLinearARG(eqx.Module):
             self.min_index_to_keep,
             b,
         )
-        flip_sum = jnp.sum(x * self.flip.astype(x.dtype)[:, None], axis=0)
+        # Match the NumPy/Cython path: only flipped rows contribute to this
+        # correction. A dense mask multiply materializes work for every variant.
+        flip_sum = jnp.sum(x[self._flipped_variant_indices, :], axis=0)
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
         result = solved[sample_nonunique_indices, :] + flip_sum
         return result[:, 0] if was_vector else result
