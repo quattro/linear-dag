@@ -1,5 +1,6 @@
 # pattern: Functional Core
 
+from functools import cached_property
 from typing import Any
 
 import equinox as eqx
@@ -281,10 +282,8 @@ class JaxParallelOperator(eqx.Module):
         x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.blocks[0].dtype)
         if len(self.blocks) == 1:
             result = self.blocks[0].rmatmat(x)
-        elif len(self.block_ranges) > 1:
-            result = self._sharded_rmatmat(x)
         else:
-            result = jnp.concatenate([block.rmatmat(x) for block in self.blocks], axis=0)
+            result = self._cached_rmatmat(x)
         return result[:, 0] if was_vector else result
 
     def _sharded_matmat(self, x: Any) -> Any:
@@ -296,7 +295,7 @@ class JaxParallelOperator(eqx.Module):
             return self._sharded_matmat_primal(values), None
 
         def product_bwd(_residual: None, cotangent: Any) -> tuple[Any]:
-            return (self._sharded_rmatmat(cotangent),)
+            return (self._cached_rmatmat(cotangent),)
 
         product.defvjp(product_fwd, product_bwd)
         return product(x)
@@ -334,44 +333,29 @@ class JaxParallelOperator(eqx.Module):
 
         return branch
 
-    def _sharded_rmatmat(self, x: Any) -> Any:
-        device_variant_counts = tuple(
-            int(self.variant_offsets[end] - self.variant_offsets[start]) for start, end in self.block_ranges
-        )
-        max_device_variants = max(device_variant_counts)
-        branches = tuple(self._rmatmat_branch(start, end, max_device_variants) for start, end in self.block_ranges)
-
-        def mapped(values: Any) -> Any:
-            axis_index = jax.lax.axis_index("blocks")
-            return jax.lax.switch(axis_index, branches, values)
-
-        product = jax.shard_map(
-            mapped,
-            mesh=self.mesh,
-            in_specs=P(),
-            out_specs=P("blocks"),
-            axis_names={"blocks"},
-        )
-        padded_segments = product(x)
-        segments = []
-        for device_index, variant_count in enumerate(device_variant_counts):
-            start = device_index * max_device_variants
-            # shard_map needs a static output shape, so device-local variant
-            # segments are padded to a common length and trimmed here.
-            segments.append(padded_segments[start : start + variant_count])
+    def _cached_rmatmat(self, x: Any) -> Any:
+        # Reverse products naturally return variant rows, and each block range
+        # owns a different number of variants. Do not route this through
+        # shard_map: shard_map would force equal per-device output shapes and
+        # reintroduce padding. Instead, keep one cached JIT entrypoint per
+        # non-empty range and concatenate the exact-size range outputs.
+        assembly_device = _mesh_assembly_device(self.mesh)
+        segments = [
+            _device_put_if_needed(product(_device_put_if_needed(x, device)), assembly_device)
+            for device, product in self._rmatmat_products
+        ]
         return jnp.concatenate(segments, axis=0)
 
-    def _rmatmat_branch(self, start: int, end: int, max_device_variants: int) -> Any:
-        def branch(values: Any) -> Any:
-            local_blocks = [self.blocks[block_index].rmatmat(values) for block_index in range(start, end)]
-            if local_blocks:
-                local = jnp.concatenate(local_blocks, axis=0)
-            else:
-                local = jnp.zeros((0, values.shape[1]), dtype=values.dtype)
-            padding = max_device_variants - local.shape[0]
-            return jnp.pad(local, ((0, padding), (0, 0)))
-
-        return branch
+    @cached_property
+    def _rmatmat_products(self) -> tuple[tuple[jax.Device | None, Any], ...]:
+        devices = _mesh_block_devices(self.mesh)
+        products = []
+        for range_index, (start, end) in enumerate(self.block_ranges):
+            if start == end:
+                continue
+            device = devices[range_index] if devices is not None else None
+            products.append((device, jax.jit(_rmatmat_range_product(self.blocks[start:end]))))
+        return tuple(products)
 
     def matvec(self, x: Any) -> Any:
         """Multiply a vector by the composed genotype matrix."""
@@ -556,6 +540,42 @@ def _mesh_blocks_axis_size(mesh: Any) -> int:
     if devices.ndim <= axis_index:
         return int(devices.size)
     return int(devices.shape[axis_index])
+
+
+def _mesh_block_devices(mesh: Any) -> tuple[jax.Device, ...] | None:
+    if isinstance(mesh, AbstractMesh):
+        return None
+    axis_names = tuple(getattr(mesh, "axis_names", ()))
+    devices = np.asarray(mesh.devices)
+    axis_index = axis_names.index("blocks")
+    if devices.ndim <= axis_index:
+        return tuple(devices.reshape(-1).tolist())
+    moved = np.moveaxis(devices, axis_index, 0)
+    return tuple(moved.reshape((moved.shape[0], -1))[:, 0].tolist())
+
+
+def _mesh_assembly_device(mesh: Any) -> jax.Device | None:
+    if isinstance(mesh, AbstractMesh):
+        return None
+    return np.asarray(mesh.devices).reshape(-1).tolist()[0]
+
+
+def _rmatmat_range_product(blocks: tuple[JaxLinearARG, ...]) -> Any:
+    # A range product is deliberately exact-size. This mirrors the NumPy
+    # ParallelOperator model: each worker/range computes its own variant rows,
+    # and the wrapper assembles the public `(sum p_i, k)` result by
+    # concatenation. Keeping the function object cached lets JAX reuse compiled
+    # executables for repeated calls with the same input shape and dtype.
+    def product(values: Any) -> Any:
+        return jnp.concatenate([block.rmatmat(values) for block in blocks], axis=0)
+
+    return product
+
+
+def _device_put_if_needed(value: Any, device: jax.Device | None) -> Any:
+    if device is None:
+        return value
+    return jax.device_put(value, device)
 
 
 def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Array, bool]:

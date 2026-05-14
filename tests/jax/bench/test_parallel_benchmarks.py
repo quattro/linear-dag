@@ -141,8 +141,11 @@ def _time_jax_parallel_operator(
     for k, matrix in sample_inputs.items():
         with jax.default_device(config.devices[0]):
             jax_matrix = jnp.asarray(matrix)
-        rmatmat = jax.jit(lambda values: op.rmatmat(values)).lower(jax_matrix).compile()
-        runtime = _time_call(lambda matrix=jax_matrix, rmatmat=rmatmat: rmatmat(matrix), block_until_ready=True)
+        # `JaxParallelOperator.rmatmat` uses cached per-range JIT functions and
+        # concatenates exact-size variant outputs. Benchmark that path directly:
+        # an outer JIT would collapse the host-side launch pattern we are trying
+        # to compare against ParallelOperator's worker writes.
+        runtime = _time_call(lambda matrix=jax_matrix, op=op: op.rmatmat(matrix), block_until_ready=True)
         results.append(
             ParallelBenchmarkResult(
                 _result_operator_name(config),

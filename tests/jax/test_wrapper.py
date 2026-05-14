@@ -379,6 +379,26 @@ def test_jax_parallel_operator_rmatmat_matches_concatenated_block_products(
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
 
 
+def test_jax_parallel_operator_rmatmat_uses_concatenated_cached_path(monkeypatch):
+    def reject_shard_map(*args, **kwargs):
+        raise AssertionError("rmatmat should not use shard_map")
+
+    monkeypatch.setattr("linear_dag.core.jaxlinarg.wrapper.jax.shard_map", reject_shard_map)
+    op = JaxParallelOperator(
+        blocks=(_tiny_block(), _tiny_block()),
+        variant_offsets=(0, 1, 2),
+        mesh=AbstractMesh((2,), ("blocks",)),
+        backend=Backend.PURE_JAX,
+        block_ranges=((0, 1), (1, 2)),
+    )
+    y = jnp.ones((op.shape[0], 1), dtype=jnp.float32)
+
+    actual = op.rmatmat(y)
+    expected = jnp.concatenate([block.rmatmat(y) for block in op.blocks], axis=0)
+
+    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
+
+
 def test_jax_parallel_operator_products_on_two_device_cpu_mesh(
     linarg_h5_path,
     linarg_block_metadata,
@@ -408,8 +428,10 @@ def test_jax_parallel_operator_products_on_two_device_cpu_mesh(
     expected_rmatmat = jnp.concatenate([block.rmatmat(y) for block in op.blocks], axis=0)
 
     np.testing.assert_allclose(np.asarray(op.matmat(w)), np.asarray(expected_matmat), rtol=1e-5, atol=1e-5)
+    assert len(shard_map_calls) == 1
+
     np.testing.assert_allclose(np.asarray(op.rmatmat(y)), np.asarray(expected_rmatmat), rtol=1e-5, atol=1e-5)
-    assert len(shard_map_calls) >= 2
+    assert len(shard_map_calls) == 1
     assert all(call["axis_names"] == {"blocks"} for call in shard_map_calls)
 
 
