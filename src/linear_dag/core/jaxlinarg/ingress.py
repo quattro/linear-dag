@@ -10,14 +10,12 @@ from scipy import sparse
 from linear_dag.core.lineararg import LinearARG
 
 from .operator import Backend, JaxLinearARG, resolve_backend
-from .padding import BucketSpec, pad_to_bucket
 
 
 def from_lineararg(
     linarg: LinearARG,
     *,
     backend: Backend = Backend.AUTO,
-    bucket: BucketSpec | None = None,
     dtype: Any = None,
 ) -> JaxLinearARG:
     """Convert a [`linear_dag.core.lineararg.LinearARG`][] to a JAX operator.
@@ -26,7 +24,6 @@ def from_lineararg(
 
     - `linarg`: Source LinearARG object.
     - `backend`: Requested numerical backend.
-    - `bucket`: Optional static padding bucket for JIT cache stability.
     - `dtype`: Optional computation dtype. Defaults to `jax.numpy.float32`.
 
     **Returns:**
@@ -41,23 +38,7 @@ def from_lineararg(
     indptr = np.asarray(graph.indptr, dtype=np.int32)
     indices = np.asarray(graph.indices, dtype=np.int32)
     data = np.asarray(graph.data, dtype=np.dtype(dtype))
-    n_nonunique_indices = None
     resolved_backend = resolve_backend(backend)
-
-    if bucket is not None:
-        bucket = _as_bucket_spec(bucket)
-        n_nonunique_indices = bucket.max_nodes
-        padded = pad_to_bucket(
-            indptr,
-            indices,
-            data,
-            max_nodes=bucket.max_nodes,
-            max_nnz=bucket.max_nnz,
-        )
-        indptr = padded.indptr
-        indices = padded.indices
-        data = padded.data
-        nonunique_indices = _pad_nonunique_indices(nonunique_indices, bucket.max_nodes)
 
     return JaxLinearARG.from_lineararg_arrays(
         indptr=indptr,
@@ -70,7 +51,6 @@ def from_lineararg(
         allele_counts=_cached_allele_counts(linarg),
         n_variants=int(linarg.shape[1]),
         n_samples=int(linarg.shape[0]),
-        n_nonunique_indices=n_nonunique_indices,
         backend=resolved_backend,
         dtype=dtype,
     )
@@ -81,7 +61,6 @@ def from_hdf5_block(
     block: Any,
     *,
     backend: Backend = Backend.AUTO,
-    bucket: BucketSpec | None = None,
     load_metadata: bool = False,
     dtype: Any = None,
 ) -> JaxLinearARG:
@@ -92,7 +71,6 @@ def from_hdf5_block(
     - `path`: HDF5 file path.
     - `block`: Block name inside the HDF5 file.
     - `backend`: Requested numerical backend.
-    - `bucket`: Optional static padding bucket for JIT cache stability.
     - `load_metadata`: Whether to load optional LinearARG metadata.
     - `dtype`: Optional computation dtype. Defaults to `jax.numpy.float32`.
 
@@ -104,7 +82,6 @@ def from_hdf5_block(
     return from_lineararg(
         linarg,
         backend=backend,
-        bucket=bucket,
         dtype=dtype,
     )
 
@@ -127,24 +104,8 @@ def _canonical_nonunique_indices(nonunique_indices: Any, n_nodes: int) -> np.nda
     return np.asarray(nonunique_indices, dtype=np.int32)
 
 
-def _pad_nonunique_indices(nonunique_indices: np.ndarray, max_nodes: int) -> np.ndarray:
-    if nonunique_indices.shape[0] > max_nodes:
-        raise ValueError("bucket max_nodes is smaller than nonunique_indices")
-    if nonunique_indices.shape[0] == max_nodes:
-        return nonunique_indices
-    padded = np.zeros(max_nodes, dtype=np.int32)
-    padded[: nonunique_indices.shape[0]] = nonunique_indices
-    return padded
-
-
 def _cached_allele_counts(linarg: LinearARG) -> np.ndarray | None:
     allele_counts = linarg.__dict__.get("allele_counts")
     if allele_counts is None:
         return None
     return np.asarray(allele_counts, dtype=np.int32)
-
-
-def _as_bucket_spec(bucket: Any) -> BucketSpec:
-    if isinstance(bucket, BucketSpec):
-        return bucket
-    return BucketSpec(*bucket)

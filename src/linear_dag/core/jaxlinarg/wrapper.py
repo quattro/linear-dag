@@ -14,7 +14,6 @@ from jax.sharding import AbstractMesh, Mesh, PartitionSpec as P
 from linear_dag.core.lineararg import list_blocks
 
 from .operator import Backend, JaxLinearARG, resolve_backend
-from .padding import BucketSpec, choose_bucket, choose_buckets
 
 
 def split_blocks_by_n_entries(metadata: pl.DataFrame, num_devices: int) -> tuple[tuple[int, int], ...]:
@@ -94,7 +93,6 @@ class JaxParallelOperator(eqx.Module):
         *,
         mesh: Any,
         backend: Backend = Backend.AUTO,
-        buckets: Any = "auto",
     ) -> "JaxParallelOperator":
         """Construct a multi-block JAX operator from LinearARG objects.
 
@@ -109,7 +107,6 @@ class JaxParallelOperator(eqx.Module):
         - `lineargs`: Iterable of LinearARG or JAX LinearARG blocks.
         - `mesh`: JAX mesh with a `"blocks"` axis.
         - `backend`: Requested numerical backend.
-        - `buckets`: Padding policy, a shared bucket, or one bucket per block.
 
         **Returns:**
 
@@ -123,14 +120,8 @@ class JaxParallelOperator(eqx.Module):
         backend = _backend_for_lineargs(lineargs, backend=backend)
         metadata = _metadata_from_lineargs(lineargs)
         blocks = tuple(
-            linearg
-            if isinstance(linearg, JaxLinearARG)
-            else JaxLinearARG.from_lineararg(linearg, backend=backend, bucket=bucket)
-            for linearg, bucket in _zip_buckets(
-                lineargs,
-                buckets,
-                shapes=_bucket_shapes_from_metadata(metadata),
-            )
+            linearg if isinstance(linearg, JaxLinearARG) else JaxLinearARG.from_lineararg(linearg, backend=backend)
+            for linearg in lineargs
         )
         return cls(
             blocks=blocks,
@@ -148,7 +139,6 @@ class JaxParallelOperator(eqx.Module):
         mesh: Any,
         block_metadata: pl.DataFrame | None = None,
         backend: Backend = Backend.AUTO,
-        buckets: Any = "auto",
     ) -> "JaxParallelOperator":
         """Construct a multi-block JAX operator from an HDF5 LinearARG file.
 
@@ -163,7 +153,6 @@ class JaxParallelOperator(eqx.Module):
         - `mesh`: JAX mesh with a `"blocks"` axis.
         - `block_metadata`: Optional preloaded block metadata.
         - `backend`: Requested numerical backend.
-        - `buckets`: Padding policy, a shared bucket, or one bucket per block.
 
         **Returns:**
 
@@ -180,13 +169,8 @@ class JaxParallelOperator(eqx.Module):
                 path,
                 block_name,
                 backend=backend,
-                bucket=bucket,
             )
-            for block_name, bucket in _zip_buckets(
-                block_names,
-                buckets,
-                shapes=_bucket_shapes_from_metadata(metadata),
-            )
+            for block_name in block_names
         )
         return cls(
             blocks=blocks,
@@ -369,35 +353,6 @@ class JaxParallelOperator(eqx.Module):
         return self.matmat(x)
 
 
-def _zip_buckets(
-    values: Any,
-    buckets: Any,
-    *,
-    shapes: tuple[BucketSpec, ...] | None = None,
-) -> tuple[tuple[Any, Any], ...]:
-    values = tuple(values)
-    if buckets == "auto":
-        if shapes is None:
-            raise ValueError('buckets="auto" requires block shapes')
-        chosen_buckets = choose_buckets(shapes)
-        bucket_values = tuple(choose_bucket(shape, chosen_buckets) for shape in shapes)
-        return tuple(zip(values, bucket_values, strict=True))
-    if buckets is None:
-        return tuple((value, None) for value in values)
-    shared_bucket = _as_single_bucket_spec(buckets)
-    if shared_bucket is not None:
-        return tuple((value, shared_bucket) for value in values)
-    if isinstance(buckets, (str, bytes)):
-        raise ValueError("buckets must be 'auto', None, a bucket spec, or one bucket per block")
-    try:
-        bucket_values = tuple(buckets)
-    except TypeError:
-        return tuple((value, buckets) for value in values)
-    if len(bucket_values) != len(values):
-        raise ValueError("buckets must contain one entry per block")
-    return tuple(zip(values, bucket_values, strict=True))
-
-
 def _backend_for_lineargs(lineargs: tuple[Any, ...], *, backend: Backend) -> Backend:
     requested_backend = Backend(backend)
     if requested_backend is not Backend.AUTO:
@@ -457,32 +412,6 @@ def _metadata_from_lineargs(lineargs: tuple[Any, ...]) -> pl.DataFrame:
             "n": n_nodes,
         }
     )
-
-
-def _bucket_shapes_from_metadata(metadata: pl.DataFrame) -> tuple[BucketSpec, ...]:
-    _require_metadata_columns(metadata, "n", "n_entries")
-    return tuple(
-        BucketSpec(max_nodes=int(n_nodes), max_nnz=int(n_entries))
-        for n_nodes, n_entries in zip(
-            metadata.get_column("n").to_list(),
-            metadata.get_column("n_entries").to_list(),
-            strict=True,
-        )
-    )
-
-
-def _as_single_bucket_spec(bucket: Any) -> BucketSpec | None:
-    if isinstance(bucket, BucketSpec):
-        return bucket
-    if isinstance(bucket, (str, bytes)):
-        return None
-    try:
-        values = tuple(bucket)
-    except TypeError:
-        return None
-    if len(values) != 2 or not all(isinstance(value, (int, np.integer)) for value in values):
-        return None
-    return BucketSpec(max_nodes=int(values[0]), max_nnz=int(values[1]))
 
 
 def _require_metadata_columns(metadata: pl.DataFrame, *columns: str) -> None:

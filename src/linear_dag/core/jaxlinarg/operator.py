@@ -138,11 +138,6 @@ class JaxLinearARG(eqx.Module):
     ) -> "JaxLinearARG":
         """Construct a JAX operator from LinearARG array components.
 
-        !!! info
-            `bucket` padding is handled by ingress helpers before this method.
-            Arrays passed here should already describe the static shape that JAX
-            will trace.
-
         **Arguments:**
 
         - `indptr`: CSC index pointer array.
@@ -233,7 +228,6 @@ class JaxLinearARG(eqx.Module):
         linarg: Any,
         *,
         backend: Backend = Backend.AUTO,
-        bucket: Any = None,
         dtype: Any = None,
     ) -> "JaxLinearARG":
         """Construct a JAX operator from a [`linear_dag.core.lineararg.LinearARG`][].
@@ -247,7 +241,6 @@ class JaxLinearARG(eqx.Module):
 
         - `linarg`: Source LinearARG object.
         - `backend`: Requested numerical backend.
-        - `bucket`: Optional static padding bucket.
         - `dtype`: Optional computation dtype.
 
         **Returns:**
@@ -259,7 +252,6 @@ class JaxLinearARG(eqx.Module):
         return from_lineararg(
             linarg,
             backend=backend,
-            bucket=bucket,
             dtype=dtype,
         )
 
@@ -270,7 +262,6 @@ class JaxLinearARG(eqx.Module):
         block: Any,
         *,
         backend: Backend = Backend.AUTO,
-        bucket: Any = None,
         load_metadata: bool = False,
         dtype: Any = None,
     ) -> "JaxLinearARG":
@@ -281,7 +272,6 @@ class JaxLinearARG(eqx.Module):
         - `path`: HDF5 file path.
         - `block`: Block name inside the HDF5 file.
         - `backend`: Requested numerical backend.
-        - `bucket`: Optional static padding bucket.
         - `load_metadata`: Whether to load optional LinearARG metadata.
         - `dtype`: Optional computation dtype.
 
@@ -295,7 +285,6 @@ class JaxLinearARG(eqx.Module):
             path,
             block,
             backend=backend,
-            bucket=bucket,
             load_metadata=load_metadata,
             dtype=dtype,
         )

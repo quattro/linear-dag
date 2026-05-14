@@ -20,7 +20,6 @@ from linear_dag.core.jaxlinarg import (
     split_blocks_by_n_entries,
     variant_offsets_from_metadata,
 )
-from linear_dag.core.jaxlinarg.padding import BucketSpec
 from linear_dag.core.lineararg import LinearARG
 
 
@@ -244,64 +243,6 @@ def test_jax_parallel_operator_from_hdf5_rejects_block_metadata_variant_count_mi
         )
 
 
-def test_jax_parallel_operator_from_hdf5_uses_one_bucket_spec_for_all_blocks(
-    linarg_h5_path,
-    linarg_block_metadata,
-):
-    bucket = BucketSpec(
-        max_nodes=linarg_block_metadata.get_column("n").max(),
-        max_nnz=linarg_block_metadata.get_column("n_entries").max(),
-    )
-
-    op = JaxParallelOperator.from_hdf5(
-        linarg_h5_path,
-        mesh=_mesh(),
-        block_metadata=linarg_block_metadata,
-        backend=Backend.PURE_JAX,
-        buckets=bucket,
-    )
-
-    assert all(block.indptr.shape == (bucket.max_nodes + 1,) for block in op.blocks)
-    assert all(block.indices.shape == (bucket.max_nnz,) for block in op.blocks)
-
-
-def test_jax_parallel_operator_from_hdf5_uses_bucket_shaped_tuple_for_all_blocks(
-    linarg_h5_path,
-    linarg_block_metadata,
-):
-    bucket = (
-        linarg_block_metadata.get_column("n").max(),
-        linarg_block_metadata.get_column("n_entries").max(),
-    )
-
-    op = JaxParallelOperator.from_hdf5(
-        linarg_h5_path,
-        mesh=_mesh(),
-        block_metadata=linarg_block_metadata,
-        backend=Backend.PURE_JAX,
-        buckets=bucket,
-    )
-
-    assert all(block.indptr.shape == (bucket[0] + 1,) for block in op.blocks)
-    assert all(block.indices.shape == (bucket[1],) for block in op.blocks)
-
-
-def test_jax_parallel_operator_from_linearargs_auto_buckets_blocks():
-    lineargs = tuple(_lineararg_with_graph_shape(n_nodes=n_nodes, n_edges=n_nodes - 1) for n_nodes in range(3, 12))
-
-    op = JaxParallelOperator.from_linearargs(
-        lineargs,
-        mesh=_mesh(),
-        backend=Backend.PURE_JAX,
-        buckets="auto",
-    )
-    padded_shapes = tuple((block.indptr.shape[0] - 1, block.indices.shape[0]) for block in op.blocks)
-    original_shapes = tuple((linarg.A.shape[0], linarg.A.nnz) for linarg in lineargs)
-
-    assert len(set(padded_shapes)) <= 8
-    assert any(padded != original for padded, original in zip(padded_shapes, original_shapes, strict=True))
-
-
 def test_jax_parallel_operator_from_linearargs_auto_accepts_consistent_prebuilt_backend(monkeypatch):
     block = JaxLinearARG.from_lineararg(
         _lineararg_with_graph_shape(n_nodes=3, n_edges=2),
@@ -317,7 +258,6 @@ def test_jax_parallel_operator_from_linearargs_auto_accepts_consistent_prebuilt_
     op = JaxParallelOperator.from_linearargs(
         (block,),
         mesh=_mesh(),
-        buckets=None,
     )
 
     assert op.backend is Backend.PURE_JAX
@@ -341,7 +281,6 @@ def test_jax_parallel_operator_from_linearargs_rejects_explicit_prebuilt_backend
             (block,),
             mesh=_mesh(),
             backend=Backend.FFI_CPU,
-            buckets=None,
         )
 
 
