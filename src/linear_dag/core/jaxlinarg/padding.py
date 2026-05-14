@@ -14,19 +14,11 @@ class BucketSpec(NamedTuple):
 
 
 class PaddedGraph(NamedTuple):
-    """Padded CSC graph arrays and edge-source metadata."""
+    """Padded CSC graph arrays."""
 
     indptr: np.ndarray
     indices: np.ndarray
     data: np.ndarray
-    src_of_edge: np.ndarray
-
-
-def compute_src_of_edge(indptr: Any) -> Any:
-    """Return the CSC source node for each edge implied by `indptr`."""
-    indptr = np.asarray(indptr)
-    n_nodes = indptr.shape[0] - 1
-    return np.repeat(np.arange(n_nodes, dtype=np.int32), np.diff(indptr).astype(np.int64))
 
 
 def pad_to_bucket(indptr: Any, indices: Any, data: Any, *, max_nodes: int, max_nnz: int) -> Any:
@@ -92,7 +84,6 @@ def pad_to_bucket(indptr: Any, indices: Any, data: Any, *, max_nodes: int, max_n
         indptr=padded_indptr,
         indices=padded_indices,
         data=padded_data,
-        src_of_edge=compute_src_of_edge(padded_indptr),
     )
 
 

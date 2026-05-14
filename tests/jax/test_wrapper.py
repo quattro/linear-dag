@@ -52,7 +52,6 @@ def _tiny_block(*, n_samples: int = 1, n_variants: int = 1, dtype=jnp.float32) -
         indptr=np.array([0, 1, 1], dtype=np.int32),
         indices=np.array([1], dtype=np.int32),
         data=np.ones(1, dtype=np.dtype(dtype)),
-        src_of_edge=np.array([0], dtype=np.int32),
         variant_indices=np.array([0], dtype=np.int32),
         flip=np.array([False]),
         sample_indices=np.zeros(n_samples, dtype=np.int32),

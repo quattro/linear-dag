@@ -14,21 +14,23 @@ def pure_jax_solve_forward(
     indptr: Any,
     indices: Any,
     data: Any,
-    src_of_edge: Any,
     b: Any,
 ) -> jax.Array:
-    """Solve a lower-triangular LinearARG node buffer by forward edge scan."""
-    del indptr
-    n_edges = indices.shape[0]
+    """Solve a lower-triangular LinearARG node buffer by forward node scan."""
+    n_nodes = indptr.shape[0] - 1
 
-    def step(carry: jax.Array, edge_index: jax.Array) -> tuple[jax.Array, None]:
-        src = src_of_edge[edge_index]
-        dst = indices[edge_index]
-        weight = data[edge_index]
-        return carry.at[dst, :].add(carry[src, :] * weight), None
+    def node_step(carry: jax.Array, node: jax.Array) -> tuple[jax.Array, None]:
+        edge_start = indptr[node]
+        edge_stop = indptr[node + 1]
 
-    edge_indices = jax.numpy.arange(n_edges, dtype=indices.dtype)
-    result, _ = lax.scan(step, b, edge_indices)
+        def edge_step(edge: jax.Array, values: jax.Array) -> jax.Array:
+            dst = indices[edge]
+            return values.at[dst, :].add(values[node, :] * data[edge])
+
+        return lax.fori_loop(edge_start, edge_stop, edge_step, carry), None
+
+    nodes = jnp.arange(n_nodes, dtype=indices.dtype)
+    result, _ = lax.scan(node_step, b, nodes)
     return result
 
 
@@ -36,21 +38,23 @@ def pure_jax_solve_backward(
     indptr: Any,
     indices: Any,
     data: Any,
-    src_of_edge: Any,
     b: Any,
 ) -> jax.Array:
-    """Solve a transposed LinearARG node buffer by backward edge scan."""
-    del indptr
-    n_edges = indices.shape[0]
+    """Solve a transposed LinearARG node buffer by backward node scan."""
+    n_nodes = indptr.shape[0] - 1
 
-    def step(carry: jax.Array, edge_index: jax.Array) -> tuple[jax.Array, None]:
-        src = src_of_edge[edge_index]
-        dst = indices[edge_index]
-        weight = data[edge_index]
-        return carry.at[src, :].add(carry[dst, :] * weight), None
+    def node_step(carry: jax.Array, node: jax.Array) -> tuple[jax.Array, None]:
+        edge_start = indptr[node]
+        edge_stop = indptr[node + 1]
 
-    edge_indices = jax.numpy.arange(n_edges - 1, -1, -1, dtype=indices.dtype)
-    result, _ = lax.scan(step, b, edge_indices)
+        def edge_step(edge: jax.Array, values: jax.Array) -> jax.Array:
+            dst = indices[edge]
+            return values.at[node, :].add(values[dst, :] * data[edge])
+
+        return lax.fori_loop(edge_start, edge_stop, edge_step, carry), None
+
+    nodes = jnp.arange(n_nodes - 1, -1, -1, dtype=indices.dtype)
+    result, _ = lax.scan(node_step, b, nodes)
     return result
 
 
@@ -58,32 +62,34 @@ def pure_jax_solve_forward_compressed(
     indptr: Any,
     indices: Any,
     data: Any,
-    src_of_edge: Any,
     nonunique_indices: Any,
     min_index_to_keep: int,
     b: Any,
 ) -> jax.Array:
-    """Solve a compressed LinearARG node buffer by forward edge scan."""
-    n_edges = indices.shape[0]
+    """Solve a compressed LinearARG node buffer by forward node scan."""
+    n_nodes = indptr.shape[0] - 1
 
-    def step(carry: jax.Array, edge_index: jax.Array) -> tuple[jax.Array, None]:
-        src = src_of_edge[edge_index]
-        dst = indices[edge_index]
-        src_col = nonunique_indices[src]
-        dst_col = nonunique_indices[dst]
-        source = carry[src_col, :]
-        updated = carry.at[dst_col, :].add(source * data[edge_index])
-        should_zero = (edge_index == indptr[src + 1] - 1) & (src < min_index_to_keep)
+    def node_step(carry: jax.Array, node: jax.Array) -> tuple[jax.Array, None]:
+        edge_start = indptr[node]
+        edge_stop = indptr[node + 1]
+        src_col = nonunique_indices[node]
+
+        def edge_step(edge: jax.Array, values: jax.Array) -> jax.Array:
+            dst_col = nonunique_indices[indices[edge]]
+            return values.at[dst_col, :].add(values[src_col, :] * data[edge])
+
+        updated = lax.fori_loop(edge_start, edge_stop, edge_step, carry)
+        should_zero = (edge_start != edge_stop) & (node < min_index_to_keep)
         updated = lax.cond(
             should_zero,
-            lambda values: values.at[src_col, :].set(jnp.zeros_like(source)),
+            lambda values: values.at[src_col, :].set(jnp.zeros_like(values[src_col, :])),
             lambda values: values,
             updated,
         )
         return updated, None
 
-    edge_indices = jnp.arange(n_edges, dtype=indices.dtype)
-    result, _ = lax.scan(step, b, edge_indices)
+    nodes = jnp.arange(n_nodes, dtype=indices.dtype)
+    result, _ = lax.scan(node_step, b, nodes)
     return result
 
 
@@ -91,28 +97,32 @@ def pure_jax_solve_backward_compressed(
     indptr: Any,
     indices: Any,
     data: Any,
-    src_of_edge: Any,
     nonunique_indices: Any,
     min_index_to_keep: int,
     b: Any,
 ) -> jax.Array:
-    """Solve a compressed transposed LinearARG node buffer by backward edge scan."""
-    n_edges = indices.shape[0]
+    """Solve a compressed transposed LinearARG node buffer by backward node scan."""
+    n_nodes = indptr.shape[0] - 1
 
-    def step(carry: jax.Array, edge_index: jax.Array) -> tuple[jax.Array, None]:
-        src = src_of_edge[edge_index]
-        dst = indices[edge_index]
-        src_col = nonunique_indices[src]
-        dst_col = nonunique_indices[dst]
-        should_zero = (edge_index == indptr[src + 1] - 1) & (src < min_index_to_keep)
+    def node_step(carry: jax.Array, node: jax.Array) -> tuple[jax.Array, None]:
+        edge_start = indptr[node]
+        edge_stop = indptr[node + 1]
+        dst_col = nonunique_indices[node]
+        should_zero = (edge_start != edge_stop) & (node < min_index_to_keep)
         carry = lax.cond(
             should_zero,
-            lambda values: values.at[src_col, :].set(jnp.zeros_like(values[src_col, :])),
+            lambda values: values.at[dst_col, :].set(jnp.zeros_like(values[dst_col, :])),
             lambda values: values,
             carry,
         )
-        return carry.at[src_col, :].add(carry[dst_col, :] * data[edge_index]), None
 
-    edge_indices = jnp.arange(n_edges - 1, -1, -1, dtype=indices.dtype)
-    result, _ = lax.scan(step, b, edge_indices)
+        def edge_step(edge: jax.Array, values: jax.Array) -> jax.Array:
+            src_col = nonunique_indices[indices[edge]]
+            return values.at[dst_col, :].add(values[src_col, :] * data[edge])
+
+        updated = lax.fori_loop(edge_start, edge_stop, edge_step, carry)
+        return updated, None
+
+    nodes = jnp.arange(n_nodes - 1, -1, -1, dtype=indices.dtype)
+    result, _ = lax.scan(node_step, b, nodes)
     return result

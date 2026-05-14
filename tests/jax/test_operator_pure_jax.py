@@ -19,7 +19,6 @@ def _minimal_operator_kwargs() -> dict:
         "indptr": np.array([0, 1, 1], dtype=np.int32),
         "indices": np.array([1], dtype=np.int32),
         "data": np.ones(1, dtype=np.float32),
-        "src_of_edge": np.array([0], dtype=np.int32),
         "variant_indices": np.array([0], dtype=np.int32),
         "flip": np.array([False]),
         "sample_indices": np.array([1], dtype=np.int32),
@@ -31,10 +30,6 @@ def _minimal_operator_kwargs() -> dict:
     }
 
 
-def _src_of_edge(indptr: np.ndarray) -> np.ndarray:
-    return np.repeat(np.arange(indptr.shape[0] - 1, dtype=np.int32), np.diff(indptr))
-
-
 def _operator_from_case(oracle_case, *, nonunique_indices=_USE_CASE_NONUNIQUE) -> JaxLinearARG:
     linarg = oracle_case.linarg
     if nonunique_indices is _USE_CASE_NONUNIQUE:
@@ -43,7 +38,6 @@ def _operator_from_case(oracle_case, *, nonunique_indices=_USE_CASE_NONUNIQUE) -
         indptr=linarg.A.indptr,
         indices=linarg.A.indices,
         data=linarg.A.data,
-        src_of_edge=_src_of_edge(linarg.A.indptr),
         variant_indices=linarg.variant_indices,
         flip=linarg.flip,
         sample_indices=linarg.sample_indices,
@@ -205,7 +199,6 @@ def test_from_lineararg_arrays_synthesizes_identity_nonunique_mapping(oracle_cas
     ("field", "bad_value"),
     [
         ("indices", np.array([-1], dtype=np.int32)),
-        ("src_of_edge", np.array([-1], dtype=np.int32)),
         ("variant_indices", np.array([-1], dtype=np.int32)),
         ("sample_indices", np.array([-1], dtype=np.int32)),
         ("nonunique_indices", np.array([-1, 1], dtype=np.int32)),
@@ -224,12 +217,7 @@ def test_from_lineararg_arrays_rejects_negative_indices(field, bad_value):
     [
         ("indptr", np.array([1, 2, 2], dtype=np.int32), "indptr must start at 0"),
         ("indptr", np.array([0, 2, 1], dtype=np.int32), "indptr must be monotonic"),
-        (
-            "src_of_edge",
-            np.array([1], dtype=np.int32),
-            "src_of_edge must match the sources implied by indptr",
-        ),
-        ("indices", np.array([0], dtype=np.int32), "indices must be greater than src_of_edge"),
+        ("indices", np.array([0], dtype=np.int32), "indices must be greater than their source nodes"),
     ],
 )
 def test_from_lineararg_arrays_rejects_malformed_graph_structure(field, bad_value, message):

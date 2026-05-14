@@ -83,7 +83,6 @@ class JaxLinearARG(eqx.Module):
     - `indptr`: CSC index pointer array.
     - `indices`: CSC row index array.
     - `data`: CSC edge value array.
-    - `src_of_edge`: Source node index for each edge.
     - `variant_indices`: Variant node indices.
     - `flip`: Allele flip flags aligned to `variant_indices`.
     - `sample_indices`: Sample node indices.
@@ -99,7 +98,6 @@ class JaxLinearARG(eqx.Module):
     indptr: Any = eqx.field(converter=jnp.asarray)
     indices: Any = eqx.field(converter=jnp.asarray)
     data: Any = eqx.field(converter=jnp.asarray)
-    src_of_edge: Any = eqx.field(converter=jnp.asarray)
     variant_indices: Any = eqx.field(converter=jnp.asarray)
     flip: Any = eqx.field(converter=jnp.asarray)
     sample_indices: Any = eqx.field(converter=jnp.asarray)
@@ -120,7 +118,6 @@ class JaxLinearARG(eqx.Module):
         indptr: Any,
         indices: Any,
         data: Any,
-        src_of_edge: Any,
         variant_indices: Any,
         flip: Any,
         sample_indices: Any,
@@ -144,7 +141,6 @@ class JaxLinearARG(eqx.Module):
         - `indptr`: CSC index pointer array.
         - `indices`: CSC row index array.
         - `data`: CSC edge value array.
-        - `src_of_edge`: Source node index for each edge.
         - `variant_indices`: Variant node indices.
         - `flip`: Allele flip flags aligned to `variant_indices`.
         - `sample_indices`: Sample node indices.
@@ -171,7 +167,6 @@ class JaxLinearARG(eqx.Module):
         indptr = np.asarray(indptr, dtype=np.int32)
         indices = np.asarray(indices, dtype=np.int32)
         data = np.asarray(data, dtype=np.dtype(dtype))
-        src_of_edge = np.asarray(src_of_edge, dtype=np.int32)
         variant_indices = np.asarray(variant_indices, dtype=np.int32)
         flip = np.asarray(flip, dtype=np.bool_)
         sample_indices = np.asarray(sample_indices, dtype=np.int32)
@@ -194,7 +189,6 @@ class JaxLinearARG(eqx.Module):
                 "indptr": indptr,
                 "indices": indices,
                 "data": data,
-                "src_of_edge": src_of_edge,
                 "variant_indices": variant_indices,
                 "flip": flip,
                 "sample_indices": sample_indices,
@@ -211,7 +205,6 @@ class JaxLinearARG(eqx.Module):
             indptr=jnp.asarray(indptr, dtype=jnp.int32),
             indices=jnp.asarray(indices, dtype=jnp.int32),
             data=jnp.asarray(data, dtype=dtype),
-            src_of_edge=jnp.asarray(src_of_edge, dtype=jnp.int32),
             variant_indices=jnp.asarray(variant_indices, dtype=jnp.int32),
             flip=jnp.asarray(flip, dtype=jnp.bool_),
             sample_indices=sample_indices,
@@ -306,7 +299,6 @@ class JaxLinearARG(eqx.Module):
                     "indptr": self.indptr,
                     "indices": self.indices,
                     "data": self.data,
-                    "src_of_edge": self.src_of_edge,
                     "variant_indices": self.variant_indices,
                     "flip": self.flip,
                     "sample_indices": self.sample_indices,
@@ -328,7 +320,6 @@ class JaxLinearARG(eqx.Module):
                 "indptr": np.asarray(self.indptr),
                 "indices": np.asarray(self.indices),
                 "data": np.asarray(self.data),
-                "src_of_edge": np.asarray(self.src_of_edge),
                 "variant_indices": np.asarray(self.variant_indices),
                 "flip": np.asarray(self.flip),
                 "sample_indices": np.asarray(self.sample_indices),
@@ -372,7 +363,6 @@ class JaxLinearARG(eqx.Module):
             self.indptr,
             self.indices,
             self.data,
-            self.src_of_edge,
             self.nonunique_indices,
             self.min_index_to_keep,
             b,
@@ -407,7 +397,6 @@ class JaxLinearARG(eqx.Module):
             self.indptr,
             self.indices,
             self.data,
-            self.src_of_edge,
             self.nonunique_indices,
             self.min_index_to_keep,
             b,
@@ -500,8 +489,6 @@ def _validate_array_shapes(
     n_edges = arrays["indices"].shape[0]
     if arrays["data"].shape[0] != n_edges:
         raise ValueError("data must have the same length as indices")
-    if arrays["src_of_edge"].shape[0] != n_edges:
-        raise ValueError("src_of_edge must have the same length as indices")
     if arrays["indptr"].shape[0] == 0:
         raise ValueError("indptr must contain at least one entry")
     if arrays["nonunique_indices"].shape[0] < arrays["indptr"].shape[0] - 1:
@@ -539,7 +526,6 @@ def _validate_array_contract(
     )
     indptr = arrays["indptr"]
     indices = arrays["indices"]
-    src_of_edge = arrays["src_of_edge"]
     data = arrays["data"]
     node_count = indptr.shape[0] - 1
     n_edges = indices.shape[0]
@@ -553,7 +539,6 @@ def _validate_array_contract(
 
     for name in (
         "indices",
-        "src_of_edge",
         "variant_indices",
         "sample_indices",
         "nonunique_indices",
@@ -564,16 +549,12 @@ def _validate_array_contract(
 
     if min_index_to_keep < 0 or min_index_to_keep > node_count:
         raise ValueError("min_index_to_keep must be within the node range")
-    if src_of_edge.shape[0] and int(np.max(src_of_edge)) >= node_count:
-        raise ValueError("src_of_edge contains an out-of-range node index")
     if indices.shape[0] and int(np.max(indices)) >= node_count:
         raise ValueError("indices contains an out-of-range node index")
-    expected_src_of_edge = np.repeat(np.arange(node_count, dtype=np.int32), np.diff(indptr))
-    if not np.array_equal(src_of_edge, expected_src_of_edge):
-        raise ValueError("src_of_edge must match the sources implied by indptr")
-    invalid_edge_order = (indices < src_of_edge) | ((indices == src_of_edge) & (data != 0))
+    source_indices = np.repeat(np.arange(node_count, dtype=np.int32), np.diff(indptr))
+    invalid_edge_order = (indices < source_indices) | ((indices == source_indices) & (data != 0))
     if indices.shape[0] and np.any(invalid_edge_order):
-        raise ValueError("indices must be greater than src_of_edge")
+        raise ValueError("indices must be greater than their source nodes")
     if arrays["variant_indices"].shape[0] and int(np.max(arrays["variant_indices"])) >= node_count:
         raise ValueError("variant_indices contains an out-of-range node index")
     if arrays["sample_indices"].shape[0] and int(np.max(arrays["sample_indices"])) >= node_count:
@@ -605,14 +586,13 @@ def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Arr
 
 # custom_vjp disables forward-mode differentiation for this wrapped function;
 # reverse-mode gradients are defined by the transpose-direction solve below.
-@partial(jax.custom_vjp, nondiff_argnums=(0, 1, 7))
+@partial(jax.custom_vjp, nondiff_argnums=(0, 1, 6))
 def _solve(
     backend: Backend,
     direction: str,
     indptr: Any,
     indices: Any,
     data: Any,
-    src_of_edge: Any,
     nonunique_indices: Any,
     min_index_to_keep: int,
     b: Any,
@@ -636,7 +616,6 @@ def _solve(
         indptr,
         indices,
         data,
-        src_of_edge,
         nonunique_indices,
         min_index_to_keep,
         b,
@@ -649,33 +628,31 @@ def _solve_fwd(
     indptr: Any,
     indices: Any,
     data: Any,
-    src_of_edge: Any,
     nonunique_indices: Any,
     min_index_to_keep: int,
     b: Any,
-) -> tuple[jax.Array, tuple[Any, Any, Any, Any, Any]]:
+) -> tuple[jax.Array, tuple[Any, Any, Any, Any]]:
     result = _solve.fun(
         backend,
         direction,
         indptr,
         indices,
         data,
-        src_of_edge,
         nonunique_indices,
         min_index_to_keep,
         b,
     )
-    return result, (indptr, indices, data, src_of_edge, nonunique_indices)
+    return result, (indptr, indices, data, nonunique_indices)
 
 
 def _solve_bwd(
     backend: Backend,
     direction: str,
     min_index_to_keep: int,
-    residual: tuple[Any, Any, Any, Any, Any],
+    residual: tuple[Any, Any, Any, Any],
     grad: Any,
-) -> tuple[None, None, None, None, None, jax.Array]:
-    indptr, indices, data, src_of_edge, nonunique_indices = residual
+) -> tuple[None, None, None, None, jax.Array]:
+    indptr, indices, data, nonunique_indices = residual
     transpose_direction = "backward" if direction == "forward" else "forward"
     grad_b = _solve.fun(
         backend,
@@ -683,12 +660,11 @@ def _solve_bwd(
         indptr,
         indices,
         data,
-        src_of_edge,
         nonunique_indices,
         min_index_to_keep,
         grad,
     )
-    return None, None, None, None, None, grad_b
+    return None, None, None, None, grad_b
 
 
 _solve.defvjp(_solve_fwd, _solve_bwd)

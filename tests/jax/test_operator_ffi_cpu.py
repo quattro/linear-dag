@@ -13,17 +13,12 @@ from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 from linear_dag.core.jaxlinarg.kernels import ffi_cpu
 
 
-def _src_of_edge(indptr: np.ndarray) -> np.ndarray:
-    return np.repeat(np.arange(indptr.shape[0] - 1, dtype=np.int32), np.diff(indptr))
-
-
 def _operator_from_case(oracle_case, *, backend: Backend) -> JaxLinearARG:
     linarg = oracle_case.linarg
     return JaxLinearARG.from_lineararg_arrays(
         indptr=linarg.A.indptr,
         indices=linarg.A.indices,
         data=linarg.A.data,
-        src_of_edge=_src_of_edge(linarg.A.indptr),
         variant_indices=linarg.variant_indices,
         flip=linarg.flip,
         sample_indices=linarg.sample_indices,

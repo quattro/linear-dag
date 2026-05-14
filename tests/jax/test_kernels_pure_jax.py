@@ -5,14 +5,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 
-from linear_dag.core.jaxlinarg.kernels.pure_jax import (
-    pure_jax_solve_backward,
-    pure_jax_solve_forward,
-)
-
-
-def _src_of_edge(indptr: np.ndarray) -> np.ndarray:
-    return np.repeat(np.arange(indptr.shape[0] - 1, dtype=np.int32), np.diff(indptr))
+from linear_dag.core.jaxlinarg.kernels.pure_jax import pure_jax_solve_backward, pure_jax_solve_forward
 
 
 def _as_matrix(x: np.ndarray) -> np.ndarray:
@@ -30,7 +23,6 @@ def test_pure_jax_forward_kernel_matches_oracle_case(oracle_case):
         jnp.asarray(linarg.A.indptr, dtype=jnp.int32),
         jnp.asarray(linarg.A.indices, dtype=jnp.int32),
         jnp.asarray(linarg.A.data, dtype=w.dtype),
-        jnp.asarray(_src_of_edge(linarg.A.indptr), dtype=jnp.int32),
         jnp.asarray(b),
     )
     actual = np.asarray(solved)[linarg.sample_indices] + np.sum(w[linarg.flip], axis=0)
@@ -48,7 +40,6 @@ def test_pure_jax_backward_kernel_matches_oracle_case(oracle_case):
         jnp.asarray(linarg.A.indptr, dtype=jnp.int32),
         jnp.asarray(linarg.A.indices, dtype=jnp.int32),
         jnp.asarray(linarg.A.data, dtype=y.dtype),
-        jnp.asarray(_src_of_edge(linarg.A.indptr), dtype=jnp.int32),
         jnp.asarray(b),
     )
     actual = np.asarray(solved)[linarg.variant_indices]

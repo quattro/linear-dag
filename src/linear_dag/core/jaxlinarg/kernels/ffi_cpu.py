@@ -34,6 +34,14 @@ def last_ffi_cpu_error() -> Exception | None:
     return _last_ffi_cpu_error
 
 
+def is_ffi_cpu_blas_enabled() -> bool:
+    """Return whether the native CPU FFI handler was built with CBLAS support."""
+    try:
+        return bool(_load_ffi_cpu_impl().blas_enabled())
+    except Exception:
+        return False
+
+
 @cache
 def _load_ffi_cpu_impl() -> Any:
     from linear_dag.core.jaxlinarg.kernels import _ffi_cpu_impl
@@ -47,7 +55,6 @@ def ffi_cpu_solve_forward(
     indptr: Any,
     indices: Any,
     data: Any,
-    src_of_edge: Any,
     nonunique_indices: Any,
     min_index_to_keep: int,
     b: Any,
@@ -59,7 +66,6 @@ def ffi_cpu_solve_forward(
         indptr,
         indices,
         data,
-        src_of_edge,
         nonunique_indices,
         min_index_to_keep,
         b,
@@ -70,7 +76,6 @@ def ffi_cpu_solve_backward(
     indptr: Any,
     indices: Any,
     data: Any,
-    src_of_edge: Any,
     nonunique_indices: Any,
     min_index_to_keep: int,
     b: Any,
@@ -82,7 +87,6 @@ def ffi_cpu_solve_backward(
         indptr,
         indices,
         data,
-        src_of_edge,
         nonunique_indices,
         min_index_to_keep,
         b,
@@ -95,7 +99,6 @@ def _ffi_cpu_solve(
     indptr: Any,
     indices: Any,
     data: Any,
-    src_of_edge: Any,
     nonunique_indices: Any,
     min_index_to_keep: int,
     b: Any,
@@ -109,12 +112,15 @@ def _ffi_cpu_solve(
         target_name,
         result_shape,
         vmap_method="sequential",
+        # The solve updates the state buffer in place. Alias the output to the
+        # input state when XLA can legally reuse it; the native handler still
+        # handles non-aliased buffers for portability.
+        input_output_aliases={4: 0},
     )
     return call(
         indptr,
         indices,
         data,
-        src_of_edge,
         nonunique_indices,
         b,
         min_index_to_keep=int(min_index_to_keep),

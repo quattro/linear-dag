@@ -11,17 +11,12 @@ from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 from tests.jax.oracle import make_oracle_cases
 
 
-def _src_of_edge(indptr: np.ndarray) -> np.ndarray:
-    return np.repeat(np.arange(indptr.shape[0] - 1, dtype=np.int32), np.diff(indptr))
-
-
 def _operator_from_case(oracle_case, *, backend: Backend = Backend.PURE_JAX) -> JaxLinearARG:
     linarg = oracle_case.linarg
     return JaxLinearARG.from_lineararg_arrays(
         indptr=linarg.A.indptr,
         indices=linarg.A.indices,
         data=linarg.A.data,
-        src_of_edge=_src_of_edge(linarg.A.indptr),
         variant_indices=linarg.variant_indices,
         flip=linarg.flip,
         sample_indices=linarg.sample_indices,
@@ -38,7 +33,6 @@ def _tiny_two_by_two_operator() -> JaxLinearARG:
         indptr=np.array([0, 1, 2, 3, 3, 3], dtype=np.int32),
         indices=np.array([2, 4, 3], dtype=np.int32),
         data=np.ones(3, dtype=np.float32),
-        src_of_edge=np.array([0, 1, 2], dtype=np.int32),
         variant_indices=np.array([0, 1], dtype=np.int32),
         flip=np.array([False, False]),
         sample_indices=np.array([3, 4], dtype=np.int32),
@@ -55,7 +49,6 @@ def _operator_with_disconnected_variant() -> JaxLinearARG:
         indptr=np.array([0, 1, 1, 1], dtype=np.int32),
         indices=np.array([2], dtype=np.int32),
         data=np.ones(1, dtype=np.float32),
-        src_of_edge=np.array([0], dtype=np.int32),
         variant_indices=np.array([0, 1], dtype=np.int32),
         flip=np.array([False, False]),
         sample_indices=np.array([2], dtype=np.int32),

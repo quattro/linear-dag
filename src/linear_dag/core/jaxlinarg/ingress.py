@@ -10,7 +10,7 @@ from scipy import sparse
 from linear_dag.core.lineararg import LinearARG
 
 from .operator import Backend, JaxLinearARG, resolve_backend
-from .padding import BucketSpec, compute_src_of_edge, pad_to_bucket
+from .padding import BucketSpec, pad_to_bucket
 
 
 def from_lineararg(
@@ -41,7 +41,6 @@ def from_lineararg(
     indptr = np.asarray(graph.indptr, dtype=np.int32)
     indices = np.asarray(graph.indices, dtype=np.int32)
     data = np.asarray(graph.data, dtype=np.dtype(dtype))
-    src_of_edge = compute_src_of_edge(indptr)
     n_nonunique_indices = None
     resolved_backend = resolve_backend(backend)
 
@@ -58,14 +57,12 @@ def from_lineararg(
         indptr = padded.indptr
         indices = padded.indices
         data = padded.data
-        src_of_edge = padded.src_of_edge
         nonunique_indices = _pad_nonunique_indices(nonunique_indices, bucket.max_nodes)
 
     return JaxLinearARG.from_lineararg_arrays(
         indptr=indptr,
         indices=indices,
         data=data,
-        src_of_edge=src_of_edge,
         variant_indices=np.asarray(linarg.variant_indices, dtype=np.int32),
         flip=np.asarray(linarg.flip, dtype=np.bool_),
         sample_indices=np.asarray(linarg.sample_indices, dtype=np.int32),

@@ -28,7 +28,6 @@ def test_from_lineararg_canonicalizes_arrays_and_preserves_cached_allele_counts(
 
     assert op.indptr.dtype == jnp.int32
     assert op.indices.dtype == jnp.int32
-    assert op.src_of_edge.dtype == jnp.int32
     assert op.variant_indices.dtype == jnp.int32
     assert op.sample_indices.dtype == jnp.int32
     assert op.nonunique_indices.dtype == jnp.int32

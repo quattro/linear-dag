@@ -17,7 +17,6 @@ def _minimal_operator_kwargs() -> dict:
         "indptr": np.array([0, 1, 1], dtype=np.int32),
         "indices": np.array([1], dtype=np.int32),
         "data": np.ones(1, dtype=np.float32),
-        "src_of_edge": np.array([0], dtype=np.int32),
         "variant_indices": np.array([0], dtype=np.int32),
         "flip": np.array([False]),
         "sample_indices": np.array([1], dtype=np.int32),

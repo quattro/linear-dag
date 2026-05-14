@@ -18,6 +18,9 @@ from setuptools import Distribution, Extension
 from setuptools.command.build_ext import build_ext
 
 FFI_CPU_BUILD_REQUIRED_ENV = "LINEAR_DAG_REQUIRE_FFI_CPU"
+FFI_CPU_BLAS_DISABLED_ENV = "LINEAR_DAG_DISABLE_FFI_CPU_BLAS"
+FFI_CPU_BLAS_REQUIRED_ENV = "LINEAR_DAG_REQUIRE_FFI_CPU_BLAS"
+FFI_CPU_NATIVE_ENV = "LINEAR_DAG_FFI_CPU_NATIVE"
 
 
 class CustomBuildHook(BuildHookInterface):
@@ -66,8 +69,45 @@ def is_ffi_cpu_build_required():
     return _truthy_env(os.environ.get(FFI_CPU_BUILD_REQUIRED_ENV))
 
 
+def _ffi_cpu_blas_options():
+    empty_options = {
+        "define_macros": [],
+        "include_dirs": [],
+        "library_dirs": [],
+        "libraries": [],
+        "extra_link_args": [],
+    }
+    if _truthy_env(os.environ.get(FFI_CPU_BLAS_DISABLED_ENV)):
+        return empty_options
+    if sys.platform == "darwin":
+        return {
+            **empty_options,
+            "define_macros": [("LINEAR_DAG_HAVE_CBLAS", "1")],
+            "extra_link_args": ["-framework", "Accelerate"],
+        }
+
+    include_dir = _find_header_dir("cblas.h", _blas_include_dir_candidates())
+    library_name, library_dir = _find_blas_library(_blas_library_dir_candidates())
+    if include_dir is not None and library_name is not None:
+        return {
+            **empty_options,
+            "define_macros": [("LINEAR_DAG_HAVE_CBLAS", "1")],
+            "include_dirs": [str(include_dir)],
+            "library_dirs": [str(library_dir)] if library_dir is not None else [],
+            "libraries": [library_name],
+        }
+
+    if _truthy_env(os.environ.get(FFI_CPU_BLAS_REQUIRED_ENV)):
+        raise RuntimeError(
+            "Could not find cblas.h and a BLAS library for the CPU FFI extension. "
+            f"Set {FFI_CPU_BLAS_DISABLED_ENV}=1 to build the scalar fallback instead."
+        )
+    return empty_options
+
+
 def build_ffi_cpu_extension(root):
     root = Path(root)
+    blas_options = _ffi_cpu_blas_options()
     extension = Extension(
         "linear_dag.core.jaxlinarg.kernels._ffi_cpu_impl",
         sources=[str(root / "src/linear_dag/core/jaxlinarg/kernels/ffi_cpu_impl.cc")],
@@ -76,9 +116,14 @@ def build_ffi_cpu_extension(root):
             np.get_include(),
             os.path.dirname(scipy.__file__),
             *_macos_cxx_include_dirs(),
+            *blas_options["include_dirs"],
         ],
+        define_macros=blas_options["define_macros"],
+        library_dirs=blas_options["library_dirs"],
+        libraries=blas_options["libraries"],
         language="c++",
         extra_compile_args=_cxx_compile_args(),
+        extra_link_args=blas_options["extra_link_args"],
     )
     distribution = Distribution(
         {
@@ -117,10 +162,58 @@ def _truthy_env(value):
     return value.lower() in {"1", "true", "yes", "on"}
 
 
+def _blas_include_dir_candidates():
+    env_dirs = [os.environ.get("BLAS_INCLUDE_DIR"), os.environ.get("OPENBLAS_INCLUDE_DIR")]
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    candidates = [Path(path) for path in env_dirs if path]
+    if conda_prefix:
+        candidates.append(Path(conda_prefix) / "include")
+    candidates.extend([Path("/usr/include"), Path("/usr/local/include"), Path("/opt/homebrew/include")])
+    return _existing_dirs(candidates)
+
+
+def _blas_library_dir_candidates():
+    env_dirs = [os.environ.get("BLAS_LIBRARY_DIR"), os.environ.get("OPENBLAS_LIBRARY_DIR")]
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    candidates = [Path(path) for path in env_dirs if path]
+    if conda_prefix:
+        candidates.append(Path(conda_prefix) / "lib")
+    candidates.extend([Path("/usr/lib"), Path("/usr/local/lib"), Path("/opt/homebrew/lib")])
+    return _existing_dirs(candidates)
+
+
+def _existing_dirs(paths):
+    return [path for path in dict.fromkeys(paths) if path.is_dir()]
+
+
+def _find_header_dir(header, candidates):
+    for directory in candidates:
+        if (directory / header).exists():
+            return directory
+    return None
+
+
+def _find_blas_library(candidates):
+    for name in ("openblas", "blas"):
+        for directory in candidates:
+            patterns = (
+                f"lib{name}.so",
+                f"lib{name}.dylib",
+                f"lib{name}.a",
+            )
+            if any(directory.glob(pattern) for pattern in patterns):
+                return name, directory
+    return None, None
+
+
 def _cxx_compile_args():
-    args = ["-std=c++17"]
+    args = ["-std=c++17", "-O3"]
     if sys.platform == "darwin":
         args.append("-stdlib=libc++")
+    if _truthy_env(os.environ.get(FFI_CPU_NATIVE_ENV)):
+        # Native CPU tuning is intentionally opt-in: it is useful for local
+        # benchmark builds, but the resulting extension may not be portable.
+        args.append("-mcpu=native" if sys.platform == "darwin" else "-march=native")
     return args
 
 

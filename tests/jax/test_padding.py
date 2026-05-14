@@ -11,19 +11,9 @@ from linear_dag.core.jaxlinarg.padding import (
     BucketSpec,
     choose_bucket,
     choose_buckets,
-    compute_src_of_edge,
     pad_to_bucket,
 )
 from tests.helpers.linarg_fixtures import load_lineararg_block
-
-
-def test_compute_src_of_edge_expands_csc_sources() -> None:
-    indptr = np.array([0, 2, 3, 3], dtype=np.int64)
-
-    src_of_edge = compute_src_of_edge(indptr)
-
-    np.testing.assert_array_equal(src_of_edge, np.array([0, 0, 1], dtype=np.int32))
-    assert src_of_edge.dtype == np.int32
 
 
 def test_pad_to_bucket_preserves_forward_solve_for_small_graph() -> None:
@@ -38,21 +28,18 @@ def test_pad_to_bucket_preserves_forward_solve_for_small_graph() -> None:
         jnp.asarray(indptr),
         jnp.asarray(indices),
         jnp.asarray(data),
-        jnp.asarray(compute_src_of_edge(indptr)),
         b,
     )
     actual = pure_jax_solve_forward(
         jnp.asarray(padded.indptr),
         jnp.asarray(padded.indices),
         jnp.asarray(padded.data),
-        jnp.asarray(padded.src_of_edge),
         padded_b,
     )
 
     np.testing.assert_array_equal(padded.indptr[: indptr.shape[0]], indptr)
     np.testing.assert_array_equal(padded.indices[: indices.shape[0]], indices)
     np.testing.assert_array_equal(padded.data[: data.shape[0]], data)
-    np.testing.assert_array_equal(padded.src_of_edge, compute_src_of_edge(padded.indptr))
     np.testing.assert_array_equal(padded.data[data.shape[0] :], np.zeros(4, dtype=np.float32))
     np.testing.assert_array_equal(padded.indices[data.shape[0] :], np.full(4, 4, dtype=np.int32))
     np.testing.assert_allclose(np.asarray(actual[: b.shape[0], :]), np.asarray(expected), rtol=1e-6, atol=1e-6)
@@ -77,14 +64,12 @@ def test_pad_to_bucket_preserves_forward_solve_for_real_lineararg_block(
         jnp.asarray(linarg.A.indptr),
         jnp.asarray(linarg.A.indices),
         jnp.asarray(linarg.A.data.astype(np.float32)),
-        jnp.asarray(compute_src_of_edge(linarg.A.indptr)),
         jnp.asarray(b),
     )
     actual = pure_jax_solve_forward(
         jnp.asarray(padded.indptr),
         jnp.asarray(padded.indices),
         jnp.asarray(padded.data),
-        jnp.asarray(padded.src_of_edge),
         jnp.pad(jnp.asarray(b), ((0, 2), (0, 0))),
     )
 

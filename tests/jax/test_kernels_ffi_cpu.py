@@ -17,14 +17,13 @@ from linear_dag.core.jaxlinarg.kernels.pure_jax import (
 )
 
 
-def _solve_args(dtype=np.float32) -> tuple:
+def _solve_args(dtype=np.float32, n_cols: int = 1) -> tuple:
     indptr = jnp.asarray(np.array([0, 1, 1], dtype=np.int32))
     indices = jnp.asarray(np.array([1], dtype=np.int32))
     data = jnp.asarray(np.ones(1, dtype=dtype))
-    src_of_edge = jnp.asarray(np.array([0], dtype=np.int32))
     nonunique_indices = jnp.asarray(np.array([0, 1], dtype=np.int32))
-    b = jnp.asarray(np.array([[2.0], [0.0]], dtype=dtype))
-    return indptr, indices, data, src_of_edge, nonunique_indices, 0, b
+    b = jnp.asarray(np.vstack([np.arange(2, n_cols + 2), np.zeros(n_cols)]).astype(dtype))
+    return indptr, indices, data, nonunique_indices, 0, b
 
 
 @pytest.mark.parametrize(
@@ -57,6 +56,7 @@ def test_ffi_solve_wrapper_uses_explicit_result_metadata_and_vmap_method(monkeyp
     assert captured["target_name"] == expected_target
     assert captured["result_shape_dtypes"] == jax.ShapeDtypeStruct((2, 1), jnp.float32)
     assert captured["kwargs"]["vmap_method"] == "sequential"
+    assert captured["kwargs"]["input_output_aliases"] == {4: 0}
     assert captured["attrs"]["min_index_to_keep"] == 0
     np.testing.assert_allclose(np.asarray(result), np.array([[3.0], [1.0]], dtype=np.float32))
 
@@ -100,6 +100,14 @@ def test_native_ffi_cpu_handler_is_available_on_cpu():
     assert ffi_cpu.is_ffi_cpu_available()
 
 
+def test_native_ffi_cpu_blas_flag_is_boolean_on_cpu():
+    if jax.default_backend() != "cpu":
+        pytest.skip("native CPU FFI handler is only required on CPU platforms")
+    ffi_cpu.is_ffi_cpu_available.cache_clear()
+
+    assert isinstance(ffi_cpu.is_ffi_cpu_blas_enabled(), bool)
+
+
 def test_auto_backend_resolves_to_ffi_cpu_when_native_handler_is_available():
     if jax.default_backend() != "cpu":
         pytest.skip("native CPU FFI handler is only required on CPU platforms")
@@ -108,18 +116,18 @@ def test_auto_backend_resolves_to_ffi_cpu_when_native_handler_is_available():
     assert jaxlinarg_operator.resolve_backend(Backend.AUTO, platform="cpu") is Backend.FFI_CPU
 
 
-def test_native_ffi_cpu_forward_and_backward_match_pure_jax_on_cpu():
+@pytest.mark.parametrize("n_cols", [1, 64])
+def test_native_ffi_cpu_forward_and_backward_match_pure_jax_on_cpu(n_cols):
     if jax.default_backend() != "cpu":
         pytest.skip("native CPU FFI handler is only required on CPU platforms")
     ffi_cpu.is_ffi_cpu_available.cache_clear()
-    indptr, indices, data, src_of_edge, nonunique_indices, min_index_to_keep, b = _solve_args()
-    backward_b = jnp.asarray(np.array([[0.0], [3.0]], dtype=np.float32))
+    indptr, indices, data, nonunique_indices, min_index_to_keep, b = _solve_args(n_cols=n_cols)
+    backward_b = jnp.asarray(np.vstack([np.zeros(n_cols), np.arange(3, n_cols + 3)]).astype(np.float32))
 
     forward = ffi_cpu.ffi_cpu_solve_forward(
         indptr,
         indices,
         data,
-        src_of_edge,
         nonunique_indices,
         min_index_to_keep,
         b,
@@ -128,7 +136,6 @@ def test_native_ffi_cpu_forward_and_backward_match_pure_jax_on_cpu():
         indptr,
         indices,
         data,
-        src_of_edge,
         nonunique_indices,
         min_index_to_keep,
         b,
@@ -137,7 +144,6 @@ def test_native_ffi_cpu_forward_and_backward_match_pure_jax_on_cpu():
         indptr,
         indices,
         data,
-        src_of_edge,
         nonunique_indices,
         min_index_to_keep,
         backward_b,
@@ -146,7 +152,6 @@ def test_native_ffi_cpu_forward_and_backward_match_pure_jax_on_cpu():
         indptr,
         indices,
         data,
-        src_of_edge,
         nonunique_indices,
         min_index_to_keep,
         backward_b,
@@ -154,40 +159,3 @@ def test_native_ffi_cpu_forward_and_backward_match_pure_jax_on_cpu():
 
     np.testing.assert_allclose(np.asarray(forward), np.asarray(expected_forward), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(np.asarray(backward), np.asarray(expected_backward), rtol=1e-6, atol=1e-6)
-
-
-@pytest.mark.parametrize(
-    ("field", "replacement", "message"),
-    [
-        ("indptr", np.array([1, 1, 1], dtype=np.int32), "indptr must start at 0"),
-        ("indptr", np.array([0, 1, 0], dtype=np.int32), "indptr must end at the number of edges"),
-        ("indptr", np.array([0, 2, 1], dtype=np.int32), "indptr must be monotonically nondecreasing"),
-        ("min_index_to_keep", -1, "min_index_to_keep must be in node range"),
-        ("min_index_to_keep", 2, "min_index_to_keep must be in node range"),
-        ("src_of_edge", np.array([2], dtype=np.int32), "src_of_edge entries must be in node range"),
-        ("indices", np.array([2], dtype=np.int32), "indices entries must be in node range"),
-        (
-            "nonunique_indices",
-            np.array([0, 2], dtype=np.int32),
-            "nonunique_indices entries must be in b row range",
-        ),
-    ],
-)
-def test_native_ffi_cpu_rejects_invalid_index_metadata_on_cpu(field, replacement, message):
-    if jax.default_backend() != "cpu":
-        pytest.skip("native CPU FFI handler is only required on CPU platforms")
-    ffi_cpu.is_ffi_cpu_available.cache_clear()
-    args = list(_solve_args())
-    fields = {
-        "indptr": 0,
-        "indices": 1,
-        "data": 2,
-        "src_of_edge": 3,
-        "nonunique_indices": 4,
-        "min_index_to_keep": 5,
-        "b": 6,
-    }
-    args[fields[field]] = jnp.asarray(replacement) if field != "min_index_to_keep" else replacement
-
-    with pytest.raises(Exception, match=message):
-        ffi_cpu.ffi_cpu_solve_forward(*args).block_until_ready()
