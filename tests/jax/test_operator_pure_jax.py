@@ -167,7 +167,7 @@ def test_jax_lineararg_forward_product_uses_nonunique_buffer(monkeypatch, oracle
         assert b.shape[0] == expected_rows
         return b
 
-    monkeypatch.setattr(jaxlinarg_operator, "_solve", fake_solve)
+    monkeypatch.setattr(jaxlinarg_operator, "_solve_forward", fake_solve)
 
     op.matmat(np.zeros((op.shape[1], 1), dtype=np.float32))
 
@@ -183,7 +183,7 @@ def test_jax_lineararg_reverse_product_uses_nonunique_buffer(monkeypatch, oracle
         assert b.shape[0] == expected_rows
         return b
 
-    monkeypatch.setattr(jaxlinarg_operator, "_solve", fake_solve)
+    monkeypatch.setattr(jaxlinarg_operator, "_solve_backward", fake_solve)
 
     op.rmatmat(np.zeros((op.shape[0], 1), dtype=np.float32))
 

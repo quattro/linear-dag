@@ -40,11 +40,12 @@ def test_jax_parallel_operator_benchmark(
     linarg_h5_path,
     linarg_block_metadata,
     linarg_benchmark_k_values: tuple[int, ...],
+    linarg_parallel_processes: int,
 ):
     if not request.config.getoption("--runbench"):
         pytest.skip("benchmarks require --runbench")
 
-    num_processes = min(2, linarg_block_metadata.height)
+    num_processes = min(linarg_parallel_processes, linarg_block_metadata.height)
     process_results = _time_parallel_operator(
         linarg_h5_path,
         linarg_block_metadata,

@@ -34,6 +34,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=(1, 8, 64),
         help="matrix widths to use for LinearARG benchmark inputs",
     )
+    parser.addoption(
+        "--linarg-parallel-processes",
+        type=int,
+        default=2,
+        help="number of worker processes to use for ParallelOperator benchmarks",
+    )
 
 
 @pytest.fixture(scope="session")
@@ -78,3 +84,11 @@ def linarg_benchmark_k_values(request: pytest.FixtureRequest) -> tuple[int, ...]
     if any(k < 1 for k in k_values):
         raise ValueError("--linarg-benchmark-k values must be positive")
     return k_values
+
+
+@pytest.fixture(scope="session")
+def linarg_parallel_processes(request: pytest.FixtureRequest) -> int:
+    num_processes = request.config.getoption("--linarg-parallel-processes")
+    if num_processes < 1:
+        raise ValueError("--linarg-parallel-processes must be at least 1")
+    return num_processes

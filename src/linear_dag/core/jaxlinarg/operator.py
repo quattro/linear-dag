@@ -36,11 +36,14 @@ class Backend(StrEnum):
     FFI_CPU = "ffi_cpu"
 
 
-_SOLVERS = {
-    ("forward", Backend.PURE_JAX): pure_jax_solve_forward_compressed,
-    ("backward", Backend.PURE_JAX): pure_jax_solve_backward_compressed,
-    ("forward", Backend.FFI_CPU): ffi_cpu.ffi_cpu_solve_forward,
-    ("backward", Backend.FFI_CPU): ffi_cpu.ffi_cpu_solve_backward,
+_FORWARD_SOLVERS = {
+    Backend.PURE_JAX: pure_jax_solve_forward_compressed,
+    Backend.FFI_CPU: ffi_cpu.ffi_cpu_solve_forward,
+}
+
+_BACKWARD_SOLVERS = {
+    Backend.PURE_JAX: pure_jax_solve_backward_compressed,
+    Backend.FFI_CPU: ffi_cpu.ffi_cpu_solve_backward,
 }
 
 
@@ -362,9 +365,8 @@ class JaxLinearARG(eqx.Module):
         b = jnp.zeros((self.n_nonunique_indices, x.shape[1]), dtype=x.dtype)
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
         b = b.at[variant_nonunique_indices, :].add(x * flip_sign[:, None])
-        solved = _solve(
+        solved = _solve_forward(
             self.backend,
-            "forward",
             self.indptr,
             self.indices,
             self.data,
@@ -398,9 +400,8 @@ class JaxLinearARG(eqx.Module):
         b = jnp.zeros((self.n_nonunique_indices, x.shape[1]), dtype=x.dtype)
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
         b = b.at[sample_nonunique_indices, :].set(x)
-        solved = _solve(
+        solved = _solve_backward(
             self.backend,
-            "backward",
             self.indptr,
             self.indices,
             self.data,
@@ -591,12 +592,23 @@ def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Arr
     return array, was_vector
 
 
-# custom_vjp disables forward-mode differentiation for this wrapped function;
-# reverse-mode gradients are defined by the transpose-direction solve below.
-@partial(jax.custom_vjp, nondiff_argnums=(0, 1, 6))
-def _solve(
+# The solve kernels are split by direction at the Python boundary so `matmat`
+# and `rmatmat` read as forward/backward operations instead of string-dispatching
+# through one generic helper.
+#
+# Algebraically, each helper is a linear map from the right-hand side `b` to the
+# solved state. If the forward solve applies some linear operator `S`, then for a
+# scalar loss L and cotangent g = dL/d(S b), the gradient with respect to `b` is
+# S.T @ g. In this LinearARG representation, applying S.T is exactly the
+# opposite-direction triangular solve over the same compressed graph. That is why
+# `_solve_forward_bwd` calls `_solve_backward`, and `_solve_backward_bwd` calls
+# `_solve_forward`.
+#
+# `jax.custom_vjp` disables forward-mode AD for these wrapped functions, so the
+# comments below focus only on reverse mode.
+@partial(jax.custom_vjp, nondiff_argnums=(0, 5))
+def _solve_forward(
     backend: Backend,
-    direction: str,
     indptr: Any,
     indices: Any,
     data: Any,
@@ -604,22 +616,9 @@ def _solve(
     min_index_to_keep: int,
     b: Any,
 ) -> jax.Array:
-    if backend is Backend.AUTO:
-        backend = resolve_backend(backend)
-    if backend is Backend.FFI_CPU:
-        if not ffi_cpu.is_ffi_cpu_available():
-            warnings.warn(
-                _ffi_cpu_unavailable_message(),
-                UserWarning,
-                stacklevel=2,
-            )
-            backend = Backend.PURE_JAX
-
-    try:
-        solve = _SOLVERS[(direction, backend)]
-    except KeyError as error:
-        raise ValueError(f"unknown backend/direction combination: {backend.value}/{direction}") from error
-    return solve(
+    # Primal forward solve used by `matmat`.
+    backend = _resolve_solve_backend(backend)
+    return _FORWARD_SOLVERS[backend](
         indptr,
         indices,
         data,
@@ -629,9 +628,8 @@ def _solve(
     )
 
 
-def _solve_fwd(
+def _solve_forward_fwd(
     backend: Backend,
-    direction: str,
     indptr: Any,
     indices: Any,
     data: Any,
@@ -639,9 +637,98 @@ def _solve_fwd(
     min_index_to_keep: int,
     b: Any,
 ) -> tuple[jax.Array, tuple[Any, Any, Any, Any]]:
-    result = _solve.fun(
+    # This is the "fwd" half of JAX's custom VJP protocol, not another forward
+    # triangular solve. It computes the primal output and returns residual data
+    # that the "bwd" half will need later.
+    #
+    # We run the primal solve via `.fun` to call the raw wrapped function. Calling
+    # `_solve_forward(...)` here would recursively enter this custom VJP rule.
+    result = _solve_forward.fun(
         backend,
-        direction,
+        indptr,
+        indices,
+        data,
+        nonunique_indices,
+        min_index_to_keep,
+        b,
+    )
+    # The backward pass needs the graph arrays to apply S.T to the incoming
+    # cotangent. It does not need the solved primal output because this solve is
+    # linear in `b`; the derivative does not depend on the value of `b`.
+    #
+    # `min_index_to_keep` is a nondiff/static argument, so JAX passes it directly
+    # to `_solve_forward_bwd` instead of storing it in the residual.
+    return result, (indptr, indices, data, nonunique_indices)
+
+
+def _solve_forward_bwd(
+    backend: Backend,
+    min_index_to_keep: int,
+    residual: tuple[Any, Any, Any, Any],
+    grad: Any,
+) -> tuple[None, None, None, None, jax.Array]:
+    indptr, indices, data, nonunique_indices = residual
+    # `grad` is the cotangent for the solved state, dL/d(S b). To get the
+    # cotangent for the right-hand side, we apply the adjoint map S.T to `grad`.
+    # The graph is triangular/topologically ordered, so S.T is implemented by the
+    # backward solve over the same compressed graph arrays.
+    #
+    # `.fun` keeps this as a plain primal call and avoids nesting custom VJP
+    # traces. The transpose solve is already the complete gradient calculation.
+    grad_b = _solve_backward.fun(
+        backend,
+        indptr,
+        indices,
+        data,
+        nonunique_indices,
+        min_index_to_keep,
+        grad,
+    )
+    # Return cotangents only for differentiable arguments. Backend selection,
+    # graph structure, and the static cutoff are treated as fixed operator state;
+    # only the right-hand side `b` receives dL/db.
+    return None, None, None, None, grad_b
+
+
+_solve_forward.defvjp(_solve_forward_fwd, _solve_forward_bwd)
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(0, 5))
+def _solve_backward(
+    backend: Backend,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    nonunique_indices: Any,
+    min_index_to_keep: int,
+    b: Any,
+) -> jax.Array:
+    # Primal backward solve used by `rmatmat`.
+    backend = _resolve_solve_backend(backend)
+    return _BACKWARD_SOLVERS[backend](
+        indptr,
+        indices,
+        data,
+        nonunique_indices,
+        min_index_to_keep,
+        b,
+    )
+
+
+def _solve_backward_fwd(
+    backend: Backend,
+    indptr: Any,
+    indices: Any,
+    data: Any,
+    nonunique_indices: Any,
+    min_index_to_keep: int,
+    b: Any,
+) -> tuple[jax.Array, tuple[Any, Any, Any, Any]]:
+    # This mirrors `_solve_forward_fwd`: compute the primal backward solve and
+    # save only the fixed graph arrays needed to apply the adjoint in reverse
+    # mode. The primal output itself is unnecessary because the solve is linear.
+    result = _solve_backward.fun(
+        backend,
         indptr,
         indices,
         data,
@@ -652,18 +739,18 @@ def _solve_fwd(
     return result, (indptr, indices, data, nonunique_indices)
 
 
-def _solve_bwd(
+def _solve_backward_bwd(
     backend: Backend,
-    direction: str,
     min_index_to_keep: int,
     residual: tuple[Any, Any, Any, Any],
     grad: Any,
 ) -> tuple[None, None, None, None, jax.Array]:
     indptr, indices, data, nonunique_indices = residual
-    transpose_direction = "backward" if direction == "forward" else "forward"
-    grad_b = _solve.fun(
+    # Here the primal map is the backward solve, call it T. The incoming `grad`
+    # is dL/d(T b), so dL/db = T.T @ grad. T.T is the forward solve over the same
+    # graph, which is exactly the pairing used by `matmat` and `rmatmat`.
+    grad_b = _solve_forward.fun(
         backend,
-        transpose_direction,
         indptr,
         indices,
         data,
@@ -671,7 +758,26 @@ def _solve_bwd(
         min_index_to_keep,
         grad,
     )
+    # Only the right-hand side `b` is differentiable; graph arrays remain fixed
+    # operator data.
     return None, None, None, None, grad_b
 
 
-_solve.defvjp(_solve_fwd, _solve_bwd)
+_solve_backward.defvjp(_solve_backward_fwd, _solve_backward_bwd)
+
+
+def _resolve_solve_backend(backend: Backend) -> Backend:
+    # Backend availability is resolved once at the solve boundary so the primal
+    # helpers and VJP helpers can share identical fallback behavior.
+    if backend is Backend.AUTO:
+        backend = resolve_backend(backend)
+    if backend is Backend.FFI_CPU and not ffi_cpu.is_ffi_cpu_available():
+        warnings.warn(
+            _ffi_cpu_unavailable_message(),
+            UserWarning,
+            stacklevel=2,
+        )
+        return Backend.PURE_JAX
+    if backend not in _FORWARD_SOLVERS:
+        raise ValueError(f"unknown backend: {backend.value}")
+    return backend
