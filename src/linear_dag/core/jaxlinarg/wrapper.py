@@ -182,6 +182,47 @@ class JaxParallelOperator(eqx.Module):
             block_ranges=split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh)),
         )
 
+    @classmethod
+    def from_zarr(
+        cls,
+        reader: Any,
+        *,
+        mesh: Mesh | AbstractMesh,
+        block_metadata: pl.DataFrame | None = None,
+        backend: Backend = Backend.AUTO,
+        dtype: Any = None,
+    ) -> "JaxParallelOperator":
+        """Construct a multi-block JAX operator from a LinearARG Zarr reader.
+
+        **Arguments:**
+
+        - `reader`: Open [`linear_dag.core.zarr_io.LinearARGZarrReader`][].
+        - `mesh`: JAX mesh with a `"blocks"` axis.
+        - `block_metadata`: Optional preloaded block metadata.
+        - `backend`: Requested numerical backend.
+        - `dtype`: Optional computation dtype.
+
+        **Returns:**
+
+        - A [`linear_dag.core.jaxlinarg.JaxParallelOperator`][].
+
+        **Raises:**
+
+        - `ValueError`: If metadata, block settings, shapes, or mesh ranges are invalid.
+        """
+        from .ingress import read_zarr_blocks
+
+        metadata = reader.list_blocks() if block_metadata is None else block_metadata
+        block_names = metadata.get_column("block_name").to_list()
+        blocks = read_zarr_blocks(reader, block_names, backend=backend, dtype=dtype)
+        return cls(
+            blocks=blocks,
+            variant_offsets=variant_offsets_from_metadata(metadata),
+            mesh=mesh,
+            backend=backend,
+            block_ranges=split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh)),
+        )
+
     def __check_init__(self) -> None:
         if not self.blocks:
             raise ValueError("blocks must contain at least one JaxLinearARG")
