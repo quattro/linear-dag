@@ -31,9 +31,11 @@ def _minimal_operator_kwargs() -> dict:
 
 @pytest.fixture(autouse=True)
 def _isolate_ffi_cpu_availability_cache():
+    jaxlinarg_operator.ffi_cpu._import_ffi_cpu_impl.cache_clear()
     jaxlinarg_operator.ffi_cpu._load_ffi_cpu_impl.cache_clear()
     jaxlinarg_operator.ffi_cpu.is_ffi_cpu_available.cache_clear()
     yield
+    jaxlinarg_operator.ffi_cpu._import_ffi_cpu_impl.cache_clear()
     jaxlinarg_operator.ffi_cpu._load_ffi_cpu_impl.cache_clear()
     jaxlinarg_operator.ffi_cpu.is_ffi_cpu_available.cache_clear()
 
@@ -74,6 +76,7 @@ def test_ffi_availability_returns_false_when_registrations_raises(monkeypatch):
     fake_impl = types.SimpleNamespace(registrations=lambda: (_ for _ in ()).throw(RuntimeError("registrations failed")))
     monkeypatch.setitem(sys.modules, module_name, fake_impl)
     monkeypatch.setattr(kernels_pkg, "_ffi_cpu_impl", fake_impl, raising=False)
+    jaxlinarg_operator.ffi_cpu._import_ffi_cpu_impl.cache_clear()
     jaxlinarg_operator.ffi_cpu._load_ffi_cpu_impl.cache_clear()
     jaxlinarg_operator.ffi_cpu.is_ffi_cpu_available.cache_clear()
 
@@ -91,6 +94,7 @@ def test_ffi_availability_returns_false_when_target_registration_raises(monkeypa
         "register_ffi_target",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("registration failed")),
     )
+    jaxlinarg_operator.ffi_cpu._import_ffi_cpu_impl.cache_clear()
     jaxlinarg_operator.ffi_cpu._load_ffi_cpu_impl.cache_clear()
     jaxlinarg_operator.ffi_cpu.is_ffi_cpu_available.cache_clear()
 

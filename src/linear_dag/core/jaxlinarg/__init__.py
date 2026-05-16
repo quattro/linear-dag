@@ -1,5 +1,6 @@
 # pattern: Functional Core
 
+from .build_config import show_build_config as show_build_config
 from .grm import JaxGRMOperator as JaxGRMOperator
 from .operator import Backend as Backend, JaxLinearARG as JaxLinearARG
 from .wrapper import (

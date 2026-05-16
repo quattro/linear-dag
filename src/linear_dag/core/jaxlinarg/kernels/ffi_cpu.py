@@ -29,6 +29,15 @@ def is_ffi_cpu_available() -> bool:
     return True
 
 
+def is_ffi_cpu_built() -> bool:
+    """Return whether the native CPU FFI handler can be imported."""
+    try:
+        _import_ffi_cpu_impl()
+    except Exception:
+        return False
+    return True
+
+
 def last_ffi_cpu_error() -> Exception | None:
     """Return the last native CPU FFI import or registration error."""
     return _last_ffi_cpu_error
@@ -37,15 +46,37 @@ def last_ffi_cpu_error() -> Exception | None:
 def is_ffi_cpu_blas_enabled() -> bool:
     """Return whether the native CPU FFI handler was built with CBLAS support."""
     try:
-        return bool(_load_ffi_cpu_impl().blas_enabled())
+        return bool(_import_ffi_cpu_impl().blas_enabled())
+    except Exception:
+        return False
+
+
+def ffi_cpu_blas_backend() -> str | None:
+    """Return the native CPU FFI BLAS backend selected at build time."""
+    try:
+        return str(_import_ffi_cpu_impl().blas_backend())
+    except Exception:
+        return None
+
+
+def is_ffi_cpu_native_tuning_enabled() -> bool:
+    """Return whether the native CPU FFI handler was built for the local CPU."""
+    try:
+        return bool(_import_ffi_cpu_impl().native_tuning_enabled())
     except Exception:
         return False
 
 
 @cache
-def _load_ffi_cpu_impl() -> Any:
+def _import_ffi_cpu_impl() -> Any:
     from linear_dag.core.jaxlinarg.kernels import _ffi_cpu_impl
 
+    return _ffi_cpu_impl
+
+
+@cache
+def _load_ffi_cpu_impl() -> Any:
+    _ffi_cpu_impl = _import_ffi_cpu_impl()
     for name, capsule in _ffi_cpu_impl.registrations().items():
         jax.ffi.register_ffi_target(name, capsule, platform="cpu", api_version=1)
     return _ffi_cpu_impl

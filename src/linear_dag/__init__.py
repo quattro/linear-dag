@@ -17,6 +17,7 @@ from .core import (
     LinearARG as LinearARG,
     list_blocks as list_blocks,
     ParallelOperator as ParallelOperator,
+    show_build_config as show_build_config,
 )
 from .genotype import (
     apply_maf_threshold as apply_maf_threshold,

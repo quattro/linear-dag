@@ -17,6 +17,14 @@
 
 #include "xla/ffi/api/ffi.h"
 
+#ifndef LINEAR_DAG_FFI_CPU_BLAS_BACKEND
+#define LINEAR_DAG_FFI_CPU_BLAS_BACKEND "unknown"
+#endif
+
+#ifndef LINEAR_DAG_FFI_CPU_NATIVE_TUNING
+#define LINEAR_DAG_FFI_CPU_NATIVE_TUNING 0
+#endif
+
 namespace ffi = xla::ffi;
 
 template <typename T>
@@ -251,9 +259,23 @@ static PyObject* BlasEnabled(PyObject*, PyObject*) {
 #endif
 }
 
+static PyObject* BlasBackend(PyObject*, PyObject*) {
+  return PyUnicode_FromString(LINEAR_DAG_FFI_CPU_BLAS_BACKEND);
+}
+
+static PyObject* NativeTuningEnabled(PyObject*, PyObject*) {
+#if LINEAR_DAG_FFI_CPU_NATIVE_TUNING
+  Py_RETURN_TRUE;
+#else
+  Py_RETURN_FALSE;
+#endif
+}
+
 static PyMethodDef Methods[] = {
     {"registrations", Registrations, METH_NOARGS, "Return CPU FFI target registrations."},
     {"blas_enabled", BlasEnabled, METH_NOARGS, "Return whether the CPU FFI extension was built with CBLAS."},
+    {"blas_backend", BlasBackend, METH_NOARGS, "Return the CPU FFI BLAS backend selected at build time."},
+    {"native_tuning_enabled", NativeTuningEnabled, METH_NOARGS, "Return whether the CPU FFI extension was built with native CPU tuning."},
     {nullptr, nullptr, 0, nullptr},
 };
 

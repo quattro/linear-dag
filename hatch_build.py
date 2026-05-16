@@ -1,11 +1,19 @@
 # pattern: Imperative Shell
 
+import base64
+import csv
 import glob
+import hashlib
 import importlib.machinery
+import io
 import os
+import shlex
+import subprocess
 import sys
 import sysconfig
+import tempfile
 import warnings
+import zipfile
 
 from pathlib import Path
 
@@ -25,13 +33,19 @@ FFI_CPU_NATIVE_ENV = "LINEAR_DAG_FFI_CPU_NATIVE"
 
 class CustomBuildHook(BuildHookInterface):
     def initialize(self, version, build_data):
+        sanitize_macos_linker_flags()
         build_data["include-dirs"] = [os.path.dirname(scipy.__file__)]
         if self.target_name != "sdist":
             if build_ffi_cpu_extension_or_warn(self.root):
-                for artifact in ffi_cpu_extension_artifacts(self.root):
+                for artifact in ffi_cpu_source_extension_artifacts(self.root):
                     relative_artifact = os.path.relpath(artifact, self.root)
                     build_data.setdefault("artifacts", []).append(f"/{relative_artifact}")
                     build_data.setdefault("force_include", {})[relative_artifact] = relative_artifact
+
+    def finalize(self, version, build_data, artifact_path):
+        del version, build_data
+        repair_macos_extension_rpaths(self.root)
+        repair_macos_wheel_rpaths(artifact_path)
 
 
 def get_include_dirs():
@@ -39,13 +53,14 @@ def get_include_dirs():
 
 
 def build_hook(config):
+    sanitize_macos_linker_flags()
     config["include-dirs"] = get_include_dirs()
 
 
 def build_ffi_cpu_extension_or_warn(root):
     remove_ffi_cpu_extension_artifacts(root)
     try:
-        build_ffi_cpu_extension(root)
+        build_ffi_cpu_extension_with_optional_blas_fallback(root)
     except Exception as exc:
         if is_ffi_cpu_build_required():
             raise
@@ -58,6 +73,19 @@ def build_ffi_cpu_extension_or_warn(root):
         )
         return False
     return True
+
+
+def build_ffi_cpu_extension_with_optional_blas_fallback(root):
+    try:
+        build_ffi_cpu_extension(root)
+    except Exception:
+        if _truthy_env(os.environ.get(FFI_CPU_BLAS_DISABLED_ENV)) or _truthy_env(
+            os.environ.get(FFI_CPU_BLAS_REQUIRED_ENV)
+        ):
+            raise
+        with _temporary_env(FFI_CPU_BLAS_DISABLED_ENV, "1"):
+            remove_ffi_cpu_extension_artifacts(root)
+            build_ffi_cpu_extension(root)
 
 
 def remove_ffi_cpu_extension_artifacts(root):
@@ -76,6 +104,7 @@ def _ffi_cpu_blas_options():
         "library_dirs": [],
         "libraries": [],
         "extra_link_args": [],
+        "blas_backend": "none",
     }
     if _truthy_env(os.environ.get(FFI_CPU_BLAS_DISABLED_ENV)):
         return empty_options
@@ -84,6 +113,7 @@ def _ffi_cpu_blas_options():
             **empty_options,
             "define_macros": [("LINEAR_DAG_HAVE_CBLAS", "1")],
             "extra_link_args": ["-framework", "Accelerate"],
+            "blas_backend": "accelerate",
         }
 
     include_dir = _find_header_dir("cblas.h", _blas_include_dir_candidates())
@@ -95,6 +125,7 @@ def _ffi_cpu_blas_options():
             "include_dirs": [str(include_dir)],
             "library_dirs": [str(library_dir)] if library_dir is not None else [],
             "libraries": [library_name],
+            "blas_backend": library_name,
         }
 
     if _truthy_env(os.environ.get(FFI_CPU_BLAS_REQUIRED_ENV)):
@@ -106,6 +137,7 @@ def _ffi_cpu_blas_options():
 
 
 def build_ffi_cpu_extension(root):
+    sanitize_macos_linker_flags()
     root = Path(root)
     blas_options = _ffi_cpu_blas_options()
     extension = Extension(
@@ -115,10 +147,13 @@ def build_ffi_cpu_extension(root):
             jax.ffi.include_dir(),
             np.get_include(),
             os.path.dirname(scipy.__file__),
-            *_macos_cxx_include_dirs(),
             *blas_options["include_dirs"],
         ],
-        define_macros=blas_options["define_macros"],
+        define_macros=[
+            *blas_options["define_macros"],
+            ("LINEAR_DAG_FFI_CPU_BLAS_BACKEND", f'"{blas_options["blas_backend"]}"'),
+            ("LINEAR_DAG_FFI_CPU_NATIVE_TUNING", "1" if _truthy_env(os.environ.get(FFI_CPU_NATIVE_ENV)) else "0"),
+        ],
         library_dirs=blas_options["library_dirs"],
         libraries=blas_options["libraries"],
         language="c++",
@@ -134,6 +169,7 @@ def build_ffi_cpu_extension(root):
     )
     command = build_ext(distribution)
     command.inplace = True
+    command.force = True
     command.build_lib = str(root / "build")
     command.build_temp = str(root / "build/temp")
     command.ensure_finalized()
@@ -141,11 +177,124 @@ def build_ffi_cpu_extension(root):
 
 
 def ffi_cpu_extension_artifacts(root):
-    base = Path(root) / "src" / "linear_dag" / "core" / "jaxlinarg" / "kernels" / "_ffi_cpu_impl"
+    return sorted(
+        {
+            *ffi_cpu_source_extension_artifacts(root),
+            *ffi_cpu_build_cache_extension_artifacts(root),
+        }
+    )
+
+
+def ffi_cpu_source_extension_artifacts(root):
+    root = Path(root)
+    return _extension_artifacts_for_base(
+        root / "src" / "linear_dag" / "core" / "jaxlinarg" / "kernels" / "_ffi_cpu_impl"
+    )
+
+
+def ffi_cpu_build_cache_extension_artifacts(root):
+    root = Path(root)
+    return _extension_artifacts_for_base(
+        root / "build" / "linear_dag" / "core" / "jaxlinarg" / "kernels" / "_ffi_cpu_impl"
+    )
+
+
+def _extension_artifacts_for_base(base):
     artifacts = []
     for suffix in _extension_suffixes():
         artifacts.extend(glob.glob(f"{base}*{suffix}"))
     return sorted(set(artifacts))
+
+
+def repair_macos_extension_rpaths(root):
+    if sys.platform != "darwin":
+        return
+
+    root = Path(root)
+    for artifact in sorted(root.glob("src/linear_dag/**/*.so")):
+        _delete_duplicate_macos_rpaths(artifact)
+
+
+def repair_macos_wheel_rpaths(artifact_path):
+    if sys.platform != "darwin":
+        return
+
+    artifact_path = Path(artifact_path)
+    if artifact_path.suffix != ".whl" or not artifact_path.exists():
+        return
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        extracted_root = Path(temp_dir) / "wheel"
+        with zipfile.ZipFile(artifact_path) as wheel:
+            wheel.extractall(extracted_root)
+
+        for artifact in sorted(extracted_root.glob("linear_dag/**/*.so")):
+            _delete_duplicate_macos_rpaths(artifact)
+
+        _rewrite_wheel_record(extracted_root)
+        repaired_wheel = artifact_path.with_name(f"{artifact_path.name}.repaired")
+        _write_wheel_archive(extracted_root, repaired_wheel)
+        os.replace(repaired_wheel, artifact_path)
+
+
+def _rewrite_wheel_record(root):
+    record_paths = sorted(root.glob("*.dist-info/RECORD"))
+    if not record_paths:
+        return
+
+    record_path = record_paths[0]
+    rows = []
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        relative_path = path.relative_to(root).as_posix()
+        if path == record_path:
+            rows.append([relative_path, "", ""])
+            continue
+        payload = path.read_bytes()
+        digest = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(b"=").decode("ascii")
+        rows.append([relative_path, f"sha256={digest}", str(len(payload))])
+
+    output = io.StringIO()
+    csv.writer(output, lineterminator="\n").writerows(rows)
+    record_path.write_text(output.getvalue(), encoding="utf-8")
+
+
+def _write_wheel_archive(root, artifact_path):
+    with zipfile.ZipFile(artifact_path, "w", compression=zipfile.ZIP_DEFLATED) as wheel:
+        for path in sorted(item for item in root.rglob("*") if item.is_file()):
+            wheel.write(path, path.relative_to(root).as_posix())
+
+
+def _delete_duplicate_macos_rpaths(artifact):
+    rpaths = _macos_rpaths(artifact)
+    seen = set()
+    for rpath in rpaths:
+        if rpath not in seen:
+            seen.add(rpath)
+            continue
+        subprocess.run(
+            ["install_name_tool", "-delete_rpath", rpath, str(artifact)],
+            check=True,
+        )
+
+
+def _macos_rpaths(artifact):
+    output = subprocess.run(
+        ["otool", "-l", str(artifact)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    rpaths = []
+    in_rpath_command = False
+    for line in output:
+        stripped = line.strip()
+        if stripped == "cmd LC_RPATH":
+            in_rpath_command = True
+            continue
+        if in_rpath_command and stripped.startswith("path "):
+            rpaths.append(stripped.split()[1])
+            in_rpath_command = False
+    return rpaths
 
 
 def _extension_suffixes():
@@ -160,6 +309,24 @@ def _truthy_env(value):
     if value is None:
         return False
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+class _temporary_env:
+    def __init__(self, key, value):
+        self.key = key
+        self.value = value
+        self.previous = None
+
+    def __enter__(self):
+        self.previous = os.environ.get(self.key)
+        os.environ[self.key] = self.value
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.previous is None:
+            os.environ.pop(self.key, None)
+        else:
+            os.environ[self.key] = self.previous
+        return False
 
 
 def _blas_include_dir_candidates():
@@ -217,8 +384,88 @@ def _cxx_compile_args():
     return args
 
 
-def _macos_cxx_include_dirs():
+def sanitize_macos_linker_flags():
+    """Remove duplicate Darwin rpath flags inherited from conda-style envs.
+
+    Some macOS Python distributions expose the same `-Wl,-rpath,<prefix>/lib`
+    value through both `sysconfig` and environment `LDFLAGS`. If extension
+    builders concatenate those sources, the resulting Mach-O can contain
+    duplicate `LC_RPATH` load commands, which modern `dlopen` rejects.
+    """
     if sys.platform != "darwin":
-        return []
-    candidates = sorted(glob.glob("/Library/Developer/CommandLineTools/SDKs/MacOSX*.sdk/usr/include/c++/v1"))
-    return candidates[-1:] if candidates else []
+        return
+
+    config_keys = ("LDSHARED", "BLDSHARED", "LDCXXSHARED", "LDFLAGS", "PY_LDFLAGS")
+    config_rpaths = set()
+    for key in config_keys:
+        value = sysconfig.get_config_var(key)
+        if not isinstance(value, str) or not value:
+            continue
+        deduped, rpaths = _dedupe_rpath_flags(value)
+        _set_sysconfig_var(key, deduped)
+        if key in {"LDSHARED", "BLDSHARED", "LDCXXSHARED"}:
+            os.environ[key] = deduped
+        config_rpaths.update(rpaths)
+
+    env_value = os.environ.get("LDFLAGS")
+    if env_value:
+        os.environ["LDFLAGS"] = _drop_known_rpath_flags(env_value, config_rpaths)
+
+
+def _dedupe_rpath_flags(flags):
+    tokens = shlex.split(flags)
+    result = []
+    seen_rpaths = set()
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        parsed = _parse_rpath_token(tokens, i)
+        if parsed is None:
+            result.append(token)
+            i += 1
+            continue
+
+        rpath, consumed = parsed
+        if rpath not in seen_rpaths:
+            result.extend(tokens[i : i + consumed])
+            seen_rpaths.add(rpath)
+        i += consumed
+    return shlex.join(result), seen_rpaths
+
+
+def _drop_known_rpath_flags(flags, rpaths_to_drop):
+    if not rpaths_to_drop:
+        return flags
+
+    tokens = shlex.split(flags)
+    result = []
+    i = 0
+    while i < len(tokens):
+        parsed = _parse_rpath_token(tokens, i)
+        if parsed is None:
+            result.append(tokens[i])
+            i += 1
+            continue
+
+        rpath, consumed = parsed
+        if rpath not in rpaths_to_drop:
+            result.extend(tokens[i : i + consumed])
+        i += consumed
+    return shlex.join(result)
+
+
+def _parse_rpath_token(tokens, index):
+    token = tokens[index]
+    if token.startswith("-Wl,-rpath,"):
+        return token.removeprefix("-Wl,-rpath,"), 1
+    if token == "-Wl,-rpath" and index + 1 < len(tokens):
+        return tokens[index + 1], 2
+    if token == "-rpath" and index + 1 < len(tokens):
+        return tokens[index + 1], 2
+    return None
+
+
+def _set_sysconfig_var(key, value):
+    config_vars = sysconfig.get_config_vars()
+    if key in config_vars:
+        config_vars[key] = value

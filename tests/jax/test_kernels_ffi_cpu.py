@@ -108,6 +108,18 @@ def test_native_ffi_cpu_blas_flag_is_boolean_on_cpu():
     assert isinstance(ffi_cpu.is_ffi_cpu_blas_enabled(), bool)
 
 
+def test_native_ffi_cpu_build_metadata_has_expected_types_on_cpu():
+    if jax.default_backend() != "cpu":
+        pytest.skip("native CPU FFI handler is only required on CPU platforms")
+    ffi_cpu._import_ffi_cpu_impl.cache_clear()
+    ffi_cpu._load_ffi_cpu_impl.cache_clear()
+    ffi_cpu.is_ffi_cpu_available.cache_clear()
+
+    assert isinstance(ffi_cpu.is_ffi_cpu_built(), bool)
+    assert ffi_cpu.ffi_cpu_blas_backend() in {"accelerate", "openblas", "blas", "none"}
+    assert isinstance(ffi_cpu.is_ffi_cpu_native_tuning_enabled(), bool)
+
+
 def test_auto_backend_resolves_to_ffi_cpu_when_native_handler_is_available():
     if jax.default_backend() != "cpu":
         pytest.skip("native CPU FFI handler is only required on CPU platforms")

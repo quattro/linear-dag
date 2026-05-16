@@ -6,6 +6,7 @@ from .jaxlinarg import (
     JaxGRMOperator as JaxGRMOperator,
     JaxLinearARG as JaxLinearARG,
     JaxParallelOperator as JaxParallelOperator,
+    show_build_config as show_build_config,
 )
 from .linear_arg_inference import linear_arg_from_genotypes as linear_arg_from_genotypes
 from .lineararg import LinearARG as LinearARG, list_blocks as list_blocks
