@@ -6,6 +6,8 @@ import polars as pl
 from scipy.sparse import csr_matrix, eye
 from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
+from linear_dag.core.alignment import get_iid_alignment
+
 
 def get_inner_merge_operators(row_ids: pl.Series, col_ids: pl.Series) -> Tuple[LinearOperator, LinearOperator]:
     """Build operators that align two ID vectors onto their inner join.
@@ -34,25 +36,21 @@ def get_inner_merge_operators(row_ids: pl.Series, col_ids: pl.Series) -> Tuple[L
 
     - `TypeError`: If `row_ids` and `col_ids` have different dtypes.
     """
-    if row_ids.dtype != col_ids.dtype:
-        raise TypeError("Data types of row_ids and col_ids must match")
-
-    row_df = pl.LazyFrame({"id": row_ids}).with_row_index("row_idx")
-    col_df = pl.LazyFrame({"id": col_ids}).with_row_index("col_idx")
-    merged_df = row_df.join(col_df, on="id", how="inner").with_row_index("merged_idx").collect()
+    alignment = get_iid_alignment(row_ids, col_ids)
+    merged_idx = np.arange(alignment.n_merged)
     row_matrix = csr_matrix(
         (
-            np.ones(merged_df.shape[0], dtype=int),
-            (merged_df.select("row_idx").to_numpy().flatten(), merged_df.select("merged_idx").to_numpy().flatten()),
+            np.ones(alignment.n_merged, dtype=int),
+            (alignment.left_indices, merged_idx),
         ),
-        shape=(row_ids.len(), merged_df.height),
+        shape=(alignment.n_left, alignment.n_merged),
     )
     col_matrix = csr_matrix(
         (
-            np.ones(merged_df.shape[0], dtype=int),
-            (merged_df.select("merged_idx").to_numpy().flatten(), merged_df.select("col_idx").to_numpy().flatten()),
+            np.ones(alignment.n_merged, dtype=int),
+            (merged_idx, alignment.right_indices),
         ),
-        shape=(merged_df.height, col_ids.len()),
+        shape=(alignment.n_merged, alignment.n_right),
     )
     return aslinearoperator(row_matrix), aslinearoperator(col_matrix)
 
