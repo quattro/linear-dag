@@ -1,5 +1,6 @@
 # pattern: Functional Core
 
+from .grm import JaxGRMOperator as JaxGRMOperator
 from .operator import Backend as Backend, JaxLinearARG as JaxLinearARG
 from .wrapper import (
     JaxParallelOperator as JaxParallelOperator,

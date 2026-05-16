@@ -3,6 +3,7 @@
 from .brick_graph import BrickGraph as BrickGraph
 from .jaxlinarg import (
     Backend as Backend,
+    JaxGRMOperator as JaxGRMOperator,
     JaxLinearARG as JaxLinearARG,
     JaxParallelOperator as JaxParallelOperator,
 )

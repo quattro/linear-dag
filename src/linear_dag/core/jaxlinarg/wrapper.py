@@ -1,5 +1,6 @@
 # pattern: Functional Core
 
+from collections.abc import Callable
 from functools import cached_property
 from typing import Any
 
@@ -10,6 +11,7 @@ import numpy as np
 import polars as pl
 
 from jax.sharding import AbstractMesh, Mesh, PartitionSpec as P
+from jaxtyping import Array, ArrayLike
 
 from linear_dag.core.lineararg import list_blocks
 
@@ -82,7 +84,7 @@ class JaxParallelOperator(eqx.Module):
 
     blocks: tuple[JaxLinearARG, ...] = eqx.field(converter=tuple)
     variant_offsets: tuple[int, ...] = eqx.field(converter=_int_tuple, static=True)
-    mesh: Any = eqx.field(static=True)
+    mesh: Mesh | AbstractMesh = eqx.field(static=True)
     block_ranges: tuple[tuple[int, int], ...] = eqx.field(converter=_range_tuple, static=True)
     backend: Backend = eqx.field(default=Backend.AUTO, converter=Backend, static=True)
 
@@ -91,7 +93,7 @@ class JaxParallelOperator(eqx.Module):
         cls,
         lineargs: Any,
         *,
-        mesh: Any,
+        mesh: Mesh | AbstractMesh,
         backend: Backend = Backend.AUTO,
     ) -> "JaxParallelOperator":
         """Construct a multi-block JAX operator from LinearARG objects.
@@ -136,7 +138,7 @@ class JaxParallelOperator(eqx.Module):
         cls,
         path: Any,
         *,
-        mesh: Any,
+        mesh: Mesh | AbstractMesh,
         block_metadata: pl.DataFrame | None = None,
         backend: Backend = Backend.AUTO,
     ) -> "JaxParallelOperator":
@@ -215,7 +217,7 @@ class JaxParallelOperator(eqx.Module):
         """Return the composed operator shape `(n_samples, total_variants)`."""
         return (self.blocks[0].n_samples, self.variant_offsets[-1])
 
-    def matmat(self, x: Any) -> Any:
+    def matmat(self, x: ArrayLike) -> Array:
         """Multiply by the concatenated multi-block genotype matrix.
 
         **Arguments:**
@@ -247,7 +249,7 @@ class JaxParallelOperator(eqx.Module):
                 result = result + block.matmat(x[start:end])
         return result[:, 0] if was_vector else result
 
-    def rmatmat(self, x: Any) -> Any:
+    def rmatmat(self, x: ArrayLike) -> Array:
         """Multiply by the transpose of the multi-block genotype matrix.
 
         **Arguments:**
@@ -270,24 +272,24 @@ class JaxParallelOperator(eqx.Module):
             result = self._cached_rmatmat(x)
         return result[:, 0] if was_vector else result
 
-    def _sharded_matmat(self, x: Any) -> Any:
+    def _sharded_matmat(self, x: Array) -> Array:
         @jax.custom_vjp
-        def product(values: Any) -> Any:
+        def product(values: Array) -> Array:
             return self._sharded_matmat_primal(values)
 
-        def product_fwd(values: Any) -> tuple[Any, None]:
+        def product_fwd(values: Array) -> tuple[Array, None]:
             return self._sharded_matmat_primal(values), None
 
-        def product_bwd(_residual: None, cotangent: Any) -> tuple[Any]:
+        def product_bwd(_residual: None, cotangent: Array) -> tuple[Array]:
             return (self._cached_rmatmat(cotangent),)
 
         product.defvjp(product_fwd, product_bwd)
         return product(x)
 
-    def _sharded_matmat_primal(self, x: Any) -> Any:
+    def _sharded_matmat_primal(self, x: Array) -> Array:
         branches = tuple(self._matmat_branch(start, end) for start, end in self.block_ranges)
 
-        def mapped(values: Any) -> Any:
+        def mapped(values: Array) -> Array:
             axis_index = jax.lax.axis_index("blocks")
             local = jax.lax.switch(axis_index, branches, values)
             # Each device owns a contiguous subset of variant blocks and returns
@@ -306,8 +308,8 @@ class JaxParallelOperator(eqx.Module):
         )
         return product(x)
 
-    def _matmat_branch(self, start: int, end: int) -> Any:
-        def branch(values: Any) -> Any:
+    def _matmat_branch(self, start: int, end: int) -> Callable[[Array], Array]:
+        def branch(values: Array) -> Array:
             local = jnp.zeros((self.shape[0], values.shape[1]), dtype=values.dtype)
             for block_index in range(start, end):
                 block_start = self.variant_offsets[block_index]
@@ -317,7 +319,7 @@ class JaxParallelOperator(eqx.Module):
 
         return branch
 
-    def _cached_rmatmat(self, x: Any) -> Any:
+    def _cached_rmatmat(self, x: Array) -> Array:
         # Reverse products naturally return variant rows, and each block range
         # owns a different number of variants. Do not route this through
         # shard_map: shard_map would force equal per-device output shapes and
@@ -331,7 +333,7 @@ class JaxParallelOperator(eqx.Module):
         return jnp.concatenate(segments, axis=0)
 
     @cached_property
-    def _rmatmat_products(self) -> tuple[tuple[jax.Device | None, Any], ...]:
+    def _rmatmat_products(self) -> tuple[tuple[jax.Device | None, Callable[[Array], Array]], ...]:
         devices = _mesh_block_devices(self.mesh)
         products = []
         for range_index, (start, end) in enumerate(self.block_ranges):
@@ -341,15 +343,15 @@ class JaxParallelOperator(eqx.Module):
             products.append((device, jax.jit(_rmatmat_range_product(self.blocks[start:end]))))
         return tuple(products)
 
-    def matvec(self, x: Any) -> Any:
+    def matvec(self, x: ArrayLike) -> Array:
         """Multiply a vector by the composed genotype matrix."""
         return self.matmat(x)
 
-    def rmatvec(self, x: Any) -> Any:
+    def rmatvec(self, x: ArrayLike) -> Array:
         """Multiply a vector by the transpose of the composed matrix."""
         return self.rmatmat(x)
 
-    def __matmul__(self, x: Any) -> Any:
+    def __matmul__(self, x: ArrayLike) -> Array:
         return self.matmat(x)
 
 
@@ -422,7 +424,7 @@ def _require_metadata_columns(metadata: pl.DataFrame, *columns: str) -> None:
         raise ValueError(f"metadata must contain columns {expected}; observed columns: {observed}")
 
 
-def _validate_mesh(mesh: Any) -> None:
+def _validate_mesh(mesh: Mesh | AbstractMesh) -> None:
     if not isinstance(mesh, (Mesh, AbstractMesh)):
         raise TypeError("mesh must be a jax.sharding.Mesh or jax.sharding.AbstractMesh")
     if isinstance(mesh, AbstractMesh):
@@ -459,7 +461,7 @@ def _validate_block_ranges(
         raise ValueError("block_ranges must be contiguous and cover every block")
 
 
-def _mesh_blocks_axis_size(mesh: Any) -> int:
+def _mesh_blocks_axis_size(mesh: Mesh | AbstractMesh) -> int:
     _validate_mesh(mesh)
     axis_names = tuple(getattr(mesh, "axis_names", ()))
     if isinstance(mesh, AbstractMesh):
@@ -471,7 +473,7 @@ def _mesh_blocks_axis_size(mesh: Any) -> int:
     return int(devices.shape[axis_index])
 
 
-def _mesh_block_devices(mesh: Any) -> tuple[jax.Device, ...] | None:
+def _mesh_block_devices(mesh: Mesh | AbstractMesh) -> tuple[jax.Device, ...] | None:
     if isinstance(mesh, AbstractMesh):
         return None
     axis_names = tuple(getattr(mesh, "axis_names", ()))
@@ -483,31 +485,31 @@ def _mesh_block_devices(mesh: Any) -> tuple[jax.Device, ...] | None:
     return tuple(moved.reshape((moved.shape[0], -1))[:, 0].tolist())
 
 
-def _mesh_assembly_device(mesh: Any) -> jax.Device | None:
+def _mesh_assembly_device(mesh: Mesh | AbstractMesh) -> jax.Device | None:
     if isinstance(mesh, AbstractMesh):
         return None
     return np.asarray(mesh.devices).reshape(-1).tolist()[0]
 
 
-def _rmatmat_range_product(blocks: tuple[JaxLinearARG, ...]) -> Any:
+def _rmatmat_range_product(blocks: tuple[JaxLinearARG, ...]) -> Callable[[Array], Array]:
     # A range product is deliberately exact-size. This mirrors the NumPy
     # ParallelOperator model: each worker/range computes its own variant rows,
     # and the wrapper assembles the public `(sum p_i, k)` result by
     # concatenation. Keeping the function object cached lets JAX reuse compiled
     # executables for repeated calls with the same input shape and dtype.
-    def product(values: Any) -> Any:
+    def product(values: Array) -> Array:
         return jnp.concatenate([block.rmatmat(values) for block in blocks], axis=0)
 
     return product
 
 
-def _device_put_if_needed(value: Any, device: jax.Device | None) -> Any:
+def _device_put_if_needed(value: Array, device: jax.Device | None) -> Array:
     if device is None:
         return value
     return jax.device_put(value, device)
 
 
-def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Array, bool]:
+def _as_rank2_matrix(x: ArrayLike, *, expected_rows: int, dtype: Any) -> tuple[Array, bool]:
     array = jnp.asarray(x, dtype=dtype)
     if array.ndim == 1:
         array = array.reshape(-1, 1)

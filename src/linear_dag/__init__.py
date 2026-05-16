@@ -10,6 +10,7 @@ from .core import (
     Backend as Backend,
     BrickGraph as BrickGraph,
     GRMOperator as GRMOperator,
+    JaxGRMOperator as JaxGRMOperator,
     JaxLinearARG as JaxLinearARG,
     JaxParallelOperator as JaxParallelOperator,
     linear_arg_from_genotypes as linear_arg_from_genotypes,

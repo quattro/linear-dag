@@ -13,6 +13,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from jaxtyping import Array, ArrayLike, Bool, Float, Int
+
 from .kernels import ffi_cpu
 from .kernels.pure_jax import (
     pure_jax_solve_backward_compressed,
@@ -98,14 +100,14 @@ class JaxLinearARG(eqx.Module):
     - `dtype`: Computation dtype.
     """
 
-    indptr: Any = eqx.field(converter=jnp.asarray)
-    indices: Any = eqx.field(converter=jnp.asarray)
-    data: Any = eqx.field(converter=jnp.asarray)
-    variant_indices: Any = eqx.field(converter=jnp.asarray)
-    flip: Any = eqx.field(converter=jnp.asarray)
-    sample_indices: Any = eqx.field(converter=jnp.asarray)
-    nonunique_indices: Any = eqx.field(converter=jnp.asarray)
-    allele_counts: Any = eqx.field(converter=jnp.asarray)
+    indptr: Int[Array, "nodes_plus_1"] = eqx.field(converter=jnp.asarray)  # noqa: F722, F821
+    indices: Int[Array, "edges"] = eqx.field(converter=jnp.asarray)  # noqa: F722, F821
+    data: Float[Array, "edges"] = eqx.field(converter=jnp.asarray)  # noqa: F722, F821
+    variant_indices: Int[Array, "variants"] = eqx.field(converter=jnp.asarray)  # noqa: F722, F821
+    flip: Bool[Array, "variants"] = eqx.field(converter=jnp.asarray)  # noqa: F722, F821
+    sample_indices: Int[Array, "samples"] = eqx.field(converter=jnp.asarray)  # noqa: F722, F821
+    nonunique_indices: Int[Array, "nodes"] = eqx.field(converter=jnp.asarray)  # noqa: F722, F821
+    allele_counts: Int[Array, "variants"] = eqx.field(converter=jnp.asarray)  # noqa: F722, F821
     n_variants: int = eqx.field(static=True)
     n_samples: int = eqx.field(static=True)
     n_nonunique_indices: int = eqx.field(default=-1, static=True)
@@ -113,7 +115,7 @@ class JaxLinearARG(eqx.Module):
     backend: Backend = eqx.field(default=Backend.AUTO, converter=resolve_backend, static=True)
     dtype: Any = eqx.field(default=jnp.float32, converter=jnp.dtype, static=True)
     _arrays_validated: bool = eqx.field(default=False, converter=bool, static=True)
-    _flipped_variant_indices: Any = eqx.field(
+    _flipped_variant_indices: Int[Array, "flipped_variants"] = eqx.field(  # noqa: F722, F821
         default_factory=lambda: jnp.asarray([], dtype=jnp.int32),
         converter=jnp.asarray,
     )
@@ -122,17 +124,17 @@ class JaxLinearARG(eqx.Module):
     def from_lineararg_arrays(
         cls,
         *,
-        indptr: Any,
-        indices: Any,
-        data: Any,
-        variant_indices: Any,
-        flip: Any,
-        sample_indices: Any,
-        nonunique_indices: Any | None,
+        indptr: ArrayLike,
+        indices: ArrayLike,
+        data: ArrayLike,
+        variant_indices: ArrayLike,
+        flip: ArrayLike,
+        sample_indices: ArrayLike,
+        nonunique_indices: ArrayLike | None,
         n_variants: int,
         n_samples: int,
         n_nonunique_indices: int | None = None,
-        allele_counts: Any | None = None,
+        allele_counts: ArrayLike | None = None,
         backend: Backend = Backend.AUTO,
         dtype: Any = jnp.float32,
     ) -> "JaxLinearARG":
@@ -334,7 +336,7 @@ class JaxLinearARG(eqx.Module):
         """Return the operator shape `(n_samples, n_variants)`."""
         return (self.n_samples, self.n_variants)
 
-    def matmat(self, x: Any) -> Any:
+    def matmat(self, x: ArrayLike) -> Array:
         """Multiply by the represented genotype matrix.
 
         **Arguments:**
@@ -350,6 +352,25 @@ class JaxLinearARG(eqx.Module):
         - `ValueError`: If `x` has an incompatible rank or leading dimension.
         """
         x, was_vector = _as_rank2_matrix(x, expected_rows=self.n_variants, dtype=self.dtype)
+
+        @jax.custom_vjp
+        def product(values: Array) -> Array:
+            return self._matmat_rank2(values)
+
+        def product_fwd(values: Array) -> tuple[Array, None]:
+            return self._matmat_rank2(values), None
+
+        def product_bwd(_residual: None, cotangent: Array) -> tuple[Array]:
+            # The operator state is closed over and treated as fixed. Since this
+            # method is linear in `values`, the input cotangent is exactly the
+            # transpose product applied to the output cotangent.
+            return (self._rmatmat_rank2(cotangent),)
+
+        product.defvjp(product_fwd, product_bwd)
+        result = product(x)
+        return result[:, 0] if was_vector else result
+
+    def _matmat_rank2(self, x: Array) -> Array:
         flip_sign = jnp.where(self.flip, -1, 1).astype(x.dtype)
         b = jnp.zeros((self.n_nonunique_indices, x.shape[1]), dtype=x.dtype)
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
@@ -367,10 +388,9 @@ class JaxLinearARG(eqx.Module):
         # correction. A dense mask multiply materializes work for every variant.
         flip_sum = jnp.sum(x[self._flipped_variant_indices, :], axis=0)
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
-        result = solved[sample_nonunique_indices, :] + flip_sum
-        return result[:, 0] if was_vector else result
+        return solved[sample_nonunique_indices, :] + flip_sum
 
-    def rmatmat(self, x: Any) -> Any:
+    def rmatmat(self, x: ArrayLike) -> Array:
         """Multiply by the transpose of the represented genotype matrix.
 
         **Arguments:**
@@ -386,6 +406,23 @@ class JaxLinearARG(eqx.Module):
         - `ValueError`: If `x` has an incompatible rank or leading dimension.
         """
         x, was_vector = _as_rank2_matrix(x, expected_rows=self.n_samples, dtype=self.dtype)
+
+        @jax.custom_vjp
+        def product(values: Array) -> Array:
+            return self._rmatmat_rank2(values)
+
+        def product_fwd(values: Array) -> tuple[Array, None]:
+            return self._rmatmat_rank2(values), None
+
+        def product_bwd(_residual: None, cotangent: Array) -> tuple[Array]:
+            # This is the adjoint pair to `matmat`: d(X.T @ y)/dy = X.
+            return (self._matmat_rank2(cotangent),)
+
+        product.defvjp(product_fwd, product_bwd)
+        result = product(x)
+        return result[:, 0] if was_vector else result
+
+    def _rmatmat_rank2(self, x: Array) -> Array:
         b = jnp.zeros((self.n_nonunique_indices, x.shape[1]), dtype=x.dtype)
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
         b = b.at[sample_nonunique_indices, :].set(x)
@@ -401,14 +438,13 @@ class JaxLinearARG(eqx.Module):
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
         values = solved[variant_nonunique_indices, :]
         total = jnp.sum(x, axis=0)
-        result = jnp.where(self.flip[:, None], total[None, :] - values, values)
-        return result[:, 0] if was_vector else result
+        return jnp.where(self.flip[:, None], total[None, :] - values, values)
 
-    def matvec(self, x: Any) -> Any:
+    def matvec(self, x: ArrayLike) -> Array:
         """Multiply a vector by the represented genotype matrix."""
         return self.matmat(x)
 
-    def rmatvec(self, x: Any) -> Any:
+    def rmatvec(self, x: ArrayLike) -> Array:
         """Multiply a vector by the transpose of the represented matrix."""
         return self.rmatmat(x)
 
@@ -421,7 +457,7 @@ class JaxLinearARG(eqx.Module):
         """Return a lightweight transpose view of this operator."""
         return _TransposeView(self)
 
-    def __matmul__(self, x: Any) -> Any:
+    def __matmul__(self, x: ArrayLike) -> Array:
         return self.matmat(x)
 
 
@@ -436,19 +472,19 @@ class _TransposeView(eqx.Module):
         rows, cols = self.parent.shape
         return (cols, rows)
 
-    def matmat(self, x: Any) -> Any:
+    def matmat(self, x: ArrayLike) -> Array:
         """Multiply by the transposed matrix."""
         return self.parent.rmatmat(x)
 
-    def rmatmat(self, x: Any) -> Any:
+    def rmatmat(self, x: ArrayLike) -> Array:
         """Multiply by the original matrix."""
         return self.parent.matmat(x)
 
-    def matvec(self, x: Any) -> Any:
+    def matvec(self, x: ArrayLike) -> Array:
         """Multiply a vector by the transposed matrix."""
         return self.matmat(x)
 
-    def rmatvec(self, x: Any) -> Any:
+    def rmatvec(self, x: ArrayLike) -> Array:
         """Multiply a vector by the original matrix."""
         return self.rmatmat(x)
 
@@ -461,18 +497,18 @@ class _TransposeView(eqx.Module):
         """Return the original non-transposed operator."""
         return self.parent
 
-    def __matmul__(self, x: Any) -> Any:
+    def __matmul__(self, x: ArrayLike) -> Array:
         return self.matmat(x)
 
 
-def _canonical_allele_counts_array(allele_counts: Any | None, *, n_variants: int) -> np.ndarray:
+def _canonical_allele_counts_array(allele_counts: ArrayLike | None, *, n_variants: int) -> np.ndarray:
     if allele_counts is None:
         return np.full((n_variants,), -1, dtype=np.int32)
     return np.asarray(allele_counts, dtype=np.int32)
 
 
 def _validate_array_shapes(
-    arrays: dict[str, Any],
+    arrays: dict[str, ArrayLike],
     *,
     n_variants: int,
     n_samples: int,
@@ -567,7 +603,7 @@ def _ffi_cpu_unavailable_message() -> str:
     return f"FFI_CPU backend is unavailable ({error}); falling back to PURE_JAX."
 
 
-def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Array, bool]:
+def _as_rank2_matrix(x: ArrayLike, *, expected_rows: int, dtype: Any) -> tuple[Array, bool]:
     array = jnp.asarray(x, dtype=dtype)
     if array.ndim == 1:
         array = array.reshape(-1, 1)
@@ -598,13 +634,13 @@ def _as_rank2_matrix(x: Any, *, expected_rows: int, dtype: Any) -> tuple[jax.Arr
 @partial(jax.custom_vjp, nondiff_argnums=(0, 5))
 def _solve_forward(
     backend: Backend,
-    indptr: Any,
-    indices: Any,
-    data: Any,
-    nonunique_indices: Any,
+    indptr: ArrayLike,
+    indices: ArrayLike,
+    data: ArrayLike,
+    nonunique_indices: ArrayLike,
     min_index_to_keep: int,
-    b: Any,
-) -> jax.Array:
+    b: ArrayLike,
+) -> Array:
     # Primal forward solve used by `matmat`.
     backend = _resolve_solve_backend(backend)
     return _FORWARD_SOLVERS[backend](
@@ -619,13 +655,13 @@ def _solve_forward(
 
 def _solve_forward_fwd(
     backend: Backend,
-    indptr: Any,
-    indices: Any,
-    data: Any,
-    nonunique_indices: Any,
+    indptr: ArrayLike,
+    indices: ArrayLike,
+    data: ArrayLike,
+    nonunique_indices: ArrayLike,
     min_index_to_keep: int,
-    b: Any,
-) -> tuple[jax.Array, tuple[Any, Any, Any, Any]]:
+    b: ArrayLike,
+) -> tuple[Array, tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike]]:
     # This is the "fwd" half of JAX's custom VJP protocol, not another forward
     # triangular solve. It computes the primal output and returns residual data
     # that the "bwd" half will need later.
@@ -653,9 +689,9 @@ def _solve_forward_fwd(
 def _solve_forward_bwd(
     backend: Backend,
     min_index_to_keep: int,
-    residual: tuple[Any, Any, Any, Any],
-    grad: Any,
-) -> tuple[None, None, None, None, jax.Array]:
+    residual: tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike],
+    grad: ArrayLike,
+) -> tuple[None, None, None, None, Array]:
     indptr, indices, data, nonunique_indices = residual
     # `grad` is the cotangent for the solved state, dL/d(S b). To get the
     # cotangent for the right-hand side, we apply the adjoint map S.T to `grad`.
@@ -685,13 +721,13 @@ _solve_forward.defvjp(_solve_forward_fwd, _solve_forward_bwd)
 @partial(jax.custom_vjp, nondiff_argnums=(0, 5))
 def _solve_backward(
     backend: Backend,
-    indptr: Any,
-    indices: Any,
-    data: Any,
-    nonunique_indices: Any,
+    indptr: ArrayLike,
+    indices: ArrayLike,
+    data: ArrayLike,
+    nonunique_indices: ArrayLike,
     min_index_to_keep: int,
-    b: Any,
-) -> jax.Array:
+    b: ArrayLike,
+) -> Array:
     # Primal backward solve used by `rmatmat`.
     backend = _resolve_solve_backend(backend)
     return _BACKWARD_SOLVERS[backend](
@@ -706,13 +742,13 @@ def _solve_backward(
 
 def _solve_backward_fwd(
     backend: Backend,
-    indptr: Any,
-    indices: Any,
-    data: Any,
-    nonunique_indices: Any,
+    indptr: ArrayLike,
+    indices: ArrayLike,
+    data: ArrayLike,
+    nonunique_indices: ArrayLike,
     min_index_to_keep: int,
-    b: Any,
-) -> tuple[jax.Array, tuple[Any, Any, Any, Any]]:
+    b: ArrayLike,
+) -> tuple[Array, tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike]]:
     # This mirrors `_solve_forward_fwd`: compute the primal backward solve and
     # save only the fixed graph arrays needed to apply the adjoint in reverse
     # mode. The primal output itself is unnecessary because the solve is linear.
@@ -731,9 +767,9 @@ def _solve_backward_fwd(
 def _solve_backward_bwd(
     backend: Backend,
     min_index_to_keep: int,
-    residual: tuple[Any, Any, Any, Any],
-    grad: Any,
-) -> tuple[None, None, None, None, jax.Array]:
+    residual: tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike],
+    grad: ArrayLike,
+) -> tuple[None, None, None, None, Array]:
     indptr, indices, data, nonunique_indices = residual
     # Here the primal map is the backward solve, call it T. The incoming `grad`
     # is dL/d(T b), so dL/db = T.T @ grad. T.T is the forward solve over the same
