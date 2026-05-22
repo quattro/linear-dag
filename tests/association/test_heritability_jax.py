@@ -167,3 +167,88 @@ def test_jax_randomized_haseman_elston_uses_jax_arrays_in_matmat():
 
     assert grm.observed_types
     assert all(not issubclass(observed, np.ndarray) for observed in grm.observed_types)
+
+
+def test_jax_randomized_haseman_elston_prefers_blockwise_grm_matmat():
+    class RecordingGRM:
+        shape = (4, 4)
+        dtype = jnp.float32
+        iids = pl.Series("iids", ["a", "a", "b", "b"]).cast(pl.Utf8)
+
+        def __init__(self):
+            self.default_calls = 0
+            self.blockwise_calls = 0
+
+        def matmat(self, values):
+            self.default_calls += 1
+            return values
+
+        def matmat_blockwise(self, values):
+            self.blockwise_calls += 1
+            return values
+
+    grm = RecordingGRM()
+    data = pl.DataFrame(
+        {
+            "iid": ["a", "b"],
+            "trait": [0.25, -0.5],
+            "intercept": [1.0, 1.0],
+        }
+    )
+
+    randomized_haseman_elston_jax(
+        grm,
+        data.lazy(),
+        ["trait"],
+        ["intercept"],
+        num_matvecs=2,
+        trace_est="hutchinson",
+        sampler="normal",
+        seed=1,
+    )
+
+    assert grm.blockwise_calls > 0
+    assert grm.default_calls == 0
+
+
+def test_jax_randomized_haseman_elston_allows_default_grm_matmat_opt_out(monkeypatch):
+    class RecordingGRM:
+        shape = (4, 4)
+        dtype = jnp.float32
+        iids = pl.Series("iids", ["a", "a", "b", "b"]).cast(pl.Utf8)
+
+        def __init__(self):
+            self.default_calls = 0
+            self.blockwise_calls = 0
+
+        def matmat(self, values):
+            self.default_calls += 1
+            return values
+
+        def matmat_blockwise(self, values):
+            self.blockwise_calls += 1
+            return values
+
+    monkeypatch.setenv("LINEAR_DAG_JAX_RHE_BLOCKWISE_GRM", "0")
+    grm = RecordingGRM()
+    data = pl.DataFrame(
+        {
+            "iid": ["a", "b"],
+            "trait": [0.25, -0.5],
+            "intercept": [1.0, 1.0],
+        }
+    )
+
+    randomized_haseman_elston_jax(
+        grm,
+        data.lazy(),
+        ["trait"],
+        ["intercept"],
+        num_matvecs=2,
+        trace_est="hutchinson",
+        sampler="normal",
+        seed=1,
+    )
+
+    assert grm.default_calls > 0
+    assert grm.blockwise_calls == 0

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from collections.abc import Callable
 from functools import partial
@@ -22,6 +23,9 @@ from numpy.random import Generator
 
 from linear_dag.core.alignment import get_iid_alignment, IidAlignment
 from linear_dag.core.jaxlinarg import JaxGRMOperator
+
+_BLOCKWISE_GRM_ENV = "LINEAR_DAG_JAX_RHE_BLOCKWISE_GRM"
+_FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 
 
 def randomized_haseman_elston(
@@ -129,12 +133,12 @@ class _PreparedRHEInputs(tuple):
 
 
 class _ResidualizedJaxGRM:
-    def __init__(self, base_matmat: Callable[[Array], Array], covariates: Array):
+    def __init__(self, base_matmat: Callable[[Array], Array], covariates: Array, *, jit_matmat: bool = True):
         self._base_matmat = base_matmat
         self._basis = _orthonormal_covariate_basis(covariates)
         self.shape = (covariates.shape[0], covariates.shape[0])
         self.residual_rank = self.shape[0] - self._basis.shape[1]
-        self.matmat = jax.jit(self._matmat)
+        self.matmat = jax.jit(self._matmat) if jit_matmat else self._matmat
 
     def _project(self, values: Array) -> Array:
         if self._basis.shape[1] == 0:
@@ -248,14 +252,22 @@ def _build_residualized_operator(
     alignment: IidAlignment,
     covariates: Array,
 ) -> _ResidualizedJaxGRM:
+    use_blockwise_grm = _should_use_blockwise_grm(grm)
+    grm_matmat = grm.matmat_blockwise if use_blockwise_grm else grm.matmat
+
     def base_matmat(values: Array) -> Array:
         merged = alignment.gather_left_jax(values)
         haplotype_values = alignment.scatter_right_jax(merged)
-        haplotype_result = grm.matmat(haplotype_values)
+        haplotype_result = grm_matmat(haplotype_values)
         merged_result = alignment.gather_right_jax(haplotype_result)
         return 0.5 * alignment.scatter_left_jax(merged_result)
 
-    return _ResidualizedJaxGRM(base_matmat, covariates)
+    return _ResidualizedJaxGRM(base_matmat, covariates, jit_matmat=not use_blockwise_grm)
+
+
+def _should_use_blockwise_grm(grm: JaxGRMOperator) -> bool:
+    setting = os.environ.get(_BLOCKWISE_GRM_ENV, "1").strip().lower()
+    return setting not in _FALSE_ENV_VALUES and hasattr(grm, "matmat_blockwise")
 
 
 _Sampler = Callable[[int, int], Array]

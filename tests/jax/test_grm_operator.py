@@ -147,6 +147,39 @@ def test_jax_grm_parallel_operator_matches_dense_blocks(linarg_h5_path, linarg_b
     np.testing.assert_allclose(np.asarray(result), expected, rtol=1e-4, atol=1e-4)
 
 
+def test_jax_grm_blockwise_matmat_matches_default_parallel_operator(linarg_h5_path, linarg_block_metadata):
+    op = JaxParallelOperator.from_hdf5(
+        linarg_h5_path,
+        mesh=_mesh(),
+        block_metadata=linarg_block_metadata,
+        backend=Backend.PURE_JAX,
+    )
+    grm = JaxGRMOperator(op, alpha=-1.0)
+    y = jnp.arange(op.shape[0] * 3, dtype=jnp.float32).reshape(op.shape[0], 3)
+
+    result = grm.matmat_blockwise(y)
+    expected = grm.matmat(y)
+
+    np.testing.assert_allclose(np.asarray(result), np.asarray(expected), rtol=1e-4, atol=1e-4)
+
+
+def test_jax_grm_blockwise_matvec_restores_vector_outputs(linarg_h5_path, linarg_block_metadata):
+    op = JaxParallelOperator.from_hdf5(
+        linarg_h5_path,
+        mesh=_mesh(),
+        block_metadata=linarg_block_metadata,
+        backend=Backend.PURE_JAX,
+    )
+    grm = JaxGRMOperator(op, alpha=-1.0)
+    y = jnp.arange(op.shape[0], dtype=jnp.float32)
+
+    result = grm.matmat_blockwise(y)
+    expected = grm.matmat(y)
+
+    assert result.shape == (op.shape[0],)
+    np.testing.assert_allclose(np.asarray(result), np.asarray(expected), rtol=1e-4, atol=1e-4)
+
+
 def test_jax_grm_matches_existing_grm_operator(linarg_h5_path, linarg_block_metadata):
     op = JaxParallelOperator.from_hdf5(
         linarg_h5_path,
