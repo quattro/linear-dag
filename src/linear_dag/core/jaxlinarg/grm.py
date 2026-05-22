@@ -256,13 +256,16 @@ def _block_grm_product(
     if center:
         # Apply `(X - 1 f^T)^T values` without forming centered genotypes:
         # `X^T values - f (1^T values)`.
-        variant_scores = variant_scores - frequencies[:, None] * jnp.sum(values, axis=0, keepdims=True)
-    weighted_scores = weights[:, None] * variant_scores
+        value_sums = jnp.sum(values, axis=0, keepdims=True)
+        weighted_scores = weights[:, None] * (variant_scores - frequencies[:, None] * value_sums)
+        correction = jnp.sum(frequencies[:, None] * weighted_scores, axis=0, keepdims=True)
+    else:
+        correction = None
+        weighted_scores = weights[:, None] * variant_scores
 
     result = block.matmat(weighted_scores)
     if center:
         # Apply the left centering factor:
         # `(X - 1 f^T) weighted_scores = X weighted_scores - 1 (f^T weighted_scores)`.
-        correction = jnp.sum(frequencies[:, None] * weighted_scores, axis=0, keepdims=True)
         result = result - correction
     return result
