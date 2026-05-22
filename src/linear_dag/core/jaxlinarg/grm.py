@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 import equinox as eqx
 import jax
@@ -45,6 +46,7 @@ class JaxGRMOperator(eqx.Module):
     operator: JaxLinearARG | JaxParallelOperator
     alpha: float = eqx.field(default=-1.0, converter=float, static=True)
     center: bool = eqx.field(default=True, converter=bool, static=True)
+    iids: Any = eqx.field(default=None, static=True)
 
     def __check_init__(self) -> None:
         if not isinstance(self.operator, (JaxLinearARG, JaxParallelOperator)):

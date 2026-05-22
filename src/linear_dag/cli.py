@@ -8,10 +8,12 @@ import sys
 import time
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from importlib import metadata
 from os import PathLike
 from typing import Optional, Union
 
+import numpy as np
 import polars as pl
 
 from linear_dag.pipeline import (
@@ -24,10 +26,11 @@ from linear_dag.pipeline import (
     msc_step5,
 )
 
+from .association._heritability_jax import randomized_haseman_elston as randomized_haseman_elston_jax
 from .association.gwas import run_gwas
 from .association.heritability import randomized_haseman_elston
 from .association.prs import run_prs
-from .core.lineararg import list_blocks, load_variant_info
+from .core.lineararg import list_blocks, list_iids, load_variant_info
 from .core.parallel_processing import GRMOperator, ParallelOperator
 from .memory_logger import ensure_memory_usage_filter
 
@@ -529,11 +532,11 @@ def _estimate_h2g(args, logger):
         args.num_processes,
         logger,
     )
-    logger.info("Creating parallel operator")
-    operator_kwargs = _build_grm_operator_kwargs(args, block_metadata)
-    with GRMOperator.from_hdf5(args.linarg_path, **operator_kwargs) as grm:
+    logger.info("Creating %s operator", "JAX GRM" if getattr(args, "jax_backend", False) else "parallel GRM")
+    with _open_rhe_grm_operator(args, block_metadata, logger) as grm:
         logger.info("Estimating SNP heritability")
-        results = randomized_haseman_elston(
+        rhe_fn = randomized_haseman_elston_jax if getattr(args, "jax_backend", False) else randomized_haseman_elston
+        results = rhe_fn(
             grm,
             phenotypes.lazy(),
             pheno_cols,
@@ -549,6 +552,61 @@ def _estimate_h2g(args, logger):
         logger.info("Done!")
 
     return
+
+
+def _open_rhe_grm_operator(args, block_metadata: pl.DataFrame, logger: logging.Logger):
+    if getattr(args, "jax_backend", False):
+        return _open_jax_grm_operator(args, block_metadata, logger)
+    operator_kwargs = _build_grm_operator_kwargs(args, block_metadata)
+    return GRMOperator.from_hdf5(args.linarg_path, **operator_kwargs)
+
+
+def _open_jax_grm_operator(args, block_metadata: pl.DataFrame, logger: logging.Logger):
+    _validate_jax_grm_backend_args(args)
+
+    import jax
+
+    from jax.sharding import Mesh
+
+    from .core.jaxlinarg import Backend, JaxGRMOperator, JaxParallelOperator
+
+    devices = tuple(jax.devices())
+    if not devices:
+        raise ValueError("No JAX devices are available for --jax-backend")
+
+    requested_devices = _validate_num_processes(args.num_processes)
+    if requested_devices is None:
+        device_count = len(devices)
+    else:
+        if requested_devices > len(devices):
+            logger.warning(
+                "`--num-processes` requested %d JAX devices, but only %d are available; using %d.",
+                requested_devices,
+                len(devices),
+                len(devices),
+            )
+        device_count = min(requested_devices, len(devices))
+    device_count = max(1, min(device_count, block_metadata.height))
+
+    logger.info("Creating JAX GRM operator with %d device(s)", device_count)
+    mesh = Mesh(np.asarray(devices[:device_count]), ("blocks",))
+    operator = JaxParallelOperator.from_hdf5(
+        args.linarg_path,
+        mesh=mesh,
+        block_metadata=block_metadata,
+        backend=Backend.AUTO,
+    )
+    grm = JaxGRMOperator(operator, alpha=-1.0, iids=list_iids(args.linarg_path))
+    return nullcontext(grm)
+
+
+def _validate_jax_grm_backend_args(args) -> None:
+    if (
+        getattr(args, "maf_log10_threshold", None) is not None
+        or getattr(args, "bed", None) is not None
+        or getattr(args, "bed_maf_log10_threshold", None) is not None
+    ):
+        raise ValueError("--jax-backend does not yet support variant filtering for RHE")
 
 
 def _prep_data(
@@ -1203,6 +1261,11 @@ def _add_assoc_rhe_variant_filtering_options(group) -> None:
 
 def _add_rhe_estimator_group(parser: argparse.ArgumentParser) -> None:
     rhe_group = parser.add_argument_group("RHE Estimator")
+    rhe_group.add_argument(
+        "--jax-backend",
+        action="store_true",
+        help="Use the experimental JAX GRM operator instead of the Cython ParallelOperator-backed GRM.",
+    )
     rhe_group.add_argument(
         "--num-matvecs",
         type=int,

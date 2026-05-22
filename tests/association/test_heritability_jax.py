@@ -1,0 +1,169 @@
+# pattern: Mixed (unavoidable)
+# Reason: These tests construct real HDF5-backed operators, then compare the
+# JAX RHE numerical path against the existing Cython-backed RHE implementation.
+
+from pathlib import Path
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import polars as pl
+
+from jax.sharding import Mesh
+
+from linear_dag.association._heritability_jax import randomized_haseman_elston as randomized_haseman_elston_jax
+from linear_dag.association.heritability import randomized_haseman_elston
+from linear_dag.core.jaxlinarg import Backend, JaxGRMOperator, JaxParallelOperator
+from linear_dag.core.lineararg import list_blocks, list_iids
+from linear_dag.core.parallel_processing import GRMOperator
+
+PHENO_COLS = ["height", "bmi"]
+COVAR_COLS = ["sex"]
+
+
+def _jax_grm_from_hdf5(path: Path) -> JaxGRMOperator:
+    mesh = Mesh(np.asarray(jax.devices()[:1]), ("blocks",))
+    operator = JaxParallelOperator.from_hdf5(
+        str(path),
+        mesh=mesh,
+        block_metadata=list_blocks(path),
+        backend=Backend.PURE_JAX,
+    )
+    return JaxGRMOperator(operator, alpha=-1.0, iids=list_iids(path))
+
+
+def _phenotypes() -> pl.DataFrame:
+    frame = pl.read_csv(Path("tests/testdata/phenotypes_50.tsv"), separator="\t")
+    return frame.select(["iid", *PHENO_COLS, *COVAR_COLS]).with_columns(pl.lit(1.0).alias("intercept"))
+
+
+def test_jax_randomized_haseman_elston_matches_cython_hutchinson(linarg_h5_path: Path):
+    data = _phenotypes()
+    covar_cols = ["intercept", *COVAR_COLS]
+
+    with GRMOperator.from_hdf5(linarg_h5_path, num_processes=1, alpha=-1.0) as cython_grm:
+        expected = randomized_haseman_elston(
+            cython_grm,
+            data.lazy(),
+            PHENO_COLS,
+            covar_cols,
+            num_matvecs=4,
+            trace_est="hutchinson",
+            sampler="normal",
+            seed=20260522,
+        )
+
+    observed = randomized_haseman_elston_jax(
+        _jax_grm_from_hdf5(linarg_h5_path),
+        data.lazy(),
+        PHENO_COLS,
+        covar_cols,
+        num_matvecs=4,
+        trace_est="hutchinson",
+        sampler="normal",
+        seed=20260522,
+    )
+
+    np.testing.assert_allclose(
+        observed.select(["s2g", "s2e", "h2g"]).to_numpy(),
+        expected.select(["s2g", "s2e", "h2g"]).to_numpy(),
+        rtol=2e-5,
+        atol=2e-5,
+    )
+
+
+def test_jax_randomized_haseman_elston_reorders_phenotype_rows(linarg_h5_path: Path):
+    data = _phenotypes().sort("iid", descending=True)
+    covar_cols = ["intercept", *COVAR_COLS]
+
+    with GRMOperator.from_hdf5(linarg_h5_path, num_processes=1, alpha=-1.0) as cython_grm:
+        expected = randomized_haseman_elston(
+            cython_grm,
+            data.lazy(),
+            PHENO_COLS,
+            covar_cols,
+            num_matvecs=4,
+            trace_est="hutchinson",
+            sampler="rademacher",
+            seed=20260523,
+        )
+
+    observed = randomized_haseman_elston_jax(
+        _jax_grm_from_hdf5(linarg_h5_path),
+        data.lazy(),
+        PHENO_COLS,
+        covar_cols,
+        num_matvecs=4,
+        trace_est="hutchinson",
+        sampler="rademacher",
+        seed=20260523,
+    )
+
+    np.testing.assert_allclose(
+        observed.select(["s2g", "s2e", "h2g"]).to_numpy(),
+        expected.select(["s2g", "s2e", "h2g"]).to_numpy(),
+        rtol=2e-5,
+        atol=2e-5,
+    )
+
+
+def test_jax_randomized_haseman_elston_rejects_missing_iids(linarg_h5_path: Path):
+    grm = JaxGRMOperator(
+        JaxParallelOperator.from_hdf5(
+            str(linarg_h5_path),
+            mesh=Mesh(np.asarray(jax.devices()[:1]), ("blocks",)),
+            block_metadata=list_blocks(linarg_h5_path),
+            backend=Backend.PURE_JAX,
+        ),
+        alpha=-1.0,
+    )
+
+    try:
+        randomized_haseman_elston_jax(
+            grm,
+            _phenotypes().lazy(),
+            PHENO_COLS,
+            ["intercept", *COVAR_COLS],
+            num_matvecs=4,
+        )
+    except ValueError as error:
+        assert "iids" in str(error)
+    else:
+        raise AssertionError("missing JAX GRM iids should fail")
+
+
+def test_jax_randomized_haseman_elston_uses_jax_arrays_in_matmat():
+    class RecordingGRM:
+        shape = (4, 4)
+        dtype = jnp.float32
+        iids = pl.Series("iids", ["a", "a", "b", "b"]).cast(pl.Utf8)
+
+        def __init__(self):
+            self.observed_types = []
+
+        def matmat(self, values):
+            self.observed_types.append(type(values))
+            return values
+
+    grm = RecordingGRM()
+    data = pl.DataFrame(
+        {
+            "iid": ["a", "b"],
+            "trait": [0.25, -0.5],
+            "intercept": [1.0, 1.0],
+        }
+    )
+
+    randomized_haseman_elston_jax(
+        grm,
+        data.lazy(),
+        ["trait"],
+        ["intercept"],
+        num_matvecs=2,
+        trace_est="hutchinson",
+        sampler="normal",
+        seed=1,
+    )
+
+    assert grm.observed_types
+    assert all(not issubclass(observed, np.ndarray) for observed in grm.observed_types)
