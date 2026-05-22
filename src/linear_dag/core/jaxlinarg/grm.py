@@ -250,8 +250,7 @@ def _block_grm_product(
         block.n_samples, dtype=values.dtype
     )
     pq = frequencies * (1 - frequencies)
-    safe_pq = jnp.where(pq > 0, pq, jnp.ones_like(pq))
-    weights = jnp.where(pq > 0, safe_pq**alpha, jnp.zeros_like(pq))
+    weights = jnp.where(pq > 0, pq**alpha, jnp.zeros_like(pq))
 
     variant_scores = block.rmatmat(values)
     if center:
