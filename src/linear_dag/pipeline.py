@@ -64,7 +64,8 @@ def compress_vcf(
     - `flip_minor_alleles`: Whether to minor-allele flip genotypes while loading.
     - `maf_filter`: Optional MAF filter during VCF loading.
     - `remove_indels`: Whether to remove indel variants.
-    - `remove_multiallelics`: Whether to remove multiallelic sites.
+    - `remove_multiallelics`: Whether to exclude multiallelic sites instead of
+      raising an error.
     - `add_individual_nodes`: Whether to append individual nodes before writing.
 
     **Returns:**
@@ -706,6 +707,8 @@ def make_genotype_matrix(
         Empty regions are represented explicitly by an `is_empty` HDF5 attribute
         and a sentinel metadata text file so downstream steps can skip them
         deterministically.
+
+        Multiallelic variants raise an error unless `remove_multiallelics=True`.
     """
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/variant_metadata/", exist_ok=True)

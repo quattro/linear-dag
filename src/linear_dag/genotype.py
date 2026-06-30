@@ -49,7 +49,8 @@ def read_vcf(
     - `samples`: Optional sample IDs to include.
     - `maf_filter`: Optional MAF threshold for variant filtering.
     - `remove_indels`: If `True`, skip indel records.
-    - `remove_multiallelics`: If `True`, skip multiallelic variants.
+    - `remove_multiallelics`: If `True`, skip multiallelic variants. If
+      `False`, multiallelic variants raise a `ValueError`.
     - `sex`: Optional sex vector (`0` female / `1` male) for ploidy-aware filtering.
 
     **Returns:**
@@ -63,7 +64,8 @@ def read_vcf(
 
     **Raises:**
 
-    - `ValueError`: If `samples` is provided but none are present in the VCF.
+    - `ValueError`: If `samples` is provided but none are present in the VCF,
+      or if a multiallelic variant is encountered and `remove_multiallelics=False`.
     """
 
     def _update_dict_from_vcf(var: cv.Variant, data: DefaultDict[str, list]) -> DefaultDict[str, list]:
@@ -133,17 +135,27 @@ def read_vcf(
         start = 0
         end = np.inf
 
+    variants = vcf(region) if region else vcf
+
     # TODO: handle missing data
-    for var in vcf(region):
+    for var in variants:
         if (var.POS < start) or (var.POS > end):
             continue  # ignore indels that are outside of region
+
+        if len(var.ALT) > 1:
+            if remove_multiallelics:
+                continue
+            variant_id = var.ID if var.ID is not None else "."
+            raise ValueError(
+                "Multiallelic variant encountered in VCF/BCF input: "
+                f"{var.CHROM}:{var.POS} ID={variant_id} REF={var.REF} ALT={','.join(var.ALT)}. "
+                "Multiallelic variants are not supported by default; use "
+                "`remove_multiallelics=True` or `--remove-multiallelics` to exclude them."
+            )
 
         if remove_indels:
             if any(len(alt) != 1 for alt in var.ALT) or len(var.REF) != 1:
                 continue
-
-        if remove_multiallelics and len(var.ALT) > 1:
-            continue
 
         gts, is_flipped = final_read(var, flip_minor_alleles)
 

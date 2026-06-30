@@ -74,6 +74,13 @@ class LinearARG(LinearOperator):
     sex: Optional[npt.NDArray[np.int32]] = None  # determines how individual_indices are handled
     # allele_counts: Optional[npt.NDArray[np.int32]] = None
 
+    def __post_init__(self) -> None:
+        # SciPy's LinearOperator namespace checks expect subclasses to define
+        # this attribute. LinearARG exposes shape/dtype as derived properties,
+        # so it cannot call LinearOperator.__init__ directly.
+        reference_operator = aslinearoperator(np.empty((0, 0), dtype=self.A.dtype))
+        self._xp = getattr(reference_operator, "_xp", np)
+
     @cached_property
     def allele_counts(self) -> npt.NDArray[np.int32]:
         """Return per-variant alternate-allele counts across all sample rows.
@@ -281,7 +288,8 @@ class LinearARG(LinearOperator):
         - `logger`: Optional logger for timing/progress output.
         - `maf_filter`: Optional MAF filter applied during VCF parsing.
         - `snps_only`: Whether to remove indels.
-        - `remove_multiallelics`: Whether to remove multi-allelic sites.
+        - `remove_multiallelics`: Whether to exclude multiallelic sites instead
+          of raising an error.
 
         **Returns:**
 
@@ -291,7 +299,8 @@ class LinearARG(LinearOperator):
 
         **Raises:**
 
-        - `ValueError`: If no valid variants are found in the VCF after filtering.
+        - `ValueError`: If no valid variants are found in the VCF after filtering,
+          or if a multiallelic variant is encountered and `remove_multiallelics=False`.
         """
         import time
 

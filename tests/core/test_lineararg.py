@@ -1,6 +1,9 @@
 import h5py
 import numpy as np
 import polars as pl
+import pytest
+import shutil
+import subprocess
 
 from scipy.sparse import csc_matrix
 
@@ -36,6 +39,52 @@ def test_read_vcf(test_data_dir):
     assert len(flip) == len(v_info)
 
 
+def test_read_vcf_rejects_multiallelic_by_default(test_data_dir):
+    """Test that multiallelic records fail unless explicitly excluded."""
+    vcf_path = test_data_dir / "tiny.ma.vcf.gz"
+
+    with pytest.raises(ValueError, match="Multiallelic variant encountered"):
+        read_vcf(vcf_path)
+
+
+def test_read_vcf_can_exclude_multiallelic_records(test_data_dir):
+    """Test explicit filtering of multiallelic records."""
+    vcf_path = test_data_dir / "tiny.ma.vcf.gz"
+    genotypes, flip, v_info, iids = read_vcf(vcf_path, remove_multiallelics=True)
+
+    assert isinstance(genotypes, csc_matrix)
+    assert isinstance(flip, np.ndarray)
+    assert isinstance(v_info, pl.DataFrame)
+    assert isinstance(iids, list)
+    assert genotypes.shape[1] == len(v_info)
+    assert not v_info["ALT"].str.contains(",").any()
+
+
+def test_read_vcf_rejects_multiallelic_bcf_by_default(test_data_dir, tmp_path):
+    """Test BCF inputs follow the same multiallelic policy as VCF inputs."""
+    if shutil.which("bcftools") is None:
+        pytest.skip("bcftools is required to generate a temporary BCF fixture")
+
+    vcf_path = test_data_dir / "tiny.ma.vcf.gz"
+    bcf_path = tmp_path / "tiny.ma.bcf"
+    subprocess.run(
+        ["bcftools", "view", "-Ob", "-o", str(bcf_path), str(vcf_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    with pytest.raises(ValueError, match="Multiallelic variant encountered"):
+        read_vcf(bcf_path)
+
+    genotypes, flip, v_info, iids = read_vcf(bcf_path, remove_multiallelics=True)
+    assert isinstance(genotypes, csc_matrix)
+    assert isinstance(flip, np.ndarray)
+    assert isinstance(v_info, pl.DataFrame)
+    assert isinstance(iids, list)
+    assert not v_info["ALT"].str.contains(",").any()
+
+
 def test_from_vcf(test_data_dir):
     """Test creating a LinearARG from a VCF file."""
     vcf_path = test_data_dir / "1kg_small.vcf"
@@ -49,6 +98,14 @@ def test_from_vcf(test_data_dir):
     assert linarg.shape[1] > 0
     assert linarg.variants is not None
     assert linarg.variants.collect().height > 0
+
+
+def test_from_vcf_rejects_multiallelic_by_default(test_data_dir):
+    """Test that LinearARG construction propagates multiallelic input errors."""
+    vcf_path = test_data_dir / "tiny.ma.vcf.gz"
+
+    with pytest.raises(ValueError, match="Multiallelic variant encountered"):
+        LinearARG.from_vcf(vcf_path)
 
 
 def test_zero_ac_variants():

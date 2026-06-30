@@ -925,7 +925,9 @@ def _main(args):
     compress_p.add_argument("--maf", type=float, help="Filter out variants with MAF less than maf")
     compress_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
     compress_p.add_argument(
-        "--remove-multiallelics", action="store_true", help="Should multi-allelic sites be excluded?"
+        "--remove-multiallelics",
+        action="store_true",
+        help="Exclude multi-allelic sites instead of raising an error.",
     )
     compress_p.add_argument(
         "--add-individual-nodes", action="store_true", help="Add individual nodes for Hardy Weinberg calculations."
@@ -970,7 +972,11 @@ def _main(args):
         "--maf", type=float, nargs="?", const=None, default=None, help="Filter out variants with MAF < maf"
     )
     step0_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
-    step0_p.add_argument("--remove-multiallelics", action="store_true", help="Should multi-allelic sites be excluded?")
+    step0_p.add_argument(
+        "--remove-multiallelics",
+        action="store_true",
+        help="Exclude multi-allelic sites instead of raising an error.",
+    )
     step0_p.add_argument(
         "--sex-path",
         nargs="?",
