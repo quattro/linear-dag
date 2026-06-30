@@ -61,6 +61,74 @@ def test_msc_step1_skip_paths_log_via_logger_not_stdout(tmp_path: Path, caplog):
     )
 
 
+def test_msc_step0_records_remove_multiallelics_metadata(monkeypatch, tmp_path: Path):
+    vcf_metadata = tmp_path / "vcf_metadata.txt"
+    vcf_metadata.write_text("chr vcf_path\nchr1 input.vcf.gz\n")
+    out_dir = tmp_path / "kodama"
+
+    def _fake_check_output(cmd, shell, text):
+        if "head" in cmd:
+            return "100\n"
+        if "tail" in cmd:
+            return "200\n"
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(pipeline.subprocess, "check_output", _fake_check_output)
+
+    pipeline.msc_step0(
+        vcf_metadata=str(vcf_metadata),
+        large_partition_size=100,
+        n_small_blocks=2,
+        out=str(out_dir),
+        remove_multiallelics=True,
+    )
+
+    metadata = pl.read_parquet_metadata(out_dir / "job_metadata.parquet")
+    assert metadata["remove_multiallelics"] == "True"
+
+
+def test_msc_step1_reads_remove_multiallelics_metadata(monkeypatch, tmp_path: Path):
+    out_dir = tmp_path / "kodama"
+    jobs_metadata = tmp_path / "job_metadata.parquet"
+    pl.DataFrame(
+        {
+            "small_job_id": [0],
+            "large_job_id": [0],
+            "small_region": ["chr1:100-150"],
+            "large_region": ["chr1:100-200"],
+            "vcf_path": ["input.vcf.gz"],
+        }
+    ).write_parquet(
+        jobs_metadata,
+        metadata={
+            "flip_minor_alleles": "False",
+            "keep": "None",
+            "maf": "None",
+            "remove_indels": "False",
+            "remove_multiallelics": "True",
+            "sex_path": "None",
+            "mount_point": "",
+            "out": str(out_dir),
+            "large_partition_size": "100",
+            "n_small_blocks": "2",
+        },
+    )
+
+    captured = {}
+
+    def _fake_make_genotype_matrix(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(pipeline, "make_genotype_matrix", _fake_make_genotype_matrix)
+    monkeypatch.setattr(pipeline, "run_forward_backward", lambda *args, **kwargs: None)
+
+    pipeline.msc_step1(str(jobs_metadata), 0)
+
+    assert captured["vcf_path"] == "input.vcf.gz"
+    assert captured["region"] == "chr1:100-150"
+    assert captured["remove_multiallelics"] is True
+
+
 def test_load_genotypes_does_not_print_progress(tmp_path: Path):
     prefix = tmp_path / "geno"
     np.savetxt(prefix.with_suffix(".txt"), np.array([[0, 1], [1, 0]]), fmt="%d")

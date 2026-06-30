@@ -1344,6 +1344,23 @@ def test_compress_passes_injected_logger_to_pipeline(monkeypatch):
     assert captured["logger"] is injected
 
 
+def test_main_compress_remove_multiallelics_reaches_pipeline(monkeypatch, tmp_path: Path):
+    captured = {}
+
+    def _fake_compress_vcf(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli, "compress_vcf", _fake_compress_vcf)
+
+    output_h5 = tmp_path / "out.h5"
+    rc = cli._main(["-q", "compress", "input.vcf.gz", str(output_h5), "--remove-multiallelics"])
+
+    assert rc == 0 or rc is None
+    assert captured["input_vcf"] == "input.vcf.gz"
+    assert captured["output_h5"] == str(output_h5)
+    assert captured["remove_multiallelics"] is True
+
+
 def test_step1_passes_injected_logger_to_pipeline(monkeypatch):
     captured = {}
 
