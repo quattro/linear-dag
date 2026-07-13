@@ -26,6 +26,8 @@ class OneSparseMatrix:
     nonunit_values: np.ndarray
     shape: tuple[int, int]
 
+    __array_priority__ = 10.1
+
     def __post_init__(self) -> None:
         arrays = (
             self.indptr,
@@ -93,6 +95,24 @@ class OneSparseMatrix:
         return np.dtype(np.int32)
 
     @property
+    def data(self) -> np.ndarray:
+        """Materialize the logical CSC edge-weight array.
+
+        !!! info
+
+            The returned array is independent. Mutating it does not change the
+            compressed matrix; use [`linear_dag.core.one_sparse.OneSparseMatrix.to_csc`][]
+            when a mutable SciPy sparse matrix is required.
+
+        **Returns:**
+
+        - Dense `int32` edge weights aligned to `indices`.
+        """
+        data = np.ones(self.nnz, dtype=np.int32)
+        data[self.nonunit_edge_indices] = self.nonunit_values
+        return data
+
+    @property
     def nbytes(self) -> int:
         """Return bytes used by topology and compressed edge weights.
 
@@ -127,9 +147,7 @@ class OneSparseMatrix:
 
         - Equivalent CSC matrix with a dense `int32` values array.
         """
-        data = np.ones(self.nnz, dtype=np.int32)
-        data[self.nonunit_edge_indices] = self.nonunit_values
-        return csc_matrix((data, self.indices.copy(), self.indptr.copy()), shape=self.shape)
+        return csc_matrix((self.data, self.indices.copy(), self.indptr.copy()), shape=self.shape)
 
     def tocsc(self, copy: bool = True) -> csc_matrix:
         """Materialize the logical matrix as a SciPy CSC matrix.
@@ -200,3 +218,9 @@ class OneSparseMatrix:
 
     def __rsub__(self, other):
         return other - self.to_csc()
+
+    def __matmul__(self, other):
+        return self.to_csc() @ other
+
+    def __rmatmul__(self, other):
+        return other @ self.to_csc()

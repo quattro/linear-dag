@@ -73,7 +73,7 @@ Topology-changing operations materialize SciPy matrices only at their local boun
 
 ### On-disk effect
 
-The legacy HDF5 schema stores `indptr`, `indices`, and `data`. The default compressed schema stores:
+The default HDF5 schema remains the legacy-compatible `indptr`, `indices`, and `data` layout so files written by upgraded code remain readable by existing installations. An explicit compressed schema stores:
 
 ```text
 indptr
@@ -88,7 +88,7 @@ and sets the group attribute:
 edge_weight_encoding = "one_sparse_v1"
 ```
 
-The `data` dataset is omitted. Existing HDF5 files remain readable and are converted directly to compressed in-memory adjacency. Passing `compress_edge_weights=False` to `write()` or `write_blosc()` emits the legacy schema for consumers that have not been upgraded. Within new code, `linarg.A.to_csc()` provides the equivalent SciPy representation without changing the canonical stored form.
+The `data` dataset is omitted from the explicit compressed schema. Existing HDF5 files remain readable and are converted directly to compressed in-memory adjacency. Passing `compress_edge_weights=True` to `write()` or `write_blosc()` opts into compressed storage when all consumers understand `one_sparse_v1`; the default continues to emit `data`. Within new code, `linarg.A.to_csc()` provides the equivalent mutable SciPy representation without changing the canonical stored form.
 
 The on-disk reduction is much smaller than the in-memory reduction because HDF5 gzip compression already encodes a long, repetitive integer array efficiently. On three representative 20 Mb blocks, the optional format reduced total serialized size by 1.6%, 2.4%, and 1.9%. The main benefit is therefore resident memory, particularly when several blocks are loaded by parallel workers, rather than disk capacity.
 

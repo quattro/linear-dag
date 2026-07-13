@@ -189,6 +189,7 @@ def _rewrite_with_compressed_edge_weights(source: Path, destination: Path) -> No
                 "start": block_info["start"],
                 "end": block_info["end"],
             },
+            compress_edge_weights=True,
         )
 
 

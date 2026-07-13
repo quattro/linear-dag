@@ -758,7 +758,7 @@ class LinearARG(LinearOperator):
         block_info: Optional[dict] = None,
         compression_option: str = "gzip",
         save_allele_counts: bool = True,
-        compress_edge_weights: bool = True,
+        compress_edge_weights: bool = False,
     ):
         """Write this LinearARG to HDF5 in the package's on-disk schema.
 
@@ -886,7 +886,7 @@ class LinearARG(LinearOperator):
         save_threshold: bool = False,
         codec: str = "zstd",
         level: int = 5,
-        compress_edge_weights: bool = True,
+        compress_edge_weights: bool = False,
     ):
         """Write this LinearARG to HDF5 using Blosc-compressed datasets.
 
