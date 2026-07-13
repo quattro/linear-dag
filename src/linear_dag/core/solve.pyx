@@ -48,6 +48,53 @@ def spsolve_backward_triangular(A: "csc_matrix", b: np.ndarray) -> None:
                 b_view[node_idx] += b_view[indices[edge_idx]] * data[edge_idx]
 
 
+def spsolve_forward_triangular_one_sparse(A, b: np.ndarray) -> None:
+    """Solve ``(I-A)x = b`` in place for a default-one compressed matrix."""
+    cdef int[:] indptr = A.indptr
+    cdef int[:] indices = A.indices
+    cdef int[:] nonunit_indices = A.nonunit_edge_indices
+    cdef int[:] nonunit_values = A.nonunit_values
+    cdef double[:] b_view = b
+    cdef int num_nodes = len(indptr) - 1
+    cdef int node_idx, special_edge_idx, edge_idx = 0
+    cdef int nonunit_idx = 0
+    cdef int num_nonunit = len(nonunit_indices)
+    cdef double source
+
+    with nogil:
+        for node_idx in range(num_nodes):
+            source = b_view[node_idx]
+            while edge_idx < indptr[node_idx + 1]:
+                b_view[indices[edge_idx]] += source
+                edge_idx += 1
+            while nonunit_idx < num_nonunit and nonunit_indices[nonunit_idx] < indptr[node_idx + 1]:
+                special_edge_idx = nonunit_indices[nonunit_idx]
+                b_view[indices[special_edge_idx]] += (<double> nonunit_values[nonunit_idx] - 1.0) * source
+                nonunit_idx += 1
+
+
+def spsolve_backward_triangular_one_sparse(A, b: np.ndarray) -> None:
+    """Solve ``(I-A)'x = b`` in place for a default-one compressed matrix."""
+    cdef int[:] indptr = A.indptr
+    cdef int[:] indices = A.indices
+    cdef int[:] nonunit_indices = A.nonunit_edge_indices
+    cdef int[:] nonunit_values = A.nonunit_values
+    cdef double[:] b_view = b
+    cdef int num_nodes = len(indptr) - 1
+    cdef int node_idx, special_edge_idx, edge_idx = indptr[num_nodes]
+    cdef int nonunit_idx = len(nonunit_indices) - 1
+
+    with nogil:
+        for node_idx in range(num_nodes - 1, -1, -1):
+            while edge_idx > indptr[node_idx]:
+                edge_idx -= 1
+                b_view[node_idx] += b_view[indices[edge_idx]]
+            while nonunit_idx >= 0 and nonunit_indices[nonunit_idx] >= indptr[node_idx]:
+                special_edge_idx = nonunit_indices[nonunit_idx]
+                b_view[node_idx] += (<double> nonunit_values[nonunit_idx] - 1.0) * b_view[indices[special_edge_idx]]
+                nonunit_idx -= 1
+
+
 def spsolve_forward_triangular_matmat(A: "csc_matrix", b: np.ndarray, nonunique_indices: np.ndarray, min_index_to_keep: int) -> None:
     """Solves (I-A)x' = b' in place, where A is a lower-triangular, zero-diagonal CSC matrix.
     Assumes that b is Fortran-contiguous. nonunique_indices is an array of length equal to A.shape[0] that
@@ -259,6 +306,214 @@ cdef void _spsolve_backward_triangular_matmat_float32(
 
             # Call the BLAS axpy routine for destination += alpha * source
             blas.saxpy(vector_length_ptr, alpha_ptr, source_ptr, inc_ptr, destination_ptr, inc_ptr)
+
+
+def spsolve_forward_triangular_matmat_one_sparse(
+    A, b: np.ndarray, nonunique_indices: np.ndarray, min_index_to_keep: int
+) -> None:
+    """Solve ``(I-A)x' = b'`` in place for a default-one compressed matrix."""
+    if b.ndim == 1:
+        b = b.reshape(1, -1)
+    if b.dtype == np.float64:
+        _spsolve_forward_triangular_matmat_one_sparse_float64(
+            A.indptr, A.indices, A.nonunit_edge_indices, A.nonunit_values,
+            b, nonunique_indices, min_index_to_keep
+        )
+    elif b.dtype == np.float32:
+        _spsolve_forward_triangular_matmat_one_sparse_float32(
+            A.indptr, A.indices, A.nonunit_edge_indices, A.nonunit_values,
+            b, nonunique_indices, min_index_to_keep
+        )
+    else:
+        b_copy = b.astype(np.float64)
+        _spsolve_forward_triangular_matmat_one_sparse_float64(
+            A.indptr, A.indices, A.nonunit_edge_indices, A.nonunit_values,
+            b_copy, nonunique_indices, min_index_to_keep
+        )
+        b[:] = b_copy
+
+
+cdef void _spsolve_forward_triangular_matmat_one_sparse_float64(
+    int[:] indptr, int[:] indices, int[:] nonunit_indices, int[:] nonunit_values,
+    double[:, :] b_view, int[:] nonunique_indices, int min_index_to_keep
+) noexcept nogil:
+    cdef int node_idx, edge_idx = 0
+    cdef int stop_edge_idx
+    cdef int nonunit_idx = 0
+    cdef int num_nodes = len(indptr) - 1
+    cdef int num_nonunit = len(nonunit_indices)
+    cdef int vector_length = b_view.shape[0]
+    cdef int vector_bytes = vector_length * sizeof(double)
+    cdef int inc = 1
+    cdef double alpha = 1.0
+    cdef double* source_ptr
+    cdef double* destination_ptr
+
+    for node_idx in range(num_nodes):
+        if edge_idx == indptr[node_idx + 1]:
+            continue
+        source_ptr = &b_view[0, nonunique_indices[node_idx]]
+        while edge_idx < indptr[node_idx + 1]:
+            if nonunit_idx < num_nonunit and nonunit_indices[nonunit_idx] < indptr[node_idx + 1]:
+                stop_edge_idx = nonunit_indices[nonunit_idx]
+            else:
+                stop_edge_idx = indptr[node_idx + 1]
+            alpha = 1.0
+            while edge_idx < stop_edge_idx:
+                destination_ptr = &b_view[0, nonunique_indices[indices[edge_idx]]]
+                blas.daxpy(&vector_length, &alpha, source_ptr, &inc, destination_ptr, &inc)
+                edge_idx += 1
+            if edge_idx < indptr[node_idx + 1]:
+                alpha = <double> nonunit_values[nonunit_idx]
+                destination_ptr = &b_view[0, nonunique_indices[indices[edge_idx]]]
+                blas.daxpy(&vector_length, &alpha, source_ptr, &inc, destination_ptr, &inc)
+                edge_idx += 1
+                nonunit_idx += 1
+        if node_idx < min_index_to_keep:
+            memset(source_ptr, 0, vector_bytes)
+
+
+cdef void _spsolve_forward_triangular_matmat_one_sparse_float32(
+    int[:] indptr, int[:] indices, int[:] nonunit_indices, int[:] nonunit_values,
+    float[:, :] b_view, int[:] nonunique_indices, int min_index_to_keep
+) noexcept nogil:
+    cdef int node_idx, edge_idx = 0
+    cdef int stop_edge_idx
+    cdef int nonunit_idx = 0
+    cdef int num_nodes = len(indptr) - 1
+    cdef int num_nonunit = len(nonunit_indices)
+    cdef int vector_length = b_view.shape[0]
+    cdef int vector_bytes = vector_length * sizeof(float)
+    cdef int inc = 1
+    cdef float alpha = 1.0
+    cdef float* source_ptr
+    cdef float* destination_ptr
+
+    for node_idx in range(num_nodes):
+        if edge_idx == indptr[node_idx + 1]:
+            continue
+        source_ptr = &b_view[0, nonunique_indices[node_idx]]
+        while edge_idx < indptr[node_idx + 1]:
+            if nonunit_idx < num_nonunit and nonunit_indices[nonunit_idx] < indptr[node_idx + 1]:
+                stop_edge_idx = nonunit_indices[nonunit_idx]
+            else:
+                stop_edge_idx = indptr[node_idx + 1]
+            alpha = 1.0
+            while edge_idx < stop_edge_idx:
+                destination_ptr = &b_view[0, nonunique_indices[indices[edge_idx]]]
+                blas.saxpy(&vector_length, &alpha, source_ptr, &inc, destination_ptr, &inc)
+                edge_idx += 1
+            if edge_idx < indptr[node_idx + 1]:
+                alpha = <float> nonunit_values[nonunit_idx]
+                destination_ptr = &b_view[0, nonunique_indices[indices[edge_idx]]]
+                blas.saxpy(&vector_length, &alpha, source_ptr, &inc, destination_ptr, &inc)
+                edge_idx += 1
+                nonunit_idx += 1
+        if node_idx < min_index_to_keep:
+            memset(source_ptr, 0, vector_bytes)
+
+
+def spsolve_backward_triangular_matmat_one_sparse(
+    A, b: np.ndarray, nonunique_indices: np.ndarray, min_index_to_keep: int
+) -> None:
+    """Solve ``(I-A)'x' = b'`` in place for a default-one compressed matrix."""
+    if b.ndim == 1:
+        b = b.reshape(1, -1)
+    if b.dtype == np.float64:
+        _spsolve_backward_triangular_matmat_one_sparse_float64(
+            A.indptr, A.indices, A.nonunit_edge_indices, A.nonunit_values,
+            b, nonunique_indices, min_index_to_keep
+        )
+    elif b.dtype == np.float32:
+        _spsolve_backward_triangular_matmat_one_sparse_float32(
+            A.indptr, A.indices, A.nonunit_edge_indices, A.nonunit_values,
+            b, nonunique_indices, min_index_to_keep
+        )
+    else:
+        b_copy = b.astype(np.float64)
+        _spsolve_backward_triangular_matmat_one_sparse_float64(
+            A.indptr, A.indices, A.nonunit_edge_indices, A.nonunit_values,
+            b_copy, nonunique_indices, min_index_to_keep
+        )
+        b[:] = b_copy
+
+
+cdef void _spsolve_backward_triangular_matmat_one_sparse_float64(
+    int[:] indptr, int[:] indices, int[:] nonunit_indices, int[:] nonunit_values,
+    double[:, :] b_view, int[:] nonunique_indices, int min_index_to_keep
+) noexcept nogil:
+    cdef int num_nodes = len(indptr) - 1
+    cdef int node_idx, edge_idx = indptr[num_nodes]
+    cdef int stop_edge_idx
+    cdef int nonunit_idx = len(nonunit_indices) - 1
+    cdef int vector_length = b_view.shape[0]
+    cdef int vector_bytes = vector_length * sizeof(double)
+    cdef int inc = 1
+    cdef double alpha = 1.0
+    cdef double* source_ptr
+    cdef double* destination_ptr
+
+    for node_idx in range(num_nodes - 1, -1, -1):
+        if edge_idx == indptr[node_idx]:
+            continue
+        destination_ptr = &b_view[0, nonunique_indices[node_idx]]
+        if node_idx < min_index_to_keep:
+            memset(destination_ptr, 0, vector_bytes)
+        while edge_idx > indptr[node_idx]:
+            if nonunit_idx >= 0 and nonunit_indices[nonunit_idx] >= indptr[node_idx]:
+                stop_edge_idx = nonunit_indices[nonunit_idx]
+            else:
+                stop_edge_idx = indptr[node_idx] - 1
+            alpha = 1.0
+            while edge_idx - 1 > stop_edge_idx:
+                edge_idx -= 1
+                source_ptr = &b_view[0, nonunique_indices[indices[edge_idx]]]
+                blas.daxpy(&vector_length, &alpha, source_ptr, &inc, destination_ptr, &inc)
+            if edge_idx > indptr[node_idx]:
+                edge_idx -= 1
+                alpha = <double> nonunit_values[nonunit_idx]
+                source_ptr = &b_view[0, nonunique_indices[indices[edge_idx]]]
+                blas.daxpy(&vector_length, &alpha, source_ptr, &inc, destination_ptr, &inc)
+                nonunit_idx -= 1
+
+
+cdef void _spsolve_backward_triangular_matmat_one_sparse_float32(
+    int[:] indptr, int[:] indices, int[:] nonunit_indices, int[:] nonunit_values,
+    float[:, :] b_view, int[:] nonunique_indices, int min_index_to_keep
+) noexcept nogil:
+    cdef int num_nodes = len(indptr) - 1
+    cdef int node_idx, edge_idx = indptr[num_nodes]
+    cdef int stop_edge_idx
+    cdef int nonunit_idx = len(nonunit_indices) - 1
+    cdef int vector_length = b_view.shape[0]
+    cdef int vector_bytes = vector_length * sizeof(float)
+    cdef int inc = 1
+    cdef float alpha = 1.0
+    cdef float* source_ptr
+    cdef float* destination_ptr
+
+    for node_idx in range(num_nodes - 1, -1, -1):
+        if edge_idx == indptr[node_idx]:
+            continue
+        destination_ptr = &b_view[0, nonunique_indices[node_idx]]
+        if node_idx < min_index_to_keep:
+            memset(destination_ptr, 0, vector_bytes)
+        while edge_idx > indptr[node_idx]:
+            if nonunit_idx >= 0 and nonunit_indices[nonunit_idx] >= indptr[node_idx]:
+                stop_edge_idx = nonunit_indices[nonunit_idx]
+            else:
+                stop_edge_idx = indptr[node_idx] - 1
+            alpha = 1.0
+            while edge_idx - 1 > stop_edge_idx:
+                edge_idx -= 1
+                source_ptr = &b_view[0, nonunique_indices[indices[edge_idx]]]
+                blas.saxpy(&vector_length, &alpha, source_ptr, &inc, destination_ptr, &inc)
+            if edge_idx > indptr[node_idx]:
+                edge_idx -= 1
+                alpha = <float> nonunit_values[nonunit_idx]
+                source_ptr = &b_view[0, nonunique_indices[indices[edge_idx]]]
+                blas.saxpy(&vector_length, &alpha, source_ptr, &inc, destination_ptr, &inc)
+                nonunit_idx -= 1
         
 
 def add_at(destination: np.ndarray, 
@@ -611,8 +866,3 @@ cdef void _dfs(long node, Stack leaves_visited, long[:] indices, long[:] indptr,
         _dfs(neighbors[i], leaves_visited, indices, indptr, visited)
 
     
-
-
-
-
-

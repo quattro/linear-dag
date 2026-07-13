@@ -23,13 +23,18 @@ from linear_dag.genotype import read_vcf
 
 from .digraph import DiGraph
 from .linear_arg_inference import linear_arg_from_genotypes
+from .one_sparse import OneSparseMatrix
 from .one_summed_cy import linearize_brick_graph
 from .solve import (
     add_at,
     spsolve_backward_triangular,
     spsolve_backward_triangular_matmat,
+    spsolve_backward_triangular_matmat_one_sparse,
+    spsolve_backward_triangular_one_sparse,
     spsolve_forward_triangular,
     spsolve_forward_triangular_matmat,
+    spsolve_forward_triangular_matmat_one_sparse,
+    spsolve_forward_triangular_one_sparse,
     topological_sort,
 )
 
@@ -63,7 +68,7 @@ class LinearARG(LinearOperator):
         ```
     """
 
-    A: csc_matrix  # samples must be in descending order starting from the final row/col
+    A: Union[csc_matrix, OneSparseMatrix]  # samples must descend from the final row/col
     variant_indices: npt.NDArray[np.int32]
     flip: npt.NDArray[np.bool_]
     n_samples: np.int32
@@ -448,7 +453,10 @@ class LinearARG(LinearOperator):
         vi = np.zeros(self.A.shape[0], dtype=np.float64)
         vi[self.individual_indices[indiv_to_include]] = 2
         vi[self.sample_indices[np.repeat(indiv_to_include, 2)]] = -1
-        spsolve_backward_triangular(self.A, vi)
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_backward_triangular_one_sparse(self.A, vi)
+        else:
+            spsolve_backward_triangular(self.A, vi)
         return vi[self.variant_indices].astype(np.int32)
 
     def number_of_carriers(self, indiv_to_include: np.ndarray | None = None):
@@ -481,7 +489,10 @@ class LinearARG(LinearOperator):
         # n1 + n2
         vi = np.zeros(self.A.shape[0], dtype=np.float64)
         vi[self.individual_indices[indiv_to_include]] = 1
-        spsolve_backward_triangular(self.A, vi)
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_backward_triangular_one_sparse(self.A, vi)
+        else:
+            spsolve_backward_triangular(self.A, vi)
         alt_carriers = vi[self.variant_indices]
 
         if not np.any(self.flip):
@@ -490,7 +501,10 @@ class LinearARG(LinearOperator):
         # n1 + 2*n2
         vh = np.zeros(self.A.shape[0], dtype=np.float64)
         vh[self.sample_indices[np.repeat(indiv_to_include, 2)]] = 1
-        spsolve_backward_triangular(self.A, vh)
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_backward_triangular_one_sparse(self.A, vh)
+        else:
+            spsolve_backward_triangular(self.A, vh)
         hap_counts = vh[self.variant_indices]
 
         # handle flipped variants
@@ -616,7 +630,12 @@ class LinearARG(LinearOperator):
 
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
         add_at(v, variant_nonunique_indices, temp)
-        spsolve_forward_triangular_matmat(self.A, v, self.nonunique_indices, int(self.sample_indices[-1]))
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_forward_triangular_matmat_one_sparse(
+                self.A, v, self.nonunique_indices, int(self.sample_indices[-1])
+            )
+        else:
+            spsolve_forward_triangular_matmat(self.A, v, self.nonunique_indices, int(self.sample_indices[-1]))
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
         return v[:, sample_nonunique_indices].T + np.sum(other[self.flip], axis=0)
 
@@ -632,7 +651,12 @@ class LinearARG(LinearOperator):
         v = np.zeros((other.shape[1], self.num_nonunique_indices), dtype=other.dtype, order="F")
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
         v[:, sample_nonunique_indices] = other.T
-        spsolve_backward_triangular_matmat(self.A, v, self.nonunique_indices, int(self.sample_indices[-1]))
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_backward_triangular_matmat_one_sparse(
+                self.A, v, self.nonunique_indices, int(self.sample_indices[-1])
+            )
+        else:
+            spsolve_backward_triangular_matmat(self.A, v, self.nonunique_indices, int(self.sample_indices[-1]))
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
         v = v[:, variant_nonunique_indices]
         if np.any(self.flip):
@@ -669,7 +693,10 @@ class LinearARG(LinearOperator):
         v = np.zeros(self.A.shape[0], dtype=np.float64)
         temp = other.ravel().astype(np.float64) * ((-1) ** self.flip.ravel())
         np.add.at(v, self.variant_indices, temp)  # handles duplicate variant indices
-        spsolve_forward_triangular(self.A, v)
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_forward_triangular_one_sparse(self.A, v)
+        else:
+            spsolve_forward_triangular(self.A, v)
         result = np.asarray(v[self.sample_indices]) + np.sum(other[self.flip])
         return result if other.ndim == 1 else result.reshape(-1, 1)
 
@@ -683,7 +710,10 @@ class LinearARG(LinearOperator):
             )
         v = np.zeros(self.A.shape[0], dtype=np.float64)
         v[self.sample_indices] = other.ravel().astype(np.float64)
-        spsolve_backward_triangular(self.A, v)
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_backward_triangular_one_sparse(self.A, v)
+        else:
+            spsolve_backward_triangular(self.A, v)
         v = v[self.variant_indices]
         if np.any(self.flip):
             v[self.flip] = np.sum(other) - v[self.flip]
@@ -718,6 +748,7 @@ class LinearARG(LinearOperator):
         block_info: Optional[dict] = None,
         compression_option: str = "gzip",
         save_allele_counts: bool = True,
+        compress_edge_weights: bool = False,
     ):
         """Write this LinearARG to HDF5 in the package's on-disk schema.
 
@@ -732,6 +763,7 @@ class LinearARG(LinearOperator):
         - `h5_fname`: Base path/prefix used for output files.
         - `block_info`: Optional dictionary with keys `chrom`, `start`, and `end`.
         - `compression_option`: HDF5 compression option.
+        - `compress_edge_weights`: Store only indices and values of non-unit edges.
         - `save_allele_counts`: Whether to persist per-variant
           $\\mathbf{1}^\\top X$ counts for faster reloads.
 
@@ -768,7 +800,24 @@ class LinearARG(LinearOperator):
 
             destination.create_dataset("indptr", data=self.A.indptr, compression=compression_option, shuffle=True)
             destination.create_dataset("indices", data=self.A.indices, compression=compression_option, shuffle=True)
-            destination.create_dataset("data", data=self.A.data, compression=compression_option, shuffle=True)
+            if compress_edge_weights:
+                compressed_A = self.A if isinstance(self.A, OneSparseMatrix) else OneSparseMatrix.from_csc(self.A)
+                destination.attrs["edge_weight_encoding"] = "one_sparse_v1"
+                destination.create_dataset(
+                    "nonunit_edge_indices",
+                    data=compressed_A.nonunit_edge_indices,
+                    compression=compression_option,
+                    shuffle=True,
+                )
+                destination.create_dataset(
+                    "nonunit_values",
+                    data=compressed_A.nonunit_values,
+                    compression=compression_option,
+                    shuffle=True,
+                )
+            else:
+                data = self.A.to_csc().data if isinstance(self.A, OneSparseMatrix) else self.A.data
+                destination.create_dataset("data", data=data, compression=compression_option, shuffle=True)
             destination.create_dataset(
                 "variant_indices", data=self.variant_indices, compression=compression_option, shuffle=True
             )
@@ -894,7 +943,8 @@ class LinearARG(LinearOperator):
             # Write main datasets with Blosc compression
             destination.create_dataset("indptr", data=self.A.indptr, compression=get_blosc_filter(self.A.indptr))
             destination.create_dataset("indices", data=self.A.indices, compression=get_blosc_filter(self.A.indices))
-            destination.create_dataset("data", data=self.A.data, compression=get_blosc_filter(self.A.data))
+            data = self.A.to_csc().data if isinstance(self.A, OneSparseMatrix) else self.A.data
+            destination.create_dataset("data", data=data, compression=get_blosc_filter(data))
             destination.create_dataset(
                 "variant_indices", data=self.variant_indices, compression=get_blosc_filter(self.variant_indices)
             )
@@ -983,6 +1033,7 @@ class LinearARG(LinearOperator):
         h5_fname: Union[str, PathLike],
         block: Optional[str] = None,
         load_metadata: bool = False,
+        compress_edge_weights: bool = False,
     ) -> "LinearARG":
         """Read a [`linear_dag.core.lineararg.LinearARG`][] from HDF5 storage.
 
@@ -998,6 +1049,7 @@ class LinearARG(LinearOperator):
 
         - `h5_fname`: Base path/prefix of the HDF5 file.
         - `block`: Optional block/group name.
+        - `compress_edge_weights`: Keep only non-unit edge weights in memory.
         - `load_metadata`: Whether to load variant metadata into `variants`.
 
         **Returns:**
@@ -1025,7 +1077,23 @@ class LinearARG(LinearOperator):
         with h5py.File(fname, "r") as file:
             iids = pl.Series(file["iids"][:].astype(str))
             f = file[block] if block else file
-            A = csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=(f.attrs["n"], f.attrs["n"]))
+            shape = (f.attrs["n"], f.attrs["n"])
+            if "data" in f:
+                A = csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=shape)
+                if compress_edge_weights:
+                    A = OneSparseMatrix.from_csc(A)
+            elif f.attrs.get("edge_weight_encoding") == "one_sparse_v1":
+                A = OneSparseMatrix(
+                    indptr=f["indptr"][:],
+                    indices=f["indices"][:],
+                    nonunit_edge_indices=f["nonunit_edge_indices"][:],
+                    nonunit_values=f["nonunit_values"][:],
+                    shape=shape,
+                )
+                if not compress_edge_weights:
+                    A = A.to_csc()
+            else:
+                raise ValueError("LinearARG block has no recognized edge-weight encoding")
             variant_indices = f["variant_indices"][:]
             flip = f["flip"][:]
             n_samples = f.attrs["n_samples"]

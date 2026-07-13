@@ -1,0 +1,274 @@
+{
+  "files": [
+    {
+      "path": "/Users/lukeoconnor/Dropbox/GitHub/linear-dag/data/javier/1kg_blocksize_20Mb.h5",
+      "groups": 36,
+      "edges": 203521903,
+      "fraction_one": 0.9818097514546137,
+      "fraction_minus_one": 0.017399065888254787,
+      "fraction_other": 0.0007911826571315029,
+      "dense_weight_bytes": 814087612,
+      "compressed_weight_bytes": 29616912,
+      "weight_memory_ratio": 0.03638049709077258,
+      "core_bytes": 2145472359,
+      "compressed_core_bytes": 1361001659,
+      "core_memory_ratio": 0.6343599130003986
+    },
+    {
+      "path": "/Users/lukeoconnor/Dropbox/GitHub/linear-dag/data/test/1kg_chromosomes_n50.h5",
+      "groups": 2,
+      "edges": 2121633,
+      "fraction_one": 0.8811651213946993,
+      "fraction_minus_one": 0.10327610854469176,
+      "fraction_other": 0.015558770060608974,
+      "dense_weight_bytes": 8486532,
+      "compressed_weight_bytes": 2016992,
+      "weight_memory_ratio": 0.23766975721060146,
+      "core_bytes": 98094101,
+      "compressed_core_bytes": 91624561,
+      "core_memory_ratio": 0.9340476141373679
+    }
+  ],
+  "blocks": [
+    {
+      "path": "/Users/lukeoconnor/Dropbox/GitHub/linear-dag/data/javier/1kg_blocksize_20Mb.h5",
+      "block": "2_240000001_260000000",
+      "nodes": 253410,
+      "edges": 949449,
+      "variants": 64918,
+      "default_core_bytes": 9947466,
+      "compressed_core_bytes": 6238046,
+      "core_memory_ratio": 0.6270990018965634,
+      "timings": {
+        "matvec": {
+          "default_seconds": 0.0021244999952614307,
+          "compressed_seconds": 0.0019482499919831753,
+          "runtime_ratio": 0.9170393016373874,
+          "max_absolute_error": 5.684341886080802e-14
+        },
+        "rmatvec": {
+          "default_seconds": 0.001797459030058235,
+          "compressed_seconds": 0.0017025000415742397,
+          "runtime_ratio": 0.9471704295363446,
+          "max_absolute_error": 9.947598300641403e-14
+        },
+        "matmat_8": {
+          "default_seconds": 0.007336915994528681,
+          "compressed_seconds": 0.007082625001203269,
+          "runtime_ratio": 0.965340887981402,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_8": {
+          "default_seconds": 0.006959166028536856,
+          "compressed_seconds": 0.006938540958799422,
+          "runtime_ratio": 0.9970362727871617,
+          "max_absolute_error": 0.0
+        },
+        "matmat_32": {
+          "default_seconds": 0.01043725002091378,
+          "compressed_seconds": 0.009908333013299853,
+          "runtime_ratio": 0.94932410294339,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_32": {
+          "default_seconds": 0.008109749993309379,
+          "compressed_seconds": 0.007804332999512553,
+          "runtime_ratio": 0.9623395303124267,
+          "max_absolute_error": 0.0
+        }
+      }
+    },
+    {
+      "path": "/Users/lukeoconnor/Dropbox/GitHub/linear-dag/data/javier/1kg_blocksize_20Mb.h5",
+      "block": "1_40000001_60000000",
+      "nodes": 1502793,
+      "edges": 5551766,
+      "variants": 472152,
+      "default_core_bytes": 58797236,
+      "compressed_core_bytes": 37414148,
+      "core_memory_ratio": 0.6363249456147905,
+      "timings": {
+        "matvec": {
+          "default_seconds": 0.013034000003244728,
+          "compressed_seconds": 0.012418625003192574,
+          "runtime_ratio": 0.952786941852159,
+          "max_absolute_error": 2.8421709430404007e-13
+        },
+        "rmatvec": {
+          "default_seconds": 0.010959999985061586,
+          "compressed_seconds": 0.010902917012572289,
+          "runtime_ratio": 0.9947916995832937,
+          "max_absolute_error": 1.4210854715202004e-13
+        },
+        "matmat_8": {
+          "default_seconds": 0.04812229098752141,
+          "compressed_seconds": 0.047037667012773454,
+          "runtime_ratio": 0.9774610902247108,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_8": {
+          "default_seconds": 0.0420090839616023,
+          "compressed_seconds": 0.04246174998115748,
+          "runtime_ratio": 1.0107754318082474,
+          "max_absolute_error": 0.0
+        },
+        "matmat_32": {
+          "default_seconds": 0.06658020801842213,
+          "compressed_seconds": 0.06483491696417332,
+          "runtime_ratio": 0.9737866386093912,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_32": {
+          "default_seconds": 0.04931979102548212,
+          "compressed_seconds": 0.047576333046890795,
+          "runtime_ratio": 0.964649931754769,
+          "max_absolute_error": 0.0
+        }
+      }
+    },
+    {
+      "path": "/Users/lukeoconnor/Dropbox/GitHub/linear-dag/data/javier/1kg_blocksize_20Mb.h5",
+      "block": "1_1_20000000",
+      "nodes": 2206021,
+      "edges": 8666744,
+      "variants": 569305,
+      "default_core_bytes": 89828649,
+      "compressed_core_bytes": 55971681,
+      "core_memory_ratio": 0.6230938750954609,
+      "timings": {
+        "matvec": {
+          "default_seconds": 0.01883145800093189,
+          "compressed_seconds": 0.01838695799233392,
+          "runtime_ratio": 0.9763958792475881,
+          "max_absolute_error": 3.410605131648481e-13
+        },
+        "rmatvec": {
+          "default_seconds": 0.016118832980282605,
+          "compressed_seconds": 0.015885166998486966,
+          "runtime_ratio": 0.9855035422178844,
+          "max_absolute_error": 1.8474111129762605e-13
+        },
+        "matmat_8": {
+          "default_seconds": 0.06982404104201123,
+          "compressed_seconds": 0.06677858298644423,
+          "runtime_ratio": 0.9563838183794802,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_8": {
+          "default_seconds": 0.062449541001114994,
+          "compressed_seconds": 0.0627461249823682,
+          "runtime_ratio": 1.0047491779202655,
+          "max_absolute_error": 0.0
+        },
+        "matmat_32": {
+          "default_seconds": 0.09367116703651845,
+          "compressed_seconds": 0.0892209589947015,
+          "runtime_ratio": 0.9524911647563652,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_32": {
+          "default_seconds": 0.07365070900414139,
+          "compressed_seconds": 0.07017920800717548,
+          "runtime_ratio": 0.9528653417746363,
+          "max_absolute_error": 0.0
+        }
+      }
+    },
+    {
+      "path": "/Users/lukeoconnor/Dropbox/GitHub/linear-dag/data/test/1kg_chromosomes_n50.h5",
+      "block": "22_0_999999999",
+      "nodes": 933043,
+      "edges": 384455,
+      "variants": 1066557,
+      "default_core_bytes": 15872773,
+      "compressed_core_bytes": 14671065,
+      "core_memory_ratio": 0.9242912375802262,
+      "timings": {
+        "matvec": {
+          "default_seconds": 0.0043670000159181654,
+          "compressed_seconds": 0.0047894580056890845,
+          "runtime_ratio": 1.0967387195399625,
+          "max_absolute_error": 9.094947017729282e-13
+        },
+        "rmatvec": {
+          "default_seconds": 0.0032690829830244184,
+          "compressed_seconds": 0.0035427080001682043,
+          "runtime_ratio": 1.08370084778045,
+          "max_absolute_error": 2.4868995751603507e-14
+        },
+        "matmat_8": {
+          "default_seconds": 0.017801749985665083,
+          "compressed_seconds": 0.017823749978560954,
+          "runtime_ratio": 1.0012358331576159,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_8": {
+          "default_seconds": 0.013549708994105458,
+          "compressed_seconds": 0.014166167005896568,
+          "runtime_ratio": 1.0454960333140209,
+          "max_absolute_error": 0.0
+        },
+        "matmat_32": {
+          "default_seconds": 0.0465881249983795,
+          "compressed_seconds": 0.04705133294919506,
+          "runtime_ratio": 1.009942618442611,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_32": {
+          "default_seconds": 0.016482874983921647,
+          "compressed_seconds": 0.017668082960881293,
+          "runtime_ratio": 1.0719054156581158,
+          "max_absolute_error": 0.0
+        }
+      }
+    },
+    {
+      "path": "/Users/lukeoconnor/Dropbox/GitHub/linear-dag/data/test/1kg_chromosomes_n50.h5",
+      "block": "1_0_999999999",
+      "nodes": 4941075,
+      "edges": 1737178,
+      "variants": 5759060,
+      "default_core_bytes": 82221328,
+      "compressed_core_bytes": 76953496,
+      "core_memory_ratio": 0.9359310761801366,
+      "timings": {
+        "matvec": {
+          "default_seconds": 0.023423791979439557,
+          "compressed_seconds": 0.025379166996572167,
+          "runtime_ratio": 1.0834781583976223,
+          "max_absolute_error": 4.547473508864641e-12
+        },
+        "rmatvec": {
+          "default_seconds": 0.017966084007639438,
+          "compressed_seconds": 0.019351791008375585,
+          "runtime_ratio": 1.0771290505013182,
+          "max_absolute_error": 3.019806626980426e-14
+        },
+        "matmat_8": {
+          "default_seconds": 0.09405825001886114,
+          "compressed_seconds": 0.09402795799542218,
+          "runtime_ratio": 0.9996779440034991,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_8": {
+          "default_seconds": 0.07179020799230784,
+          "compressed_seconds": 0.07688800001051277,
+          "runtime_ratio": 1.0710095730430416,
+          "max_absolute_error": 0.0
+        },
+        "matmat_32": {
+          "default_seconds": 0.25280799996107817,
+          "compressed_seconds": 0.25219804199878126,
+          "runtime_ratio": 0.9975872679567466,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_32": {
+          "default_seconds": 0.0894176249857992,
+          "compressed_seconds": 0.09447474998887628,
+          "runtime_ratio": 1.0565562438487963,
+          "max_absolute_error": 0.0
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,260 @@
+{
+  "files": [
+    {
+      "path": "/Users/lukeoconnor/Dropbox/GitHub/linear-dag/data/javier/1kg_blocksize_1Mb.h5",
+      "groups": 674,
+      "edges": 205315586,
+      "fraction_one": 0.9825722290756825,
+      "fraction_minus_one": 0.016699005013676847,
+      "fraction_other": 0.0007287659106406077,
+      "dense_weight_bytes": 821262344,
+      "compressed_weight_bytes": 28625544,
+      "weight_memory_ratio": 0.03485554184863491,
+      "core_bytes": 2198519407,
+      "compressed_core_bytes": 1405882607,
+      "core_memory_ratio": 0.6394679085041163
+    }
+  ],
+  "blocks": [
+    {
+      "path": "/Users/lukeoconnor/Dropbox/GitHub/linear-dag/data/javier/1kg_blocksize_1Mb.h5",
+      "block": "3_92000001_93000000",
+      "nodes": 12772,
+      "edges": 40967,
+      "variants": 1931,
+      "default_core_bytes": 439571,
+      "compressed_core_bytes": 275783,
+      "core_memory_ratio": 0.6273912519251725,
+      "timings": {
+        "matvec": {
+          "default_seconds": 5.070853512734175e-05,
+          "compressed_seconds": 4.554097540676594e-05,
+          "runtime_ratio": 0.898092900778956,
+          "max_absolute_error": 0.0
+        },
+        "rmatvec": {
+          "default_seconds": 4.699951387010515e-05,
+          "compressed_seconds": 4.7250010538846254e-05,
+          "runtime_ratio": 1.005329771483029,
+          "max_absolute_error": 7.105427357601002e-15
+        },
+        "matmat_8": {
+          "default_seconds": 0.0003419994900468737,
+          "compressed_seconds": 0.00034225001581944525,
+          "runtime_ratio": 1.0007325325910201,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_8": {
+          "default_seconds": 0.00034791696816682816,
+          "compressed_seconds": 0.00035295795532874763,
+          "runtime_ratio": 1.0144890523405063,
+          "max_absolute_error": 0.0
+        },
+        "matmat_32": {
+          "default_seconds": 0.0004466454847715795,
+          "compressed_seconds": 0.0004229375335853547,
+          "runtime_ratio": 0.9469199801754419,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_32": {
+          "default_seconds": 0.00039545801701024175,
+          "compressed_seconds": 0.00037852051900699735,
+          "runtime_ratio": 0.9571699212692766,
+          "max_absolute_error": 0.0
+        }
+      }
+    },
+    {
+      "path": "/Users/lukeoconnor/Dropbox/GitHub/linear-dag/data/javier/1kg_blocksize_1Mb.h5",
+      "block": "3_163000001_164000000",
+      "nodes": 75540,
+      "edges": 252433,
+      "variants": 25033,
+      "default_core_bytes": 2748953,
+      "compressed_core_bytes": 1801965,
+      "core_memory_ratio": 0.655509570370974,
+      "timings": {
+        "matvec": {
+          "default_seconds": 0.0005455625068861991,
+          "compressed_seconds": 0.000542416499229148,
+          "runtime_ratio": 0.994233460662451,
+          "max_absolute_error": 2.842170943040401e-14
+        },
+        "rmatvec": {
+          "default_seconds": 0.0005035625072196126,
+          "compressed_seconds": 0.0005071459745522588,
+          "runtime_ratio": 1.007116231413717,
+          "max_absolute_error": 1.8474111129762605e-13
+        },
+        "matmat_8": {
+          "default_seconds": 0.0021449169726110995,
+          "compressed_seconds": 0.0021762505057267845,
+          "runtime_ratio": 1.0146082731946222,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_8": {
+          "default_seconds": 0.00202266700216569,
+          "compressed_seconds": 0.002043104002950713,
+          "runtime_ratio": 1.010103986846644,
+          "max_absolute_error": 0.0
+        },
+        "matmat_32": {
+          "default_seconds": 0.0030130830127745867,
+          "compressed_seconds": 0.0029129795148037374,
+          "runtime_ratio": 0.9667770527574449,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_32": {
+          "default_seconds": 0.002297645987709984,
+          "compressed_seconds": 0.002247750002425164,
+          "runtime_ratio": 0.9782838672486049,
+          "max_absolute_error": 0.0
+        }
+      }
+    },
+    {
+      "path": "/Users/lukeoconnor/Dropbox/GitHub/linear-dag/data/javier/1kg_blocksize_1Mb.h5",
+      "block": "3_155000001_156000000",
+      "nodes": 84513,
+      "edges": 289130,
+      "variants": 23660,
+      "default_core_bytes": 3107448,
+      "compressed_core_bytes": 1989592,
+      "core_memory_ratio": 0.6402655812744091,
+      "timings": {
+        "matvec": {
+          "default_seconds": 0.0006478750146925449,
+          "compressed_seconds": 0.0006368750182446092,
+          "runtime_ratio": 0.9830214220359218,
+          "max_absolute_error": 2.842170943040401e-14
+        },
+        "rmatvec": {
+          "default_seconds": 0.0005571664951276034,
+          "compressed_seconds": 0.0005506875168066472,
+          "runtime_ratio": 0.988371557913811,
+          "max_absolute_error": 8.526512829121202e-14
+        },
+        "matmat_8": {
+          "default_seconds": 0.0023967080051079392,
+          "compressed_seconds": 0.002373875002376735,
+          "runtime_ratio": 0.9904731812625728,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_8": {
+          "default_seconds": 0.0022411665122490376,
+          "compressed_seconds": 0.0022694584913551807,
+          "runtime_ratio": 1.0126237738032913,
+          "max_absolute_error": 0.0
+        },
+        "matmat_32": {
+          "default_seconds": 0.0032678125135134906,
+          "compressed_seconds": 0.0031369790085591376,
+          "runtime_ratio": 0.9599629708212105,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_32": {
+          "default_seconds": 0.0025396670098416507,
+          "compressed_seconds": 0.0025331039796583354,
+          "runtime_ratio": 0.9974157910632053,
+          "max_absolute_error": 0.0
+        }
+      }
+    },
+    {
+      "path": "/Users/lukeoconnor/Dropbox/GitHub/linear-dag/data/javier/1kg_blocksize_1Mb.h5",
+      "block": "2_70000001_71000000",
+      "nodes": 98157,
+      "edges": 335440,
+      "variants": 26334,
+      "default_core_bytes": 3600450,
+      "compressed_core_bytes": 2302746,
+      "core_memory_ratio": 0.6395717202016414,
+      "timings": {
+        "matvec": {
+          "default_seconds": 0.0007074580062180758,
+          "compressed_seconds": 0.0006846045143902302,
+          "runtime_ratio": 0.9676963273763547,
+          "max_absolute_error": 2.842170943040401e-14
+        },
+        "rmatvec": {
+          "default_seconds": 0.0006312495097517967,
+          "compressed_seconds": 0.0006335624784696847,
+          "runtime_ratio": 1.0036641117056826,
+          "max_absolute_error": 4.263256414560601e-14
+        },
+        "matmat_8": {
+          "default_seconds": 0.002681624988326803,
+          "compressed_seconds": 0.00263229149277322,
+          "runtime_ratio": 0.9816031340070542,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_8": {
+          "default_seconds": 0.0025948545371647924,
+          "compressed_seconds": 0.002599520987132564,
+          "runtime_ratio": 1.0017983474221528,
+          "max_absolute_error": 0.0
+        },
+        "matmat_32": {
+          "default_seconds": 0.0036581039894372225,
+          "compressed_seconds": 0.0036081040161661804,
+          "runtime_ratio": 0.9863317244628865,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_32": {
+          "default_seconds": 0.002990125532960519,
+          "compressed_seconds": 0.002894041535910219,
+          "runtime_ratio": 0.9678662330423407,
+          "max_absolute_error": 0.0
+        }
+      }
+    },
+    {
+      "path": "/Users/lukeoconnor/Dropbox/GitHub/linear-dag/data/javier/1kg_blocksize_1Mb.h5",
+      "block": "1_123000001_124000000",
+      "nodes": 178119,
+      "edges": 1285979,
+      "variants": 67182,
+      "default_core_bytes": 12048698,
+      "compressed_core_bytes": 6904910,
+      "core_memory_ratio": 0.5730834983165816,
+      "timings": {
+        "matvec": {
+          "default_seconds": 0.0014505000144708902,
+          "compressed_seconds": 0.0014340210473164916,
+          "runtime_ratio": 0.9886391127266485,
+          "max_absolute_error": 0.0
+        },
+        "rmatvec": {
+          "default_seconds": 0.0014092499914113432,
+          "compressed_seconds": 0.0013374370173551142,
+          "runtime_ratio": 0.9490417069406477,
+          "max_absolute_error": 1.4210854715202004e-14
+        },
+        "matmat_8": {
+          "default_seconds": 0.008358104503713548,
+          "compressed_seconds": 0.008271104539744556,
+          "runtime_ratio": 0.989590945658751,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_8": {
+          "default_seconds": 0.00784406196908094,
+          "compressed_seconds": 0.0077605209662579,
+          "runtime_ratio": 0.9893497778125243,
+          "max_absolute_error": 0.0
+        },
+        "matmat_32": {
+          "default_seconds": 0.011293187504634261,
+          "compressed_seconds": 0.010582646005786955,
+          "runtime_ratio": 0.9370822897826031,
+          "max_absolute_error": 0.0
+        },
+        "rmatmat_32": {
+          "default_seconds": 0.009643750003306195,
+          "compressed_seconds": 0.008679811988258734,
+          "runtime_ratio": 0.9000453127966828,
+          "max_absolute_error": 0.0
+        }
+      }
+    }
+  ]
+}
