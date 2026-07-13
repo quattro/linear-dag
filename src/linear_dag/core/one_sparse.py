@@ -131,6 +131,51 @@ class OneSparseMatrix:
         data[self.nonunit_edge_indices] = self.nonunit_values
         return csc_matrix((data, self.indices.copy(), self.indptr.copy()), shape=self.shape)
 
+    def tocsc(self, copy: bool = True) -> csc_matrix:
+        """Materialize the logical matrix as a SciPy CSC matrix.
+
+        This compatibility adapter mirrors the common SciPy sparse-matrix
+        method name. Materialization necessarily allocates the full edge-weight
+        array; callers should therefore keep the result local to operations
+        that require SciPy's sparse-matrix API.
+
+        **Arguments:**
+
+        - `copy`: Accepted for compatibility. The returned matrix is always
+          independent because its dense edge-weight array must be constructed.
+
+        **Returns:**
+
+        - Equivalent SciPy `csc_matrix`.
+        """
+        return self.to_csc()
+
+    def tocsr(self, copy: bool = True):
+        """Materialize the logical matrix as a SciPy CSR matrix.
+
+        **Arguments:**
+
+        - `copy`: Accepted for compatibility.
+
+        **Returns:**
+
+        - Equivalent SciPy `csr_matrix`.
+        """
+        return self.to_csc().tocsr(copy=copy)
+
+    def tocoo(self, copy: bool = True):
+        """Materialize the logical matrix as a SciPy COO matrix.
+
+        **Arguments:**
+
+        - `copy`: Accepted for compatibility.
+
+        **Returns:**
+
+        - Equivalent SciPy `coo_matrix`.
+        """
+        return self.to_csc().tocoo(copy=copy)
+
     def copy(self) -> "OneSparseMatrix":
         """Return a deep copy of this matrix.
 

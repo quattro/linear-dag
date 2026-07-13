@@ -298,6 +298,9 @@ class ParallelOperator(LinearOperator):
     iids: Optional[pl.Series] = None
     _variant_view_handles: List[_SharedArrayHandle] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        LinearOperator.__init__(self, dtype=self.dtype, shape=self.shape)
+
     def __enter__(self):
         self._manager.__enter__()
         return self
@@ -717,6 +720,9 @@ class GRMOperator(LinearOperator):
     shape: tuple[int, int]
     dtype: np.dtype = np.float32
     iids: Optional[pl.Series] = None
+
+    def __post_init__(self) -> None:
+        LinearOperator.__init__(self, dtype=self.dtype, shape=self.shape)
 
     def __enter__(self):
         self._manager.__enter__()

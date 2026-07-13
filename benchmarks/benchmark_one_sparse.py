@@ -85,8 +85,9 @@ def summarize_file(path: Path) -> dict:
 
 
 def benchmark_block(path: Path, block: str, repeats: int) -> dict:
-    default = LinearARG.read(path, block=block)
-    compressed = LinearARG.read(path, block=block, compress_edge_weights=True)
+    compressed = LinearARG.read(path, block=block)
+    default = compressed.copy()
+    default.A = compressed.A.to_csc()
     rng = np.random.default_rng(20260713)
     cases = {
         "matvec": (default._matvec, compressed._matvec, rng.standard_normal(default.shape[1])),

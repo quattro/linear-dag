@@ -6,7 +6,7 @@ The LinearARG adjacency matrix is stored in compressed sparse column (CSC) forma
 
 For the full 3,202-sample 1000 Genomes LinearARGs on the test computer, this representation reduced the memory used by edge weights by approximately 96.5% and reduced the memory used by the core graph arrays by 36–37%. Forward matrix-vector multiplication was consistently faster, while reverse matrix-vector multiplication was approximately unchanged or faster. Matrix-matrix multiplication was generally unchanged for narrow matrices and faster for wider matrices.
 
-The approach is not universally beneficial. A sample-thinned 50-haplotype LinearARG contained many more non-unit edges and obtained little memory benefit while becoming slower. The compressed representation should therefore be used for graphs whose edge weights are strongly dominated by ones rather than enabled unconditionally.
+The approach is not universally beneficial. A sample-thinned 50-haplotype LinearARG contained many more non-unit edges and obtained little memory benefit while becoming slower. The implementation nevertheless uses compressed weights as the canonical in-memory representation so that loading behavior and memory use are predictable. Callers that require SciPy sparse-matrix operations can materialize a CSC adapter explicitly.
 
 ## Task
 
@@ -62,17 +62,18 @@ For the 20 Mb 1000 Genomes file, $K/E = 0.01819$, so the compressed weights occu
 
 “Core graph” includes the CSC topology, edge weights, variant indices, flip flags, and non-unique workspace mapping. It excludes variant strings and other optional metadata that are not required for algebra-only loading.
 
-The implementation is opt-in:
+The compressed representation is the default for all LinearARG construction and loading paths:
 
 ```python
-linarg = LinearARG.read(path, block=block, compress_edge_weights=True)
+linarg = LinearARG.read(path, block=block)
+scipy_adjacency = linarg.A.to_csc()
 ```
 
-The default loading path still constructs the existing SciPy CSC matrix.
+Topology-changing operations materialize SciPy matrices only at their local boundaries and recompress their results. Parallel workers therefore retain compressed weights for the lifetime of each loaded block.
 
 ### On-disk effect
 
-The existing HDF5 schema stores `indptr`, `indices`, and `data`. The optional compressed schema stores:
+The legacy HDF5 schema stores `indptr`, `indices`, and `data`. The default compressed schema stores:
 
 ```text
 indptr
@@ -87,7 +88,7 @@ and sets the group attribute:
 edge_weight_encoding = "one_sparse_v1"
 ```
 
-The `data` dataset is omitted. Readers can either retain the compressed representation or reconstruct an ordinary CSC `data` array. Existing HDF5 files remain readable, and uncompressed writing remains the default.
+The `data` dataset is omitted. Existing HDF5 files remain readable and are converted directly to compressed in-memory adjacency. Passing `compress_edge_weights=False` to `write()` or `write_blosc()` emits the legacy schema for consumers that have not been upgraded. Within new code, `linarg.A.to_csc()` provides the equivalent SciPy representation without changing the canonical stored form.
 
 The on-disk reduction is much smaller than the in-memory reduction because HDF5 gzip compression already encodes a long, repetitive integer array efficiently. On three representative 20 Mb blocks, the optional format reduced total serialized size by 1.6%, 2.4%, and 1.9%. The main benefit is therefore resident memory, particularly when several blocks are loaded by parallel workers, rather than disk capacity.
 
@@ -199,13 +200,13 @@ The 50-haplotype chromosome file had a different distribution:
 
 Compressed weights occupied 23.8% of the original weight memory, but topology and workspace arrays dominated the graph. Total core memory fell by only 6.6%, while matrix-vector multiplication slowed by approximately 8–10%.
 
-This graph does not contain individual nodes, so the result demonstrates that the relevant selection criterion is the actual non-unit edge fraction and graph structure, not only the presence or absence of individual nodes. A production default should inspect the projected memory ratio, and potentially an edge-to-node measure, before selecting the compressed representation.
+This graph does not contain individual nodes, so the result demonstrates that the performance tradeoff depends on the actual non-unit edge fraction and graph structure, not only the presence or absence of individual nodes. Workloads dominated by such graphs should measure the canonical representation against a locally materialized SciPy alternative.
 
 ## Conclusions
 
 Implicitly storing the common edge weight is effective for full-cohort 1000 Genomes LinearARGs. The selected representation reduces core graph memory by roughly 36–37% while preserving or improving the cost of the primary forward matrix-vector operation. The solver changes are important: a naive sparse lookup or second BLAS pass can give back the computational benefit, whereas column-local corrections for matvec and run-segmented traversal for matmat exploit the CSC ordering efficiently.
 
-The representation should remain optional or be selected adaptively. It is highly favorable when approximately 98% of edges have weight one, but it is not favorable for every LinearARG construction.
+The representation is most favorable when approximately 98% of edges have weight one, but it is not faster for every LinearARG construction. It is used canonically to provide consistent memory behavior across serial and parallel loading, while explicit SciPy adapters preserve operations that require the standard sparse-matrix API.
 
 ## Reproducing the analysis
 

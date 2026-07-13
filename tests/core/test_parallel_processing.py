@@ -5,6 +5,7 @@ from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
 
+import h5py
 import numpy as np
 import pytest
 
@@ -176,6 +177,57 @@ def _load_serial_blocks(hdf5_path: Path):
     n_variants = blocks_df.get_column("n_variants").to_list()
     linargs = [LinearARG.read(hdf5_path, block) for block in block_names]
     return linargs, n_variants
+
+
+def _rewrite_with_compressed_edge_weights(source: Path, destination: Path) -> None:
+    for block_info in list_blocks(source).iter_rows(named=True):
+        linarg = LinearARG.read(source, block=block_info["block_name"], load_metadata=True)
+        linarg.write(
+            destination,
+            block_info={
+                "chrom": block_info["chrom"],
+                "start": block_info["start"],
+                "end": block_info["end"],
+            },
+        )
+
+
+def test_parallel_and_grm_operators_read_compressed_hdf5(tmp_path, linarg_h5_path: Path):
+    compressed_path = tmp_path / "compressed_blocks.h5"
+    _rewrite_with_compressed_edge_weights(linarg_h5_path, compressed_path)
+
+    with h5py.File(compressed_path, "r") as file:
+        for block_name in list_blocks(compressed_path).get_column("block_name"):
+            block = file[block_name]
+            assert block.attrs["edge_weight_encoding"] == "one_sparse_v1"
+            assert "data" not in block
+
+    linargs, nvars = _load_serial_blocks(compressed_path)
+    n = linargs[0].shape[0]
+    m = sum(nvars)
+    rng = np.random.default_rng(20260713)
+    variants = rng.standard_normal((m, 3)).astype(np.float32)
+    samples = rng.standard_normal((n, 3)).astype(np.float32)
+
+    serial_forward = np.zeros((n, 3), dtype=np.float32)
+    offset = 0
+    for linarg, num_variants in zip(linargs, nvars):
+        serial_forward += linarg @ variants[offset : offset + num_variants]
+        offset += num_variants
+    serial_reverse = np.vstack([linarg.T @ samples for linarg in linargs])
+
+    with ParallelOperator.from_hdf5(compressed_path, num_processes=2) as parallel:
+        np.testing.assert_allclose(parallel @ variants, serial_forward, rtol=1e-3, atol=1e-3)
+        np.testing.assert_allclose(parallel.T @ samples, serial_reverse, rtol=1e-5, atol=1e-5)
+
+    with GRMOperator.from_hdf5(compressed_path, num_processes=2) as grm:
+        grm_result = grm @ samples
+
+    serial_grm = np.zeros_like(samples)
+    for linarg in linargs:
+        normalized = linarg.normalized
+        serial_grm += normalized @ normalized.T @ samples
+    np.testing.assert_allclose(grm_result, serial_grm, rtol=1e-4, atol=1e-4)
 
 
 def test_matmat_matches_serial(linarg_h5_path: Path):
