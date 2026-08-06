@@ -1338,6 +1338,7 @@ def test_compress_passes_injected_logger_to_pipeline(monkeypatch):
         maf=None,
         remove_indels=False,
         remove_multiallelics=False,
+        split_multiallelics=False,
         add_individual_nodes=False,
     )
     cli._compress(args, injected)
@@ -1359,6 +1360,32 @@ def test_main_compress_remove_multiallelics_reaches_pipeline(monkeypatch, tmp_pa
     assert captured["input_vcf"] == "input.vcf.gz"
     assert captured["output_h5"] == str(output_h5)
     assert captured["remove_multiallelics"] is True
+
+
+def test_main_compress_split_multiallelics_reaches_pipeline(monkeypatch, tmp_path: Path):
+    captured = {}
+
+    monkeypatch.setattr(cli, "compress_vcf", lambda **kwargs: captured.update(kwargs))
+    output_h5 = tmp_path / "out.h5"
+    rc = cli._main(["-q", "compress", "input.vcf.gz", str(output_h5), "--split-multiallelics"])
+
+    assert rc == 0 or rc is None
+    assert captured["split_multiallelics"] is True
+    assert captured["remove_multiallelics"] is False
+
+
+def test_main_rejects_conflicting_multiallelic_options(tmp_path: Path):
+    with pytest.raises(SystemExit):
+        cli._main(
+            [
+                "-q",
+                "compress",
+                "input.vcf.gz",
+                str(tmp_path / "out.h5"),
+                "--remove-multiallelics",
+                "--split-multiallelics",
+            ]
+        )
 
 
 def test_step1_passes_injected_logger_to_pipeline(monkeypatch):

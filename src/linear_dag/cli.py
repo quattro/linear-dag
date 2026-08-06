@@ -812,6 +812,7 @@ def _compress(args, logger):
         maf_filter=args.maf,
         remove_indels=args.remove_indels,
         remove_multiallelics=args.remove_multiallelics,
+        split_multiallelics=getattr(args, "split_multiallelics", False),
         add_individual_nodes=args.add_individual_nodes,
         logger=logger,
     )
@@ -820,17 +821,18 @@ def _compress(args, logger):
 def _step0(args, logger):
     logger.info("Starting main process")
     msc_step0(
-        args.vcf_metadata,
-        args.partition_size,
-        args.n_small_blocks,
-        args.out,
-        args.flip_minor_alleles,
-        args.keep,
-        args.maf,
-        args.remove_indels,
-        args.remove_multiallelics,
-        args.sex_path,
-        args.mount_point,
+        vcf_metadata=args.vcf_metadata,
+        large_partition_size=args.partition_size,
+        n_small_blocks=args.n_small_blocks,
+        out=args.out,
+        flip_minor_alleles=args.flip_minor_alleles,
+        keep=args.keep,
+        maf=args.maf,
+        remove_indels=args.remove_indels,
+        remove_multiallelics=args.remove_multiallelics,
+        split_multiallelics=getattr(args, "split_multiallelics", False),
+        sex_path=args.sex_path,
+        mount_point=args.mount_point,
         logger=logger,
     )
     return
@@ -924,10 +926,16 @@ def _main(args):
     compress_p.add_argument("--keep", help="Path to file of IIDs to include in construction of the genotype matrix.")
     compress_p.add_argument("--maf", type=float, help="Filter out variants with MAF less than maf")
     compress_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
-    compress_p.add_argument(
+    compress_multiallelic_group = compress_p.add_mutually_exclusive_group()
+    compress_multiallelic_group.add_argument(
         "--remove-multiallelics",
         action="store_true",
         help="Exclude multi-allelic sites instead of raising an error.",
+    )
+    compress_multiallelic_group.add_argument(
+        "--split-multiallelics",
+        action="store_true",
+        help="Emit one ALT-specific genotype column for each multi-allelic site.",
     )
     compress_p.add_argument(
         "--add-individual-nodes", action="store_true", help="Add individual nodes for Hardy Weinberg calculations."
@@ -972,10 +980,16 @@ def _main(args):
         "--maf", type=float, nargs="?", const=None, default=None, help="Filter out variants with MAF < maf"
     )
     step0_p.add_argument("--remove-indels", action="store_true", help="Should indels be excluded?")
-    step0_p.add_argument(
+    step0_multiallelic_group = step0_p.add_mutually_exclusive_group()
+    step0_multiallelic_group.add_argument(
         "--remove-multiallelics",
         action="store_true",
         help="Exclude multi-allelic sites instead of raising an error.",
+    )
+    step0_multiallelic_group.add_argument(
+        "--split-multiallelics",
+        action="store_true",
+        help="Emit one ALT-specific genotype column for each multi-allelic site.",
     )
     step0_p.add_argument(
         "--sex-path",

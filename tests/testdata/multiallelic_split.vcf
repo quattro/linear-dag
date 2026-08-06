@@ -1,0 +1,14 @@
+##fileformat=VCFv4.2
+##contig=<ID=1,length=1000000>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	S1	S2	S3	S4
+1	100	biallelic	A	G	.	PASS	.	GT	0|0	0|1	1|0	1|1
+1	110	triallelic	A	C,G	.	PASS	.	GT	0|1	0|2	1|2	2|2
+1	120	duplicate-first	A	C	.	PASS	.	GT	0|1	0|0	1|0	0|0
+1	120	duplicate-exact	A	C	.	PASS	.	GT	0|1	0|0	1|0	0|0
+1	120	duplicate-later	A	C	.	PASS	.	GT	1|1	1|1	1|1	1|1
+1	120	same-position-distinct	A	G	.	PASS	.	GT	0|0	0|1	0|0	1|0
+1	130	mixed-types	A	C,AT	.	PASS	.	GT	0|1	0|2	1|2	2|2
+1	140	missing-calls	A	C,G	.	PASS	.	GT	.|.	.|1	2|.	0|2
+1	150	high-frequency	A	C	.	PASS	.	GT	1|1	1|1	1|1	0|1
+1	160	zero-carrier-alt	A	C,G	.	PASS	.	GT	0|1	1|0	0|0	1|1
