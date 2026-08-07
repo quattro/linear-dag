@@ -127,6 +127,18 @@ def test_ffi_cpu_source_extension_artifacts_exclude_build_cache(
     assert hatch_build.ffi_cpu_source_extension_artifacts(tmp_path) == [str(source_expected)]
 
 
+def test_macos_sdk_cxx_include_dirs_uses_sdkroot(monkeypatch, tmp_path):
+    sdk_root = tmp_path / "MacOSX.sdk"
+    include_dir = sdk_root / "usr" / "include" / "c++" / "v1"
+    include_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(hatch_build.sys, "platform", "darwin")
+    monkeypatch.setenv("SDKROOT", str(sdk_root))
+    monkeypatch.setattr(hatch_build.sysconfig, "get_config_var", lambda name: None)
+
+    assert hatch_build._macos_sdk_cxx_include_dirs() == [str(include_dir)]
+
+
 def test_sanitize_macos_linker_flags_deduplicates_sysconfig_rpaths(monkeypatch):
     config = {
         "LDSHARED": "clang -bundle -Wl,-rpath,/env/lib -L/env/lib -Wl,-rpath,/env/lib",

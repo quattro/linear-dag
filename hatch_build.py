@@ -136,6 +136,18 @@ def _ffi_cpu_blas_options():
     return empty_options
 
 
+def _macos_sdk_cxx_include_dirs():
+    if sys.platform != "darwin":
+        return []
+
+    sdk_root = os.environ.get("SDKROOT") or sysconfig.get_config_var("SDKROOT")
+    if not sdk_root:
+        return []
+
+    include_dir = Path(sdk_root) / "usr" / "include" / "c++" / "v1"
+    return [str(include_dir)] if include_dir.is_dir() else []
+
+
 def build_ffi_cpu_extension(root):
     sanitize_macos_linker_flags()
     root = Path(root)
@@ -144,6 +156,7 @@ def build_ffi_cpu_extension(root):
         "linear_dag.core.jaxlinarg.kernels._ffi_cpu_impl",
         sources=[str(root / "src/linear_dag/core/jaxlinarg/kernels/ffi_cpu_impl.cc")],
         include_dirs=[
+            *_macos_sdk_cxx_include_dirs(),
             jax.ffi.include_dir(),
             np.get_include(),
             os.path.dirname(scipy.__file__),
