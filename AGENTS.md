@@ -1,6 +1,6 @@
 # linear-dag
 
-Last verified: 2026-05-11
+Last verified: 2026-08-07
 
 ## Scope
 This context is intentionally scoped to `src/` only.
@@ -14,12 +14,14 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 
 ## Contracts
 - **Exposes**:
-  - Package API from `src/linear_dag/__init__.py`: `LinearARG`, `BrickGraph`, `ParallelOperator`, `GRMOperator`, `Backend`, `JaxLinearARG`, `JaxParallelOperator`, `linear_arg_from_genotypes`, `list_blocks`, `read_vcf`, `compute_af`, `flip_alleles`, `apply_maf_threshold`, `binarize`, `randomized_haseman_elston`, `run_gwas`, `get_gwas_beta_se`, `pca`, `svd`.
+  - Package API from `src/linear_dag/__init__.py`: `LinearARG`, `BrickGraph`, `ParallelOperator`, `GRMOperator`, `Backend`, `JaxLinearARG`, `JaxParallelOperator`, `JaxGRMOperator`, `show_build_config`, `linear_arg_from_genotypes`, `list_blocks`, `read_vcf`, `compute_af`, `flip_alleles`, `apply_maf_threshold`, `binarize`, `randomized_haseman_elston`, `run_gwas`, `get_gwas_beta_se`, `pca`, `svd`.
   - CLI from `src/linear_dag/cli.py`: `assoc`, `rhe`, `score`, `compress`, `multi-step-compress` (`step0`-`step5`).
 - **Guarantees**:
   - `LinearARG` behaves as a `scipy.sparse.linalg.LinearOperator` over sample-by-variant genotype space.
   - `JaxLinearARG` and `JaxParallelOperator` expose JAX-compatible LinearARG products over the same sample-by-variant genotype semantics.
-  - `Backend.AUTO` selects FFI CPU when available on CPU, Pallas GPU when available on GPU, and otherwise falls back to pure JAX; explicit unavailable Pallas GPU requests fail fast.
+  - `Backend.AUTO` selects FFI CPU when available on CPU and otherwise uses pure JAX; explicit unavailable FFI CPU requests warn and fall back to pure JAX.
+  - `rhe --jax-backend` is an experimental opt-in path through `JaxGRMOperator`; the default RHE path remains `GRMOperator`-backed.
+  - CPU FFI compilation is optional and falls back to pure JAX when unavailable; set `LINEAR_DAG_REQUIRE_FFI_CPU=1` to make build failure fatal.
   - `LinearARG.write()` / `LinearARG.read()` persist and restore HDF5-backed graph state and metadata.
   - Association and heritability paths align phenotype/covariate rows to genotype IDs using merge operators.
   - `ParallelOperator.from_hdf5` and `GRMOperator.from_hdf5` use a unified constructor keyword contract; `alpha` is operational only for GRM weighting and a no-op for `ParallelOperator`.
@@ -30,7 +32,7 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 
 ## Dependencies
 - **Uses**:
-  - Numeric/data stack: `numpy`, `scipy`, `polars`, `h5py`, `jax`, `equinox`.
+  - Numeric/data stack: `numpy`, `scipy`, `polars`, `h5py`, `jax`, `equinox`, `jaxtyping`.
   - Genotype/IO: `cyvcf2`, `pyarrow.parquet`.
   - Runtime/monitoring: `psutil`.
   - Core acceleration modules under `src/linear_dag/core/*.pyx` (Cython-backed graph/solver primitives).
@@ -45,7 +47,7 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 - Haplotypes are the base representation; diploid semantics are derived by pairing haplotypes when needed.
 - HDF5 block structure is used to support blockwise and process-parallel operations.
 - GWAS/PRS pipelines favor memory-aware paths (shared memory + lazy/tabular processing) over eager full-matrix materialization.
-- JAX operators keep backend selection explicit through `Backend`, with pure-JAX as the portable fallback and optional CPU FFI / Pallas GPU acceleration.
+- JAX operators keep backend selection explicit through `Backend`, with pure JAX as the portable fallback and optional CPU FFI acceleration.
 
 ## Invariants
 - `LinearARG.A` is square CSC adjacency; sample nodes are trailing nodes and `shape == (n_samples, n_variants)` derives from sample/variant indices.
@@ -86,7 +88,7 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 - `src/linear_dag/core/parallel_processing.py` - shared-memory parallel operator implementation
 - `src/linear_dag/core/jaxlinarg/operator.py` - JAX single-block operator and backend dispatch contract
 - `src/linear_dag/core/jaxlinarg/wrapper.py` - JAX multi-block operator and mesh/block assignment contract
-- `src/linear_dag/core/jaxlinarg/kernels/` - pure-JAX, CPU FFI, and Pallas GPU kernel implementations
+- `src/linear_dag/core/jaxlinarg/kernels/` - pure-JAX and CPU FFI kernel implementations
 - `src/linear_dag/genotype.py` - VCF ingestion and allele transformations
 - `src/linear_dag/association/gwas.py` - association scan implementation
 - `src/linear_dag/association/heritability.py` - randomized HE estimator
