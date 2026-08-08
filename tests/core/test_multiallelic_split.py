@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from linear_dag.core.lineararg import LinearARG
-from linear_dag.genotype import read_vcf
+from linear_dag.genotype import _genotype_digest, read_vcf
 
 
 EXPECTED_PHASED = np.array(
@@ -34,6 +34,21 @@ EXPECTED_VARIANTS = [
     (150, "high-frequency", "C"),
     (160, "zero-carrier-alt", "C"),
 ]
+
+
+def test_genotype_digest_storage_is_fixed_size_and_content_sensitive():
+    small = np.zeros(8, dtype=np.int8)
+    large = np.zeros(1_000_000, dtype=np.int8)
+    changed = large.copy()
+    changed[-1] = 1
+
+    small_digest = _genotype_digest(small)
+    large_digest = _genotype_digest(large)
+
+    assert isinstance(small_digest, bytes)
+    assert len(small_digest) == len(large_digest) == 16
+    assert large_digest != _genotype_digest(changed)
+    assert large_digest == _genotype_digest(large.copy())
 
 
 def test_native_phased_multiallelic_split_contents_metadata_and_audit(test_data_dir, caplog):
@@ -66,6 +81,31 @@ def test_native_phased_multiallelic_split_contents_metadata_and_audit(test_data_
     assert "'biallelic_columns_emitted': 4" in audit
     assert "'multiallelic_alt_columns_emitted': 5" in audit
     assert any("first ID=duplicate-first, later ID=duplicate-later" in record.message for record in caplog.records)
+
+
+def test_vcf_progress_and_phase_logging(test_data_dir, caplog, monkeypatch):
+    logger = logging.getLogger("linear_dag.tests.multiallelic.progress")
+    monkeypatch.setenv("KODAMA_VCF_PROGRESS_SECONDS", "1e-12")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        read_vcf(
+            test_data_dir / "multiallelic_split.vcf",
+            split_multiallelics=True,
+            logger=logger,
+        )
+
+    messages = [record.message for record in caplog.records]
+    assert any(message.startswith("Starting VCF iteration:") for message in messages)
+    progress = next(message for message in messages if message.startswith("VCF progress:"))
+    assert "records=" in progress
+    assert "emitted_columns=" in progress
+    assert "unique_keys=" in progress
+    assert "buffered_nonzeros=" in progress
+    assert any(message.startswith("Finished VCF iteration:") for message in messages)
+    assert any(message.startswith("Starting array concatenation:") for message in messages)
+    assert any(message.startswith("Finished array concatenation:") for message in messages)
+    assert any(message.startswith("Starting CSC construction:") for message in messages)
+    assert any(message.startswith("Finished CSC construction:") for message in messages)
 
 
 def test_native_unphased_split_is_alt_specific_dosage(test_data_dir):
