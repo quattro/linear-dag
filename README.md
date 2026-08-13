@@ -113,11 +113,27 @@ to `Backend.PURE_JAX`. Accelerator platforms currently use `Backend.PURE_JAX`.
 Explicit `Backend.FFI_CPU` requests also fall back to `Backend.PURE_JAX` with a
 warning when the native handler is unavailable.
 
+For a multi-device mesh, each ragged LinearARG block is stored only on its
+assigned device. `JaxParallelOperator` compiles and caches one exact-shape
+program per non-empty device range, then assembles the public result on the
+mesh's first device. Call `parallel_op.matmat(...)` and
+`parallel_op.rmatmat(...)` directly; wrapping a bound multi-block method in an
+additional `jax.jit` captures the operator arrays as constants and defeats this
+placement contract. The same restriction applies to `JaxGRMOperator.matmat`
+when its underlying operator is multi-block. Prefer the `from_linearargs`,
+`from_hdf5`, or `from_zarr` factories; direct construction with a concrete mesh
+requires every block to be placed on its assigned device and otherwise fails
+fast.
+
 Benchmark gates are opt-in so normal test runs stay fast:
 
 ```console
 pytest -p no:capture tests/jax/bench --runbench
 ```
+
+The parallel benchmark reports total resident graph bytes and the maximum graph
+bytes on any one device, making accidental graph replication visible alongside
+runtime regressions.
 
 Use `--linarg-benchmark-k` to choose matrix widths for benchmark inputs. For
 multi-trait GWAS-style workloads, values such as `42`, `64`, `89`, and `100`
@@ -126,6 +142,28 @@ are more representative than single-vector products:
 ```console
 pytest -p no:capture tests/jax/bench --runbench --linarg-benchmark-k 1 42 64 89 100
 ```
+
+The RHE benchmark compares the CLI's NumPy/Cython process path with its JAX
+`Backend.AUTO` path. It generates two deterministic phenotypes from the IIDs in
+the selected HDF5 file and uses identical Rademacher probes, estimator settings,
+and seeds for both implementations:
+
+```console
+pytest -p no:capture tests/jax/bench/test_rhe_benchmarks.py --runbench \
+  --rhe-benchmark-num-matvecs 4 20
+```
+
+`cold_total` includes operator loading and the first completed estimate;
+`warm_estimate` is the median of three estimates using the loaded operator after
+one warmup. The output records the resolved JAX backend, worker or device count,
+operator dtype, and the runtime ratio to NumPy/Cython. Cold timings are first-call
+measurements within the current process, so process-global JAX compilation caches
+and the operating system's HDF5 page cache can affect them. Run the benchmark in
+a fresh process when comparing cold results. The bundled two-block fixture is a
+smoke workload; use `--linarg-h5-path` with representative data for performance
+decisions. This is an end-to-end implementation comparison, not a matched-dtype
+kernel benchmark: the NumPy path performs some host-side residualization in
+float64, while the default JAX operator uses float32.
 
 ### Genome-wide association studies (GWAS)
 

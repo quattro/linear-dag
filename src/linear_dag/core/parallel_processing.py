@@ -1,3 +1,7 @@
+# pattern: Mixed (unavoidable)
+# Reason: Linear-operator algebra is coupled to process and shared-memory
+# orchestration required by the public parallel execution contract.
+
 from __future__ import annotations
 
 import time
@@ -299,6 +303,9 @@ class ParallelOperator(LinearOperator):
     dtype: np.dtype = np.dtype(np.float32)
     iids: Optional[pl.Series] = None
     _variant_view_handles: List[_SharedArrayHandle] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        LinearOperator.__init__(self, dtype=self.dtype, shape=self.shape)
 
     def __enter__(self):
         self._manager.__enter__()
@@ -806,6 +813,9 @@ class GRMOperator(LinearOperator):
     dtype: np.dtype = np.float32
     iids: Optional[pl.Series] = None
 
+    def __post_init__(self) -> None:
+        LinearOperator.__init__(self, dtype=self.dtype, shape=self.shape)
+
     def __enter__(self):
         self._manager.__enter__()
         return self
@@ -843,7 +853,7 @@ class GRMOperator(LinearOperator):
             raise ValueError(
                 f"Incorrect dimensions for matrix multiplication. Inputs had size {self.shape} and{x.shape}."
             )
-        result = np.empty((self.shape[0], k), dtype=np.float32)
+        result = np.empty((self.shape[0], k), dtype=self.dtype)
 
         # Process max_num_traits columns at a time
         for start in range(0, k, self._max_num_traits):
@@ -955,6 +965,7 @@ class GRMOperator(LinearOperator):
         bed_file: Optional[str] = None,
         bed_maf_log10_threshold: Optional[int] = None,
         alpha: float = -1.0,
+        dtype: Type[np.generic] | np.dtype = np.float32,
     ) -> GRMOperator:
         """Build a blockwise GRM operator from HDF5 LinearARG blocks.
 
@@ -976,6 +987,7 @@ class GRMOperator(LinearOperator):
         - `bed_file`: Optional BED file path.
         - `bed_maf_log10_threshold`: Keep BED variants with MAF greater than `10**x`.
         - `alpha`: Alpha parameter used in GRM diagonal weighting.
+        - `dtype`: Floating-point dtype for shared-memory inputs/outputs.
 
         **Returns:**
 
@@ -983,8 +995,13 @@ class GRMOperator(LinearOperator):
 
         **Raises:**
 
+        - `ValueError`: If `dtype` is not `np.float32` or `np.float64`.
         - `RuntimeError`: If any worker signals an error while initializing/awaiting.
         """
+        dtype = np.dtype(dtype)
+        if dtype not in {np.dtype(np.float32), np.dtype(np.float64)}:
+            raise ValueError("dtype must be np.float32 or np.float64")
+
         # Backward compatibility for legacy positional calls:
         # (hdf5_file, num_processes, alpha, max_num_traits, block_metadata)
         legacy_alpha_position = isinstance(max_num_traits, (float, np.floating)) or (
@@ -1005,8 +1022,8 @@ class GRMOperator(LinearOperator):
         )
 
         shm_specification = {
-            "input_data": ((max_num_traits, context.num_samples), np.float32),
-            "output_data": ((max_num_traits, context.num_samples), np.float32),
+            "input_data": ((max_num_traits, context.num_samples), dtype.type),
+            "output_data": ((max_num_traits, context.num_samples), dtype.type),
         }
 
         alpha_value = Value("d", alpha)
@@ -1036,7 +1053,7 @@ class GRMOperator(LinearOperator):
             _alpha=alpha_value,
             _max_num_traits=max_num_traits,
             shape=(context.num_samples, context.num_samples),
-            dtype=np.float32,
+            dtype=dtype,
             iids=context.iids,
         )
 

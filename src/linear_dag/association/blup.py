@@ -1,4 +1,6 @@
-from dataclasses import dataclass
+# pattern: Functional Core
+
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -22,16 +24,11 @@ class triangular_solver(LinearOperator):
     """
 
     A: csr_matrix
+    shape: tuple[int, int] = field(init=False)
+    dtype: np.dtype = field(init=False)
 
-    @property
-    def dtype(self):
-        """Return the scalar dtype used by the wrapped sparse matrix."""
-        return self.A.dtype
-
-    @property
-    def shape(self):
-        """Return the matrix shape expected by `LinearOperator` consumers."""
-        return self.A.shape
+    def __post_init__(self) -> None:
+        LinearOperator.__init__(self, dtype=self.A.dtype, shape=self.A.shape)
 
     def _matvec(self, other):
         if other.ndim == 1:

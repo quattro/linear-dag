@@ -2,8 +2,11 @@
 # Reason: Backend dispatch is pure, but module construction must normalize the
 # requested runtime backend and emit the required user-facing fallback warning.
 
+"""Single-block JAX LinearARG operator and numerical backend dispatch."""
+
 import warnings
 
+from collections.abc import Mapping
 from enum import Enum
 from functools import partial
 from typing import Any
@@ -21,21 +24,29 @@ from .kernels.pure_jax import (
     pure_jax_solve_forward_compressed,
 )
 
-try:
-    from enum import StrEnum
-except ImportError:  # pragma: no cover - Python 3.10 compatibility.
 
-    class StrEnum(str, Enum):
-        def __str__(self) -> str:
-            return self.value
+class Backend(str, Enum):
+    """Select the numerical implementation for JAX LinearARG solves.
 
+    `AUTO` uses the native CPU FFI extension when it is available on CPU and
+    otherwise resolves to `PURE_JAX`. `FFI_CPU` also falls back to `PURE_JAX`,
+    but emits a warning when the native extension cannot be registered.
 
-class Backend(StrEnum):
-    """Numerical backend choices for JAX LinearARG solves."""
+    !!! Example
+
+        ```python
+        from linear_dag import Backend
+
+        backend = Backend.PURE_JAX
+        ```
+    """
 
     AUTO = "auto"
     PURE_JAX = "pure_jax"
     FFI_CPU = "ffi_cpu"
+
+    def __str__(self) -> str:
+        return self.value
 
 
 _FORWARD_SOLVERS = {
@@ -50,7 +61,23 @@ _BACKWARD_SOLVERS = {
 
 
 def resolve_backend(requested: Backend, *, platform: str | None = None) -> Backend:
-    """Resolve a requested backend to a concrete executable backend."""
+    """Resolve a backend request against the active JAX runtime.
+
+    **Arguments:**
+
+    - `requested`: Requested backend policy.
+    - `platform`: Optional JAX platform override. This exists for diagnostics
+      and tests; normal callers should use the active platform.
+
+    **Returns:**
+
+    - A concrete executable backend.
+
+    **Warns:**
+
+    - `UserWarning`: If `FFI_CPU` is requested but its native handler is
+      unavailable. The returned backend is then `PURE_JAX`.
+    """
     requested = Backend(requested)
     platform = (jax.default_backend() if platform is None else platform).lower()
 
@@ -83,21 +110,25 @@ class JaxLinearARG(eqx.Module):
         `Backend.PURE_JAX`. Reverse-mode autodiff is supported through custom
         VJP rules; forward mode is not supported for the solve primitive.
 
-    **Arguments:**
+        The LinearARG arrays are opaque, fixed operator state. Autodiff is
+        defined with respect to arrays passed to `matmat` and `rmatmat`, not
+        with respect to graph structure, edge weights, or allele metadata.
 
-    - `indptr`: CSC index pointer array.
-    - `indices`: CSC row index array.
-    - `data`: CSC edge value array.
-    - `variant_indices`: Variant node indices.
-    - `flip`: Allele flip flags aligned to `variant_indices`.
-    - `sample_indices`: Sample node indices.
-    - `nonunique_indices`: Nonunique sample index mapping.
-    - `allele_counts`: Cached allele counts aligned to variants, or `-1` for
-      missing entries.
-    - `n_variants`: Number of variants in genotype space.
-    - `n_samples`: Number of samples in genotype space.
-    - `backend`: Requested numerical backend.
-    - `dtype`: Computation dtype.
+    !!! Example
+
+        ```python
+        import jax.numpy as jnp
+
+        from linear_dag import Backend, JaxLinearARG
+
+        operator = JaxLinearARG.from_hdf5_block(
+            "lineararg.h5",
+            "block_0",
+            backend=Backend.AUTO,
+        )
+        sample_scores = operator @ jnp.ones(operator.shape[1])
+        ```
+
     """
 
     indptr: Int[Array, "nodes_plus_1"] = eqx.field(converter=jnp.asarray)  # noqa: F722, F821
@@ -307,7 +338,6 @@ class JaxLinearARG(eqx.Module):
                 n_variants=self.n_variants,
                 n_samples=self.n_samples,
                 n_nonunique_indices=self.n_nonunique_indices,
-                min_index_to_keep=self.min_index_to_keep,
             )
             return
 
@@ -508,12 +538,11 @@ def _canonical_allele_counts_array(allele_counts: ArrayLike | None, *, n_variant
 
 
 def _validate_array_shapes(
-    arrays: dict[str, ArrayLike],
+    arrays: Mapping[str, Any],
     *,
     n_variants: int,
     n_samples: int,
     n_nonunique_indices: int,
-    min_index_to_keep: int,
 ) -> None:
     for name, array in arrays.items():
         if array.ndim != 1:
@@ -555,7 +584,6 @@ def _validate_array_contract(
         n_variants=n_variants,
         n_samples=n_samples,
         n_nonunique_indices=n_nonunique_indices,
-        min_index_to_keep=min_index_to_keep,
     )
     indptr = arrays["indptr"]
     indices = arrays["indices"]

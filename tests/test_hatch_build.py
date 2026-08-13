@@ -127,6 +127,35 @@ def test_ffi_cpu_source_extension_artifacts_exclude_build_cache(
     assert hatch_build.ffi_cpu_source_extension_artifacts(tmp_path) == [str(source_expected)]
 
 
+def test_remove_incompatible_cython_extension_artifacts_preserves_current_abi(
+    tmp_path,
+):
+    source_dir = tmp_path / "src" / "linear_dag" / "core"
+    source_dir.mkdir(parents=True)
+    (source_dir / "brick_graph.pyx").touch()
+    current_artifact = source_dir / "brick_graph.cpython-314-darwin.so"
+    stale_artifact = source_dir / "brick_graph.cpython-311-darwin.so"
+    untagged_artifact = source_dir / "brick_graph.so"
+    unrelated_artifact = source_dir / "vendor.so"
+    for artifact in (
+        current_artifact,
+        stale_artifact,
+        untagged_artifact,
+        unrelated_artifact,
+    ):
+        artifact.touch()
+
+    hatch_build.remove_incompatible_cython_extension_artifacts(
+        tmp_path,
+        current_extension_suffix=".cpython-314-darwin.so",
+    )
+
+    assert current_artifact.exists()
+    assert unrelated_artifact.exists()
+    assert not stale_artifact.exists()
+    assert not untagged_artifact.exists()
+
+
 def test_macos_sdk_cxx_include_dirs_uses_sdkroot(monkeypatch, tmp_path):
     sdk_root = tmp_path / "MacOSX.sdk"
     include_dir = sdk_root / "usr" / "include" / "c++" / "v1"

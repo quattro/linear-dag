@@ -1,3 +1,5 @@
+# pattern: Imperative Shell
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -39,6 +41,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         type=int,
         default=2,
         help="number of worker processes to use for ParallelOperator benchmarks",
+    )
+    parser.addoption(
+        "--rhe-benchmark-num-matvecs",
+        nargs="+",
+        type=int,
+        default=(4, 20),
+        help="probe-vector counts to use for RHE benchmarks",
     )
 
 
@@ -92,3 +101,13 @@ def linarg_parallel_processes(request: pytest.FixtureRequest) -> int:
     if num_processes < 1:
         raise ValueError("--linarg-parallel-processes must be at least 1")
     return num_processes
+
+
+@pytest.fixture(scope="session")
+def rhe_benchmark_num_matvecs(request: pytest.FixtureRequest) -> tuple[int, ...]:
+    values = tuple(request.config.getoption("--rhe-benchmark-num-matvecs"))
+    if not values:
+        raise ValueError("--rhe-benchmark-num-matvecs must contain at least one value")
+    if any(value < 1 for value in values):
+        raise ValueError("--rhe-benchmark-num-matvecs values must be positive")
+    return values

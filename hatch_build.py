@@ -36,6 +36,7 @@ class CustomBuildHook(BuildHookInterface):
         sanitize_macos_linker_flags()
         build_data["include-dirs"] = [os.path.dirname(scipy.__file__)]
         if self.target_name != "sdist":
+            remove_incompatible_cython_extension_artifacts(self.root)
             if build_ffi_cpu_extension_or_warn(self.root):
                 for artifact in ffi_cpu_source_extension_artifacts(self.root):
                     relative_artifact = os.path.relpath(artifact, self.root)
@@ -91,6 +92,29 @@ def build_ffi_cpu_extension_with_optional_blas_fallback(root):
 def remove_ffi_cpu_extension_artifacts(root):
     for artifact in ffi_cpu_extension_artifacts(root):
         Path(artifact).unlink()
+
+
+def remove_incompatible_cython_extension_artifacts(
+    root,
+    current_extension_suffix=None,
+):
+    """Remove in-source Cython binaries built for a different Python ABI."""
+    if current_extension_suffix is None:
+        current_extension_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    if not current_extension_suffix:
+        return
+
+    source_root = Path(root) / "src" / "linear_dag"
+    for pyx_path in source_root.rglob("*.pyx"):
+        module_stem = pyx_path.stem
+        for compiled_suffix in (".so", ".pyd", ".dll"):
+            for artifact in pyx_path.parent.glob(f"{module_stem}*{compiled_suffix}"):
+                # A module's extension begins with `<stem>.`; avoid touching a
+                # neighboring module whose name merely shares this prefix.
+                if not artifact.name.startswith(f"{module_stem}."):
+                    continue
+                if not artifact.name.endswith(current_extension_suffix):
+                    artifact.unlink()
 
 
 def is_ffi_cpu_build_required():

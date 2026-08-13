@@ -196,7 +196,15 @@ def test_jax_grm_matches_existing_grm_operator(linarg_h5_path, linarg_block_meta
     np.testing.assert_allclose(np.asarray(grm @ y), expected, rtol=1e-3, atol=1e-3)
 
 
-def test_jax_grm_parallel_operator_sharded_matmat_matches_single_device(linarg_h5_path, linarg_block_metadata):
+def test_jax_grm_parallel_operator_device_local_matmat_matches_single_device(
+    linarg_h5_path,
+    linarg_block_metadata,
+    monkeypatch,
+):
+    def reject_shard_map(*args, **kwargs):
+        raise AssertionError("ragged GRM execution should use explicit device-local state")
+
+    monkeypatch.setattr("linear_dag.core.jaxlinarg.grm.jax.shard_map", reject_shard_map)
     two_device = JaxParallelOperator.from_hdf5(
         linarg_h5_path,
         mesh=_two_device_cpu_mesh_or_skip(),
@@ -211,7 +219,19 @@ def test_jax_grm_parallel_operator_sharded_matmat_matches_single_device(linarg_h
     )
     y = jnp.arange(two_device.shape[0] * 2, dtype=jnp.float32).reshape(two_device.shape[0], 2)
 
-    sharded = JaxGRMOperator(two_device).matmat(y)
+    grm = JaxGRMOperator(two_device)
+    sharded = grm.matmat(y)
     expected = JaxGRMOperator(single_device).matmat(y)
 
     np.testing.assert_allclose(np.asarray(sharded), np.asarray(expected), rtol=1e-4, atol=1e-4)
+
+    cotangent = jnp.linspace(-1.0, 1.0, y.size, dtype=y.dtype).reshape(y.shape)
+    actual_gradient = jax.grad(lambda values: jnp.sum(grm.matmat(values) * cotangent))(y)
+    expected_gradient = grm.matmat(cotangent)
+
+    np.testing.assert_allclose(
+        np.asarray(actual_gradient),
+        np.asarray(expected_gradient),
+        rtol=1e-4,
+        atol=1e-4,
+    )

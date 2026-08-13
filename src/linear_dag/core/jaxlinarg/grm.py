@@ -1,8 +1,11 @@
-# pattern: Functional Core
+# pattern: Mixed (unavoidable)
+# Reason: GRM algebra is pure, while multi-block execution coordinates
+# device-local operands and output assembly.
+
+"""Implicit genetic relatedness matrix products over JAX LinearARG operators."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from functools import cached_property
 from typing import Any
 
@@ -10,15 +13,13 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, ArrayLike
 
-from .operator import JaxLinearARG
+from .operator import _as_rank2_matrix, JaxLinearARG
 from .wrapper import (
-    _as_rank2_matrix,
     _device_put_if_needed,
+    _devices_for_blocks,
     _mesh_assembly_device,
-    _mesh_block_devices,
     JaxParallelOperator,
 )
 
@@ -38,13 +39,23 @@ class JaxGRMOperator(eqx.Module):
         [`linear_dag.core.jaxlinarg.JaxParallelOperator`][]. This class only
         defines the GRM algebra on top of those operators.
 
-    **Arguments:**
+        When `operator` is a multi-block
+        [`linear_dag.core.jaxlinarg.JaxParallelOperator`][], call `matmat`
+        directly. An additional outer `jax.jit` around the bound GRM method
+        captures every block as a constant and bypasses device-local ownership.
 
-    - `operator`: JAX genotype operator providing `matmat`, `rmatmat`, and
-      per-variant allele counts.
-    - `alpha`: Allele-frequency weight exponent.
-    - `center`: Whether to center genotypes by allele frequency before forming
-      the GRM.
+    !!! Example
+
+        ```python
+        import jax.numpy as jnp
+
+        from linear_dag import JaxGRMOperator, JaxLinearARG
+
+        genotype = JaxLinearARG.from_hdf5_block("lineararg.h5", "block_0")
+        grm = JaxGRMOperator(genotype, alpha=-1.0, center=True)
+        relatedness_scores = grm @ jnp.ones(genotype.shape[0])
+        ```
+
     """
 
     operator: JaxLinearARG | JaxParallelOperator
@@ -104,17 +115,8 @@ class JaxGRMOperator(eqx.Module):
                 alpha=self.alpha,
                 center=self.center,
             )
-        elif len(self.operator.block_ranges) > 1:
-            result = self._sharded_matmat(x)
         else:
-            result = jnp.zeros_like(x)
-            for block in self.operator.blocks:
-                result = result + _block_grm_product(
-                    block,
-                    x,
-                    alpha=self.alpha,
-                    center=self.center,
-                )
+            result = self._device_local_matmat_rank2(x)
         return result
 
     def matmat_blockwise(self, x: ArrayLike) -> Array:
@@ -126,6 +128,18 @@ class JaxGRMOperator(eqx.Module):
         useful for workflows such as RHE where a full multi-block GRM product
         inside a larger `jax.jit` can make all block temporaries live in one HLO
         module.
+
+        **Arguments:**
+
+        - `x`: Rank-1 sample-space vector, or rank-2 sample-by-trait matrix.
+
+        **Returns:**
+
+        - GRM product with the same rank convention as the input.
+
+        **Raises:**
+
+        - `ValueError`: If `x` has an incompatible rank or leading dimension.
         """
         x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.dtype)
         result = self._matmat_blockwise_rank2(x)
@@ -136,19 +150,31 @@ class JaxGRMOperator(eqx.Module):
             _mesh_assembly_device(self.operator.mesh) if isinstance(self.operator, JaxParallelOperator) else None
         )
         result = _device_put_if_needed(jnp.zeros_like(x), assembly_device)
-        for device, product in self._blockwise_grm_products:
-            contribution = product(_device_put_if_needed(x, device))
+        # Keep each block product behind its own JIT boundary. This limits the
+        # lifetime of block intermediates instead of building one monolithic HLO.
+        for device, block in self._device_blocks:
+            contribution = _block_grm_product_jit(
+                block,
+                _device_put_if_needed(x, device),
+                alpha=self.alpha,
+                center=self.center,
+            )
             result = result + _device_put_if_needed(contribution, assembly_device)
         return result
 
     @cached_property
-    def _blockwise_grm_products(self) -> tuple[tuple[jax.Device | None, Callable[[Array], Array]], ...]:
+    def _device_blocks(self) -> tuple[tuple[jax.Device | None, JaxLinearARG], ...]:
         blocks = self.operator.blocks if isinstance(self.operator, JaxParallelOperator) else (self.operator,)
-        devices = _grm_block_devices(self.operator) if isinstance(self.operator, JaxParallelOperator) else (None,)
-        return tuple(
-            (device, _blockwise_grm_product(block, alpha=self.alpha, center=self.center))
-            for device, block in zip(devices, blocks, strict=True)
+        devices = (
+            _devices_for_blocks(
+                self.operator.mesh,
+                self.operator.block_ranges,
+                n_blocks=len(blocks),
+            )
+            if isinstance(self.operator, JaxParallelOperator)
+            else (None,)
         )
+        return tuple(zip(devices, blocks, strict=True))
 
     def matvec(self, x: ArrayLike) -> Array:
         """Multiply a vector by the implicit genetic relatedness matrix."""
@@ -174,58 +200,37 @@ class JaxGRMOperator(eqx.Module):
         """Return this symmetric operator."""
         return self
 
-    def _sharded_matmat(self, x: Array) -> Array:
-        branches = tuple(self._grm_branch(start, end) for start, end in self.operator.block_ranges)
-
-        def mapped(values: Array) -> Array:
-            axis_index = jax.lax.axis_index("blocks")
-            local = jax.lax.switch(axis_index, branches, values)
-            # Every GRM block-range contribution is sample-shaped, so unlike
-            # `JaxParallelOperator.rmatmat` there is no ragged variant output to
-            # assemble. Devices can reduce partial sample products directly.
-            return jax.lax.psum(local, "blocks")
-
-        product = jax.shard_map(
-            mapped,
-            mesh=self.operator.mesh,
-            in_specs=P(),
-            out_specs=P(),
-            axis_names={"blocks"},
-        )
-        return product(x)
-
-    def _grm_branch(self, start: int, end: int) -> Callable[[Array], Array]:
-        def branch(values: Array) -> Array:
-            local = jnp.zeros_like(values)
-            for block_index in range(start, end):
-                local = local + _block_grm_product(
-                    self.operator.blocks[block_index],
-                    values,
-                    alpha=self.alpha,
-                    center=self.center,
-                )
-            return local
-
-        return branch
+    def _device_local_matmat_rank2(self, x: Array) -> Array:
+        if not isinstance(self.operator, JaxParallelOperator):
+            raise TypeError("device-local GRM execution requires a JaxParallelOperator")
+        contributions = [
+            _grm_range_product_jit(
+                blocks,
+                _device_put_if_needed(x, device),
+                alpha=self.alpha,
+                center=self.center,
+            )
+            for device, blocks, _variant_start, _variant_end in self.operator._device_block_ranges
+        ]
+        assembly_device = _mesh_assembly_device(self.operator.mesh)
+        result = _device_put_if_needed(jnp.zeros_like(x), assembly_device)
+        for contribution in contributions:
+            result = result + _device_put_if_needed(contribution, assembly_device)
+        return result
 
 
-def _grm_block_devices(operator: JaxParallelOperator) -> tuple[jax.Device | None, ...]:
-    devices = _mesh_block_devices(operator.mesh)
-    if devices is None:
-        return tuple(None for _ in operator.blocks)
-
-    block_devices: list[jax.Device | None] = [None] * len(operator.blocks)
-    for range_index, (start, end) in enumerate(operator.block_ranges):
-        for block_index in range(start, end):
-            block_devices[block_index] = devices[range_index]
-    return tuple(block_devices)
-
-
-def _blockwise_grm_product(block: JaxLinearARG, *, alpha: float, center: bool) -> Callable[[Array], Array]:
-    def product(values: Array) -> Array:
-        return _block_grm_product_jit(block, values, alpha=alpha, center=center)
-
-    return product
+@eqx.filter_jit
+def _grm_range_product_jit(
+    blocks: tuple[JaxLinearARG, ...],
+    values: Array,
+    *,
+    alpha: float,
+    center: bool,
+) -> Array:
+    result = jnp.zeros_like(values)
+    for block in blocks:
+        result = result + _block_grm_product(block, values, alpha=alpha, center=center)
+    return result
 
 
 @eqx.filter_jit
@@ -267,5 +272,6 @@ def _block_grm_product(
     if center:
         # Apply the left centering factor:
         # `(X - 1 f^T) weighted_scores = X weighted_scores - 1 (f^T weighted_scores)`.
+        assert correction is not None
         result = result - correction
     return result

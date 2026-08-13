@@ -1,5 +1,7 @@
 # pattern: Imperative Shell
 
+"""Runtime diagnostics for the optional JAX native extension."""
+
 from __future__ import annotations
 
 from typing import Any

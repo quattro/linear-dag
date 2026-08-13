@@ -33,6 +33,8 @@ class ParallelBenchmarkResult:
     k: int
     median_seconds: float
     ratio_to_parallel_operator: float | None
+    resident_graph_bytes: int | None = None
+    max_device_graph_bytes: int | None = None
 
 
 def test_jax_parallel_operator_benchmark(
@@ -123,12 +125,17 @@ def _time_jax_parallel_operator(
             backend=config.backend,
         )
     variant_inputs, sample_inputs = _benchmark_inputs(op.shape, k_values=k_values)
+    graph_bytes_by_device = _graph_bytes_by_device(op)
+    resident_graph_bytes = sum(graph_bytes_by_device.values())
+    max_device_graph_bytes = max(graph_bytes_by_device.values(), default=0)
     results = []
     for k, matrix in variant_inputs.items():
         with jax.default_device(config.devices[0]):
             jax_matrix = jnp.asarray(matrix)
-        matmat = jax.jit(lambda values: op.matmat(values)).lower(jax_matrix).compile()
-        runtime = _time_call(lambda matrix=jax_matrix, matmat=matmat: matmat(matrix), block_until_ready=True)
+        # The operator owns cached device-local range executables. Wrapping the
+        # bound method in another JIT would capture all graph arrays as constants
+        # and defeat the placement contract this benchmark is intended to test.
+        runtime = _time_call(lambda matrix=jax_matrix, op=op: op.matmat(matrix), block_until_ready=True)
         results.append(
             ParallelBenchmarkResult(
                 _result_operator_name(config),
@@ -136,6 +143,8 @@ def _time_jax_parallel_operator(
                 k,
                 runtime,
                 runtime / baselines[("matmat", k)],
+                resident_graph_bytes,
+                max_device_graph_bytes,
             )
         )
     for k, matrix in sample_inputs.items():
@@ -153,6 +162,8 @@ def _time_jax_parallel_operator(
                 k,
                 runtime,
                 runtime / baselines[("rmatmat", k)],
+                resident_graph_bytes,
+                max_device_graph_bytes,
             )
         )
     return results
@@ -168,6 +179,18 @@ def _benchmark_inputs(
     variant_inputs = {k: rng.normal(size=(n_variants, k)).astype(np.float32) for k in k_values}
     sample_inputs = {k: rng.normal(size=(n_samples, k)).astype(np.float32) for k in k_values}
     return variant_inputs, sample_inputs
+
+
+def _graph_bytes_by_device(op: JaxParallelOperator) -> dict[str, int]:
+    resident_bytes: dict[str, int] = {}
+    for block in op.blocks:
+        for leaf in jax.tree_util.tree_leaves(block):
+            if not isinstance(leaf, jax.Array):
+                continue
+            for shard in leaf.addressable_shards:
+                device = str(shard.device)
+                resident_bytes[device] = resident_bytes.get(device, 0) + int(shard.data.nbytes)
+    return resident_bytes
 
 
 @dataclass(frozen=True)
@@ -265,8 +288,16 @@ def _call_repeated(call: Callable[[], Any], *, repetitions: int, block_until_rea
 
 
 def _print_results(results: list[ParallelBenchmarkResult]) -> None:
-    print("\n| operator | operation | k | median seconds | ratio to ParallelOperator |")
-    print("|---|---|---:|---:|---:|")
+    print(
+        "\n| operator | operation | k | median seconds | ratio to ParallelOperator "
+        "| resident graph MiB | max device graph MiB |"
+    )
+    print("|---|---|---:|---:|---:|---:|---:|")
     for result in sorted(results, key=lambda item: (item.operation, item.operator, item.k)):
         ratio = "" if result.ratio_to_parallel_operator is None else f"{result.ratio_to_parallel_operator:.3f}"
-        print(f"| {result.operator} | {result.operation} | {result.k} | {result.median_seconds:.6f} | {ratio} |")
+        resident_mib = "" if result.resident_graph_bytes is None else f"{result.resident_graph_bytes / 2**20:.3f}"
+        max_device_mib = "" if result.max_device_graph_bytes is None else f"{result.max_device_graph_bytes / 2**20:.3f}"
+        print(
+            f"| {result.operator} | {result.operation} | {result.k} | "
+            f"{result.median_seconds:.6f} | {ratio} | {resident_mib} | {max_device_mib} |"
+        )

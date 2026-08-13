@@ -37,6 +37,15 @@ def _two_device_cpu_mesh_or_skip() -> Mesh:
     return Mesh(np.asarray(devices[:2]), ("blocks",))
 
 
+def _resident_devices(block: JaxLinearARG) -> set[jax.Device]:
+    return {
+        shard.device
+        for leaf in jax.tree_util.tree_leaves(block)
+        if isinstance(leaf, jax.Array)
+        for shard in leaf.addressable_shards
+    }
+
+
 def _fixture_operator(linarg_h5_path, linarg_block_metadata, *, mesh: Mesh | None = None) -> JaxParallelOperator:
     return JaxParallelOperator.from_hdf5(
         linarg_h5_path,
@@ -343,20 +352,17 @@ def test_jax_parallel_operator_products_on_two_device_cpu_mesh(
     linarg_block_metadata,
     monkeypatch,
 ):
-    shard_map_calls = []
+    def reject_shard_map(*args, **kwargs):
+        raise AssertionError("ragged device-local execution should not capture blocks in shard_map")
 
-    def recording_shard_map(*args, **kwargs):
-        shard_map_calls.append(kwargs)
-        return original_shard_map(*args, **kwargs)
-
-    original_shard_map = jax.shard_map
-    monkeypatch.setattr("linear_dag.core.jaxlinarg.wrapper.jax.shard_map", recording_shard_map)
+    monkeypatch.setattr("linear_dag.core.jaxlinarg.wrapper.jax.shard_map", reject_shard_map)
     op = _fixture_operator(linarg_h5_path, linarg_block_metadata, mesh=_two_device_cpu_mesh_or_skip())
     w = jnp.ones((op.shape[1], 2), dtype=jnp.float32)
     y = jnp.ones((op.shape[0], 2), dtype=jnp.float32)
+    assembly_device = np.asarray(op.mesh.devices).reshape(-1).tolist()[0]
 
     expected_matmat = sum(
-        block.matmat(w[start:end])
+        jax.device_put(block.matmat(w[start:end]), assembly_device)
         for block, start, end in zip(
             op.blocks,
             op.variant_offsets[:-1],
@@ -364,14 +370,81 @@ def test_jax_parallel_operator_products_on_two_device_cpu_mesh(
             strict=True,
         )
     )
-    expected_rmatmat = jnp.concatenate([block.rmatmat(y) for block in op.blocks], axis=0)
+    expected_rmatmat = jnp.concatenate(
+        [jax.device_put(block.rmatmat(y), assembly_device) for block in op.blocks],
+        axis=0,
+    )
 
     np.testing.assert_allclose(np.asarray(op.matmat(w)), np.asarray(expected_matmat), rtol=1e-5, atol=1e-5)
-    assert len(shard_map_calls) == 1
-
     np.testing.assert_allclose(np.asarray(op.rmatmat(y)), np.asarray(expected_rmatmat), rtol=1e-5, atol=1e-5)
-    assert len(shard_map_calls) == 1
-    assert all(call["axis_names"] == {"blocks"} for call in shard_map_calls)
+
+
+def test_jax_parallel_operator_places_blocks_on_assigned_devices(
+    linarg_h5_path,
+    linarg_block_metadata,
+):
+    mesh = _two_device_cpu_mesh_or_skip()
+    op = _fixture_operator(linarg_h5_path, linarg_block_metadata, mesh=mesh)
+    devices = tuple(np.asarray(mesh.devices).reshape(-1).tolist())
+
+    for device, (start, end) in zip(devices, op.block_ranges, strict=True):
+        for block in op.blocks[start:end]:
+            assert _resident_devices(block) == {device}
+
+
+def test_jax_parallel_operator_rejects_direct_construction_with_misplaced_blocks():
+    mesh = _two_device_cpu_mesh_or_skip()
+    devices = tuple(np.asarray(mesh.devices).reshape(-1).tolist())
+    with jax.default_device(devices[0]):
+        blocks = (_tiny_block(), _tiny_block())
+
+    with pytest.raises(ValueError, match="from_linearargs"):
+        JaxParallelOperator(
+            blocks=blocks,
+            variant_offsets=(0, 1, 2),
+            mesh=mesh,
+            backend=Backend.PURE_JAX,
+            block_ranges=((0, 1), (1, 2)),
+        )
+
+
+def test_jax_parallel_operator_constructs_zarr_blocks_on_assigned_devices(monkeypatch):
+    mesh = _two_device_cpu_mesh_or_skip()
+    devices = tuple(np.asarray(mesh.devices).reshape(-1).tolist())
+    metadata = pl.DataFrame(
+        {
+            "block_name": ["block_0", "block_1"],
+            "n_entries": [1, 1],
+            "n_variants": [1, 1],
+        }
+    )
+    reader = SimpleNamespace(
+        root={"blocks": {"block_0": object(), "block_1": object()}},
+        list_blocks=lambda: metadata,
+    )
+    constructed_on = []
+
+    def reject_bulk_ingress(*args, **kwargs):
+        raise AssertionError("Zarr blocks should be constructed directly on their assigned devices")
+
+    def fake_from_zarr_group(group, *, backend, dtype):
+        del group, backend, dtype
+        block = _tiny_block()
+        constructed_on.append(_resident_devices(block))
+        return block
+
+    monkeypatch.setattr("linear_dag.core.jaxlinarg.ingress.read_zarr_blocks", reject_bulk_ingress)
+    monkeypatch.setattr("linear_dag.core.jaxlinarg.ingress.from_zarr_group", fake_from_zarr_group)
+
+    op = JaxParallelOperator.from_zarr(
+        reader,
+        mesh=mesh,
+        block_metadata=metadata,
+        backend=Backend.PURE_JAX,
+    )
+
+    assert constructed_on == [{devices[0]}, {devices[1]}]
+    assert [_resident_devices(block) for block in op.blocks] == [{devices[0]}, {devices[1]}]
 
 
 def test_jax_parallel_operator_autodiff_matches_concatenated_block_gradients(
@@ -379,19 +452,14 @@ def test_jax_parallel_operator_autodiff_matches_concatenated_block_gradients(
     linarg_block_metadata,
     monkeypatch,
 ):
-    shard_map_calls = []
+    def reject_shard_map(*args, **kwargs):
+        raise AssertionError("autodiff should use explicit device-local range products")
 
-    def recording_shard_map(*args, **kwargs):
-        shard_map_calls.append(kwargs)
-        return original_shard_map(*args, **kwargs)
-
-    original_shard_map = jax.shard_map
-    monkeypatch.setattr("linear_dag.core.jaxlinarg.wrapper.jax.shard_map", recording_shard_map)
+    monkeypatch.setattr("linear_dag.core.jaxlinarg.wrapper.jax.shard_map", reject_shard_map)
     op = _fixture_operator(linarg_h5_path, linarg_block_metadata, mesh=_two_device_cpu_mesh_or_skip())
     w = jnp.arange(op.shape[1] * 2, dtype=jnp.float32).reshape(op.shape[1], 2) / 100.0
     target = jnp.linspace(-1.0, 1.0, op.shape[0] * 2, dtype=jnp.float32).reshape(op.shape[0], 2)
 
-    @jax.jit
     def loss(values):
         residual = op.matmat(values) - target
         return 0.5 * jnp.sum(residual**2)
@@ -411,8 +479,7 @@ def test_jax_parallel_operator_autodiff_matches_concatenated_block_gradients(
 
         expected_blocks.append(jax.grad(block_pullback)(w[start:end]))
 
-    actual = jax.jit(jax.grad(loss))(w)
+    actual = jax.grad(loss)(w)
     expected = jnp.concatenate(expected_blocks, axis=0)
 
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
-    assert shard_map_calls

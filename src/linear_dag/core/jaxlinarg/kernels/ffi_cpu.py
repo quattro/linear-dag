@@ -1,8 +1,11 @@
 # pattern: Imperative Shell
 
+"""Registration and invocation of the optional native CPU FFI kernels."""
+
 from __future__ import annotations
 
 from functools import cache
+from importlib import import_module
 from typing import Any
 
 import jax
@@ -69,14 +72,16 @@ def is_ffi_cpu_native_tuning_enabled() -> bool:
 
 @cache
 def _import_ffi_cpu_impl() -> Any:
-    from linear_dag.core.jaxlinarg.kernels import _ffi_cpu_impl
-
-    return _ffi_cpu_impl
+    # The extension is generated at build time and is optional in source-only
+    # installations, so keep it outside the static import graph.
+    return import_module("linear_dag.core.jaxlinarg.kernels._ffi_cpu_impl")
 
 
 @cache
 def _load_ffi_cpu_impl() -> Any:
     _ffi_cpu_impl = _import_ffi_cpu_impl()
+    # Registration mutates JAX's process-wide FFI registry, so the cached
+    # loader performs it at most once per extension module instance.
     for name, capsule in _ffi_cpu_impl.registrations().items():
         jax.ffi.register_ffi_target(name, capsule, platform="cpu", api_version=1)
     return _ffi_cpu_impl
@@ -90,7 +95,26 @@ def ffi_cpu_solve_forward(
     min_index_to_keep: int,
     b: Any,
 ) -> jax.Array:
-    """Execute the native CPU FFI forward compressed solve."""
+    """Execute the native forward solve over a compressed node buffer.
+
+    **Arguments:**
+
+    - `indptr`: CSC edge offsets for each source node.
+    - `indices`: Destination node for each edge.
+    - `data`: Edge coefficients aligned to `indices`.
+    - `nonunique_indices`: Mapping from graph nodes to reusable buffer rows.
+    - `min_index_to_keep`: First graph node whose buffer row must remain live.
+    - `b`: Rank-2 compressed-node-by-trait input buffer.
+
+    **Returns:**
+
+    - The propagated compressed buffer with the same shape and dtype as `b`.
+
+    **Raises:**
+
+    - `RuntimeError`: If the native CPU extension cannot be registered.
+    - `ValueError`: If `b` is not `float32` or `float64`.
+    """
     return _ffi_cpu_solve(
         FFI_CPU_SOLVE_FORWARD_F32,
         FFI_CPU_SOLVE_FORWARD_F64,
@@ -111,7 +135,26 @@ def ffi_cpu_solve_backward(
     min_index_to_keep: int,
     b: Any,
 ) -> jax.Array:
-    """Execute the native CPU FFI backward compressed solve."""
+    """Execute the native transposed solve over a compressed node buffer.
+
+    **Arguments:**
+
+    - `indptr`: CSC edge offsets for each source node.
+    - `indices`: Destination node for each edge.
+    - `data`: Edge coefficients aligned to `indices`.
+    - `nonunique_indices`: Mapping from graph nodes to reusable buffer rows.
+    - `min_index_to_keep`: First graph node whose buffer row must remain live.
+    - `b`: Rank-2 compressed-node-by-trait input buffer.
+
+    **Returns:**
+
+    - The propagated compressed buffer with the same shape and dtype as `b`.
+
+    **Raises:**
+
+    - `RuntimeError`: If the native CPU extension cannot be registered.
+    - `ValueError`: If `b` is not `float32` or `float64`.
+    """
     return _ffi_cpu_solve(
         FFI_CPU_SOLVE_BACKWARD_F32,
         FFI_CPU_SOLVE_BACKWARD_F64,

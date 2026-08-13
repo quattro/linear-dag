@@ -1,3 +1,7 @@
+# pattern: Mixed (unavoidable)
+# Reason: Unit-level operator contract checks share this file with HDF5-backed
+# multiprocessing integration tests.
+
 import os
 import tempfile
 
@@ -22,6 +26,36 @@ class _FakeManager:
         self.start_flags.append(flag)
 
 
+def test_parallel_operators_support_scipy_linear_operator_protocol():
+    manager = SimpleNamespace()
+    parallel = ParallelOperator(
+        manager,
+        _sample_data_handle=object(),
+        _variant_data_handle=object(),
+        _num_traits=SimpleNamespace(value=0),
+        _max_num_traits=1,
+        shape=(2, 3),
+    )
+    grm = GRMOperator(
+        manager,
+        _input_data_handle=object(),
+        _output_data_handle=object(),
+        _num_traits=SimpleNamespace(value=0),
+        _alpha=SimpleNamespace(value=-1.0),
+        _max_num_traits=1,
+        shape=(2, 2),
+    )
+
+    for operator in (parallel, grm):
+        operator._matmat = lambda values, operator=operator: np.zeros(
+            (operator.shape[0], values.shape[1]),
+            dtype=operator.dtype,
+        )
+        observed = operator @ np.ones((operator.shape[1], 1), dtype=operator.dtype)
+
+        assert observed.shape == (operator.shape[0], 1)
+
+
 def test_from_hdf5_signature_constructor_contract_parameter_order():
     expected = [
         "hdf5_file",
@@ -32,6 +66,7 @@ def test_from_hdf5_signature_constructor_contract_parameter_order():
         "bed_file",
         "bed_maf_log10_threshold",
         "alpha",
+        "dtype",
     ]
 
     parallel_params = list(signature(ParallelOperator.from_hdf5).parameters)
@@ -60,6 +95,21 @@ def test_from_hdf5_signature_constructor_contract_default_values():
 
     assert parallel_signature.parameters["alpha"].default == -1.0
     assert grm_signature.parameters["alpha"].default == -1.0
+    assert parallel_signature.parameters["dtype"].default is np.float32
+    assert grm_signature.parameters["dtype"].default is np.float32
+
+
+def test_grm_operator_respects_requested_dtype(linarg_h5_path: Path):
+    with GRMOperator.from_hdf5(
+        linarg_h5_path,
+        num_processes=1,
+        dtype=np.float64,
+    ) as grm:
+        values = np.ones((grm.shape[1], 2), dtype=np.float64)
+        observed = grm @ values
+
+    assert grm.dtype == np.dtype(np.float64)
+    assert observed.dtype == np.dtype(np.float64)
 
 
 def test_from_hdf5_shared_pipeline_path_for_parallel_and_grm(monkeypatch):

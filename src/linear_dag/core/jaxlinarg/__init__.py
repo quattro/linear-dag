@@ -1,5 +1,7 @@
 # pattern: Functional Core
 
+"""JAX-compatible LinearARG operators and backend selection."""
+
 from .build_config import show_build_config as show_build_config
 from .grm import JaxGRMOperator as JaxGRMOperator
 from .operator import Backend as Backend, JaxLinearARG as JaxLinearARG

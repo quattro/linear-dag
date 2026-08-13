@@ -1,12 +1,15 @@
 # pattern: Imperative Shell
 
+"""Host-to-device ingress for LinearARG arrays, HDF5 blocks, and Zarr groups."""
+
 from __future__ import annotations
 
-import importlib.util as iu
 import warnings
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from importlib import import_module
+from importlib.util import find_spec
 from os import PathLike
 from typing import Any
 
@@ -23,7 +26,24 @@ from .operator import Backend, JaxLinearARG, resolve_backend
 
 @dataclass(frozen=True)
 class LinearARGBlockArrays:
-    """Host arrays for one LinearARG block in the JAX operator schema."""
+    """Canonical host arrays for one LinearARG block.
+
+    This immutable transfer object separates storage I/O from JAX device
+    construction. Array dtypes are normalized by the reader functions before
+    an instance is returned.
+
+    !!! Example
+
+        ```python
+        from linear_dag.core.jaxlinarg.ingress import (
+            from_block_arrays,
+            read_hdf5_block_arrays,
+        )
+
+        arrays = read_hdf5_block_arrays("lineararg.h5", "block_0")
+        operator = from_block_arrays(arrays)
+        ```
+    """
 
     indptr: np.ndarray
     indices: np.ndarray
@@ -186,6 +206,13 @@ def read_hdf5_blocks(
 ) -> tuple[JaxLinearARG, ...]:
     """Read HDF5 LinearARG blocks directly as eager JAX operators.
 
+    !!! info
+
+        This convenience function materializes every requested block eagerly on
+        the default device. Use
+        [`linear_dag.core.jaxlinarg.JaxParallelOperator.from_hdf5`][] for
+        device-aware multi-block ingress without transient graph duplication.
+
     **Arguments:**
 
     - `path`: HDF5 file path.
@@ -232,6 +259,13 @@ def read_zarr_blocks(
     dtype: Any = None,
 ) -> tuple[JaxLinearARG, ...]:
     """Read Zarr LinearARG blocks directly as eager JAX operators.
+
+    !!! info
+
+        This convenience function materializes every requested block eagerly on
+        the default device. Use
+        [`linear_dag.core.jaxlinarg.JaxParallelOperator.from_zarr`][] for
+        device-aware multi-block ingress without transient graph duplication.
 
     **Arguments:**
 
@@ -333,7 +367,8 @@ def _sample_indices(n_nodes: int, n_samples: int, n_individuals: Any) -> np.ndar
 
 
 def _ensure_hdf5_plugins() -> None:
-    if iu.find_spec("hdf5plugin") is None:
+    if find_spec("hdf5plugin") is None:
         warnings.warn("hdf5plugin is required for blosc compression; this may impact reading", stacklevel=2)
         return
-    import hdf5plugin  # noqa: F401
+    # Importing the optional package registers its HDF5 filters process-wide.
+    import_module("hdf5plugin")

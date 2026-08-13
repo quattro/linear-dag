@@ -1,6 +1,10 @@
-# pattern: Functional Core
+# pattern: Mixed (unavoidable)
+# Reason: Public compatibility constructors coordinate ingress/device placement
+# while the operator methods implement pure array algebra.
 
-from collections.abc import Callable
+"""Device-aware composition of ragged JAX LinearARG blocks."""
+
+from contextlib import nullcontext
 from functools import cached_property
 from typing import Any
 
@@ -10,16 +14,34 @@ import jax.numpy as jnp
 import numpy as np
 import polars as pl
 
-from jax.sharding import AbstractMesh, Mesh, PartitionSpec as P
+from jax.sharding import AbstractMesh, Mesh
 from jaxtyping import Array, ArrayLike
 
 from linear_dag.core.lineararg import list_blocks
 
-from .operator import Backend, JaxLinearARG, resolve_backend
+from .operator import _as_rank2_matrix, Backend, JaxLinearARG, resolve_backend
 
 
 def split_blocks_by_n_entries(metadata: pl.DataFrame, num_devices: int) -> tuple[tuple[int, int], ...]:
-    """Split contiguous block ranges by cumulative `n_entries` weight."""
+    """Balance contiguous block ranges by cumulative graph edge count.
+
+    The result always contains one half-open block-index range per device.
+    Empty ranges are possible when there are more devices than blocks.
+
+    **Arguments:**
+
+    - `metadata`: Block metadata containing an `n_entries` column.
+    - `num_devices`: Number of device ranges to produce.
+
+    **Returns:**
+
+    - Contiguous `(start, end)` ranges covering every metadata row once.
+
+    **Raises:**
+
+    - `ValueError`: If `num_devices` is not positive or `metadata` lacks the
+      required column.
+    """
     if num_devices < 1:
         raise ValueError(f"num_devices must be positive. Observed {num_devices}.")
     _require_metadata_columns(metadata, "n_entries")
@@ -36,16 +58,31 @@ def split_blocks_by_n_entries(metadata: pl.DataFrame, num_devices: int) -> tuple
     block_indices.append(len(size_cumsum) - 1)
 
     block_indices = np.array([0] + block_indices)
-    return tuple((int(start), int(end)) for start, end in zip(block_indices[:-1], block_indices[1:], strict=False))
+    return tuple((int(start), int(end)) for start, end in zip(block_indices[:-1], block_indices[1:], strict=True))
 
 
 def variant_offsets_from_metadata(metadata: pl.DataFrame) -> np.ndarray:
-    """Return leading-zero cumulative variant offsets from block metadata."""
+    """Build leading-zero cumulative variant offsets from block metadata.
+
+    **Arguments:**
+
+    - `metadata`: Block metadata containing an `n_variants` column.
+
+    **Returns:**
+
+    - An `int64` array of length `len(metadata) + 1`.
+
+    **Raises:**
+
+    - `ValueError`: If `metadata` lacks the required column.
+    """
     _require_metadata_columns(metadata, "n_variants")
     n_variants = metadata.get_column("n_variants").to_numpy()
     return np.insert(np.cumsum(n_variants), 0, 0).astype(np.int64)
 
 
+# Equinox field converters keep metadata hashable and normalize NumPy scalar
+# inputs before the values become static PyTree leaves.
 def _int_tuple(values: Any) -> tuple[int, ...]:
     return tuple(int(value) for value in values)
 
@@ -61,6 +98,11 @@ class JaxParallelOperator(eqx.Module):
         `mesh` must contain a `"blocks"` axis. A single-device mesh is valid
         and uses the same public API as multi-device execution.
 
+        Concrete meshes place each ragged block on its assigned device and use
+        cached exact-shape range programs. Do not wrap a bound multi-block
+        `matmat` or `rmatmat` method in an additional `jax.jit`; doing so captures
+        the operator arrays as constants and bypasses device-local ownership.
+
     !!! Example
         ```python
         import jax
@@ -73,13 +115,6 @@ class JaxParallelOperator(eqx.Module):
         operator = JaxParallelOperator.from_hdf5("lineararg.h5", mesh=mesh)
         ```
 
-    **Arguments:**
-
-    - `blocks`: Block operators composed by this wrapper.
-    - `variant_offsets`: Leading-zero cumulative variant offsets.
-    - `mesh`: JAX mesh containing a `"blocks"` axis.
-    - `backend`: Requested numerical backend.
-    - `block_ranges`: Contiguous block ranges assigned to mesh devices.
     """
 
     blocks: tuple[JaxLinearARG, ...] = eqx.field(converter=tuple)
@@ -121,16 +156,18 @@ class JaxParallelOperator(eqx.Module):
         lineargs = tuple(lineargs)
         backend = _backend_for_lineargs(lineargs, backend=backend)
         metadata = _metadata_from_lineargs(lineargs)
+        block_ranges = split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh))
+        block_devices = _devices_for_blocks(mesh, block_ranges, n_blocks=len(lineargs))
         blocks = tuple(
-            linearg if isinstance(linearg, JaxLinearARG) else JaxLinearARG.from_lineararg(linearg, backend=backend)
-            for linearg in lineargs
+            _jax_block_on_device(linearg, device=device, backend=backend)
+            for linearg, device in zip(lineargs, block_devices, strict=True)
         )
         return cls(
             blocks=blocks,
             variant_offsets=variant_offsets_from_metadata(metadata),
             mesh=mesh,
             backend=backend,
-            block_ranges=split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh)),
+            block_ranges=block_ranges,
         )
 
     @classmethod
@@ -146,8 +183,9 @@ class JaxParallelOperator(eqx.Module):
 
         !!! info
             Blocks are assigned to contiguous mesh ranges using HDF5 block
-            metadata. `Backend.AUTO` keeps CPU-only environments usable through
-            FFI or pure-JAX fallback.
+            metadata and created directly on their assigned devices.
+            `Backend.AUTO` keeps CPU-only environments usable through FFI or
+            pure-JAX fallback.
 
         **Arguments:**
 
@@ -166,20 +204,18 @@ class JaxParallelOperator(eqx.Module):
         """
         metadata = list_blocks(path) if block_metadata is None else block_metadata
         block_names = metadata.get_column("block_name").to_list()
+        block_ranges = split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh))
+        block_devices = _devices_for_blocks(mesh, block_ranges, n_blocks=len(block_names))
         blocks = tuple(
-            JaxLinearARG.from_hdf5_block(
-                path,
-                block_name,
-                backend=backend,
-            )
-            for block_name in block_names
+            _hdf5_block_on_device(path, block_name, device=device, backend=backend)
+            for block_name, device in zip(block_names, block_devices, strict=True)
         )
         return cls(
             blocks=blocks,
             variant_offsets=variant_offsets_from_metadata(metadata),
             mesh=mesh,
             backend=backend,
-            block_ranges=split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh)),
+            block_ranges=block_ranges,
         )
 
     @classmethod
@@ -193,6 +229,11 @@ class JaxParallelOperator(eqx.Module):
         dtype: Any = None,
     ) -> "JaxParallelOperator":
         """Construct a multi-block JAX operator from a LinearARG Zarr reader.
+
+        !!! info
+            Blocks are created directly on their assigned devices so ingress
+            does not transiently duplicate the full graph on the default
+            device.
 
         **Arguments:**
 
@@ -210,17 +251,26 @@ class JaxParallelOperator(eqx.Module):
 
         - `ValueError`: If metadata, block settings, shapes, or mesh ranges are invalid.
         """
-        from .ingress import read_zarr_blocks
-
         metadata = reader.list_blocks() if block_metadata is None else block_metadata
         block_names = metadata.get_column("block_name").to_list()
-        blocks = read_zarr_blocks(reader, block_names, backend=backend, dtype=dtype)
+        block_ranges = split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh))
+        block_devices = _devices_for_blocks(mesh, block_ranges, n_blocks=len(block_names))
+        blocks_group = reader.root["blocks"]
+        blocks = tuple(
+            _zarr_block_on_device(
+                blocks_group[block_name],
+                device=device,
+                backend=backend,
+                dtype=dtype,
+            )
+            for block_name, device in zip(block_names, block_devices, strict=True)
+        )
         return cls(
             blocks=blocks,
             variant_offsets=variant_offsets_from_metadata(metadata),
             mesh=mesh,
             backend=backend,
-            block_ranges=split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh)),
+            block_ranges=block_ranges,
         )
 
     def __check_init__(self) -> None:
@@ -252,6 +302,11 @@ class JaxParallelOperator(eqx.Module):
             n_blocks=len(self.blocks),
             n_mesh_blocks=_mesh_blocks_axis_size(self.mesh),
         )
+        _validate_concrete_block_placement(
+            self.blocks,
+            mesh=self.mesh,
+            block_ranges=self.block_ranges,
+        )
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -277,17 +332,8 @@ class JaxParallelOperator(eqx.Module):
         x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[1], dtype=self.blocks[0].dtype)
         if len(self.blocks) == 1:
             result = self.blocks[0].matmat(x)
-        elif len(self.block_ranges) > 1:
-            result = self._sharded_matmat(x)
         else:
-            result = jnp.zeros((self.shape[0], x.shape[1]), dtype=x.dtype)
-            for block, start, end in zip(
-                self.blocks,
-                self.variant_offsets[:-1],
-                self.variant_offsets[1:],
-                strict=True,
-            ):
-                result = result + block.matmat(x[start:end])
+            result = self._device_local_matmat(x)
         return result[:, 0] if was_vector else result
 
     def rmatmat(self, x: ArrayLike) -> Array:
@@ -313,13 +359,13 @@ class JaxParallelOperator(eqx.Module):
             result = self._cached_rmatmat(x)
         return result[:, 0] if was_vector else result
 
-    def _sharded_matmat(self, x: Array) -> Array:
+    def _device_local_matmat(self, x: Array) -> Array:
         @jax.custom_vjp
         def product(values: Array) -> Array:
-            return self._sharded_matmat_primal(values)
+            return self._cached_matmat(values)
 
         def product_fwd(values: Array) -> tuple[Array, None]:
-            return self._sharded_matmat_primal(values), None
+            return self._cached_matmat(values), None
 
         def product_bwd(_residual: None, cotangent: Array) -> tuple[Array]:
             return (self._cached_rmatmat(cotangent),)
@@ -327,38 +373,19 @@ class JaxParallelOperator(eqx.Module):
         product.defvjp(product_fwd, product_bwd)
         return product(x)
 
-    def _sharded_matmat_primal(self, x: Array) -> Array:
-        branches = tuple(self._matmat_branch(start, end) for start, end in self.block_ranges)
-
-        def mapped(values: Array) -> Array:
-            axis_index = jax.lax.axis_index("blocks")
-            local = jax.lax.switch(axis_index, branches, values)
-            # Each device owns a contiguous subset of variant blocks and returns
-            # a sample-sized partial product. The full matmat is their sum.
-            return jax.lax.psum(local, "blocks")
-
-        product = jax.shard_map(
-            mapped,
-            mesh=self.mesh,
-            in_specs=P(),
-            # `psum` leaves each device with the full sample-sized product.
-            # Returning a replicated value avoids forcing XLA to slice and
-            # exchange an already-replicated result into a sharded layout.
-            out_specs=P(),
-            axis_names={"blocks"},
-        )
-        return product(x)
-
-    def _matmat_branch(self, start: int, end: int) -> Callable[[Array], Array]:
-        def branch(values: Array) -> Array:
-            local = jnp.zeros((self.shape[0], values.shape[1]), dtype=values.dtype)
-            for block_index in range(start, end):
-                block_start = self.variant_offsets[block_index]
-                block_end = self.variant_offsets[block_index + 1]
-                local = local + self.blocks[block_index].matmat(values[block_start:block_end])
-            return local
-
-        return branch
+    def _cached_matmat(self, x: Array) -> Array:
+        contributions = [
+            _matmat_range_product_jit(
+                blocks,
+                _device_put_if_needed(x[variant_start:variant_end], device),
+            )
+            for device, blocks, variant_start, variant_end in self._device_block_ranges
+        ]
+        assembly_device = _mesh_assembly_device(self.mesh)
+        result = _device_put_if_needed(jnp.zeros((self.shape[0], x.shape[1]), dtype=x.dtype), assembly_device)
+        for contribution in contributions:
+            result = result + _device_put_if_needed(contribution, assembly_device)
+        return result
 
     def _cached_rmatmat(self, x: Array) -> Array:
         # Reverse products naturally return variant rows, and each block range
@@ -367,22 +394,32 @@ class JaxParallelOperator(eqx.Module):
         # reintroduce padding. Instead, keep one cached JIT entrypoint per
         # non-empty range and concatenate the exact-size range outputs.
         assembly_device = _mesh_assembly_device(self.mesh)
-        segments = [
-            _device_put_if_needed(product(_device_put_if_needed(x, device)), assembly_device)
-            for device, product in self._rmatmat_products
+        device_segments = [
+            _rmatmat_range_product_jit(blocks, _device_put_if_needed(x, device))
+            for device, blocks, _variant_start, _variant_end in self._device_block_ranges
         ]
+        segments = [_device_put_if_needed(segment, assembly_device) for segment in device_segments]
         return jnp.concatenate(segments, axis=0)
 
     @cached_property
-    def _rmatmat_products(self) -> tuple[tuple[jax.Device | None, Callable[[Array], Array]], ...]:
+    def _device_block_ranges(
+        self,
+    ) -> tuple[tuple[jax.Device | None, tuple[JaxLinearARG, ...], int, int], ...]:
         devices = _mesh_block_devices(self.mesh)
-        products = []
+        ranges = []
         for range_index, (start, end) in enumerate(self.block_ranges):
             if start == end:
                 continue
             device = devices[range_index] if devices is not None else None
-            products.append((device, jax.jit(_rmatmat_range_product(self.blocks[start:end]))))
-        return tuple(products)
+            ranges.append(
+                (
+                    device,
+                    self.blocks[start:end],
+                    self.variant_offsets[start],
+                    self.variant_offsets[end],
+                )
+            )
+        return tuple(ranges)
 
     def matvec(self, x: ArrayLike) -> Array:
         """Multiply a vector by the composed genotype matrix."""
@@ -407,8 +444,7 @@ def _backend_for_lineargs(lineargs: tuple[Any, ...], *, backend: Backend) -> Bac
     if len(prebuilt_backends) != 1:
         observed = ", ".join(sorted(block_backend.value for block_backend in prebuilt_backends))
         raise ValueError(
-            "prebuilt JaxLinearARG block backends must be consistent when wrapper backend is AUTO; "
-            f"observed {observed}"
+            f"prebuilt JaxLinearARG block backends must be consistent when wrapper backend is AUTO; observed {observed}"
         )
     return next(iter(prebuilt_backends))
 
@@ -532,33 +568,113 @@ def _mesh_assembly_device(mesh: Mesh | AbstractMesh) -> jax.Device | None:
     return np.asarray(mesh.devices).reshape(-1).tolist()[0]
 
 
-def _rmatmat_range_product(blocks: tuple[JaxLinearARG, ...]) -> Callable[[Array], Array]:
-    # A range product is deliberately exact-size. This mirrors the NumPy
-    # ParallelOperator model: each worker/range computes its own variant rows,
-    # and the wrapper assembles the public `(sum p_i, k)` result by
-    # concatenation. Keeping the function object cached lets JAX reuse compiled
-    # executables for repeated calls with the same input shape and dtype.
-    def product(values: Array) -> Array:
-        return jnp.concatenate([block.rmatmat(values) for block in blocks], axis=0)
+def _devices_for_blocks(
+    mesh: Mesh | AbstractMesh,
+    block_ranges: tuple[tuple[int, int], ...],
+    *,
+    n_blocks: int,
+) -> tuple[jax.Device | None, ...]:
+    range_devices = _mesh_block_devices(mesh)
+    if range_devices is None:
+        return tuple(None for _ in range(n_blocks))
 
-    return product
+    block_devices: list[jax.Device | None] = [None] * n_blocks
+    for device, (start, end) in zip(range_devices, block_ranges, strict=True):
+        for block_index in range(start, end):
+            block_devices[block_index] = device
+    return tuple(block_devices)
+
+
+def _validate_concrete_block_placement(
+    blocks: tuple[JaxLinearARG, ...],
+    *,
+    mesh: Mesh | AbstractMesh,
+    block_ranges: tuple[tuple[int, int], ...],
+) -> None:
+    if isinstance(mesh, AbstractMesh):
+        return
+
+    expected_devices = _devices_for_blocks(mesh, block_ranges, n_blocks=len(blocks))
+    for block_index, (block, expected_device) in enumerate(zip(blocks, expected_devices, strict=True)):
+        resident_devices = {
+            device
+            for leaf in jax.tree_util.tree_leaves(block)
+            if isinstance(leaf, jax.Array)
+            for device in leaf.devices()
+        }
+        if resident_devices != {expected_device}:
+            observed = ", ".join(sorted(str(device) for device in resident_devices)) or "no resident device"
+            raise ValueError(
+                f"block {block_index} must reside only on assigned device {expected_device}; observed {observed}. "
+                "Use JaxParallelOperator.from_linearargs, from_hdf5, or from_zarr to place blocks."
+            )
+
+
+def _put_block_on_device(block: JaxLinearARG, device: jax.Device | None) -> JaxLinearARG:
+    if device is None:
+        return block
+    return eqx.filter_shard(block, device)
+
+
+# These ingress-specific helpers are deliberately separate: construction must
+# happen inside the assigned default-device context. Constructing first and
+# moving afterward would transiently duplicate every graph on the default device.
+def _jax_block_on_device(
+    linearg: Any,
+    *,
+    device: jax.Device | None,
+    backend: Backend,
+) -> JaxLinearARG:
+    if isinstance(linearg, JaxLinearARG):
+        return _put_block_on_device(linearg, device)
+    with jax.default_device(device) if device is not None else nullcontext():
+        block = JaxLinearARG.from_lineararg(linearg, backend=backend)
+    return _put_block_on_device(block, device)
+
+
+def _hdf5_block_on_device(
+    path: Any,
+    block_name: Any,
+    *,
+    device: jax.Device | None,
+    backend: Backend,
+) -> JaxLinearARG:
+    with jax.default_device(device) if device is not None else nullcontext():
+        block = JaxLinearARG.from_hdf5_block(path, block_name, backend=backend)
+    return _put_block_on_device(block, device)
+
+
+def _zarr_block_on_device(
+    group: Any,
+    *,
+    device: jax.Device | None,
+    backend: Backend,
+    dtype: Any,
+) -> JaxLinearARG:
+    from .ingress import from_zarr_group
+
+    with jax.default_device(device) if device is not None else nullcontext():
+        block = from_zarr_group(group, backend=backend, dtype=dtype)
+    return _put_block_on_device(block, device)
+
+
+@eqx.filter_jit
+def _matmat_range_product_jit(blocks: tuple[JaxLinearARG, ...], values: Array) -> Array:
+    result = jnp.zeros((blocks[0].n_samples, values.shape[1]), dtype=values.dtype)
+    variant_start = 0
+    for block in blocks:
+        variant_end = variant_start + block.n_variants
+        result = result + block.matmat(values[variant_start:variant_end])
+        variant_start = variant_end
+    return result
+
+
+@eqx.filter_jit
+def _rmatmat_range_product_jit(blocks: tuple[JaxLinearARG, ...], values: Array) -> Array:
+    return jnp.concatenate([block.rmatmat(values) for block in blocks], axis=0)
 
 
 def _device_put_if_needed(value: Array, device: jax.Device | None) -> Array:
     if device is None:
         return value
     return jax.device_put(value, device)
-
-
-def _as_rank2_matrix(x: ArrayLike, *, expected_rows: int, dtype: Any) -> tuple[Array, bool]:
-    array = jnp.asarray(x, dtype=dtype)
-    if array.ndim == 1:
-        array = array.reshape(-1, 1)
-        was_vector = True
-    elif array.ndim == 2:
-        was_vector = False
-    else:
-        raise ValueError(f"expected rank 1 or 2 input, got rank {array.ndim}")
-    if array.shape[0] != expected_rows:
-        raise ValueError(f"expected leading dimension {expected_rows}, got {array.shape[0]}")
-    return array, was_vector

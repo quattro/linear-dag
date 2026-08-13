@@ -1,13 +1,29 @@
+# pattern: Mixed (unavoidable)
+# Reason: Pure association assertions exercise real HDF5-backed parallel
+# operators and their process/shared-memory lifecycle.
+
 import numpy as np
 import polars as pl
 import pytest
 
+from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import aslinearoperator
 
+from linear_dag.association.blup import triangular_solver
 from linear_dag.association.gwas import get_gwas_beta_se, run_gwas, simple_gwas
 from linear_dag.association.simulation import simulate_phenotype
 from linear_dag.core.operators import get_diploid_operator, get_inner_merge_operators
 from linear_dag.core.parallel_processing import ParallelOperator
+
+
+def test_triangular_solver_supports_scipy_linear_operator_protocol():
+    adjacency = csr_matrix(np.array([[0.0, 0.0], [0.25, 0.0]]))
+    values = np.array([1.0, 2.0])
+
+    observed = triangular_solver(adjacency) @ values
+
+    expected = np.linalg.solve(np.eye(2) - adjacency.toarray(), values)
+    np.testing.assert_allclose(observed, expected)
 
 
 def test_gwas_hwe(linarg_h5_path):

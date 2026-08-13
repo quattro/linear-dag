@@ -1,6 +1,6 @@
 # linear-dag
 
-Last verified: 2026-08-07
+Last verified: 2026-08-13
 
 ## Scope
 This context is intentionally scoped to `src/` only.
@@ -17,8 +17,10 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
   - Package API from `src/linear_dag/__init__.py`: `LinearARG`, `BrickGraph`, `ParallelOperator`, `GRMOperator`, `Backend`, `JaxLinearARG`, `JaxParallelOperator`, `JaxGRMOperator`, `show_build_config`, `linear_arg_from_genotypes`, `list_blocks`, `read_vcf`, `compute_af`, `flip_alleles`, `apply_maf_threshold`, `binarize`, `randomized_haseman_elston`, `run_gwas`, `get_gwas_beta_se`, `pca`, `svd`.
   - CLI from `src/linear_dag/cli.py`: `assoc`, `rhe`, `score`, `compress`, `multi-step-compress` (`step0`-`step5`).
 - **Guarantees**:
+  - Package metadata and build environments support CPython 3.11 through 3.14; Python 3.15 remains outside the tested range.
   - `LinearARG` behaves as a `scipy.sparse.linalg.LinearOperator` over sample-by-variant genotype space.
   - `JaxLinearARG` and `JaxParallelOperator` expose JAX-compatible LinearARG products over the same sample-by-variant genotype semantics.
+  - `JaxParallelOperator` assigns each ragged block to one concrete mesh device, runs cached exact-shape programs over device-local block ranges, and assembles public dense results on the mesh's first device.
   - `Backend.AUTO` selects FFI CPU when available on CPU and otherwise uses pure JAX; explicit unavailable FFI CPU requests warn and fall back to pure JAX.
   - `rhe --jax-backend` is an experimental opt-in path through `JaxGRMOperator`; the default RHE path remains `GRMOperator`-backed.
   - CPU FFI compilation is optional and falls back to pure JAX when unavailable; set `LINEAR_DAG_REQUIRE_FFI_CPU=1` to make build failure fatal.
@@ -48,6 +50,7 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 - HDF5 block structure is used to support blockwise and process-parallel operations.
 - GWAS/PRS pipelines favor memory-aware paths (shared memory + lazy/tabular processing) over eager full-matrix materialization.
 - JAX operators keep backend selection explicit through `Backend`, with pure JAX as the portable fallback and optional CPU FFI acceleration.
+- Multi-block JAX execution passes graph state explicitly to device-local range programs instead of closing over every block in a `shard_map`; only the sample-space operand is copied to the devices that own contributing ranges.
 
 ## Invariants
 - `LinearARG.A` is square CSC adjacency; sample nodes are trailing nodes and `shape == (n_samples, n_variants)` derives from sample/variant indices.
@@ -69,6 +72,10 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 - Respect core numerical assumptions:
   - Keep intercept checks for covariates.
   - Keep explicit shape/type validation for operator algebra paths.
+- Preserve JAX graph-state ownership:
+  - Keep ragged blocks resident on their assigned mesh devices and pass them explicitly to cached range programs.
+  - Do not add an outer `jax.jit` around a bound multi-block `JaxParallelOperator` or `JaxGRMOperator` method; that captures the operator's arrays as constants and bypasses device-local ownership.
+  - Keep multi-device tests for block placement, products, gradients, and the absence of the graph-capturing `shard_map` path.
 - Keep docstring style consistent with current project conventions:
   - Use markdown-style sections (for example `**Arguments:**`, `**Returns:**`, `**Raises:**`) with a blank line between a section header and its first list item.
   - Class docstrings should describe the class and include `!!! Example` blocks; do not enumerate class attributes in class docstrings.
