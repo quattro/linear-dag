@@ -36,6 +36,7 @@ The physical constraint is ragged graph state. Ordinary global `jax.Array` shard
 6. Pure JAX, CPU FFI, and accelerator kernels share one project-owned operation contract. HiJAX is isolated behind a private compatibility boundary and does not appear in the public API. The design can replace or remove HiJAX without changing user code.
 7. HDF5 and Zarr schemas remain unchanged. Ingress streams source blocks into their final packed shards and reports load balance, padding, and resident-byte metrics. The current exact-ragged `JaxParallelOperator` remains available until numerical, transform, memory, IR, and performance gates pass.
 8. The prototype is validated on arm64 and x86_64 CPU hosts and on an available GPU. Benchmarks report cold compilation separately from warm execution and compare the packed implementation with both `jax-focused` and NumPy/Cython baselines.
+9. The package requires Python 3.12 or newer and pins the prototype to JAX/JAXlib 0.11.0 until compatibility tests justify a wider range. Direct NumPy and SciPy minimums satisfy JAX 0.11.0 requirements.
 
 Out of scope:
 - Differentiating graph topology, edge values, allele metadata, or packing decisions.
@@ -43,6 +44,7 @@ Out of scope:
 - Multi-host execution in the first implementation.
 - Replacing `LinearARG`, `ParallelOperator`, or the current JAX wrapper before the migration gates pass.
 - Exposing HiJAX types, primitives, or version-specific APIs as public package contracts.
+- Designing or implementing a graph-preserving subdivision of one durable LinearARG block. Packing assigns whole source blocks; inputs that cannot meet the padding limit after rebalancing require an explicit override or use the exact-ragged fallback.
 
 ## Goals and Non-Goals
 ### Goals
@@ -79,7 +81,7 @@ The proposal is therefore not a return to the old bucket implementation. It comb
 ### Packed graph state
 Ingress balances source blocks across $D$ devices using estimated graph bytes and solve work. It then concatenates each device's assigned blocks into a fixed set of fields with a leading graph-shard axis, such as graph pointers, edge indices and values, variant/sample mappings, flip flags, allele counts, block descriptors, and valid lengths. Each field has shape `[D, capacity, ...]` and sharding `P("graph", None, ...)`; a device receives one compatible local slice.
 
-Capacity is selected per field from the maximum assigned load after balancing. Padding is masked by valid lengths and cannot contribute to the solve. If aggregate padding exceeds the configured limit, packing rebalances or splits oversized source blocks before accepting the representation. Source block boundaries survive only as descriptor data used by local kernels; they are not separate JAX operands or separate branches in the lowered program.
+Capacity is selected per field from the maximum assigned load after balancing. Padding is masked by valid lengths and cannot contribute to the solve. If aggregate padding exceeds the configured limit after whole-block rebalancing, packing fails with diagnostics unless the caller explicitly overrides the limit. Source block boundaries survive only as descriptor data used by local kernels; they are not separate JAX operands or separate branches in the lowered program.
 
 Dense operands and results remain ordinary logical arrays. A forward product may replicate or shard the dense variant operand because it is much smaller than graph state; each device gathers its logical variant rows using the packed mapping. Reverse execution produces a padded device-local variant buffer, then reconstructs the exact public variant order. That reconstruction may communicate dense result rows but never graph arrays. An internal packed dense-vector form may be retained between compatible library operations, but it is not required of public callers.
 
@@ -177,7 +179,7 @@ Not applicable. The model is inherited from `LinearARG`; the design selects a ru
 | PORT-INV-5 | `genoio` transforms | Regression coverage intentionally wraps the captured operator in outer `jax.jit`. | `c271a9a:tests/jax/test_wrapper.py:394` | discrepancy |
 | PORT-INV-6 | removed bucketing | Earlier padding grouped each block by `(max_nodes, max_nnz)` for cache reuse, not aggregate state sharding. | `d47b419^:src/linear_dag/core/jaxlinarg/padding.py:24` | confirmed |
 | PORT-INV-7 | current transforms | `custom_vjp` explicitly disables solve forward mode. | `src/linear_dag/core/jaxlinarg/operator.py:660` | missing |
-| PORT-INV-8 | dependency boundary | The project currently pins `jax>=0.10,<0.11`; adopting current documented HiJAX helpers requires a deliberate compatibility phase. | `pyproject.toml:6` | confirmed |
+| PORT-INV-8 | dependency boundary | The project currently pins `jax>=0.10,<0.11`; JAX 0.11.0 is the first release with the documented HiJAX derivative helpers and requires Python 3.12, NumPy 2.1, and SciPy 1.15 or newer. | `pyproject.toml:6`; JAX 0.11.0 package metadata | confirmed |
 
 ## External Research Findings (When Triggered)
 | Claim ID | Claim | Source URL | Source Type | Access Date | Confidence |
@@ -188,6 +190,7 @@ Not applicable. The model is inherited from `LinearARG`; the design selects a ru
 | EXT-4 | Building one global JAX array from addressable shards requires compatible local shard shapes, motivating aggregate per-device padding. | https://docs.jax.dev/en/latest/_autosummary/jax.make_array_from_single_device_arrays.html | official documentation | 2026-08-13 | high |
 | EXT-5 | `custom_partitioning` callback identities can interfere with persistent compilation-cache reuse, so it is not the initial partitioning mechanism. | https://docs.jax.dev/en/latest/persistent_compilation_cache.html | official documentation | 2026-08-13 | high |
 | EXT-6 | Experimental JAX APIs do not carry the compatibility guarantees of public APIs. | https://docs.jax.dev/en/latest/api_compatibility.html | official documentation | 2026-08-13 | high |
+| EXT-7 | JAX 0.11.0 is the first release with the documented HiJAX derivative helpers and requires Python 3.12 or newer. | https://docs.jax.dev/en/latest/changelog.html#jax-0-11-0-july-16-2026 | official release notes/package metadata | 2026-08-13 | high |
 
 ## Mathematical Sanity Checks
 - Summary: The representation does not change $X$. If devices own disjoint variant sets $V_d$, then $XW = \sum_d X_{:,V_d}W_{V_d,:}$ and $X^TY$ is the logical-order concatenation/permutation of $X_{:,V_d}^TY$. Padding is algebraically inert when descriptors and valid lengths mask it. Because each product is linear in its dense operand, its JVP is the same product applied to the tangent and its VJP is the adjoint product applied to the cotangent.
@@ -214,7 +217,7 @@ Detailed artifact:
 ## Layer Contracts
 ### Ingress
 - Contract: HDF5, Zarr, or in-memory LinearARG blocks plus a concrete single-host mesh produce validated host packing metadata and a fixed set of globally sharded device arrays. Source schemas remain unchanged. Loading is streamed by assigned shard; full graph state is never first materialized on the default device.
-- Rejection rules: reject inconsistent sample counts/dtypes, invalid CSC structure, incompatible variant metadata, insufficient capacities, padding above the configured bound after rebalance/splitting, unsupported mesh topology, or unavailable explicitly requested backend.
+- Rejection rules: reject inconsistent sample counts/dtypes, invalid CSC structure, incompatible variant metadata, insufficient capacities, padding above the configured bound after whole-block rebalancing, unsupported mesh topology, or unavailable explicitly requested backend. A padding-bound override must be explicit and visible in diagnostics.
 
 ### Pipeline
 - Contract: public functional products accept an explicit `JaxLinearARG` and rank-one or rank-two logical dense arrays. Bound eager methods delegate to the same operations. GRM and RHE code compose these operations without accessing graph buffers.
@@ -260,7 +263,7 @@ Not applicable. This representation consumes already aligned LinearARG blocks. P
 **Covered ACs:** `jax-packed-sharded-lineararg.AC1.*`, structural portions of `jax-packed-sharded-lineararg.AC2.*`.
 
 **Components:**
-- A cohesive packing component within `src/linear_dag/core/jaxlinarg/` owns pure capacity selection, balance scoring, source-block splitting, descriptor construction, padding masks, logical variant mappings, and invariant validation.
+- A cohesive packing component within `src/linear_dag/core/jaxlinarg/` owns pure capacity selection, whole-block balance scoring, descriptor construction, padding masks, logical variant mappings, and invariant validation.
 - `src/linear_dag/core/jaxlinarg/ingress.py` stages canonical block arrays into assigned host shard buffers and constructs global JAX arrays with explicit graph-axis sharding.
 - Memory/IR instrumentation reports unpadded bytes, padded bytes, per-device resident bytes, PyTree/lowered operand count, and graph-sized constants.
 
@@ -296,7 +299,7 @@ Not applicable. This representation consumes already aligned LinearARG blocks. P
 - `pyproject.toml` and `uv.lock` move to the validated JAX compatibility range only after the pure packed spike establishes a version-independent baseline.
 - Contract tests isolate upstream API changes and verify that public imports and call signatures contain no HiJAX types.
 
-**Dependencies:** Phase 2 and a deliberate JAX 0.11 compatibility check.
+**Dependencies:** Phase 2 and the approved Python 3.12/JAX 0.11.0 dependency migration.
 
 **Done when:** the full primitive transformation unit matrix passes for dense operands, graph differentiation is rejected, public API inspection shows no HiJAX exposure, and tests cover every assigned AC.
 <!-- END_PHASE_3 -->
@@ -386,7 +389,7 @@ Not applicable. This representation consumes already aligned LinearARG blocks. P
 ## Risks and Open Questions
 | ID | Risk or Question | Severity | Mitigation or Next Step | Owner |
 | --- | --- | --- | --- | --- |
-| R1 | Aggregate equal-shape packing wastes too much memory for skewed graph fields. | High | Measure per-field padding in Phase 1; rebalance by bytes/work, split outliers, and retain exact-ragged fallback if the gate cannot be met. | Implementation lead |
+| R1 | Aggregate equal-shape packing wastes too much memory for skewed graph fields. | High | Measure per-field padding in Phase 1; rebalance whole blocks by bytes/work, fail above the default bound, and retain an explicit override plus the exact-ragged fallback. | Implementation lead |
 | R2 | Reverse logical-order reconstruction or dense collectives erase performance gains. | High | Benchmark communication separately; retain internal packed dense results between compatible operations; consider output sharding/custom partitioning only with HLO evidence. | Implementation lead |
 | R3 | HiJAX changes across JAX releases. | High | Keep it private behind one compatibility component, pin a tested range, run upstream/nightly compatibility checks, and preserve a version-independent packed/shard-map core. | Implementation lead |
 | R4 | High-level primitive IR is small but expanded StableHLO still scales with source block count. | High | Pack blocks as descriptor data and enforce fixed component/body-size tests at constant capacities; inspect both high jaxpr and StableHLO. | Implementation lead |
@@ -398,7 +401,7 @@ Not applicable. This representation consumes already aligned LinearARG blocks. P
 ## Additional Considerations
 **Module granularity:** packing is a justified cohesive boundary because capacity selection, descriptor construction, and invariants form a reusable pure subsystem. Ingress stays in the existing I/O module, kernels stay in the existing backend package, and the HiJAX seam is one private compatibility component. Passive descriptor/config/result types remain colocated with the component that owns them; this design does not introduce separate `types`, `schemas`, or `helpers` modules.
 
-**Compatibility:** the current `jax>=0.10,<0.11` constraint must not be widened casually. The HiJAX phase records the first/last tested versions and treats any change as an API-compatibility event. The packed representation and pure `shard_map` spike remain independently testable if HiJAX adoption is delayed.
+**Compatibility:** implementation raises the package floor to Python 3.12 and pins JAX/JAXlib 0.11.0, the first release with the documented HiJAX derivative helpers. NumPy and SciPy minimums are raised to at least 2.1 and 1.15. Because HiJAX is experimental and JAX uses effort-based versioning, the supported JAX range remains exact until the compatibility suite passes on another release.
 
 **Export and serialization:** durable reconstruction continues through HDF5/Zarr. Compiled/exported artifacts are not promised to embed graph buffers or survive graph-file removal. Opaque process-local handle registries are intentionally excluded.
 
@@ -412,7 +415,7 @@ Not applicable. This representation consumes already aligned LinearARG blocks. P
 - **jax-packed-sharded-lineararg.AC1.3 Success:** On the production benchmark, aggregate packed graph bytes excluding separately reported descriptor metadata are no more than 1.25 times the unpadded canonical graph bytes.
 - **jax-packed-sharded-lineararg.AC1.4 Success:** On a balanced two-device production load, maximum graph residency on either device is no more than 0.65 times the unpadded total graph bytes, and every graph array resides only on its assigned device.
 - **jax-packed-sharded-lineararg.AC1.5 Success:** During HDF5 and Zarr ingress, graph residency on the default device never exceeds that device's final assigned shard plus one source block of staging data.
-- **jax-packed-sharded-lineararg.AC1.6 Failure:** If rebalancing and allowed block splitting cannot satisfy the configured padding limit, construction fails with diagnostics unless the caller supplies an explicit override.
+- **jax-packed-sharded-lineararg.AC1.6 Failure:** If whole-block rebalancing cannot satisfy the configured padding limit, construction fails with diagnostics unless the caller supplies an explicit override; the prototype does not claim to subdivide one source graph block.
 
 ### jax-packed-sharded-lineararg.AC2: Compiled programs treat graph state as explicit data
 - **jax-packed-sharded-lineararg.AC2.1 Success:** `jax.make_jaxpr` for the supported functional call contains no graph-sized constants; packed graph arrays are dynamic input variables.
@@ -431,7 +434,7 @@ Not applicable. This representation consumes already aligned LinearARG blocks. P
 - **jax-packed-sharded-lineararg.AC4.1 Success:** Single-device and forced two-device CPU products match the same logical reference outputs.
 - **jax-packed-sharded-lineararg.AC4.2 Success:** Each local `shard_map` body receives only its assigned graph shard and the dense data needed for that operation.
 - **jax-packed-sharded-lineararg.AC4.3 Success:** Forward StableHLO contains the selected sample-space reduction (`psum_scatter` when compatible with the requested output sharding, otherwise replicated `psum`); reverse StableHLO communicates only dense sample/result data and never graph arrays.
-- **jax-packed-sharded-lineararg.AC4.4 Edge:** Uneven source-block counts, empty assignments on overprovisioned meshes, and split oversized blocks remain numerically correct with valid descriptors and shardings.
+- **jax-packed-sharded-lineararg.AC4.4 Edge:** Uneven source-block counts and empty assignments on overprovisioned meshes remain numerically correct with valid descriptors and shardings; a skewed fixture may run only with an explicit padding override.
 - **jax-packed-sharded-lineararg.AC4.5 Failure:** Unsupported mesh axes, incompatible shardings, or unavailable required collectives fail with an actionable construction or lowering error.
 
 ### jax-packed-sharded-lineararg.AC5: Dense operands support composable JAX transformations
@@ -453,6 +456,7 @@ Not applicable. This representation consumes already aligned LinearARG blocks. P
 - **jax-packed-sharded-lineararg.AC7.3 Success:** HDF5 and Zarr inputs require no schema change and reconstruct the same logical operator as current readers.
 - **jax-packed-sharded-lineararg.AC7.4 Success:** Public package signatures, annotations, PyTree inspection, and documentation expose no HiJAX types or primitives.
 - **jax-packed-sharded-lineararg.AC7.5 Success:** The target public `JaxLinearARG` supports single- and multi-block packed datasets after promotion; the exact-ragged `JaxParallelOperator` remains constructible and covered as the compatibility/fallback path.
+- **jax-packed-sharded-lineararg.AC7.6 Success:** Package metadata, lockfile, classifiers, and test matrices require Python 3.12 or newer, JAX/JAXlib 0.11.0, NumPy 2.1 or newer, and SciPy 1.15 or newer; the compatibility suite must pass before widening the exact JAX pin.
 
 ### jax-packed-sharded-lineararg.AC8: Promotion is evidence-gated across platforms
 - **jax-packed-sharded-lineararg.AC8.1 Success:** Correctness, transform, IR, and residency suites pass on arm64 CPU, x86_64 CPU, forced two-device CPU, and an available GPU before promotion.
@@ -491,3 +495,4 @@ Not applicable. This representation consumes already aligned LinearARG blocks. P
 | 2026-08-13 | N/A | Draft | Plan created | |
 | 2026-08-13 | Draft | In Review | Architecture and acceptance criteria documented for readiness validation. | Codex |
 | 2026-08-13 | In Review | Approved for Implementation | Maintainer approved the acceptance criteria and the approval readiness gate passed. | Maintainer / Codex |
+| 2026-08-13 | Approved for Implementation | Approved for Implementation | Maintainer required Python 3.12/JAX 0.11.0 and removed graph splitting from the prototype after implementation investigation. | Maintainer / Codex |
