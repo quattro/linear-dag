@@ -292,6 +292,8 @@ def test_shard_map_graph_fields_retain_one_assigned_local_shard() -> None:
         mesh=mesh,
         allow_excess_padding=True,
     ).operator
+    operator.matmat(jnp.ones((operator.n_variants, 1), dtype=jnp.float32)).block_until_ready()
+    operator.rmatmat(jnp.ones((operator.n_samples, 1), dtype=jnp.float32)).block_until_ready()
 
     for name in PACKED_COMPONENT_NAMES:
         array = getattr(operator, name)
@@ -397,6 +399,24 @@ def test_mesh_output_sharding_rejects_wrong_axis_before_product_lowering() -> No
 
     with pytest.raises(ValueError, match="sample.*leading axis"):
         lineararg_matmat(operator, values, out_sharding=incompatible)
+
+
+def test_mesh_output_sharding_rejects_different_graph_mesh_before_product_lowering() -> None:
+    mesh = _two_device_graph_mesh_or_skip()
+    operator = _packed_from_block_arrays(
+        (_repeated_variant_block(), _larger_block()),
+        mesh=mesh,
+        allow_excess_padding=True,
+    ).operator
+    reversed_mesh = Mesh(np.asarray(mesh.devices).reshape(-1)[::-1], ("graph",))
+    incompatible = NamedSharding(reversed_mesh, P("graph", None))
+
+    with pytest.raises(ValueError, match="carrier graph mesh"):
+        lineararg_matmat(
+            operator,
+            jnp.ones((operator.n_variants, 2), dtype=jnp.float32),
+            out_sharding=incompatible,
+        )
 
 
 def test_shard_map_reduce_scatter_rejects_indivisible_sample_dimension() -> None:
