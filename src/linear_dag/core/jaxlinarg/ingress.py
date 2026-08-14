@@ -715,7 +715,8 @@ def _optional_array(group: Any, name: str, *, dtype: Any) -> np.ndarray | None:
 
 
 def _normalize_dtype(dtype: Any) -> jnp.dtype:
-    return jnp.float32 if dtype is None else jnp.dtype(dtype)
+    requested_dtype = jnp.float32 if dtype is None else jnp.dtype(dtype)
+    return jax.dtypes.canonicalize_dtype(requested_dtype)
 
 
 def _hdf5_path(path: str | PathLike[str]) -> str | PathLike[str]:

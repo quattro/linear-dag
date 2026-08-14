@@ -4,6 +4,11 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -40,6 +45,44 @@ from tests.jax.bench.test_parallel_benchmarks import (
     _packed_gate_failures,
     _packed_memory_result,
 )
+
+_FLOAT64_POLICY_PROBE = r"""
+import json
+
+import jax
+import numpy as np
+
+from jax.sharding import Mesh
+
+from linear_dag.core.jaxlinarg.ingress import _packed_from_block_arrays
+from linear_dag.core.jaxlinarg.packing import LinearARGBlockArrays
+
+
+block = LinearARGBlockArrays(
+    indptr=np.minimum(np.arange(8), 6).astype(np.int32),
+    indices=np.arange(1, 7, dtype=np.int32),
+    data=np.linspace(1.0, 2.0, 6, dtype=np.float64),
+    variant_indices=np.arange(3, dtype=np.int32),
+    flip=np.array([False, True, False]),
+    sample_indices=np.array([6, 5], dtype=np.int32),
+    nonunique_indices=np.arange(7, dtype=np.int32),
+    allele_counts=np.arange(3, dtype=np.int32),
+    n_variants=3,
+    n_samples=2,
+)
+mesh = Mesh(np.asarray(jax.devices("cpu")[:1]), ("graph",))
+result = _packed_from_block_arrays((block,), mesh=mesh, dtype=np.float64)
+print(
+    json.dumps(
+        {
+            "x64_enabled": bool(jax.config.read("jax_enable_x64")),
+            "carrier_dtype": str(result.operator.data.dtype),
+            "padded_graph_bytes": result.diagnostics.padded_graph_bytes,
+            "final_graph_bytes": sum(result.diagnostics.final_graph_bytes_by_device),
+        }
+    )
+)
+"""
 
 
 def _two_device_graph_mesh_or_skip() -> Mesh:
@@ -591,6 +634,30 @@ def test_packed_device_metadata_dtype_and_values_do_not_depend_on_x64(x64_enable
         )
     finally:
         jax.config.update("jax_enable_x64", previous_x64)
+
+
+@pytest.mark.parametrize(
+    ("x64_enabled", "expected_dtype"),
+    [(False, "float32"), (True, "float64")],
+    ids=("x64-off", "x64-on"),
+)
+def test_float64_packed_ingress_respects_isolated_jax_x64_policy(
+    x64_enabled: bool,
+    expected_dtype: str,
+) -> None:
+    environment = {**os.environ, "JAX_ENABLE_X64": "1" if x64_enabled else "0"}
+    completed = subprocess.run(
+        [sys.executable, "-c", _FLOAT64_POLICY_PROBE],
+        check=True,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+    metrics = json.loads(completed.stdout)
+
+    assert metrics["x64_enabled"] is x64_enabled
+    assert metrics["carrier_dtype"] == expected_dtype
+    assert metrics["final_graph_bytes"] == metrics["padded_graph_bytes"]
 
 
 def test_packed_benchmark_metrics_and_table_are_calculated_from_diagnostics() -> None:
