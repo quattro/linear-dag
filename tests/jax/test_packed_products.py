@@ -536,6 +536,54 @@ def test_mesh_output_sharding_rejects_wrong_axis_before_product_lowering() -> No
         lineararg_matmat(operator, values, out_sharding=incompatible)
 
 
+@pytest.mark.parametrize(
+    ("operand_columns", "spec"),
+    [
+        (None, P(None, None)),
+        (None, P("graph", None)),
+        (2, P(None, None, None)),
+        (2, P("graph", None, None)),
+    ],
+)
+@pytest.mark.parametrize("stage", ["eager", "outer_jit_lower", "outer_jit_execute"])
+def test_forward_output_sharding_rejects_specs_above_logical_result_rank(
+    operand_columns: int | None,
+    spec: P,
+    stage: str,
+) -> None:
+    mesh = _two_device_graph_mesh_or_skip()
+    operator = _packed_from_block_arrays(
+        (_repeated_variant_block(), _larger_block()),
+        mesh=mesh,
+        allow_excess_padding=True,
+    ).operator
+    shape = (operator.n_variants,) if operand_columns is None else (operator.n_variants, operand_columns)
+    values = jnp.ones(shape, dtype=jnp.float32)
+    requested = NamedSharding(mesh, spec)
+
+    with pytest.raises(ValueError, match="logical result rank"):
+        if stage == "eager":
+            lineararg_matmat(operator, values, out_sharding=requested)
+        else:
+            compiled = jax.jit(partial(lineararg_matmat, out_sharding=requested))
+            if stage == "outer_jit_lower":
+                compiled.lower(operator, values)
+            else:
+                compiled(operator, values)
+
+
+def test_lineararg_matmat_docstring_documents_output_sharding_contract() -> None:
+    docstring = inspect.getdoc(lineararg_matmat) or ""
+    contract = " ".join(docstring.split())
+
+    assert "defaults to a result replicated" in contract
+    assert "rank-1 result" in contract
+    assert "rank-2 result" in contract
+    assert "carrier graph mesh" in contract
+    assert "divisible" in contract
+    assert "ValueError" in contract
+
+
 def test_mesh_output_sharding_rejects_different_graph_mesh_before_product_lowering() -> None:
     mesh = _two_device_graph_mesh_or_skip()
     operator = _packed_from_block_arrays(

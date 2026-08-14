@@ -52,6 +52,14 @@ def lineararg_matmat(
     - `operator`: Private packed LinearARG carrier.
     - `values`: Rank-1 or rank-2 values with leading dimension equal to the
       logical variant count.
+    - `out_sharding`: Optional output `NamedSharding`. `None` defaults to a
+      result replicated across the carrier graph mesh. For a rank-1 result,
+      accepted specs are `P()`, `P(None)`, and `P("graph")`.
+      For a rank-2 result, `P(None, None)` and `P("graph", None)` are also
+      accepted. Shorter specs imply replicated trailing dimensions. The
+      sharding must use the carrier graph mesh, and `"graph"` may appear only
+      on the leading sample axis. A graph-sharded leading axis requires the
+      logical sample count to be divisible by the graph mesh size.
 
     **Returns:**
 
@@ -59,7 +67,10 @@ def lineararg_matmat(
 
     **Raises:**
 
-    - `ValueError`: If the operand shape or packed carrier contract is invalid.
+    - `ValueError`: If the operand shape or packed carrier contract is invalid;
+      if `out_sharding` is not a `NamedSharding`, uses another mesh, exceeds
+      the logical result rank, or shards a non-leading axis; or if the sample
+      count is not divisible by the graph mesh size for graph sharding.
     """
     matrix, was_vector = _as_rank2_matrix(
         values,
@@ -71,6 +82,7 @@ def lineararg_matmat(
         operator,
         out_sharding=out_sharding,
         mesh=mesh,
+        logical_result_rank=1 if was_vector else 2,
     )
     if output_spec == P():
         result = jax.shard_map(
@@ -393,6 +405,7 @@ def _forward_output_spec(
     *,
     out_sharding: NamedSharding | None,
     mesh: Mesh,
+    logical_result_rank: int,
 ) -> P:
     if out_sharding is None:
         return P()
@@ -401,6 +414,10 @@ def _forward_output_spec(
     if isinstance(mesh, Mesh) and out_sharding.mesh != mesh:
         raise ValueError("packed forward output sharding must use the carrier graph mesh")
     spec = out_sharding.spec
+    if len(spec) > logical_result_rank:
+        raise ValueError(
+            f"packed forward output sharding rank {len(spec)} exceeds logical result rank {logical_result_rank}"
+        )
     if all(axis is None for axis in spec):
         return P()
     if len(spec) > 0 and spec[0] == "graph" and all(axis is None for axis in spec[1:]):
