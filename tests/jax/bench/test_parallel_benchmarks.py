@@ -15,10 +15,12 @@ import numpy as np
 import polars as pl
 import pytest
 
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 
 from linear_dag.core.jaxlinarg import Backend, JaxParallelOperator
+from linear_dag.core.jaxlinarg.ingress import _packed_from_hdf5, _PackedJaxLinearARG
 from linear_dag.core.jaxlinarg.kernels import ffi_cpu
+from linear_dag.core.jaxlinarg.packing import GRAPH_FIELD_NAMES, PACKED_COMPONENT_NAMES
 from linear_dag.core.parallel_processing import ParallelOperator
 
 MIN_SAMPLE_SECONDS = 0.005
@@ -30,11 +32,19 @@ TIMED_ITERATIONS = 9
 class ParallelBenchmarkResult:
     operator: str
     operation: str
-    k: int
+    k: int | None
     median_seconds: float
     ratio_to_parallel_operator: float | None
     resident_graph_bytes: int | None = None
     max_device_graph_bytes: int | None = None
+    canonical_graph_bytes: int | None = None
+    padded_graph_bytes: int | None = None
+    descriptor_bytes: int | None = None
+    padding_ratio: float | None = None
+    staging_bytes: int | None = None
+    component_count: int | None = None
+    pytree_leaf_count: int | None = None
+    resident_devices_valid: bool | None = None
 
 
 def test_jax_parallel_operator_benchmark(
@@ -54,7 +64,11 @@ def test_jax_parallel_operator_benchmark(
         num_processes=num_processes,
         k_values=linarg_benchmark_k_values,
     )
-    baselines = {(result.operation, result.k): result.median_seconds for result in process_results}
+    baselines = {}
+    for result in process_results:
+        if result.k is None:
+            continue
+        baselines[(result.operation, result.k)] = result.median_seconds
     results = list(process_results)
 
     for config in _jax_parallel_configs(linarg_block_metadata):
@@ -68,7 +82,108 @@ def test_jax_parallel_operator_benchmark(
             )
         )
 
+    explicit_production_path = request.config.getoption("--linarg-h5-path") is not None
+    packed_result = _benchmark_packed_ingress(
+        linarg_h5_path,
+        linarg_block_metadata,
+        production_gate=explicit_production_path,
+    )
+    results.append(packed_result)
+    if explicit_production_path:
+        failures = _packed_gate_failures(packed_result)
+        if failures:
+            pytest.fail("packed production memory gate failed:\n- " + "\n- ".join(failures))
+
     _print_results(results)
+
+
+def _benchmark_packed_ingress(
+    linarg_h5_path: Any,
+    linarg_block_metadata: pl.DataFrame,
+    *,
+    production_gate: bool,
+) -> ParallelBenchmarkResult:
+    cpu_devices = tuple(_devices_for_backend("cpu"))
+    if not cpu_devices:
+        pytest.skip("packed ingress benchmark requires at least one JAX device")
+    if production_gate and len(cpu_devices) < 2:
+        pytest.fail(
+            "the packed production residency gate requires two CPU devices; set "
+            "XLA_FLAGS=--xla_force_host_platform_device_count=2 before JAX import"
+        )
+    num_devices = 2 if production_gate else min(2, len(cpu_devices))
+    mesh = Mesh(np.asarray(cpu_devices[:num_devices]), ("graph",))
+    block_names = tuple(linarg_block_metadata.get_column("block_name").to_list())
+
+    start = time.perf_counter()
+    op = _packed_from_hdf5(
+        linarg_h5_path,
+        block_names,
+        mesh=mesh,
+        allow_excess_padding=True,
+    )
+    construction_seconds = time.perf_counter() - start
+    for name in PACKED_COMPONENT_NAMES:
+        getattr(op, name).block_until_ready()
+
+    observed_graph_bytes = _graph_bytes_by_device(op)
+    if sum(observed_graph_bytes.values()) != sum(op.diagnostics.final_graph_bytes_by_device):
+        pytest.fail("packed ingress diagnostics do not match observed graph residency")
+    return _packed_memory_result(
+        op.diagnostics,
+        operator=f"packed_jax_lineararg_{num_devices}_device",
+        construction_seconds=construction_seconds,
+        resident_devices_valid=_packed_fields_have_expected_residency(op),
+    )
+
+
+def _packed_memory_result(
+    diagnostics: Any,
+    *,
+    operator: str,
+    construction_seconds: float,
+    resident_devices_valid: bool,
+) -> ParallelBenchmarkResult:
+    """Convert packed ingress diagnostics into the shared benchmark record."""
+    final_graph_bytes = tuple(int(value) for value in diagnostics.final_graph_bytes_by_device)
+    return ParallelBenchmarkResult(
+        operator=operator,
+        operation="ingress",
+        k=None,
+        median_seconds=construction_seconds,
+        ratio_to_parallel_operator=None,
+        resident_graph_bytes=sum(final_graph_bytes),
+        max_device_graph_bytes=max(final_graph_bytes, default=0),
+        canonical_graph_bytes=int(diagnostics.canonical_graph_bytes),
+        padded_graph_bytes=int(diagnostics.padded_graph_bytes),
+        descriptor_bytes=int(diagnostics.descriptor_bytes),
+        padding_ratio=float(diagnostics.padding_ratio),
+        staging_bytes=int(diagnostics.staging_bytes),
+        component_count=int(diagnostics.component_count),
+        pytree_leaf_count=int(diagnostics.pytree_leaf_count),
+        resident_devices_valid=resident_devices_valid,
+    )
+
+
+def _packed_gate_failures(result: ParallelBenchmarkResult) -> tuple[str, ...]:
+    """Return every failed production packed-memory gate."""
+    if result.canonical_graph_bytes is None or result.padding_ratio is None:
+        raise ValueError("packed gate requires canonical bytes and a padding ratio")
+    if result.max_device_graph_bytes is None:
+        raise ValueError("packed gate requires maximum device graph residency")
+
+    failures = []
+    if result.padding_ratio > 1.25:
+        failures.append(f"packed padding ratio {result.padding_ratio:.6f} exceeds 1.250000")
+    residency_limit = 0.65 * result.canonical_graph_bytes
+    if result.max_device_graph_bytes > residency_limit:
+        failures.append(
+            f"maximum device graph residency {result.max_device_graph_bytes} exceeds "
+            f"0.65 * canonical graph bytes ({residency_limit:.3f})"
+        )
+    if result.resident_devices_valid is not True:
+        failures.append("one or more packed fields has an unexpected resident device or shard index")
+    return tuple(failures)
 
 
 def _time_parallel_operator(
@@ -181,16 +296,42 @@ def _benchmark_inputs(
     return variant_inputs, sample_inputs
 
 
-def _graph_bytes_by_device(op: JaxParallelOperator) -> dict[str, int]:
+def _graph_bytes_by_device(op: JaxParallelOperator | _PackedJaxLinearARG) -> dict[str, int]:
     resident_bytes: dict[str, int] = {}
-    for block in op.blocks:
-        for leaf in jax.tree_util.tree_leaves(block):
-            if not isinstance(leaf, jax.Array):
-                continue
-            for shard in leaf.addressable_shards:
-                device = str(shard.device)
-                resident_bytes[device] = resident_bytes.get(device, 0) + int(shard.data.nbytes)
+    if isinstance(op, _PackedJaxLinearARG):
+        arrays = tuple(getattr(op, name) for name in GRAPH_FIELD_NAMES)
+    else:
+        arrays = tuple(
+            leaf for block in op.blocks for leaf in jax.tree_util.tree_leaves(block) if isinstance(leaf, jax.Array)
+        )
+    for array in arrays:
+        array.block_until_ready()
+        for shard in array.addressable_shards:
+            shard.data.block_until_ready()
+            device = str(shard.device)
+            resident_bytes[device] = resident_bytes.get(device, 0) + int(shard.data.on_device_size_in_bytes())
     return resident_bytes
+
+
+def _packed_fields_have_expected_residency(op: _PackedJaxLinearARG) -> bool:
+    for name in PACKED_COMPONENT_NAMES:
+        array = getattr(op, name)
+        array.block_until_ready()
+        if not isinstance(array.sharding, NamedSharding):
+            return False
+        if array.sharding.mesh.axis_names != ("graph",) or array.sharding.spec[0] != "graph":
+            return False
+        expected_indices = array.sharding.addressable_devices_indices_map(array.shape)
+        observed_shards = {shard.device: shard for shard in array.addressable_shards}
+        if set(observed_shards) != set(expected_indices):
+            return False
+        for device, expected_index in expected_indices.items():
+            shard = observed_shards[device]
+            if shard.index != expected_index or shard.data.devices() != {device}:
+                return False
+            if shard.data.on_device_size_in_bytes() != shard.data.nbytes:
+                return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -288,16 +429,36 @@ def _call_repeated(call: Callable[[], Any], *, repetitions: int, block_until_rea
 
 
 def _print_results(results: list[ParallelBenchmarkResult]) -> None:
-    print(
-        "\n| operator | operation | k | median seconds | ratio to ParallelOperator "
-        "| resident graph MiB | max device graph MiB |"
-    )
-    print("|---|---|---:|---:|---:|---:|---:|")
+    print("\n" + _format_results_table(results))
+
+
+def _format_results_table(results: list[ParallelBenchmarkResult]) -> str:
+    lines = [
+        "| operator | operation | k | median seconds | ratio to ParallelOperator "
+        "| canonical graph MiB | padded graph MiB | descriptor MiB | padding ratio "
+        "| resident graph MiB | max device graph MiB | staging MiB | components | PyTree leaves |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
     for result in sorted(results, key=lambda item: (item.operation, item.operator, item.k)):
         ratio = "" if result.ratio_to_parallel_operator is None else f"{result.ratio_to_parallel_operator:.3f}"
-        resident_mib = "" if result.resident_graph_bytes is None else f"{result.resident_graph_bytes / 2**20:.3f}"
-        max_device_mib = "" if result.max_device_graph_bytes is None else f"{result.max_device_graph_bytes / 2**20:.3f}"
-        print(
-            f"| {result.operator} | {result.operation} | {result.k} | "
-            f"{result.median_seconds:.6f} | {ratio} | {resident_mib} | {max_device_mib} |"
+        k = "" if result.k is None else str(result.k)
+        canonical_mib = _format_mib(result.canonical_graph_bytes)
+        padded_mib = _format_mib(result.padded_graph_bytes)
+        descriptor_mib = _format_mib(result.descriptor_bytes)
+        padding_ratio = "" if result.padding_ratio is None else f"{result.padding_ratio:.3f}"
+        resident_mib = _format_mib(result.resident_graph_bytes)
+        max_device_mib = _format_mib(result.max_device_graph_bytes)
+        staging_mib = _format_mib(result.staging_bytes)
+        component_count = "" if result.component_count is None else str(result.component_count)
+        pytree_leaf_count = "" if result.pytree_leaf_count is None else str(result.pytree_leaf_count)
+        lines.append(
+            f"| {result.operator} | {result.operation} | {k} | "
+            f"{result.median_seconds:.6f} | {ratio} | {canonical_mib} | {padded_mib} | {descriptor_mib} | "
+            f"{padding_ratio} | {resident_mib} | {max_device_mib} | {staging_mib} | "
+            f"{component_count} | {pytree_leaf_count} |"
         )
+    return "\n".join(lines)
+
+
+def _format_mib(value: int | None) -> str:
+    return "" if value is None else f"{value / 2**20:.3f}"

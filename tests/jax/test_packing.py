@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import jax
 import jax.tree_util as jtu
@@ -26,6 +27,11 @@ from linear_dag.core.jaxlinarg.packing import (
     unpack_packed_blocks,
     VALID_LENGTH_FIELDS,
     validate_packed_graph,
+)
+from tests.jax.bench.test_parallel_benchmarks import (
+    _format_results_table,
+    _packed_gate_failures,
+    _packed_memory_result,
 )
 
 
@@ -508,4 +514,67 @@ def test_packed_ingress_reports_structural_staging_and_final_residency() -> None
     assert diagnostics.pytree_leaf_count == len(PACKED_COMPONENT_NAMES)
     assert diagnostics.staging_accounting == (
         "deterministic one-source-block ingress accounting; not a JAX allocator high-water mark"
+    )
+
+
+def test_packed_benchmark_metrics_and_table_are_calculated_from_diagnostics() -> None:
+    diagnostics = SimpleNamespace(
+        canonical_graph_bytes=1_000,
+        padded_graph_bytes=1_200,
+        descriptor_bytes=80,
+        padding_ratio=1.2,
+        staging_bytes=300,
+        final_graph_bytes_by_device=(620, 580),
+        component_count=11,
+        pytree_leaf_count=11,
+    )
+
+    result = _packed_memory_result(
+        diagnostics,
+        operator="packed_jax_lineararg_2_device",
+        construction_seconds=0.25,
+        resident_devices_valid=True,
+    )
+    table = _format_results_table([result])
+
+    assert result.canonical_graph_bytes == 1_000
+    assert result.padded_graph_bytes == 1_200
+    assert result.descriptor_bytes == 80
+    assert result.padding_ratio == 1.2
+    assert result.resident_graph_bytes == 1_200
+    assert result.max_device_graph_bytes == 620
+    assert result.staging_bytes == 300
+    assert result.component_count == result.pytree_leaf_count == 11
+    assert "canonical graph MiB" in table
+    assert "padding ratio" in table
+    assert "packed_jax_lineararg_2_device" in table
+    assert "1.200" in table
+
+
+def test_packed_production_gate_reports_padding_residency_and_placement_failures() -> None:
+    passing = _packed_memory_result(
+        SimpleNamespace(
+            canonical_graph_bytes=1_000,
+            padded_graph_bytes=1_200,
+            descriptor_bytes=80,
+            padding_ratio=1.2,
+            staging_bytes=300,
+            final_graph_bytes_by_device=(620, 580),
+            component_count=11,
+            pytree_leaf_count=11,
+        ),
+        operator="packed",
+        construction_seconds=0.25,
+        resident_devices_valid=True,
+    )
+
+    assert _packed_gate_failures(passing) == ()
+    assert _packed_gate_failures(replace(passing, padded_graph_bytes=1_251, padding_ratio=1.251)) == (
+        "packed padding ratio 1.251000 exceeds 1.250000",
+    )
+    assert _packed_gate_failures(replace(passing, max_device_graph_bytes=651)) == (
+        "maximum device graph residency 651 exceeds 0.65 * canonical graph bytes (650.000)",
+    )
+    assert _packed_gate_failures(replace(passing, resident_devices_valid=False)) == (
+        "one or more packed fields has an unexpected resident device or shard index",
     )
