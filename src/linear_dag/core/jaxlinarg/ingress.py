@@ -75,6 +75,7 @@ class _PackedJaxLinearARG(eqx.Module):
     n_samples: int = eqx.field(static=True)
     n_variants: int = eqx.field(static=True)
     capacities: tuple[int, ...] = eqx.field(static=True)
+    graph_mesh: Mesh = eqx.field(static=True)
     indptr: Array
     indices: Array
     data: Array
@@ -328,6 +329,7 @@ def _packed_from_plan(
             n_samples=plan.n_samples,
             n_variants=plan.n_variants,
             capacities=tuple(plan.capacities.values()),
+            graph_mesh=mesh,
             **arrays,
         ),
         diagnostics=diagnostics,

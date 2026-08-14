@@ -19,6 +19,7 @@ from jax.extend import core as jax_core
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from scipy import sparse
 
+from linear_dag.core.jaxlinarg import packed_products as packed_products_module
 from linear_dag.core.jaxlinarg.ingress import (
     _packed_from_block_arrays,
     _PackedJaxLinearARG,
@@ -242,6 +243,7 @@ def _replace_carrier_array(
         n_samples=operator.n_samples,
         n_variants=operator.n_variants,
         capacities=operator.capacities,
+        graph_mesh=operator.graph_mesh,
         **arrays,
     )
 
@@ -378,6 +380,9 @@ def test_packed_carrier_keeps_fixed_component_count() -> None:
     operator = _packed_from_block_arrays((_repeated_variant_block(),), mesh=_graph_mesh()).operator
 
     assert tuple(field.name for field in fields(operator) if not field.metadata.get("static")) == PACKED_COMPONENT_NAMES
+    assert isinstance(operator.indptr.sharding, NamedSharding)
+    assert operator.graph_mesh == operator.indptr.sharding.mesh
+    assert len(jax.tree_util.tree_leaves(operator)) == len(PACKED_COMPONENT_NAMES)
 
 
 def test_shard_map_two_device_products_match_single_device_and_bound_methods() -> None:
@@ -547,6 +552,63 @@ def test_mesh_output_sharding_rejects_different_graph_mesh_before_product_loweri
             jnp.ones((operator.n_variants, 2), dtype=jnp.float32),
             out_sharding=incompatible,
         )
+
+
+@pytest.mark.parametrize("stage", ["lower", "execute"])
+def test_outer_jit_rejects_different_graph_mesh_for_requested_output(stage: str) -> None:
+    mesh = _two_device_graph_mesh_or_skip()
+    operator = _packed_from_block_arrays(
+        (_repeated_variant_block(), _larger_block()),
+        mesh=mesh,
+        allow_excess_padding=True,
+    ).operator
+    reversed_mesh = Mesh(np.asarray(mesh.devices).reshape(-1)[::-1], ("graph",))
+    incompatible = NamedSharding(reversed_mesh, P("graph", None))
+    values = jnp.ones((operator.n_variants, 2), dtype=jnp.float32)
+    compiled = jax.jit(partial(lineararg_matmat, out_sharding=incompatible))
+
+    with pytest.raises(ValueError, match="carrier graph mesh"):
+        if stage == "lower":
+            compiled.lower(operator, values)
+        else:
+            compiled(operator, values)
+
+
+def test_outer_jit_output_sharding_keeps_graph_arrays_as_zero_constant_operands() -> None:
+    mesh = _two_device_graph_mesh_or_skip()
+    operator = _packed_from_block_arrays(
+        (_repeated_variant_block(), _larger_block()),
+        mesh=mesh,
+        allow_excess_padding=True,
+    ).operator
+    compatible = NamedSharding(mesh, P("graph", None))
+    values = jnp.ones((operator.n_variants, 2), dtype=jnp.float32)
+    compiled = jax.jit(partial(lineararg_matmat, out_sharding=compatible))
+
+    closed_jaxpr = jax.make_jaxpr(compiled)(operator, values)
+
+    assert _recursive_closed_jaxpr_constant_metrics(closed_jaxpr) == (0, 0)
+
+
+@pytest.mark.parametrize("boundary", ["construction", "compilation"])
+def test_non_single_host_graph_mesh_is_rejected_at_project_boundary(monkeypatch, boundary: str) -> None:
+    mesh = _two_device_graph_mesh_or_skip()
+    blocks = (_repeated_variant_block(), _larger_block())
+    operator = None
+    if boundary == "compilation":
+        operator = _packed_from_block_arrays(blocks, mesh=mesh, allow_excess_padding=True).operator
+    monkeypatch.setattr(
+        packed_products_module,
+        "_addressable_device_count",
+        lambda _sharding: mesh.size - 1,
+    )
+
+    with pytest.raises(ValueError, match="every graph mesh device.*one host"):
+        if boundary == "construction":
+            _packed_from_block_arrays(blocks, mesh=mesh, allow_excess_padding=True)
+        else:
+            assert operator is not None
+            operator.compile_matmat()
 
 
 def test_shard_map_reduce_scatter_rejects_indivisible_sample_dimension() -> None:

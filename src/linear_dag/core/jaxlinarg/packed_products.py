@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jax import lax
-from jax.sharding import AbstractMesh, Mesh, NamedSharding, PartitionSpec as P
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from jaxtyping import Array, ArrayLike
 
 from .kernels.pure_jax import (
@@ -367,34 +367,32 @@ def _remove_local_graph_axis(operator: _PackedJaxLinearARG) -> dict[str, Array]:
     return {name: getattr(operator, name)[0] for name in (*GRAPH_FIELD_NAMES, "block_descriptors", "valid_lengths")}
 
 
-def _operator_mesh(operator: _PackedJaxLinearARG) -> Mesh | AbstractMesh:
-    sharding = getattr(operator.indptr, "sharding", None)
-    if not isinstance(sharding, NamedSharding):
-        abstract_sharding = getattr(jax.typeof(operator.indptr), "sharding", None)
-        if not isinstance(abstract_sharding, NamedSharding):
-            raise ValueError("packed products require graph operands with NamedSharding")
-        sharding = abstract_sharding
-    mesh = sharding.mesh
-    if not isinstance(mesh, (Mesh, AbstractMesh)) or mesh.axis_names != ("graph",):
+def _operator_mesh(operator: _PackedJaxLinearARG) -> Mesh:
+    """Return concrete global execution metadata retained across outer JIT."""
+    mesh = operator.graph_mesh
+    if not isinstance(mesh, Mesh) or mesh.axis_names != ("graph",):
         raise ValueError('packed products require a concrete carrier mesh with the dedicated "graph" axis')
     return mesh
 
 
 def _concrete_operator_mesh(operator: _PackedJaxLinearARG) -> Mesh:
     mesh = _operator_mesh(operator)
-    if not isinstance(mesh, Mesh):
-        raise ValueError("safe compilation helpers require a concrete single-host graph mesh")
     sharding = operator.indptr.sharding
-    if not isinstance(sharding, NamedSharding) or len(sharding.addressable_devices) != mesh.size:
+    if not isinstance(sharding, NamedSharding) or _addressable_device_count(sharding) != mesh.size:
         raise ValueError("safe compilation helpers require every graph mesh device to be addressable on one host")
     return mesh
+
+
+def _addressable_device_count(sharding: NamedSharding) -> int:
+    """Return the local ownership count used by single-host validation."""
+    return len(sharding.addressable_devices)
 
 
 def _forward_output_spec(
     operator: _PackedJaxLinearARG,
     *,
     out_sharding: NamedSharding | None,
-    mesh: Mesh | AbstractMesh,
+    mesh: Mesh,
 ) -> P:
     if out_sharding is None:
         return P()
@@ -419,9 +417,11 @@ def _validate_packed_carrier(operator: _PackedJaxLinearARG) -> None:
     if not isinstance(first_sharding, NamedSharding) or not isinstance(first_sharding.mesh, Mesh):
         raise ValueError("packed products require a concrete single-host NamedSharding mesh")
     mesh = first_sharding.mesh
+    if operator.graph_mesh != mesh:
+        raise ValueError("packed graph arrays must use the carrier graph mesh")
     if mesh.axis_names != ("graph",):
         raise ValueError('packed products require the dedicated mesh axis "graph"')
-    if len(first_sharding.addressable_devices) != mesh.size:
+    if _addressable_device_count(first_sharding) != mesh.size:
         raise ValueError("packed products require every graph mesh device to be addressable on one host")
 
     num_devices = mesh.size
