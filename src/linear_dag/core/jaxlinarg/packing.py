@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -145,6 +145,30 @@ class PackingPlan:
     def data_dtype(self) -> np.dtype[Any]:
         """Return the canonical floating dtype for packed graph edge data."""
         return self.config.data_dtype
+
+
+class PackedHostBuffers(NamedTuple):
+    """Fixed host array components ready for sharded device assembly."""
+
+    indptr: np.ndarray
+    indices: np.ndarray
+    data: np.ndarray
+    variant_indices: np.ndarray
+    flip: np.ndarray
+    sample_indices: np.ndarray
+    nonunique_indices: np.ndarray
+    allele_counts: np.ndarray
+    logical_variant_indices: np.ndarray
+    block_descriptors: np.ndarray
+    valid_lengths: np.ndarray
+
+
+@dataclass(frozen=True)
+class PackedGraph:
+    """Validated host buffers together with their immutable packing plan."""
+
+    buffers: PackedHostBuffers
+    plan: PackingPlan
 
 
 @dataclass(frozen=True)
@@ -311,6 +335,361 @@ def plan_packing(
         n_variants=sum(block.n_variants for block in canonical_blocks),
         diagnostics=diagnostics,
     )
+
+
+def pack_blocks(
+    blocks: Iterable[LinearARGBlockArrays],
+    *,
+    num_devices: int,
+    dtype: Any = None,
+    max_padding_ratio: float = 1.25,
+    allow_excess_padding: bool = False,
+) -> PackedGraph:
+    """Pack canonical LinearARG blocks into equal-capacity host shard buffers."""
+    source_blocks = tuple(blocks)
+    plan = plan_packing(
+        source_blocks,
+        num_devices=num_devices,
+        dtype=dtype,
+        max_padding_ratio=max_padding_ratio,
+        allow_excess_padding=allow_excess_padding,
+    )
+    canonical_blocks = tuple(canonicalize_block_arrays(block, dtype=plan.data_dtype) for block in source_blocks)
+    buffers = _allocate_host_buffers(plan)
+
+    descriptor_rows = [0] * plan.config.num_devices
+    for descriptor in plan.descriptors:
+        block = canonical_blocks[descriptor.logical_block_index]
+        device = descriptor.device
+        _pack_block_into_buffers(buffers, block, descriptor)
+        row = descriptor_rows[device]
+        buffers.block_descriptors[device, row] = descriptor.as_array_row()
+        descriptor_rows[device] += 1
+
+    for device in range(plan.config.num_devices):
+        indptr_length = int(buffers.valid_lengths[device, VALID_LENGTH_FIELDS.index("indptr")])
+        edge_length = int(buffers.valid_lengths[device, VALID_LENGTH_FIELDS.index("indices")])
+        buffers.indptr[device, indptr_length:] = edge_length
+
+    packed = PackedGraph(buffers=buffers, plan=plan)
+    validate_packed_graph(packed)
+    return packed
+
+
+def validate_packed_graph(packed: PackedGraph) -> None:
+    """Reject malformed descriptors, mappings, dtypes, and padding on the host."""
+    buffers = packed.buffers
+    plan = packed.plan
+    num_devices = plan.config.num_devices
+    if not isinstance(buffers, PackedHostBuffers):
+        raise ValueError("packed buffers must use the fixed PackedHostBuffers component schema")
+
+    expected_dtypes = {name: _field_dtype(name, plan.data_dtype) for name in GRAPH_FIELD_NAMES}
+    for name in GRAPH_FIELD_NAMES:
+        values = getattr(buffers, name)
+        expected_shape = (num_devices, plan.capacities[name])
+        if not isinstance(values, np.ndarray) or values.shape != expected_shape:
+            raise ValueError(f"{name} shape must be {expected_shape}")
+        if values.dtype != expected_dtypes[name]:
+            if name == "data":
+                raise ValueError(f"data dtype must match the packing plan dtype {plan.data_dtype}")
+            raise ValueError(f"{name} dtype must be {expected_dtypes[name]}")
+
+    expected_descriptor_shape = (num_devices, plan.descriptor_capacity, len(BLOCK_DESCRIPTOR_FIELDS))
+    if buffers.block_descriptors.shape != expected_descriptor_shape or buffers.block_descriptors.dtype != np.int64:
+        raise ValueError(f"block_descriptors must have int64 shape {expected_descriptor_shape}")
+    expected_lengths_shape = (num_devices, len(VALID_LENGTH_FIELDS))
+    if buffers.valid_lengths.shape != expected_lengths_shape or buffers.valid_lengths.dtype != np.int64:
+        raise ValueError(f"valid_lengths must have int64 shape {expected_lengths_shape}")
+
+    expected_valid_lengths = np.asarray(
+        [
+            (*tuple(plan.valid_lengths_by_device[device].values()), len(plan.blocks_by_device[device]))
+            for device in range(num_devices)
+        ],
+        dtype=np.int64,
+    )
+    if not np.array_equal(buffers.valid_lengths, expected_valid_lengths):
+        raise ValueError("valid_lengths do not match the packing plan")
+
+    descriptors = _validated_descriptors(buffers, plan)
+    _validate_graph_values(buffers, descriptors, plan)
+    _validate_inert_padding(buffers, plan)
+
+
+def unpack_packed_blocks(packed: PackedGraph) -> tuple[LinearARGBlockArrays, ...]:
+    """Reconstruct canonical source blocks in their original logical order."""
+    validate_packed_graph(packed)
+    blocks: dict[int, LinearARGBlockArrays] = {}
+    for descriptor in _descriptor_rows(packed.buffers, packed.plan):
+        device = descriptor.device
+        indptr_slice = slice(descriptor.indptr_start, descriptor.indptr_start + descriptor.indptr_length)
+        edge_slice = slice(descriptor.edge_start, descriptor.edge_start + descriptor.edge_length)
+        node_slice = slice(descriptor.node_start, descriptor.node_start + descriptor.node_length)
+        variant_slice = slice(descriptor.variant_start, descriptor.variant_start + descriptor.variant_length)
+        sample_slice = slice(descriptor.sample_start, descriptor.sample_start + descriptor.sample_length)
+        blocks[descriptor.logical_block_index] = LinearARGBlockArrays(
+            indptr=np.asarray(packed.buffers.indptr[device, indptr_slice] - descriptor.edge_start, dtype=np.int32),
+            indices=np.asarray(packed.buffers.indices[device, edge_slice] - descriptor.node_start, dtype=np.int32),
+            data=np.asarray(packed.buffers.data[device, edge_slice], dtype=packed.plan.data_dtype),
+            variant_indices=np.asarray(
+                packed.buffers.variant_indices[device, variant_slice] - descriptor.node_start,
+                dtype=np.int32,
+            ),
+            flip=np.asarray(packed.buffers.flip[device, variant_slice], dtype=np.bool_),
+            sample_indices=np.asarray(
+                packed.buffers.sample_indices[device, sample_slice] - descriptor.node_start,
+                dtype=np.int32,
+            ),
+            nonunique_indices=np.asarray(
+                packed.buffers.nonunique_indices[device, node_slice] - descriptor.compressed_start,
+                dtype=np.int32,
+            ),
+            allele_counts=np.asarray(packed.buffers.allele_counts[device, variant_slice], dtype=np.int32),
+            n_variants=descriptor.variant_length,
+            n_samples=descriptor.sample_length,
+        )
+    return tuple(blocks[index] for index in range(len(packed.plan.assignment)))
+
+
+def _allocate_host_buffers(plan: PackingPlan) -> PackedHostBuffers:
+    def shape(name: str) -> tuple[int, int]:
+        return (plan.config.num_devices, plan.capacities[name])
+
+    valid_lengths = np.asarray(
+        [
+            (*tuple(plan.valid_lengths_by_device[device].values()), len(plan.blocks_by_device[device]))
+            for device in range(plan.config.num_devices)
+        ],
+        dtype=np.int64,
+    )
+    return PackedHostBuffers(
+        indptr=np.zeros(shape("indptr"), dtype=np.int32),
+        indices=np.zeros(shape("indices"), dtype=np.int32),
+        data=np.zeros(shape("data"), dtype=plan.data_dtype),
+        variant_indices=np.zeros(shape("variant_indices"), dtype=np.int32),
+        flip=np.zeros(shape("flip"), dtype=np.bool_),
+        sample_indices=np.zeros(shape("sample_indices"), dtype=np.int32),
+        nonunique_indices=np.zeros(shape("nonunique_indices"), dtype=np.int32),
+        allele_counts=np.full(shape("allele_counts"), -1, dtype=np.int32),
+        logical_variant_indices=np.full(shape("logical_variant_indices"), -1, dtype=np.int32),
+        block_descriptors=np.full(
+            (plan.config.num_devices, plan.descriptor_capacity, len(BLOCK_DESCRIPTOR_FIELDS)),
+            -1,
+            dtype=np.int64,
+        ),
+        valid_lengths=valid_lengths,
+    )
+
+
+def _pack_block_into_buffers(
+    buffers: PackedHostBuffers,
+    block: LinearARGBlockArrays,
+    descriptor: BlockDescriptor,
+) -> None:
+    nonunique_indices = block.nonunique_indices
+    allele_counts = block.allele_counts
+    assert nonunique_indices is not None
+    assert allele_counts is not None
+    device = descriptor.device
+    indptr_slice = slice(descriptor.indptr_start, descriptor.indptr_start + descriptor.indptr_length)
+    edge_slice = slice(descriptor.edge_start, descriptor.edge_start + descriptor.edge_length)
+    node_slice = slice(descriptor.node_start, descriptor.node_start + descriptor.node_length)
+    variant_slice = slice(descriptor.variant_start, descriptor.variant_start + descriptor.variant_length)
+    sample_slice = slice(descriptor.sample_start, descriptor.sample_start + descriptor.sample_length)
+    buffers.indptr[device, indptr_slice] = block.indptr + descriptor.edge_start
+    buffers.indices[device, edge_slice] = block.indices + descriptor.node_start
+    buffers.data[device, edge_slice] = block.data
+    buffers.variant_indices[device, variant_slice] = block.variant_indices + descriptor.node_start
+    buffers.flip[device, variant_slice] = block.flip
+    buffers.sample_indices[device, sample_slice] = block.sample_indices + descriptor.node_start
+    buffers.nonunique_indices[device, node_slice] = nonunique_indices + descriptor.compressed_start
+    buffers.allele_counts[device, variant_slice] = allele_counts
+    buffers.logical_variant_indices[device, variant_slice] = np.arange(
+        descriptor.logical_variant_start,
+        descriptor.logical_variant_stop,
+        dtype=np.int32,
+    )
+
+
+def _descriptor_rows(buffers: PackedHostBuffers, plan: PackingPlan) -> tuple[BlockDescriptor, ...]:
+    descriptors = []
+    block_count_index = VALID_LENGTH_FIELDS.index("block_descriptors")
+    for device in range(plan.config.num_devices):
+        block_count = int(buffers.valid_lengths[device, block_count_index])
+        for row in buffers.block_descriptors[device, :block_count]:
+            values = {name: int(row[index]) for index, name in enumerate(BLOCK_DESCRIPTOR_FIELDS)}
+            descriptors.append(BlockDescriptor(device=device, **values))
+    return tuple(descriptors)
+
+
+def _validated_descriptors(buffers: PackedHostBuffers, plan: PackingPlan) -> tuple[BlockDescriptor, ...]:
+    descriptors = _descriptor_rows(buffers, plan)
+    logical_indices = [descriptor.logical_block_index for descriptor in descriptors]
+    if sorted(logical_indices) != list(range(len(plan.assignment))):
+        raise ValueError("block assignments must be complete and non-overlapping")
+
+    for descriptor in descriptors:
+        device = descriptor.device
+        lengths = {
+            name: int(buffers.valid_lengths[device, VALID_LENGTH_FIELDS.index(name)]) for name in GRAPH_FIELD_NAMES
+        }
+        _validate_span(descriptor.indptr_start, descriptor.indptr_length, lengths["indptr"], name="indptr")
+        _validate_span(descriptor.edge_start, descriptor.edge_length, lengths["indices"], name="edge")
+        _validate_span(descriptor.node_start, descriptor.node_length, lengths["nonunique_indices"], name="node")
+        _validate_span(descriptor.variant_start, descriptor.variant_length, lengths["variant_indices"], name="variant")
+        _validate_span(descriptor.sample_start, descriptor.sample_length, lengths["sample_indices"], name="sample")
+        if descriptor.indptr_length != descriptor.node_length + 1:
+            raise ValueError("descriptor indptr length must equal node length plus one")
+        if descriptor.sample_length != plan.n_samples:
+            raise ValueError("descriptor sample count must match the packing plan")
+        if descriptor.logical_variant_stop - descriptor.logical_variant_start != descriptor.variant_length:
+            raise ValueError("descriptor logical variant span must match its variant count")
+        if descriptor.compressed_start < 0 or descriptor.compressed_length < 0:
+            raise ValueError("descriptor compressed-row extent must be nonnegative")
+        if not descriptor.node_start <= descriptor.min_index_to_keep < descriptor.node_start + descriptor.node_length:
+            raise ValueError("descriptor min_index_to_keep must lie within its node span")
+        if plan.assignment[descriptor.logical_block_index] != descriptor.device:
+            raise ValueError("descriptor assignment does not match the packing plan")
+
+    for device in range(plan.config.num_devices):
+        device_descriptors = [descriptor for descriptor in descriptors if descriptor.device == device]
+        valid = {
+            name: int(buffers.valid_lengths[device, VALID_LENGTH_FIELDS.index(name)]) for name in GRAPH_FIELD_NAMES
+        }
+        _validate_partition(device_descriptors, "indptr_start", "indptr_length", valid["indptr"], name="indptr")
+        _validate_partition(device_descriptors, "edge_start", "edge_length", valid["indices"], name="edge")
+        _validate_partition(device_descriptors, "node_start", "node_length", valid["nonunique_indices"], name="node")
+        _validate_partition(
+            device_descriptors,
+            "variant_start",
+            "variant_length",
+            valid["variant_indices"],
+            name="variant",
+        )
+        _validate_partition(
+            device_descriptors,
+            "sample_start",
+            "sample_length",
+            valid["sample_indices"],
+            name="sample",
+        )
+        block_count = len(device_descriptors)
+        if not np.all(buffers.block_descriptors[device, block_count:] == -1):
+            raise ValueError("non-inert block descriptor padding")
+
+    expected_by_logical_index = {descriptor.logical_block_index: descriptor for descriptor in plan.descriptors}
+    for descriptor in descriptors:
+        if descriptor != expected_by_logical_index[descriptor.logical_block_index]:
+            raise ValueError("packed descriptor does not match the immutable packing plan")
+    return descriptors
+
+
+def _validate_span(start: int, length: int, valid_length: int, *, name: str) -> None:
+    if start < 0 or length < 0 or start + length > valid_length:
+        raise ValueError(f"descriptor {name} span is out of range")
+
+
+def _validate_partition(
+    descriptors: list[BlockDescriptor],
+    start_name: str,
+    length_name: str,
+    valid_length: int,
+    *,
+    name: str,
+) -> None:
+    expected_start = 0
+    for descriptor in descriptors:
+        start = getattr(descriptor, start_name)
+        length = getattr(descriptor, length_name)
+        if start != expected_start:
+            raise ValueError(f"descriptor {name} spans must be non-overlapping and gap-free")
+        expected_start += length
+    if expected_start != valid_length:
+        raise ValueError(f"descriptor {name} spans must cover every valid row")
+
+
+def _validate_graph_values(
+    buffers: PackedHostBuffers,
+    descriptors: tuple[BlockDescriptor, ...],
+    plan: PackingPlan,
+) -> None:
+    logical_values = []
+    for descriptor in descriptors:
+        device = descriptor.device
+        indptr = buffers.indptr[
+            device,
+            descriptor.indptr_start : descriptor.indptr_start + descriptor.indptr_length,
+        ]
+        if (
+            indptr[0] != descriptor.edge_start
+            or indptr[-1] != descriptor.edge_start + descriptor.edge_length
+            or np.any(np.diff(indptr) < 0)
+        ):
+            raise ValueError("packed indptr is inconsistent with its descriptor edge span")
+        edge_slice = slice(descriptor.edge_start, descriptor.edge_start + descriptor.edge_length)
+        indices = buffers.indices[device, edge_slice]
+        if indices.size and (
+            int(indices.min()) < descriptor.node_start
+            or int(indices.max()) >= descriptor.node_start + descriptor.node_length
+        ):
+            raise ValueError("packed edge indices leave their descriptor node span")
+        if not np.all(np.isfinite(buffers.data[device, edge_slice])):
+            raise ValueError("packed data must contain only finite values")
+
+        variant_slice = slice(descriptor.variant_start, descriptor.variant_start + descriptor.variant_length)
+        variant_indices = buffers.variant_indices[device, variant_slice]
+        sample_slice = slice(descriptor.sample_start, descriptor.sample_start + descriptor.sample_length)
+        sample_indices = buffers.sample_indices[device, sample_slice]
+        for name, values in (("variant", variant_indices), ("sample", sample_indices)):
+            if values.size and (
+                int(values.min()) < descriptor.node_start
+                or int(values.max()) >= descriptor.node_start + descriptor.node_length
+            ):
+                raise ValueError(f"packed {name} indices leave their descriptor node span")
+        node_slice = slice(descriptor.node_start, descriptor.node_start + descriptor.node_length)
+        compressed = buffers.nonunique_indices[device, node_slice]
+        if compressed.size and (
+            int(compressed.min()) < descriptor.compressed_start
+            or int(compressed.max()) >= descriptor.compressed_start + descriptor.compressed_length
+        ):
+            raise ValueError("packed nonunique indices leave their descriptor compressed-row extent")
+
+        mapping = buffers.logical_variant_indices[device, variant_slice]
+        expected_mapping = np.arange(
+            descriptor.logical_variant_start,
+            descriptor.logical_variant_stop,
+            dtype=np.int32,
+        )
+        if not np.array_equal(mapping, expected_mapping):
+            raise ValueError("logical variant mapping must be bijective and preserve block order")
+        logical_values.append(mapping)
+
+    all_logical_values = np.concatenate(logical_values) if logical_values else np.empty(0, dtype=np.int32)
+    if not np.array_equal(np.sort(all_logical_values), np.arange(plan.n_variants, dtype=np.int32)):
+        raise ValueError("logical variant mapping must be bijective")
+
+
+def _validate_inert_padding(buffers: PackedHostBuffers, plan: PackingPlan) -> None:
+    pad_values: dict[str, int | float | bool] = {
+        "indices": 0,
+        "data": 0,
+        "variant_indices": 0,
+        "flip": False,
+        "sample_indices": 0,
+        "nonunique_indices": 0,
+        "allele_counts": -1,
+        "logical_variant_indices": -1,
+    }
+    for device in range(plan.config.num_devices):
+        edge_length = int(buffers.valid_lengths[device, VALID_LENGTH_FIELDS.index("indices")])
+        indptr_length = int(buffers.valid_lengths[device, VALID_LENGTH_FIELDS.index("indptr")])
+        if not np.all(buffers.indptr[device, indptr_length:] == edge_length):
+            raise ValueError("non-inert indptr padding; padded CSC columns must be edge-free")
+        for name, pad_value in pad_values.items():
+            valid_length = int(buffers.valid_lengths[device, VALID_LENGTH_FIELDS.index(name)])
+            if not np.all(getattr(buffers, name)[device, valid_length:] == pad_value):
+                raise ValueError(f"non-inert {name} padding")
 
 
 def _resolve_data_dtype(blocks: tuple[LinearARGBlockArrays, ...], *, dtype: Any) -> np.dtype[Any]:

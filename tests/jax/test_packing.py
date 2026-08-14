@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import jax.tree_util as jtu
 import numpy as np
 import pytest
 
@@ -14,9 +15,12 @@ from linear_dag.core.jaxlinarg.packing import (
     canonicalize_block_arrays,
     GRAPH_FIELD_NAMES,
     LinearARGBlockArrays,
+    pack_blocks,
     PACKED_COMPONENT_NAMES,
     plan_packing,
+    unpack_packed_blocks,
     VALID_LENGTH_FIELDS,
+    validate_packed_graph,
 )
 
 
@@ -56,6 +60,26 @@ def _canonical_graph_bytes(block: LinearARGBlockArrays) -> int:
         sum(getattr(block, name).nbytes for name in GRAPH_FIELD_NAMES if name != "logical_variant_indices")
         + block.n_variants * np.dtype(np.int32).itemsize
     )
+
+
+def _assert_block_arrays_equal(actual: LinearARGBlockArrays, expected: LinearARGBlockArrays) -> None:
+    for name in (
+        "indptr",
+        "indices",
+        "data",
+        "variant_indices",
+        "flip",
+        "sample_indices",
+        "nonunique_indices",
+        "allele_counts",
+    ):
+        np.testing.assert_array_equal(getattr(actual, name), getattr(expected, name), err_msg=name)
+    assert actual.n_variants == expected.n_variants
+    assert actual.n_samples == expected.n_samples
+
+
+def _replace_buffer(packed, name: str, values: np.ndarray):
+    return replace(packed, buffers=packed.buffers._replace(**{name: values}))
 
 
 def test_lineararg_block_arrays_remains_available_from_ingress() -> None:
@@ -205,3 +229,170 @@ def test_bundled_two_block_fixture_requires_explicit_padding_override(
 
     plan = plan_packing(blocks, num_devices=2, allow_excess_padding=True)
     assert plan.diagnostics.padding_ratio > 1.25
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        (_block(n_nodes=7, n_edges=6, n_variants=4),),
+        (_block(), _block(n_nodes=3, n_edges=3, n_variants=1)),
+        tuple(_block(block_seed=i) for i in range(4)),
+    ],
+)
+def test_packed_buffers_have_one_fixed_pytree_definition(blocks) -> None:
+    packed = pack_blocks(blocks, num_devices=1)
+
+    assert packed.buffers._fields == PACKED_COMPONENT_NAMES
+    assert len(jtu.tree_leaves(packed.buffers)) == len(PACKED_COMPONENT_NAMES)
+    assert jtu.tree_structure(packed.buffers) == jtu.tree_structure(pack_blocks((_block(),), num_devices=1).buffers)
+
+
+def test_pack_unpack_round_trip_preserves_synthetic_canonical_fields() -> None:
+    first = replace(
+        _block(block_seed=3),
+        flip=np.array([True, False]),
+        nonunique_indices=np.array([0, 1, 1, 2]),
+        allele_counts=np.array([7, 3]),
+    )
+    second = _block(n_nodes=3, n_edges=4, n_variants=1, block_seed=2, optional_arrays=False)
+    expected = tuple(canonicalize_block_arrays(block) for block in (first, second))
+
+    packed = pack_blocks((first, second), num_devices=1)
+    actual = unpack_packed_blocks(packed)
+
+    assert len(actual) == len(expected)
+    for actual_block, expected_block in zip(actual, expected, strict=True):
+        _assert_block_arrays_equal(actual_block, expected_block)
+
+
+def test_pack_unpack_round_trip_preserves_hdf5_fixture_blocks(
+    linarg_h5_path,
+    linarg_block_metadata,
+) -> None:
+    block_names = tuple(linarg_block_metadata.get_column("block_name").to_list())
+    blocks = tuple(read_hdf5_block_arrays(linarg_h5_path, name) for name in block_names)
+    expected = tuple(canonicalize_block_arrays(block) for block in blocks)
+
+    packed = pack_blocks(blocks, num_devices=2, allow_excess_padding=True)
+    actual = unpack_packed_blocks(packed)
+
+    for actual_block, expected_block in zip(actual, expected, strict=True):
+        _assert_block_arrays_equal(actual_block, expected_block)
+
+
+def test_unpack_restores_logical_order_after_physical_block_reordering() -> None:
+    small = _block(n_nodes=3, n_edges=2, n_variants=1, block_seed=1)
+    large = _block(n_nodes=9, n_edges=12, n_variants=6, block_seed=2)
+
+    packed = pack_blocks((small, large), num_devices=1)
+    unpacked = unpack_packed_blocks(packed)
+
+    assert packed.plan.blocks_by_device == ((1, 0),)
+    _assert_block_arrays_equal(unpacked[0], canonicalize_block_arrays(small))
+    _assert_block_arrays_equal(unpacked[1], canonicalize_block_arrays(large))
+    mapping = packed.buffers.logical_variant_indices[0]
+    valid = packed.buffers.valid_lengths[0, VALID_LENGTH_FIELDS.index("logical_variant_indices")]
+    np.testing.assert_array_equal(np.sort(mapping[:valid]), np.arange(small.n_variants + large.n_variants))
+
+
+def test_empty_device_buffers_and_all_padding_are_inert() -> None:
+    packed = pack_blocks((_block(),), num_devices=3, allow_excess_padding=True)
+
+    validate_packed_graph(packed)
+    empty_devices = [device for device, blocks in enumerate(packed.plan.blocks_by_device) if not blocks]
+    assert len(empty_devices) == 2
+    for device in empty_devices:
+        assert np.all(packed.buffers.valid_lengths[device] == 0)
+        assert np.all(packed.buffers.indptr[device] == 0)
+        assert np.all(packed.buffers.indices[device] == 0)
+        assert np.all(packed.buffers.data[device] == 0)
+        assert np.all(packed.buffers.variant_indices[device] == 0)
+        assert np.all(~packed.buffers.flip[device])
+        assert np.all(packed.buffers.sample_indices[device] == 0)
+        assert np.all(packed.buffers.nonunique_indices[device] == 0)
+        assert np.all(packed.buffers.allele_counts[device] == -1)
+        assert np.all(packed.buffers.logical_variant_indices[device] == -1)
+        assert np.all(packed.buffers.block_descriptors[device] == -1)
+
+
+def test_padding_is_masked_edge_free_and_index_safe() -> None:
+    packed = pack_blocks(
+        (_block(n_nodes=10, n_edges=15, n_variants=5), _block(n_nodes=3, n_edges=2, n_variants=1)),
+        num_devices=2,
+        allow_excess_padding=True,
+    )
+    lengths = packed.buffers.valid_lengths
+
+    for device in range(2):
+        edge_length = lengths[device, VALID_LENGTH_FIELDS.index("indices")]
+        indptr_length = lengths[device, VALID_LENGTH_FIELDS.index("indptr")]
+        variant_length = lengths[device, VALID_LENGTH_FIELDS.index("variant_indices")]
+        assert np.all(packed.buffers.indptr[device, indptr_length:] == edge_length)
+        assert np.all(packed.buffers.indices[device, edge_length:] == 0)
+        assert np.all(packed.buffers.variant_indices[device, variant_length:] == 0)
+        assert np.all(~packed.buffers.flip[device, variant_length:])
+        assert np.all(packed.buffers.logical_variant_indices[device, variant_length:] == -1)
+
+
+def test_validate_rejects_out_of_range_descriptor_span() -> None:
+    packed = pack_blocks((_block(),), num_devices=1)
+    descriptors = packed.buffers.block_descriptors.copy()
+    descriptors[0, 0, BLOCK_DESCRIPTOR_FIELDS.index("indptr_length")] = packed.buffers.indptr.shape[1] + 1
+
+    with pytest.raises(ValueError, match="descriptor indptr span is out of range"):
+        validate_packed_graph(_replace_buffer(packed, "block_descriptors", descriptors))
+
+
+def test_validate_rejects_nonbijective_logical_variant_mapping() -> None:
+    packed = pack_blocks((_block(),), num_devices=1)
+    mapping = packed.buffers.logical_variant_indices.copy()
+    mapping[0, 1] = mapping[0, 0]
+
+    with pytest.raises(ValueError, match="logical variant mapping must be bijective"):
+        validate_packed_graph(_replace_buffer(packed, "logical_variant_indices", mapping))
+
+
+def test_validate_rejects_overlapping_block_assignments() -> None:
+    packed = pack_blocks((_block(), _block(block_seed=1)), num_devices=1)
+    descriptors = packed.buffers.block_descriptors.copy()
+    descriptors[0, 1, BLOCK_DESCRIPTOR_FIELDS.index("logical_block_index")] = 0
+
+    with pytest.raises(ValueError, match="block assignments must be complete and non-overlapping"):
+        validate_packed_graph(_replace_buffer(packed, "block_descriptors", descriptors))
+
+
+def test_validate_rejects_inconsistent_sample_counts_and_data_dtype() -> None:
+    packed = pack_blocks((_block(),), num_devices=1)
+    descriptors = packed.buffers.block_descriptors.copy()
+    descriptors[0, 0, BLOCK_DESCRIPTOR_FIELDS.index("sample_length")] -= 1
+    with pytest.raises(ValueError, match="descriptor sample count"):
+        validate_packed_graph(_replace_buffer(packed, "block_descriptors", descriptors))
+
+    with pytest.raises(ValueError, match="data dtype"):
+        validate_packed_graph(_replace_buffer(packed, "data", packed.buffers.data.astype(np.float64)))
+
+
+def test_validate_rejects_non_inert_padding() -> None:
+    packed = pack_blocks(
+        (_block(n_nodes=10, n_edges=15, n_variants=5), _block(n_nodes=3, n_edges=2, n_variants=1)),
+        num_devices=2,
+        allow_excess_padding=True,
+    )
+    data = packed.buffers.data.copy()
+    short_device = int(np.argmin(packed.buffers.valid_lengths[:, VALID_LENGTH_FIELDS.index("data")]))
+    valid = packed.buffers.valid_lengths[short_device, VALID_LENGTH_FIELDS.index("data")]
+    data[short_device, valid] = 7
+
+    with pytest.raises(ValueError, match="non-inert data padding"):
+        validate_packed_graph(_replace_buffer(packed, "data", data))
+
+
+def test_padding_override_never_bypasses_structural_validation() -> None:
+    packed = pack_blocks((_block(),), num_devices=2, allow_excess_padding=True)
+    mapping = packed.buffers.logical_variant_indices.copy()
+    assigned_device = packed.plan.assignment[0]
+    mapping[assigned_device, 0] = -1
+
+    assert packed.plan.diagnostics.padding_override
+    with pytest.raises(ValueError, match="logical variant mapping"):
+        validate_packed_graph(_replace_buffer(packed, "logical_variant_indices", mapping))
