@@ -148,14 +148,22 @@ def _recursive_closed_jaxpr_constant_metrics(closed_jaxpr: jax_core.ClosedJaxpr)
     array_constant_bytes = 0
     constvar_count = 0
 
+    def add_constant(constant: Any) -> None:
+        nonlocal array_constant_bytes
+        if isinstance(constant, (jax.Array, np.ndarray)):
+            array_constant_bytes += int(constant.size * constant.dtype.itemsize)
+            return
+        abstract_value = jax.typeof(constant)
+        lower_val = getattr(abstract_value, "lower_val", None)
+        if lower_val is not None:
+            for lowered in lower_val(constant):
+                add_constant(lowered)
+
     def visit(value: Any) -> None:
-        nonlocal array_constant_bytes, constvar_count
-        if isinstance(value, jax_core.ClosedJaxpr):
-            for constant in value.consts:
-                if isinstance(constant, (jax.Array, np.ndarray)):
-                    array_constant_bytes += int(constant.size * constant.dtype.itemsize)
-            visit(value.jaxpr)
-        elif isinstance(value, jax_core.Jaxpr):
+        nonlocal constvar_count
+        if isinstance(value, jax_core.Jaxpr):
+            for constant in getattr(value, "consts", ()):
+                add_constant(constant)
             constvar_count += len(value.constvars)
             for equation in value.eqns:
                 visit(equation.params)
@@ -174,9 +182,7 @@ def _recursive_jaxpr_equation_structure(closed_jaxpr: jax_core.ClosedJaxpr) -> t
     structures: list[Any] = []
 
     def visit(value: Any, path: tuple[Any, ...]) -> None:
-        if isinstance(value, jax_core.ClosedJaxpr):
-            visit(value.jaxpr, path)
-        elif isinstance(value, jax_core.Jaxpr):
+        if isinstance(value, jax_core.Jaxpr):
             structures.append((path, tuple(equation.primitive.name for equation in value.eqns)))
             for equation_index, equation in enumerate(value.eqns):
                 for name, nested in sorted(equation.params.items()):
@@ -210,13 +216,7 @@ def _stablehlo_operation_count(stablehlo: Any) -> int:
 
 
 def _main_graph_operand_attributes(stablehlo: Any) -> tuple[str, ...]:
-    main = next(
-        operation
-        for operation in stablehlo.body.operations
-        if operation.operation.name == "func.func" and str(operation.attributes["sym_name"]) == '"main"'
-    )
-    argument_attributes = main.attributes["arg_attrs"]
-    return tuple(str(attributes) for attributes in argument_attributes if "graph" in str(attributes))
+    return test_parallel_benchmarks._stablehlo_graph_operand_attributes(stablehlo)
 
 
 def _collective_type_signatures(stablehlo: Any, name: str) -> tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]:
@@ -460,7 +460,7 @@ def test_shard_map_sample_sharded_forward_uses_compatible_reduce_scatter() -> No
     stablehlo = str(stablehlo_module)
 
     assert isinstance(actual.sharding, NamedSharding)
-    assert actual.sharding.spec == P("graph")
+    assert actual.sharding.spec == P("graph", None)
     assert "stablehlo.reduce_scatter" in stablehlo
     assert "stablehlo.all_gather" not in stablehlo
     assert "stablehlo.collective_broadcast" not in stablehlo
@@ -719,7 +719,7 @@ def test_closed_over_product_diagnostic_exposes_graph_constants() -> None:
     constant_bytes, constvar_count = _recursive_closed_jaxpr_constant_metrics(closed_jaxpr)
 
     assert constant_bytes == expected_bytes
-    assert constvar_count == len(PACKED_COMPONENT_NAMES)
+    assert constvar_count == 1
 
 
 @pytest.mark.parametrize(

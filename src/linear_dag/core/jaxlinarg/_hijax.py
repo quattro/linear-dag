@@ -7,11 +7,14 @@
 
 from __future__ import annotations
 
+import inspect
+
 from dataclasses import dataclass
 from typing import Any
 
 import jax
 import jax.numpy as jnp
+import jaxlib
 
 from jax._src import ad_util
 from jax._src.interpreters import ad
@@ -21,6 +24,81 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 from .packing import _PackedGraphLogicalMetadata, PACKED_COMPONENT_NAMES
 
 _OPAQUE_GRAPH_GUIDANCE = "packed LinearARG opaque graph state must be used as an invariant operand"
+_SUPPORTED_JAX_VERSION = "0.11.0"
+_REQUIRED_HIJAX_SIGNATURES = {
+    "HiType": "()",
+    "HiType.lo_ty": "(self)",
+    "HiType.lower_val": "(self, hi_val)",
+    "HiType.raise_val": "(self, *lo_vals)",
+    "HiType.to_tangent_aval": "(self)",
+    "HiType.to_ct_aval": "(self)",
+    "HiType.vspace_zero": "(self)",
+    "HiType.vspace_add": "(self, x, y)",
+    "HiType.dec_rank": "(self, size, spec)",
+    "HiType.inc_rank": "(self, size, spec)",
+    "HiType.leading_axis_spec": "(self)",
+    "HiType.shard": "(self, mesh, manual_axes, check_vma, spec)",
+    "HiType.unshard": "(self, mesh, check_vma, spec)",
+    "HiType.nospec": "(self, mesh, check_vma, all_names)",
+    "HiType.str_short": "(self, short_dtypes=False, mesh_axis_types=False)",
+    "HiPspec": "()",
+    "HiPspec.to_lo": "(self)",
+    "HiPspec.to_tangent_spec": "(self)",
+    "HiPspec.to_ct_spec": "(self)",
+    "MappingSpec": "()",
+    "HiPrimitive": "(name)",
+    "HiPrimitive.abstract_eval": "(self, *arg_avals, **params)",
+    "HiPrimitive.to_lojax": "(self, *lotypes_wrapped_in_hitypes, **params)",
+    "HiPrimitive.jvp": "(self, primals, tangents, **params)",
+    "HiPrimitive.transpose": "(self, *args, **params)",
+    "VJPHiPrimitive": "()",
+    "VJPHiPrimitive.expand": "(self, *args)",
+    "VJPHiPrimitive.lin": "(self, nzs_in, *primals)",
+    "VJPHiPrimitive.linearized": "(self, residuals, *tangents)",
+    "VJPHiPrimitive.vjp_fwd": "(self, nzs_in, /, *args)",
+    "VJPHiPrimitive.vjp_bwd_retval": "(self, res, outgrad, /)",
+    "VJPHiPrimitive.transpose": "(self, out_ct, *maybe_accums)",
+    "VJPHiPrimitive.batch": "(self, axis_data, args, dims)",
+    "jvp_from_lin": "(self, primals, tangents)",
+    "register_hitype": "(val_cls, typeof_fn)",
+}
+
+
+def _assert_hijax_compatibility() -> None:
+    """Fail once, at the adapter boundary, for unsupported HiJAX surfaces."""
+    incompatibilities = []
+    if jax.__version__ != _SUPPORTED_JAX_VERSION or jaxlib.__version__ != _SUPPORTED_JAX_VERSION:
+        incompatibilities.append(f"found JAX/JAXlib {jax.__version__}/{jaxlib.__version__}")
+    for qualified_name, expected_signature in _REQUIRED_HIJAX_SIGNATURES.items():
+        target: Any = hijax
+        try:
+            for name in qualified_name.split("."):
+                target = getattr(target, name)
+        except AttributeError:
+            incompatibilities.append(f"missing {qualified_name}")
+            continue
+        try:
+            signature = inspect.signature(target)
+        except (TypeError, ValueError):
+            incompatibilities.append(f"non-inspectable {qualified_name}")
+            continue
+        signature = signature.replace(
+            parameters=[
+                parameter.replace(annotation=inspect.Signature.empty) for parameter in signature.parameters.values()
+            ],
+            return_annotation=inspect.Signature.empty,
+        )
+        if str(signature) != expected_signature:
+            incompatibilities.append(f"{qualified_name}{signature} != {expected_signature}")
+    if incompatibilities:
+        details = "; ".join(incompatibilities)
+        raise ImportError(
+            "linear_dag's private packed adapter supports exactly JAX/JAXlib 0.11.0; "
+            f"incompatible jax.experimental.hijax surface: {details}"
+        )
+
+
+_assert_hijax_compatibility()
 
 
 @dataclass(frozen=True, slots=True)

@@ -198,14 +198,21 @@ def _packed_ir_metrics(op: _PackedJaxLinearARG) -> tuple[int, int, int]:
 def _closed_jaxpr_array_constant_bytes(closed_jaxpr: jax_core.ClosedJaxpr) -> int:
     total = 0
 
-    def visit(value: Any) -> None:
+    def add_constant(constant: Any) -> None:
         nonlocal total
-        if isinstance(value, jax_core.ClosedJaxpr):
-            for constant in value.consts:
-                if isinstance(constant, (jax.Array, np.ndarray)):
-                    total += int(constant.size * constant.dtype.itemsize)
-            visit(value.jaxpr)
-        elif isinstance(value, jax_core.Jaxpr):
+        if isinstance(constant, (jax.Array, np.ndarray)):
+            total += int(constant.size * constant.dtype.itemsize)
+            return
+        abstract_value = jax.typeof(constant)
+        lower_val = getattr(abstract_value, "lower_val", None)
+        if lower_val is not None:
+            for lowered in lower_val(constant):
+                add_constant(lowered)
+
+    def visit(value: Any) -> None:
+        if isinstance(value, jax_core.Jaxpr):
+            for constant in getattr(value, "consts", ()):
+                add_constant(constant)
             for equation in value.eqns:
                 visit(equation.params)
         elif isinstance(value, dict):
@@ -229,12 +236,24 @@ def _walk_ir_operations(value: Any):
 
 
 def _stablehlo_graph_operand_count(stablehlo: Any) -> int:
-    main = next(
-        operation
-        for operation in stablehlo.body.operations
-        if operation.operation.name == "func.func" and str(operation.attributes["sym_name"]) == '"main"'
+    return len(_stablehlo_graph_operand_attributes(stablehlo))
+
+
+def _stablehlo_graph_operand_attributes(stablehlo: Any) -> tuple[str, ...]:
+    """Return graph-sharded input entries from JAX 0.11 manual computation."""
+    manual_computation = next(
+        operation for operation in _walk_ir_operations(stablehlo) if operation.name == "sdy.manual_computation"
     )
-    return sum("graph" in str(attributes) for attributes in main.attributes["arg_attrs"])
+    serialized = str(manual_computation.attributes["in_shardings"])
+    prefix = "#sdy.sharding_per_value<["
+    suffix = "]>"
+    if not serialized.startswith(prefix) or not serialized.endswith(suffix):
+        raise ValueError("unexpected JAX 0.11 sdy.manual_computation input sharding format")
+    entries = serialized[len(prefix) : -len(suffix)].split(">, <")
+    normalized = tuple(
+        f"#sdy.sharding<{entry.removeprefix('<').removesuffix('>')}>" for entry in entries if '"graph"' in entry
+    )
+    return normalized
 
 
 def _stablehlo_operation_count(stablehlo: Any) -> int:

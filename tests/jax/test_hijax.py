@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import inspect
+import subprocess
+import sys
 import tomllib
 
 from dataclasses import FrozenInstanceError, replace
@@ -270,6 +273,40 @@ def test_public_exports_and_annotations_do_not_expose_hijax() -> None:
         visible = (*exported_names, *annotations, *public_values)
         assert not any(token in item for token in forbidden for item in visible)
 
+        for name in exported_names:
+            exported = getattr(module, name)
+            if callable(exported):
+                signature = inspect.signature(exported)
+                generated_annotations = inspect.get_annotations(exported, eval_str=False)
+                assert not any(token in str(signature) for token in forbidden)
+                assert not any(token in str(generated_annotations) for token in forbidden)
+
+
+def test_hijax_compatibility_failure_is_actionable_in_isolated_import() -> None:
+    script = """
+import jax.experimental.hijax as hijax
+
+delattr(hijax, "jvp_from_lin")
+try:
+    import linear_dag.core.jaxlinarg._hijax
+except ImportError as error:
+    print(error)
+else:
+    raise SystemExit("missing HiJAX symbol was accepted")
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "JAX/JAXlib 0.11.0" in completed.stdout
+    assert "jvp_from_lin" in completed.stdout
+
 
 @pytest.mark.parametrize(
     ("method", "companion", "leading_dimension"),
@@ -460,3 +497,33 @@ def test_packed_product_high_level_jaxpr_has_one_project_product_equation() -> N
     primitive = product_equations[0].params["_prim"]
     assert all(isinstance(value, (str, int, tuple, np.dtype)) for value in primitive.params.values())
     assert not any(isinstance(value, (_PackedGraphValue, jax.Array, Mesh)) for value in primitive.params.values())
+
+
+def test_project_binders_keep_graph_arrays_out_of_params_and_closures() -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    values = jnp.ones((operator.n_variants, 2), dtype=jnp.float32)
+    closed_jaxpr = jax.make_jaxpr(lambda graph_operator, operand: graph_operator.matmat(operand))(operator, values)
+    equation = next(
+        equation
+        for equation in closed_jaxpr.jaxpr.eqns
+        if type(equation.params.get("_prim")).__name__ == "_PackedMatmatPrimitive"
+    )
+    primitive = equation.params["_prim"]
+
+    assert len(equation.invars) == 2
+    assert isinstance(equation.invars[0].aval, _PackedGraphType)
+    assert set(primitive.params) == {"n_samples", "n_variants", "capacities", "data_dtype", "output_axes"}
+    assert all(_is_hashable(value) for value in primitive.params.values())
+    assert not any(isinstance(value, (_PackedGraphValue, jax.Array, Mesh)) for value in primitive.params.values())
+    for binder in (hijax_adapter._bind_matmat_rank2, hijax_adapter._bind_rmatmat_rank2):
+        assert binder.__closure__ is None
+        assert "graph" in inspect.signature(binder).parameters
+        assert "values" in inspect.signature(binder).parameters
+
+
+def _is_hashable(value: Any) -> bool:
+    try:
+        hash(value)
+    except TypeError:
+        return False
+    return True
