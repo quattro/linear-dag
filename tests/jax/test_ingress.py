@@ -4,18 +4,37 @@ from __future__ import annotations
 
 import shutil
 
+import equinox as eqx
 import h5py
+import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 import numpy as np
+
+from jax.sharding import Mesh, NamedSharding
 
 from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 from linear_dag.core.jaxlinarg.ingress import (
+    _packed_from_block_arrays,
+    _packed_from_group_reader,
+    _packed_from_hdf5,
+    _PackedJaxLinearARG,
     from_block_arrays,
     from_lineararg,
     read_hdf5_block_arrays,
     read_hdf5_blocks,
 )
+from linear_dag.core.jaxlinarg.packing import pack_blocks, PACKED_COMPONENT_NAMES
 from linear_dag.core.lineararg import LinearARG
+
+
+def _graph_mesh(num_devices: int = 1) -> Mesh:
+    return Mesh(np.asarray(jax.devices("cpu")[:num_devices]), ("graph",))
+
+
+def _assert_packed_arrays_match_host(op: _PackedJaxLinearARG, expected) -> None:
+    for name in PACKED_COMPONENT_NAMES:
+        np.testing.assert_array_equal(np.asarray(getattr(op, name)), getattr(expected.buffers, name), err_msg=name)
 
 
 def test_from_lineararg_matches_in_memory_lineararg_products(oracle_case) -> None:
@@ -106,3 +125,45 @@ def test_read_hdf5_blocks_returns_jax_block_tuple(
         np.testing.assert_array_equal(np.asarray(block.indices), np.asarray(expected.indices))
         np.testing.assert_array_equal(np.asarray(block.variant_indices), np.asarray(expected.variant_indices))
         assert block.shape == expected.shape
+
+
+def test_private_packed_constructor_preserves_fixed_components_from_canonical_arrays(
+    linarg_h5_path,
+    first_block_name,
+) -> None:
+    arrays = read_hdf5_block_arrays(linarg_h5_path, first_block_name)
+    mesh = _graph_mesh()
+
+    op = _packed_from_block_arrays((arrays,), mesh=mesh)
+    expected = pack_blocks((arrays,), num_devices=1)
+
+    assert isinstance(op, _PackedJaxLinearARG)
+    assert isinstance(op, eqx.Module)
+    assert op.shape == (arrays.n_samples, arrays.n_variants)
+    assert op.capacities == tuple(expected.plan.capacities.values())
+    assert len(jtu.tree_leaves(op)) == len(PACKED_COMPONENT_NAMES)
+    _assert_packed_arrays_match_host(op, expected)
+    for name in PACKED_COMPONENT_NAMES:
+        array = getattr(op, name)
+        assert isinstance(array.sharding, NamedSharding)
+        assert array.sharding.mesh.axis_names == ("graph",)
+
+
+def test_private_packed_hdf5_and_generic_group_reader_match_host_packing(
+    linarg_h5_path,
+    linarg_block_metadata,
+) -> None:
+    block_names = tuple(linarg_block_metadata.get_column("block_name").to_list())
+    mesh = _graph_mesh()
+    blocks = tuple(read_hdf5_block_arrays(linarg_h5_path, block_name) for block_name in block_names)
+    expected = pack_blocks(blocks, num_devices=1)
+
+    from_hdf5 = _packed_from_hdf5(linarg_h5_path, block_names, mesh=mesh)
+    with h5py.File(linarg_h5_path, "r") as file:
+        reader = type("GroupReader", (), {"root": {"blocks": file}})()
+        from_groups = _packed_from_group_reader(reader, block_names, mesh=mesh)
+
+    _assert_packed_arrays_match_host(from_hdf5, expected)
+    _assert_packed_arrays_match_host(from_groups, expected)
+    assert from_hdf5.diagnostics.staging_block_owners == (0,) * len(block_names)
+    assert from_groups.diagnostics.staging_block_owners == (0,) * len(block_names)

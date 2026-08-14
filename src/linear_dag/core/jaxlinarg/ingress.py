@@ -6,22 +6,373 @@ from __future__ import annotations
 
 import warnings
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
 from importlib import import_module
 from importlib.util import find_spec
 from os import PathLike
 from typing import Any
 
+import equinox as eqx
 import h5py
+import jax
 import jax.numpy as jnp
 import numpy as np
 
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jaxtyping import Array
 from scipy import sparse
 
 from linear_dag.core.lineararg import LinearARG
 
 from .operator import Backend, JaxLinearARG, resolve_backend
-from .packing import LinearARGBlockArrays
+from .packing import (
+    _allocate_host_buffers,
+    _block_metrics,
+    _pack_block_into_buffers,
+    canonicalize_block_arrays,
+    GRAPH_FIELD_NAMES,
+    LinearARGBlockArrays,
+    PACKED_COMPONENT_NAMES,
+    PackedGraph,
+    PackingPlan,
+    plan_packing,
+    VALID_LENGTH_FIELDS,
+    validate_packed_graph,
+)
+
+_STAGING_ACCOUNTING_NOTE = "deterministic one-source-block ingress accounting; not a JAX allocator high-water mark"
+
+
+@dataclass(frozen=True)
+class _PackedIngressDiagnostics:
+    """Host-staging and final device-residency accounting for packed ingress.
+
+    `staging_bytes` is a deterministic one-source-block ingress peak derived
+    from canonical source arrays. It is not a JAX allocator high-water mark.
+    """
+
+    canonical_graph_bytes: int
+    padded_graph_bytes: int
+    descriptor_bytes: int
+    staging_bytes: int
+    staging_bytes_by_device: tuple[int, ...]
+    staging_block_owners: tuple[int, ...]
+    final_graph_bytes_by_device: tuple[int, ...]
+    final_bytes_by_device: tuple[int, ...]
+    padding_ratio: float
+    component_count: int
+    pytree_leaf_count: int
+    staging_accounting: str = _STAGING_ACCOUNTING_NOTE
+
+
+class _PackedJaxLinearARG(eqx.Module):
+    """Private fixed-component carrier for the Phase 1 packed graph spike."""
+
+    n_samples: int = eqx.field(static=True)
+    n_variants: int = eqx.field(static=True)
+    capacities: tuple[int, ...] = eqx.field(static=True)
+    diagnostics: _PackedIngressDiagnostics = eqx.field(static=True)
+    indptr: Array
+    indices: Array
+    data: Array
+    variant_indices: Array
+    flip: Array
+    sample_indices: Array
+    nonunique_indices: Array
+    allele_counts: Array
+    logical_variant_indices: Array
+    block_descriptors: Array
+    valid_lengths: Array
+
+    def __check_init__(self) -> None:
+        arrays = tuple(getattr(self, name) for name in PACKED_COMPONENT_NAMES)
+        if len(self.capacities) != len(GRAPH_FIELD_NAMES):
+            raise ValueError("capacities must contain one entry per packed graph field")
+        if self.n_samples < 0 or self.n_variants < 0:
+            raise ValueError("packed global shape must be nonnegative")
+        num_devices = len(self.diagnostics.final_bytes_by_device)
+        if num_devices < 1:
+            raise ValueError("packed ingress requires at least one device")
+        for name, array in zip(PACKED_COMPONENT_NAMES, arrays, strict=True):
+            if not isinstance(array, jax.Array):
+                raise ValueError(f"{name} must be a JAX array")
+            if array.shape[0] != num_devices:
+                raise ValueError(f"{name} leading dimension must equal the graph device count")
+            if not isinstance(array.sharding, NamedSharding):
+                raise ValueError(f"{name} must use NamedSharding")
+            if array.sharding.mesh.axis_names != ("graph",) or array.sharding.spec[0] != "graph":
+                raise ValueError(f"{name} must be sharded on the dedicated graph axis")
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """Return the logical sample-by-variant shape."""
+        return (self.n_samples, self.n_variants)
+
+
+def _packed_from_block_arrays(
+    blocks: Iterable[LinearARGBlockArrays],
+    *,
+    mesh: Mesh,
+    dtype: Any = None,
+    max_padding_ratio: float = 1.25,
+    allow_excess_padding: bool = False,
+) -> _PackedJaxLinearARG:
+    """Construct the private packed carrier from canonical host blocks."""
+    source_blocks: list[LinearARGBlockArrays | None] = list(blocks)
+
+    def source_factory() -> Iterator[LinearARGBlockArrays]:
+        for index in range(len(source_blocks)):
+            block = source_blocks[index]
+            if block is None:
+                raise RuntimeError("canonical block source cannot be consumed more than twice")
+            yield block
+
+    normalized_dtype = _normalize_dtype(dtype)
+    plan = plan_packing(
+        source_factory(),
+        num_devices=_graph_mesh_devices(mesh),
+        dtype=normalized_dtype,
+        max_padding_ratio=max_padding_ratio,
+        allow_excess_padding=allow_excess_padding,
+    )
+
+    def staging_source() -> Iterator[LinearARGBlockArrays]:
+        for index in range(len(source_blocks)):
+            block = source_blocks[index]
+            if block is None:
+                raise RuntimeError("canonical block source was released before staging")
+            source_blocks[index] = None
+            yield block
+
+    return _packed_from_plan(staging_source(), plan=plan, mesh=mesh)
+
+
+def _packed_from_hdf5(
+    path: str | PathLike[str],
+    block_names: Iterable[Any],
+    *,
+    mesh: Mesh,
+    dtype: Any = None,
+    max_padding_ratio: float = 1.25,
+    allow_excess_padding: bool = False,
+) -> _PackedJaxLinearARG:
+    """Construct the private packed carrier from named HDF5 blocks."""
+    names = tuple(block_names)
+    normalized_dtype = _normalize_dtype(dtype)
+    _ensure_hdf5_plugins()
+
+    def source_factory() -> Iterator[LinearARGBlockArrays]:
+        with h5py.File(_hdf5_path(path), "r") as file:
+            for name in names:
+                yield _read_block_arrays_from_group(file[name], dtype=normalized_dtype)
+
+    return _packed_from_reiterable(
+        source_factory,
+        mesh=mesh,
+        dtype=normalized_dtype,
+        max_padding_ratio=max_padding_ratio,
+        allow_excess_padding=allow_excess_padding,
+    )
+
+
+def _packed_from_group_reader(
+    reader: Any,
+    block_names: Iterable[Any],
+    *,
+    mesh: Mesh,
+    dtype: Any = None,
+    max_padding_ratio: float = 1.25,
+    allow_excess_padding: bool = False,
+) -> _PackedJaxLinearARG:
+    """Construct from the existing duck-typed group-reader test seam."""
+    names = tuple(block_names)
+    normalized_dtype = _normalize_dtype(dtype)
+
+    def source_factory() -> Iterator[LinearARGBlockArrays]:
+        blocks_group = reader.root["blocks"]
+        for name in names:
+            yield _read_block_arrays_from_group(blocks_group[name], dtype=normalized_dtype)
+
+    return _packed_from_reiterable(
+        source_factory,
+        mesh=mesh,
+        dtype=normalized_dtype,
+        max_padding_ratio=max_padding_ratio,
+        allow_excess_padding=allow_excess_padding,
+    )
+
+
+def _packed_from_reiterable(
+    source_factory: Callable[[], Iterable[LinearARGBlockArrays]],
+    *,
+    mesh: Mesh,
+    dtype: Any,
+    max_padding_ratio: float,
+    allow_excess_padding: bool,
+) -> _PackedJaxLinearARG:
+    plan = plan_packing(
+        source_factory(),
+        num_devices=_graph_mesh_devices(mesh),
+        dtype=dtype,
+        max_padding_ratio=max_padding_ratio,
+        allow_excess_padding=allow_excess_padding,
+    )
+    return _packed_from_plan(source_factory(), plan=plan, mesh=mesh)
+
+
+def _packed_from_plan(
+    blocks: Iterable[LinearARGBlockArrays],
+    *,
+    plan: PackingPlan,
+    mesh: Mesh,
+) -> _PackedJaxLinearARG:
+    packed, staging_bytes_by_block = _stage_blocks(blocks, plan=plan)
+    arrays = {name: _assemble_host_shards(getattr(packed.buffers, name), mesh=mesh) for name in PACKED_COMPONENT_NAMES}
+    for array in arrays.values():
+        array.block_until_ready()
+
+    first_array = next(iter(arrays.values()))
+    first_sharding = first_array.sharding
+    if not isinstance(first_sharding, NamedSharding):
+        raise ValueError("packed arrays must use NamedSharding")
+    device_order = _addressable_devices_in_shard_order(first_sharding, first_array.shape)
+    final_graph_bytes = _resident_bytes_by_device(
+        tuple(arrays[name] for name in GRAPH_FIELD_NAMES),
+        device_order=device_order,
+    )
+    final_bytes = _resident_bytes_by_device(tuple(arrays.values()), device_order=device_order)
+    staging_by_device = tuple(
+        max(
+            (size for size, owner in zip(staging_bytes_by_block, plan.assignment, strict=True) if owner == device),
+            default=0,
+        )
+        for device in range(plan.config.num_devices)
+    )
+    diagnostics = _PackedIngressDiagnostics(
+        canonical_graph_bytes=plan.diagnostics.canonical_graph_bytes,
+        padded_graph_bytes=plan.diagnostics.padded_graph_bytes,
+        descriptor_bytes=sum(final_bytes) - sum(final_graph_bytes),
+        staging_bytes=max(staging_bytes_by_block, default=0),
+        staging_bytes_by_device=staging_by_device,
+        staging_block_owners=plan.assignment,
+        final_graph_bytes_by_device=final_graph_bytes,
+        final_bytes_by_device=final_bytes,
+        padding_ratio=plan.diagnostics.padding_ratio,
+        component_count=len(PACKED_COMPONENT_NAMES),
+        pytree_leaf_count=len(PACKED_COMPONENT_NAMES),
+    )
+    return _PackedJaxLinearARG(
+        n_samples=plan.n_samples,
+        n_variants=plan.n_variants,
+        capacities=tuple(plan.capacities.values()),
+        diagnostics=diagnostics,
+        **arrays,
+    )
+
+
+def _stage_blocks(
+    blocks: Iterable[LinearARGBlockArrays],
+    *,
+    plan: PackingPlan,
+) -> tuple[PackedGraph, tuple[int, ...]]:
+    buffers = _allocate_host_buffers(plan)
+    descriptor_by_block = {descriptor.logical_block_index: descriptor for descriptor in plan.descriptors}
+    descriptor_row_by_block: dict[int, int] = {}
+    rows_by_device = [0] * plan.config.num_devices
+    for descriptor in plan.descriptors:
+        descriptor_row_by_block[descriptor.logical_block_index] = rows_by_device[descriptor.device]
+        rows_by_device[descriptor.device] += 1
+
+    staging_bytes = []
+    block_count = 0
+    for logical_block_index, source_block in enumerate(blocks):
+        if logical_block_index >= len(plan.assignment):
+            raise ValueError("staging source contains more blocks than the packing plan")
+        canonical_block = canonicalize_block_arrays(source_block, dtype=plan.data_dtype)
+        descriptor = descriptor_by_block[logical_block_index]
+        _pack_block_into_buffers(buffers, canonical_block, descriptor)
+        descriptor_row = descriptor_row_by_block[logical_block_index]
+        buffers.block_descriptors[descriptor.device, descriptor_row] = descriptor.as_array_row()
+        staging_bytes.append(_block_metrics(canonical_block).canonical_bytes)
+        block_count += 1
+        del source_block, canonical_block
+    if block_count != len(plan.assignment):
+        raise ValueError("staging source contains fewer blocks than the packing plan")
+
+    for device in range(plan.config.num_devices):
+        indptr_length = int(buffers.valid_lengths[device, VALID_LENGTH_FIELDS.index("indptr")])
+        edge_length = int(buffers.valid_lengths[device, VALID_LENGTH_FIELDS.index("indices")])
+        buffers.indptr[device, indptr_length:] = edge_length
+
+    packed = PackedGraph(buffers=buffers, plan=plan)
+    validate_packed_graph(packed)
+    return packed, tuple(staging_bytes)
+
+
+def _graph_mesh_devices(mesh: Mesh) -> int:
+    if not isinstance(mesh, Mesh):
+        raise ValueError("packed ingress requires a concrete single-host Mesh")
+    if mesh.axis_names != ("graph",):
+        raise ValueError('packed ingress mesh must use the dedicated axis name "graph"')
+    sharding = NamedSharding(mesh, PartitionSpec("graph"))
+    addressable_devices = tuple(sharding.addressable_devices)
+    if len(addressable_devices) != mesh.size:
+        raise ValueError("packed ingress requires every graph mesh device to be addressable on this host")
+    return len(addressable_devices)
+
+
+def _assemble_host_shards(host_values: np.ndarray, *, mesh: Mesh) -> Array:
+    spec = PartitionSpec("graph", *([None] * (host_values.ndim - 1)))
+    sharding = NamedSharding(mesh, spec)
+    devices = _addressable_devices_in_shard_order(sharding, host_values.shape)
+    local_arrays = tuple(
+        jax.device_put(np.ascontiguousarray(host_values[index : index + 1]), device)
+        for index, device in enumerate(devices)
+    )
+    return _assemble_single_device_arrays(host_values.shape, sharding, local_arrays)
+
+
+def _assemble_single_device_arrays(
+    global_shape: tuple[int, ...],
+    sharding: NamedSharding,
+    local_arrays: Iterable[Array],
+) -> Array:
+    """Validate committed local shards before global array assembly."""
+    arrays = tuple(local_arrays)
+    devices = _addressable_devices_in_shard_order(sharding, global_shape)
+    if len(arrays) != len(devices):
+        raise ValueError("one local array is required for each addressable sharding device")
+    expected_shape = sharding.shard_shape(global_shape)
+    for array, device in zip(arrays, devices, strict=True):
+        if tuple(array.shape) != tuple(expected_shape):
+            raise ValueError(f"local shard shape must be {expected_shape}; observed {array.shape}")
+        if not array.committed or array.devices() != {device}:
+            raise ValueError(f"local shard must be committed only to {device}")
+    return jax.make_array_from_single_device_arrays(global_shape, sharding, arrays)
+
+
+def _addressable_devices_in_shard_order(
+    sharding: NamedSharding,
+    global_shape: tuple[int, ...],
+) -> tuple[jax.Device, ...]:
+    """Return addressable devices in the local-array order required by JAX."""
+    return tuple(sharding.addressable_devices_indices_map(global_shape))
+
+
+def _resident_bytes_by_device(
+    arrays: tuple[Array, ...],
+    *,
+    device_order: tuple[jax.Device, ...],
+) -> tuple[int, ...]:
+    byte_counts = {device: 0 for device in device_order}
+    for array in arrays:
+        for shard in array.addressable_shards:
+            shard.data.block_until_ready()
+            if shard.device not in byte_counts:
+                raise ValueError(f"packed array has an unexpected resident device {shard.device}")
+            byte_counts[shard.device] += int(shard.data.on_device_size_in_bytes())
+    return tuple(byte_counts[device] for device in device_order)
 
 
 def from_lineararg(

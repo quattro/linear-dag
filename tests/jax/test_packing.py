@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import jax
 import jax.tree_util as jtu
 import numpy as np
 import pytest
 
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
 from linear_dag.core.jaxlinarg.ingress import (
+    _assemble_single_device_arrays,
+    _packed_from_block_arrays,
     LinearARGBlockArrays as IngressLinearARGBlockArrays,
     read_hdf5_block_arrays,
 )
@@ -22,6 +27,16 @@ from linear_dag.core.jaxlinarg.packing import (
     VALID_LENGTH_FIELDS,
     validate_packed_graph,
 )
+
+
+def _two_device_graph_mesh_or_skip() -> Mesh:
+    devices = jax.devices("cpu")
+    if len(devices) < 2:
+        pytest.skip(
+            "requires at least two CPU devices; set "
+            "XLA_FLAGS=--xla_force_host_platform_device_count=2 before JAX import"
+        )
+    return Mesh(np.asarray(devices[:2]), ("graph",))
 
 
 def _block(
@@ -396,3 +411,101 @@ def test_padding_override_never_bypasses_structural_validation() -> None:
     assert packed.plan.diagnostics.padding_override
     with pytest.raises(ValueError, match="logical variant mapping"):
         validate_packed_graph(_replace_buffer(packed, "logical_variant_indices", mapping))
+
+
+def test_packed_ingress_assembles_graph_axis_shards_with_exclusive_local_residency() -> None:
+    mesh = _two_device_graph_mesh_or_skip()
+    blocks = tuple(_block(block_seed=index) for index in range(4))
+
+    op = _packed_from_block_arrays(blocks, mesh=mesh)
+
+    expected_devices = set(mesh.devices.reshape(-1).tolist())
+    for name in PACKED_COMPONENT_NAMES:
+        array = getattr(op, name)
+        assert isinstance(array.sharding, NamedSharding)
+        assert array.sharding.mesh.axis_names == ("graph",)
+        assert array.shape[0] == 2
+        assert array.devices() == expected_devices
+        assert len(array.addressable_shards) == 2
+        observed_rows = set()
+        for shard in array.addressable_shards:
+            assert shard.data.committed
+            assert shard.data.devices() == {shard.device}
+            assert shard.data.shape[0] == 1
+            assert shard.data.on_device_size_in_bytes() == shard.data.nbytes
+            row_index = shard.index[0]
+            assert isinstance(row_index, slice)
+            observed_rows.add((row_index.start, row_index.stop))
+        assert observed_rows == {(0, 1), (1, 2)}
+        assert array.on_device_size_in_bytes() == array.nbytes
+
+
+def test_packed_ingress_commits_equal_local_arrays_in_addressable_device_order(monkeypatch) -> None:
+    mesh = _two_device_graph_mesh_or_skip()
+    original = jax.make_array_from_single_device_arrays
+    calls = []
+
+    def record_call(global_shape, sharding, local_arrays):
+        calls.append((global_shape, sharding, tuple(local_arrays)))
+        return original(global_shape, sharding, local_arrays)
+
+    monkeypatch.setattr(jax, "make_array_from_single_device_arrays", record_call)
+
+    _packed_from_block_arrays(tuple(_block(block_seed=index) for index in range(4)), mesh=mesh)
+
+    assert len(calls) == len(PACKED_COMPONENT_NAMES)
+    for global_shape, sharding, local_arrays in calls:
+        expected_devices = tuple(sharding.addressable_devices_indices_map(global_shape))
+        assert len(local_arrays) == len(expected_devices)
+        assert {array.shape for array in local_arrays} == {(1, *global_shape[1:])}
+        for local_array, expected_device in zip(local_arrays, expected_devices, strict=True):
+            assert local_array.committed
+            assert local_array.devices() == {expected_device}
+
+
+def test_single_device_array_assembly_rejects_malformed_local_layout() -> None:
+    device = jax.devices("cpu")[0]
+    mesh = Mesh(np.asarray([device]), ("graph",))
+    sharding = NamedSharding(mesh, PartitionSpec("graph", None))
+    malformed = (jax.device_put(np.zeros((1, 2), dtype=np.float32), device),)
+
+    with pytest.raises(ValueError, match="local shard shape"):
+        _assemble_single_device_arrays((1, 3), sharding, malformed)
+
+
+def test_packed_ingress_empty_assignment_is_inert_on_its_device() -> None:
+    mesh = _two_device_graph_mesh_or_skip()
+
+    op = _packed_from_block_arrays((_block(),), mesh=mesh, allow_excess_padding=True)
+
+    empty_device = op.diagnostics.staging_block_owners.index(0) ^ 1
+    valid_lengths = np.asarray(op.valid_lengths)
+    assert np.all(valid_lengths[empty_device] == 0)
+    for name in GRAPH_FIELD_NAMES:
+        array = np.asarray(getattr(op, name))
+        if name in ("allele_counts", "logical_variant_indices"):
+            expected = -1
+        elif name == "flip":
+            expected = False
+        else:
+            expected = 0
+        assert np.all(array[empty_device] == expected)
+
+
+def test_packed_ingress_reports_structural_staging_and_final_residency() -> None:
+    mesh = _two_device_graph_mesh_or_skip()
+    blocks = tuple(_block(block_seed=index) for index in range(4))
+
+    op = _packed_from_block_arrays(blocks, mesh=mesh)
+    diagnostics = op.diagnostics
+
+    assert diagnostics.staging_block_owners == (0, 1, 0, 1)
+    expected_staging_bytes = max(_canonical_graph_bytes(canonicalize_block_arrays(block)) for block in blocks)
+    assert diagnostics.staging_bytes == expected_staging_bytes
+    assert sum(diagnostics.final_graph_bytes_by_device) == diagnostics.padded_graph_bytes
+    assert sum(diagnostics.final_bytes_by_device) == diagnostics.padded_graph_bytes + diagnostics.descriptor_bytes
+    assert diagnostics.component_count == len(PACKED_COMPONENT_NAMES)
+    assert diagnostics.pytree_leaf_count == len(PACKED_COMPONENT_NAMES)
+    assert diagnostics.staging_accounting == (
+        "deterministic one-source-block ingress accounting; not a JAX allocator high-water mark"
+    )
