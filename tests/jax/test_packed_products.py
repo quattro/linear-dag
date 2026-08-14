@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import inspect
 
-from dataclasses import fields
+from dataclasses import fields, replace
 from functools import partial
 from typing import Any
 
@@ -235,16 +235,15 @@ def _replace_carrier_array(
     name: str,
     values: np.ndarray,
 ) -> _PackedJaxLinearARG:
-    arrays = {
-        field.name: getattr(operator, field.name) for field in fields(operator) if not field.metadata.get("static")
-    }
-    arrays[name] = jax.device_put(values, getattr(operator, name).sharding)
+    components = list(operator.graph.components)
+    component_index = PACKED_COMPONENT_NAMES.index(name)
+    components[component_index] = jax.device_put(values, getattr(operator, name).sharding)
     return _PackedJaxLinearARG(
         n_samples=operator.n_samples,
         n_variants=operator.n_variants,
         capacities=operator.capacities,
         graph_mesh=operator.graph_mesh,
-        **arrays,
+        graph=replace(operator.graph, components=tuple(components)),
     )
 
 
@@ -379,10 +378,10 @@ def test_invalid_packed_graph_fails_at_carrier_boundary(field_name, mutate, matc
 def test_packed_carrier_keeps_fixed_component_count() -> None:
     operator = _packed_from_block_arrays((_repeated_variant_block(),), mesh=_graph_mesh()).operator
 
-    assert tuple(field.name for field in fields(operator) if not field.metadata.get("static")) == PACKED_COMPONENT_NAMES
+    assert tuple(field.name for field in fields(operator) if not field.metadata.get("static")) == ("graph",)
     assert isinstance(operator.indptr.sharding, NamedSharding)
     assert operator.graph_mesh == operator.indptr.sharding.mesh
-    assert len(jax.tree_util.tree_leaves(operator)) == len(PACKED_COMPONENT_NAMES)
+    assert len(jax.tree_util.tree_leaves(operator)) == 1
 
 
 def test_shard_map_two_device_products_match_single_device_and_bound_methods() -> None:

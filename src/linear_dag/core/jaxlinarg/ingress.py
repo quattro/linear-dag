@@ -31,7 +31,10 @@ from .packing import (
     _block_metrics,
     _BlockPackingSummary,
     _finalize_staged_descriptor,
+    _make_packed_graph_value,
     _pack_block_into_buffers,
+    _packed_graph_component,
+    _PackedGraphLogicalMetadata,
     _plan_packing_from_summaries,
     canonicalize_block_arrays,
     GRAPH_FIELD_NAMES,
@@ -70,30 +73,23 @@ class _PackedIngressDiagnostics:
 
 
 class _PackedJaxLinearARG(eqx.Module):
-    """Private fixed-component carrier for the Phase 1 packed graph spike."""
+    """Private convenience carrier around one opaque packed graph value."""
 
     n_samples: int = eqx.field(static=True)
     n_variants: int = eqx.field(static=True)
     capacities: tuple[int, ...] = eqx.field(static=True)
     graph_mesh: Mesh = eqx.field(static=True)
-    indptr: Array
-    indices: Array
-    data: Array
-    variant_indices: Array
-    flip: Array
-    sample_indices: Array
-    nonunique_indices: Array
-    allele_counts: Array
-    logical_variant_indices: Array
-    block_descriptors: Array
-    valid_lengths: Array
+    graph: Any
 
     def __check_init__(self) -> None:
-        arrays = tuple(getattr(self, name) for name in PACKED_COMPONENT_NAMES)
+        arrays = self.graph.components
         if len(self.capacities) != len(GRAPH_FIELD_NAMES):
             raise ValueError("capacities must contain one entry per packed graph field")
         if self.n_samples < 0 or self.n_variants < 0:
             raise ValueError("packed global shape must be nonnegative")
+        expected_metadata = _PackedGraphLogicalMetadata(self.n_samples, self.n_variants, self.capacities)
+        if self.graph.metadata != expected_metadata:
+            raise ValueError("packed graph metadata must match the convenience carrier logical metadata")
         num_devices = arrays[0].shape[0]
         if num_devices < 1:
             raise ValueError("packed ingress requires at least one device")
@@ -110,6 +106,50 @@ class _PackedJaxLinearARG(eqx.Module):
         from .packed_products import _validate_packed_carrier
 
         _validate_packed_carrier(self)
+
+    @property
+    def indptr(self) -> Array:
+        return _packed_graph_component(self.graph, 0)
+
+    @property
+    def indices(self) -> Array:
+        return _packed_graph_component(self.graph, 1)
+
+    @property
+    def data(self) -> Array:
+        return _packed_graph_component(self.graph, 2)
+
+    @property
+    def variant_indices(self) -> Array:
+        return _packed_graph_component(self.graph, 3)
+
+    @property
+    def flip(self) -> Array:
+        return _packed_graph_component(self.graph, 4)
+
+    @property
+    def sample_indices(self) -> Array:
+        return _packed_graph_component(self.graph, 5)
+
+    @property
+    def nonunique_indices(self) -> Array:
+        return _packed_graph_component(self.graph, 6)
+
+    @property
+    def allele_counts(self) -> Array:
+        return _packed_graph_component(self.graph, 7)
+
+    @property
+    def logical_variant_indices(self) -> Array:
+        return _packed_graph_component(self.graph, 8)
+
+    @property
+    def block_descriptors(self) -> Array:
+        return _packed_graph_component(self.graph, 9)
+
+    @property
+    def valid_lengths(self) -> Array:
+        return _packed_graph_component(self.graph, 10)
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -322,7 +362,7 @@ def _packed_from_plan(
         final_bytes_by_device=final_bytes,
         padding_ratio=plan.diagnostics.padding_ratio,
         component_count=len(PACKED_COMPONENT_NAMES),
-        pytree_leaf_count=len(PACKED_COMPONENT_NAMES),
+        pytree_leaf_count=1,
     )
     return _PackedIngressResult(
         operator=_PackedJaxLinearARG(
@@ -330,7 +370,14 @@ def _packed_from_plan(
             n_variants=plan.n_variants,
             capacities=tuple(plan.capacities.values()),
             graph_mesh=mesh,
-            **arrays,
+            graph=_make_packed_graph_value(
+                tuple(arrays[name] for name in PACKED_COMPONENT_NAMES),
+                metadata=_PackedGraphLogicalMetadata(
+                    n_samples=plan.n_samples,
+                    n_variants=plan.n_variants,
+                    capacities=tuple(plan.capacities.values()),
+                ),
+            ),
         ),
         diagnostics=diagnostics,
     )

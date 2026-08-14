@@ -605,7 +605,7 @@ def test_packed_ingress_reports_structural_staging_and_final_residency() -> None
     assert sum(diagnostics.final_graph_bytes_by_device) == diagnostics.padded_graph_bytes
     assert sum(diagnostics.final_bytes_by_device) == diagnostics.padded_graph_bytes + diagnostics.descriptor_bytes
     assert diagnostics.component_count == len(PACKED_COMPONENT_NAMES)
-    assert diagnostics.pytree_leaf_count == len(PACKED_COMPONENT_NAMES)
+    assert diagnostics.pytree_leaf_count == 1
     assert diagnostics.staging_accounting == (
         "deterministic one-source-block ingress accounting; not a JAX allocator high-water mark"
     )

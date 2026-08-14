@@ -173,6 +173,42 @@ class PackedGraph:
 
 
 @dataclass(frozen=True)
+class _PackedGraphLogicalMetadata:
+    """Compact logical facts carried by the private packed JAX graph value."""
+
+    n_samples: int
+    n_variants: int
+    capacities: tuple[int, ...]
+
+
+def _make_packed_graph_value(
+    components: tuple[Any, ...],
+    *,
+    metadata: _PackedGraphLogicalMetadata,
+) -> Any:
+    """Construct the private high-level graph value without importing HiJAX here."""
+    from ._hijax import _PackedGraphValue
+
+    return _PackedGraphValue(components=components, metadata=metadata)
+
+
+def _packed_graph_component(graph: Any, index: int) -> Any:
+    """Read one lowered component through the private HiJAX adapter."""
+    from ._hijax import _packed_graph_component as read_component
+
+    return read_component(graph, index)
+
+
+def _packed_graph_sharding_spec(graph: Any) -> Any:
+    """Return the private high-level sharding spec for a packed graph value."""
+    import jax
+
+    from ._hijax import _graph_pspec_for_type
+
+    return _graph_pspec_for_type(jax.typeof(graph))
+
+
+@dataclass(frozen=True)
 class _BlockPackingSummary:
     """Lightweight block facts sufficient for deterministic packing."""
 

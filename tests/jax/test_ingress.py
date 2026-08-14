@@ -148,7 +148,7 @@ def test_private_packed_constructor_preserves_fixed_components_from_canonical_ar
     assert isinstance(op, eqx.Module)
     assert op.shape == (arrays.n_samples, arrays.n_variants)
     assert op.capacities == tuple(expected.plan.capacities.values())
-    assert len(jtu.tree_leaves(op)) == len(PACKED_COMPONENT_NAMES)
+    assert len(jtu.tree_leaves(op)) == 1
     _assert_packed_arrays_match_host(op, expected)
     for name in PACKED_COMPONENT_NAMES:
         array = getattr(op, name)
@@ -228,5 +228,5 @@ def test_packed_carrier_static_definition_excludes_dataset_diagnostics(
         assert static_fields == expected_static_fields
         assert result.operator.graph_mesh == mesh
         assert not hasattr(result.operator, "diagnostics")
-        assert len(jtu.tree_leaves(result.operator)) == len(PACKED_COMPONENT_NAMES)
+        assert len(jtu.tree_leaves(result.operator)) == 1
         assert type(result.operator) is _PackedJaxLinearARG

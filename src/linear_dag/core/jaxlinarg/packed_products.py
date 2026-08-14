@@ -22,7 +22,12 @@ from .kernels.pure_jax import (
     pure_jax_solve_forward_compressed,
 )
 from .operator import _as_rank2_matrix
-from .packing import BLOCK_DESCRIPTOR_FIELDS, GRAPH_FIELD_NAMES, VALID_LENGTH_FIELDS
+from .packing import (
+    _packed_graph_sharding_spec,
+    BLOCK_DESCRIPTOR_FIELDS,
+    GRAPH_FIELD_NAMES,
+    VALID_LENGTH_FIELDS,
+)
 
 if TYPE_CHECKING:
     from .ingress import _PackedJaxLinearARG
@@ -78,6 +83,7 @@ def lineararg_matmat(
         dtype=operator.data.dtype,
     )
     mesh = _operator_mesh(operator)
+    graph_spec = _packed_graph_sharding_spec(operator.graph)
     output_spec = _forward_output_spec(
         operator,
         out_sharding=out_sharding,
@@ -85,22 +91,26 @@ def lineararg_matmat(
         logical_result_rank=1 if was_vector else 2,
     )
     if output_spec == P():
-        result = jax.shard_map(
-            _replicated_matmat_rank2,
-            mesh=mesh,
-            in_specs=(P("graph"), P()),
-            out_specs=P(),
-            axis_names={"graph"},
-            check_vma=True,
+        result = jax.jit(
+            jax.shard_map(
+                _replicated_matmat_rank2,
+                mesh=mesh,
+                in_specs=(graph_spec, P()),
+                out_specs=P(),
+                axis_names={"graph"},
+                check_vma=True,
+            )
         )(operator, matrix)
     else:
-        result = jax.shard_map(
-            _sample_sharded_matmat_rank2,
-            mesh=mesh,
-            in_specs=(P("graph"), P()),
-            out_specs=P("graph"),
-            axis_names={"graph"},
-            check_vma=True,
+        result = jax.jit(
+            jax.shard_map(
+                _sample_sharded_matmat_rank2,
+                mesh=mesh,
+                in_specs=(graph_spec, P()),
+                out_specs=P("graph"),
+                axis_names={"graph"},
+                check_vma=True,
+            )
         )(operator, matrix)
     return result[:, 0] if was_vector else result
 
@@ -135,13 +145,16 @@ def lineararg_rmatmat(operator: _PackedJaxLinearARG, values: ArrayLike) -> Array
         dtype=operator.data.dtype,
     )
     mesh = _operator_mesh(operator)
-    result = jax.shard_map(
-        _replicated_rmatmat_rank2,
-        mesh=mesh,
-        in_specs=(P("graph"), P()),
-        out_specs=P(),
-        axis_names={"graph"},
-        check_vma=True,
+    graph_spec = _packed_graph_sharding_spec(operator.graph)
+    result = jax.jit(
+        jax.shard_map(
+            _replicated_rmatmat_rank2,
+            mesh=mesh,
+            in_specs=(graph_spec, P()),
+            out_specs=P(),
+            axis_names={"graph"},
+            check_vma=True,
+        )
     )(operator, matrix)
     return result[:, 0] if was_vector else result
 
