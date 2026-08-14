@@ -7,7 +7,6 @@ from __future__ import annotations
 import warnings
 
 from collections.abc import Iterable
-from dataclasses import dataclass
 from importlib import import_module
 from importlib.util import find_spec
 from os import PathLike
@@ -22,39 +21,7 @@ from scipy import sparse
 from linear_dag.core.lineararg import LinearARG
 
 from .operator import Backend, JaxLinearARG, resolve_backend
-
-
-@dataclass(frozen=True)
-class LinearARGBlockArrays:
-    """Canonical host arrays for one LinearARG block.
-
-    This immutable transfer object separates storage I/O from JAX device
-    construction. Array dtypes are normalized by the reader functions before
-    an instance is returned.
-
-    !!! Example
-
-        ```python
-        from linear_dag.core.jaxlinarg.ingress import (
-            from_block_arrays,
-            read_hdf5_block_arrays,
-        )
-
-        arrays = read_hdf5_block_arrays("lineararg.h5", "block_0")
-        operator = from_block_arrays(arrays)
-        ```
-    """
-
-    indptr: np.ndarray
-    indices: np.ndarray
-    data: np.ndarray
-    variant_indices: np.ndarray
-    flip: np.ndarray
-    sample_indices: np.ndarray
-    nonunique_indices: np.ndarray | None
-    allele_counts: np.ndarray | None
-    n_variants: int
-    n_samples: int
+from .packing import LinearARGBlockArrays
 
 
 def from_lineararg(
