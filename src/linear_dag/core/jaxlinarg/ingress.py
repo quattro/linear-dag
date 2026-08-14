@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import warnings
 
-from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from importlib import import_module
 from importlib.util import find_spec
 from os import PathLike
@@ -29,7 +29,10 @@ from .operator import Backend, JaxLinearARG, resolve_backend
 from .packing import (
     _allocate_host_buffers,
     _block_metrics,
+    _BlockPackingSummary,
+    _finalize_staged_descriptor,
     _pack_block_into_buffers,
+    _plan_packing_from_summaries,
     canonicalize_block_arrays,
     GRAPH_FIELD_NAMES,
     LinearARGBlockArrays,
@@ -72,7 +75,6 @@ class _PackedJaxLinearARG(eqx.Module):
     n_samples: int = eqx.field(static=True)
     n_variants: int = eqx.field(static=True)
     capacities: tuple[int, ...] = eqx.field(static=True)
-    diagnostics: _PackedIngressDiagnostics = eqx.field(static=True)
     indptr: Array
     indices: Array
     data: Array
@@ -91,7 +93,7 @@ class _PackedJaxLinearARG(eqx.Module):
             raise ValueError("capacities must contain one entry per packed graph field")
         if self.n_samples < 0 or self.n_variants < 0:
             raise ValueError("packed global shape must be nonnegative")
-        num_devices = len(self.diagnostics.final_bytes_by_device)
+        num_devices = arrays[0].shape[0]
         if num_devices < 1:
             raise ValueError("packed ingress requires at least one device")
         for name, array in zip(PACKED_COMPONENT_NAMES, arrays, strict=True):
@@ -110,6 +112,14 @@ class _PackedJaxLinearARG(eqx.Module):
         return (self.n_samples, self.n_variants)
 
 
+@dataclass(frozen=True)
+class _PackedIngressResult:
+    """Private packed operator plus host-only construction diagnostics."""
+
+    operator: _PackedJaxLinearARG
+    diagnostics: _PackedIngressDiagnostics
+
+
 def _packed_from_block_arrays(
     blocks: Iterable[LinearARGBlockArrays],
     *,
@@ -117,35 +127,26 @@ def _packed_from_block_arrays(
     dtype: Any = None,
     max_padding_ratio: float = 1.25,
     allow_excess_padding: bool = False,
-) -> _PackedJaxLinearARG:
+) -> _PackedIngressResult:
     """Construct the private packed carrier from canonical host blocks."""
     source_blocks: list[LinearARGBlockArrays | None] = list(blocks)
-
-    def source_factory() -> Iterator[LinearARGBlockArrays]:
-        for index in range(len(source_blocks)):
-            block = source_blocks[index]
-            if block is None:
-                raise RuntimeError("canonical block source cannot be consumed more than twice")
-            yield block
-
     normalized_dtype = _normalize_dtype(dtype)
     plan = plan_packing(
-        source_factory(),
+        (block for block in source_blocks if block is not None),
         num_devices=_graph_mesh_devices(mesh),
         dtype=normalized_dtype,
         max_padding_ratio=max_padding_ratio,
         allow_excess_padding=allow_excess_padding,
     )
 
-    def staging_source() -> Iterator[LinearARGBlockArrays]:
-        for index in range(len(source_blocks)):
-            block = source_blocks[index]
-            if block is None:
-                raise RuntimeError("canonical block source was released before staging")
-            source_blocks[index] = None
-            yield block
+    def load_block(logical_block_index: int) -> LinearARGBlockArrays:
+        block = source_blocks[logical_block_index]
+        if block is None:
+            raise RuntimeError("canonical block source was released before staging")
+        source_blocks[logical_block_index] = None
+        return block
 
-    return _packed_from_plan(staging_source(), plan=plan, mesh=mesh)
+    return _packed_from_plan(load_block, plan=plan, mesh=mesh)
 
 
 def _packed_from_hdf5(
@@ -156,24 +157,26 @@ def _packed_from_hdf5(
     dtype: Any = None,
     max_padding_ratio: float = 1.25,
     allow_excess_padding: bool = False,
-) -> _PackedJaxLinearARG:
+) -> _PackedIngressResult:
     """Construct the private packed carrier from named HDF5 blocks."""
     names = tuple(block_names)
     normalized_dtype = _normalize_dtype(dtype)
     _ensure_hdf5_plugins()
 
-    def source_factory() -> Iterator[LinearARGBlockArrays]:
-        with h5py.File(_hdf5_path(path), "r") as file:
-            for name in names:
-                yield _read_block_arrays_from_group(file[name], dtype=normalized_dtype)
+    with h5py.File(_hdf5_path(path), "r") as file:
+        summaries = tuple(_block_packing_summary_from_group(file[name], dtype=normalized_dtype) for name in names)
+        plan = _plan_packing_from_summaries(
+            summaries,
+            num_devices=_graph_mesh_devices(mesh),
+            dtype=normalized_dtype,
+            max_padding_ratio=max_padding_ratio,
+            allow_excess_padding=allow_excess_padding,
+        )
 
-    return _packed_from_reiterable(
-        source_factory,
-        mesh=mesh,
-        dtype=normalized_dtype,
-        max_padding_ratio=max_padding_ratio,
-        allow_excess_padding=allow_excess_padding,
-    )
+        def load_block(logical_block_index: int) -> LinearARGBlockArrays:
+            return _read_block_arrays_from_group(file[names[logical_block_index]], dtype=normalized_dtype)
+
+        return _packed_from_plan(load_block, plan=plan, mesh=mesh)
 
 
 def _packed_from_group_reader(
@@ -184,50 +187,34 @@ def _packed_from_group_reader(
     dtype: Any = None,
     max_padding_ratio: float = 1.25,
     allow_excess_padding: bool = False,
-) -> _PackedJaxLinearARG:
+) -> _PackedIngressResult:
     """Construct from the existing duck-typed group-reader test seam."""
     names = tuple(block_names)
     normalized_dtype = _normalize_dtype(dtype)
 
-    def source_factory() -> Iterator[LinearARGBlockArrays]:
-        blocks_group = reader.root["blocks"]
-        for name in names:
-            yield _read_block_arrays_from_group(blocks_group[name], dtype=normalized_dtype)
-
-    return _packed_from_reiterable(
-        source_factory,
-        mesh=mesh,
+    blocks_group = reader.root["blocks"]
+    summaries = tuple(_block_packing_summary_from_group(blocks_group[name], dtype=normalized_dtype) for name in names)
+    plan = _plan_packing_from_summaries(
+        summaries,
+        num_devices=_graph_mesh_devices(mesh),
         dtype=normalized_dtype,
         max_padding_ratio=max_padding_ratio,
         allow_excess_padding=allow_excess_padding,
     )
 
+    def load_block(logical_block_index: int) -> LinearARGBlockArrays:
+        return _read_block_arrays_from_group(blocks_group[names[logical_block_index]], dtype=normalized_dtype)
 
-def _packed_from_reiterable(
-    source_factory: Callable[[], Iterable[LinearARGBlockArrays]],
-    *,
-    mesh: Mesh,
-    dtype: Any,
-    max_padding_ratio: float,
-    allow_excess_padding: bool,
-) -> _PackedJaxLinearARG:
-    plan = plan_packing(
-        source_factory(),
-        num_devices=_graph_mesh_devices(mesh),
-        dtype=dtype,
-        max_padding_ratio=max_padding_ratio,
-        allow_excess_padding=allow_excess_padding,
-    )
-    return _packed_from_plan(source_factory(), plan=plan, mesh=mesh)
+    return _packed_from_plan(load_block, plan=plan, mesh=mesh)
 
 
 def _packed_from_plan(
-    blocks: Iterable[LinearARGBlockArrays],
+    load_block: Callable[[int], LinearARGBlockArrays],
     *,
     plan: PackingPlan,
     mesh: Mesh,
-) -> _PackedJaxLinearARG:
-    packed, staging_bytes_by_block = _stage_blocks(blocks, plan=plan)
+) -> _PackedIngressResult:
+    packed, staging_bytes_by_block = _stage_blocks(load_block, plan=plan)
     arrays = {name: _assemble_host_shards(getattr(packed.buffers, name), mesh=mesh) for name in PACKED_COMPONENT_NAMES}
     for array in arrays.values():
         array.block_until_ready()
@@ -262,50 +249,54 @@ def _packed_from_plan(
         component_count=len(PACKED_COMPONENT_NAMES),
         pytree_leaf_count=len(PACKED_COMPONENT_NAMES),
     )
-    return _PackedJaxLinearARG(
-        n_samples=plan.n_samples,
-        n_variants=plan.n_variants,
-        capacities=tuple(plan.capacities.values()),
+    return _PackedIngressResult(
+        operator=_PackedJaxLinearARG(
+            n_samples=plan.n_samples,
+            n_variants=plan.n_variants,
+            capacities=tuple(plan.capacities.values()),
+            **arrays,
+        ),
         diagnostics=diagnostics,
-        **arrays,
     )
 
 
 def _stage_blocks(
-    blocks: Iterable[LinearARGBlockArrays],
+    load_block: Callable[[int], LinearARGBlockArrays],
     *,
     plan: PackingPlan,
 ) -> tuple[PackedGraph, tuple[int, ...]]:
     buffers = _allocate_host_buffers(plan)
-    descriptor_by_block = {descriptor.logical_block_index: descriptor for descriptor in plan.descriptors}
     descriptor_row_by_block: dict[int, int] = {}
     rows_by_device = [0] * plan.config.num_devices
     for descriptor in plan.descriptors:
         descriptor_row_by_block[descriptor.logical_block_index] = rows_by_device[descriptor.device]
         rows_by_device[descriptor.device] += 1
 
-    staging_bytes = []
-    block_count = 0
-    for logical_block_index, source_block in enumerate(blocks):
-        if logical_block_index >= len(plan.assignment):
-            raise ValueError("staging source contains more blocks than the packing plan")
+    staging_bytes = [0] * len(plan.assignment)
+    finalized_descriptors = []
+    compressed_starts = [0] * plan.config.num_devices
+    for planned_descriptor in plan.descriptors:
+        logical_block_index = planned_descriptor.logical_block_index
+        source_block = load_block(logical_block_index)
         canonical_block = canonicalize_block_arrays(source_block, dtype=plan.data_dtype)
-        descriptor = descriptor_by_block[logical_block_index]
+        descriptor = _finalize_staged_descriptor(
+            replace(planned_descriptor, compressed_start=compressed_starts[planned_descriptor.device]),
+            canonical_block,
+        )
+        compressed_starts[descriptor.device] += descriptor.compressed_length
         _pack_block_into_buffers(buffers, canonical_block, descriptor)
         descriptor_row = descriptor_row_by_block[logical_block_index]
         buffers.block_descriptors[descriptor.device, descriptor_row] = descriptor.as_array_row()
-        staging_bytes.append(_block_metrics(canonical_block).canonical_bytes)
-        block_count += 1
+        staging_bytes[logical_block_index] = _block_metrics(canonical_block).canonical_bytes
+        finalized_descriptors.append(descriptor)
         del source_block, canonical_block
-    if block_count != len(plan.assignment):
-        raise ValueError("staging source contains fewer blocks than the packing plan")
 
     for device in range(plan.config.num_devices):
         indptr_length = int(buffers.valid_lengths[device, VALID_LENGTH_FIELDS.index("indptr")])
         edge_length = int(buffers.valid_lengths[device, VALID_LENGTH_FIELDS.index("indices")])
         buffers.indptr[device, indptr_length:] = edge_length
 
-    packed = PackedGraph(buffers=buffers, plan=plan)
+    packed = PackedGraph(buffers=buffers, plan=replace(plan, descriptors=tuple(finalized_descriptors)))
     validate_packed_graph(packed)
     return packed, tuple(staging_bytes)
 
@@ -642,6 +633,64 @@ def _read_block_arrays_from_group(group: Any, *, dtype: Any = None) -> LinearARG
         n_variants=int(group.attrs["n_variants"]),
         n_samples=n_samples,
     )
+
+
+def _block_packing_summary_from_group(group: Any, *, dtype: Any) -> _BlockPackingSummary:
+    """Read only group attributes and dataset shapes needed for packing."""
+    data_dtype = np.dtype(dtype)
+    if not np.issubdtype(data_dtype, np.floating):
+        raise ValueError("data dtype must be a floating dtype")
+    n_nodes = int(group.attrs["n"])
+    n_samples = int(group.attrs["n_samples"])
+    n_variants = int(group.attrs["n_variants"])
+    if n_nodes < 1 or n_samples < 0 or n_variants < 0:
+        raise ValueError("block shape metadata must describe nonnegative dimensions and at least one node")
+
+    indptr_length = _group_array_length(group, "indptr")
+    edge_length = _group_array_length(group, "indices")
+    if indptr_length != n_nodes + 1:
+        raise ValueError("indptr metadata length must equal n + 1")
+    if _group_array_length(group, "data") != edge_length:
+        raise ValueError("data metadata length must match indices")
+    for name in ("variant_indices", "flip"):
+        if _group_array_length(group, name) != n_variants:
+            raise ValueError(f"{name} metadata length must match n_variants")
+    nonunique_length = _group_array_length(group, "nonunique_indices") if "nonunique_indices" in group else n_nodes
+    allele_count_length = _group_array_length(group, "allele_counts") if "allele_counts" in group else n_variants
+    if nonunique_length != n_nodes:
+        raise ValueError("nonunique_indices metadata length must match n")
+    if allele_count_length != n_variants:
+        raise ValueError("allele_counts metadata length must match n_variants")
+
+    sample_indices = _sample_indices(n_nodes, n_samples, group.attrs.get("n_individuals", None))
+    if sample_indices.size != n_samples:
+        raise ValueError("sample metadata cannot produce the declared n_samples")
+    return _BlockPackingSummary(
+        field_lengths=(
+            indptr_length,
+            edge_length,
+            edge_length,
+            n_variants,
+            n_variants,
+            n_samples,
+            nonunique_length,
+            allele_count_length,
+            n_variants,
+        ),
+        data_dtype=data_dtype,
+        n_samples=n_samples,
+        n_variants=n_variants,
+        min_index_to_keep=int(sample_indices[-1]) if sample_indices.size else 0,
+        compressed_length=None,
+    )
+
+
+def _group_array_length(group: Any, name: str) -> int:
+    array = group[name]
+    shape = tuple(array.shape)
+    if len(shape) != 1:
+        raise ValueError(f"{name} must be one-dimensional")
+    return int(shape[0])
 
 
 def _block_arrays_kwargs(arrays: LinearARGBlockArrays) -> dict[str, Any]:

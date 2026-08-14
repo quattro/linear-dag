@@ -5,12 +5,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, NamedTuple
 
 import numpy as np
 
+DEVICE_METADATA_DTYPE = np.dtype(np.int32)
 GRAPH_FIELD_NAMES = (
     "indptr",
     "indices",
@@ -172,6 +173,18 @@ class PackedGraph:
 
 
 @dataclass(frozen=True)
+class _BlockPackingSummary:
+    """Lightweight block facts sufficient for deterministic packing."""
+
+    field_lengths: tuple[int, ...]
+    data_dtype: np.dtype[Any]
+    n_samples: int
+    n_variants: int
+    min_index_to_keep: int
+    compressed_length: int | None
+
+
+@dataclass(frozen=True)
 class _BlockMetrics:
     field_lengths: tuple[int, ...]
     canonical_bytes: int
@@ -244,6 +257,30 @@ def plan_packing(
     A deterministic local move/swap pass then minimizes aggregate per-field
     padding before the configured bound is enforced.
     """
+    source_blocks = tuple(blocks)
+    if not source_blocks:
+        raise ValueError("at least one LinearARG block is required")
+    data_dtype = _resolve_data_dtype(source_blocks, dtype=dtype)
+    canonical_blocks = tuple(canonicalize_block_arrays(block, dtype=data_dtype) for block in source_blocks)
+    summaries = tuple(_summarize_canonical_block(block) for block in canonical_blocks)
+    return _plan_packing_from_summaries(
+        summaries,
+        num_devices=num_devices,
+        dtype=data_dtype,
+        max_padding_ratio=max_padding_ratio,
+        allow_excess_padding=allow_excess_padding,
+    )
+
+
+def _plan_packing_from_summaries(
+    summaries: Iterable[_BlockPackingSummary],
+    *,
+    num_devices: int,
+    dtype: Any,
+    max_padding_ratio: float = 1.25,
+    allow_excess_padding: bool = False,
+) -> PackingPlan:
+    """Plan from metadata summaries without owning source graph arrays."""
     if isinstance(num_devices, bool) or not isinstance(num_devices, (int, np.integer)) or num_devices < 1:
         raise ValueError("num_devices must be at least 1")
     if isinstance(max_padding_ratio, bool) or not np.isfinite(max_padding_ratio) or max_padding_ratio < 1.0:
@@ -251,12 +288,15 @@ def plan_packing(
     if not isinstance(allow_excess_padding, (bool, np.bool_)):
         raise ValueError("allow_excess_padding must be Boolean")
 
-    source_blocks = tuple(blocks)
-    if not source_blocks:
+    block_summaries = tuple(summaries)
+    if not block_summaries:
         raise ValueError("at least one LinearARG block is required")
-    data_dtype = _resolve_data_dtype(source_blocks, dtype=dtype)
-    canonical_blocks = tuple(canonicalize_block_arrays(block, dtype=data_dtype) for block in source_blocks)
-    sample_counts = {block.n_samples for block in canonical_blocks}
+    data_dtype = np.dtype(dtype)
+    if not np.issubdtype(data_dtype, np.floating):
+        raise ValueError("data dtype must be a floating dtype")
+    if any(summary.data_dtype != data_dtype for summary in block_summaries):
+        raise ValueError("all packing summaries must use the requested data dtype")
+    sample_counts = {summary.n_samples for summary in block_summaries}
     if len(sample_counts) != 1:
         raise ValueError("all blocks must have the same n_samples")
 
@@ -266,7 +306,7 @@ def plan_packing(
         max_padding_ratio=float(max_padding_ratio),
         allow_excess_padding=bool(allow_excess_padding),
     )
-    metrics = tuple(_block_metrics(block) for block in canonical_blocks)
+    metrics = tuple(_summary_metrics(summary) for summary in block_summaries)
     assignment = _initial_assignment(metrics, num_devices=config.num_devices)
     assignment, rebalance_steps = _rebalance_assignment(
         assignment,
@@ -279,8 +319,15 @@ def plan_packing(
     capacities = tuple(
         max(device_lengths[field] for device_lengths in valid_lengths) for field in range(len(GRAPH_FIELD_NAMES))
     )
-    descriptors = _build_descriptors(canonical_blocks, blocks_by_device)
+    descriptors = _build_descriptors(block_summaries, blocks_by_device)
     descriptor_capacity = max(len(device_blocks) for device_blocks in blocks_by_device)
+    _device_metadata_array(
+        [
+            (*device_lengths, len(device_blocks))
+            for device_lengths, device_blocks in zip(valid_lengths, blocks_by_device)
+        ],
+        name="valid_lengths",
+    )
 
     canonical_bytes = sum(metric.canonical_bytes for metric in metrics)
     padded_bytes = config.num_devices * sum(
@@ -290,7 +337,7 @@ def plan_packing(
     descriptor_bytes = (
         config.num_devices
         * (descriptor_capacity * len(BLOCK_DESCRIPTOR_FIELDS) + len(VALID_LENGTH_FIELDS))
-        * np.dtype(np.int64).itemsize
+        * DEVICE_METADATA_DTYPE.itemsize
     )
     device_graph_bytes = tuple(
         sum(metrics[index].canonical_bytes for index in device_blocks) for device_blocks in blocks_by_device
@@ -331,8 +378,8 @@ def plan_packing(
         capacities=_length_mapping(capacities),
         valid_lengths_by_device=tuple(_length_mapping(lengths) for lengths in valid_lengths),
         descriptor_capacity=descriptor_capacity,
-        n_samples=canonical_blocks[0].n_samples,
-        n_variants=sum(block.n_variants for block in canonical_blocks),
+        n_samples=block_summaries[0].n_samples,
+        n_variants=sum(summary.n_variants for summary in block_summaries),
         diagnostics=diagnostics,
     )
 
@@ -396,18 +443,21 @@ def validate_packed_graph(packed: PackedGraph) -> None:
             raise ValueError(f"{name} dtype must be {expected_dtypes[name]}")
 
     expected_descriptor_shape = (num_devices, plan.descriptor_capacity, len(BLOCK_DESCRIPTOR_FIELDS))
-    if buffers.block_descriptors.shape != expected_descriptor_shape or buffers.block_descriptors.dtype != np.int64:
-        raise ValueError(f"block_descriptors must have int64 shape {expected_descriptor_shape}")
+    if (
+        buffers.block_descriptors.shape != expected_descriptor_shape
+        or buffers.block_descriptors.dtype != DEVICE_METADATA_DTYPE
+    ):
+        raise ValueError(f"block_descriptors must have int32 shape {expected_descriptor_shape}")
     expected_lengths_shape = (num_devices, len(VALID_LENGTH_FIELDS))
-    if buffers.valid_lengths.shape != expected_lengths_shape or buffers.valid_lengths.dtype != np.int64:
-        raise ValueError(f"valid_lengths must have int64 shape {expected_lengths_shape}")
+    if buffers.valid_lengths.shape != expected_lengths_shape or buffers.valid_lengths.dtype != DEVICE_METADATA_DTYPE:
+        raise ValueError(f"valid_lengths must have int32 shape {expected_lengths_shape}")
 
-    expected_valid_lengths = np.asarray(
+    expected_valid_lengths = _device_metadata_array(
         [
             (*tuple(plan.valid_lengths_by_device[device].values()), len(plan.blocks_by_device[device]))
             for device in range(num_devices)
         ],
-        dtype=np.int64,
+        name="valid_lengths",
     )
     if not np.array_equal(buffers.valid_lengths, expected_valid_lengths):
         raise ValueError("valid_lengths do not match the packing plan")
@@ -456,12 +506,12 @@ def _allocate_host_buffers(plan: PackingPlan) -> PackedHostBuffers:
     def shape(name: str) -> tuple[int, int]:
         return (plan.config.num_devices, plan.capacities[name])
 
-    valid_lengths = np.asarray(
+    valid_lengths = _device_metadata_array(
         [
             (*tuple(plan.valid_lengths_by_device[device].values()), len(plan.blocks_by_device[device]))
             for device in range(plan.config.num_devices)
         ],
-        dtype=np.int64,
+        name="valid_lengths",
     )
     return PackedHostBuffers(
         indptr=np.zeros(shape("indptr"), dtype=np.int32),
@@ -476,7 +526,7 @@ def _allocate_host_buffers(plan: PackingPlan) -> PackedHostBuffers:
         block_descriptors=np.full(
             (plan.config.num_devices, plan.descriptor_capacity, len(BLOCK_DESCRIPTOR_FIELDS)),
             -1,
-            dtype=np.int64,
+            dtype=DEVICE_METADATA_DTYPE,
         ),
         valid_lengths=valid_lengths,
     )
@@ -634,7 +684,9 @@ def _validate_graph_values(
             or int(indices.max()) >= descriptor.node_start + descriptor.node_length
         ):
             raise ValueError("packed edge indices leave their descriptor node span")
-        if not np.all(np.isfinite(buffers.data[device, edge_slice])):
+        data = buffers.data[device, edge_slice]
+        _validate_edge_order(indptr, indices, data, node_start=descriptor.node_start)
+        if not np.all(np.isfinite(data)):
             raise ValueError("packed data must contain only finite values")
 
         variant_slice = slice(descriptor.variant_start, descriptor.variant_start + descriptor.variant_length)
@@ -773,6 +825,7 @@ def _validate_canonical_block(
     node_count = indptr.size - 1
     if indices.size and (int(indices.min()) < 0 or int(indices.max()) >= node_count):
         raise ValueError("indices contains an out-of-range node index")
+    _validate_edge_order(indptr, indices, data, node_start=0)
     if variant_indices.size != n_variants:
         raise ValueError("variant_indices length must match n_variants")
     if flip.size != n_variants:
@@ -791,6 +844,66 @@ def _validate_canonical_block(
         raise ValueError("nonunique_indices must be nonnegative")
     if sample_indices.size != np.unique(sample_indices).size:
         raise ValueError("sample_indices must be unique")
+
+
+def _validate_edge_order(
+    indptr: np.ndarray,
+    indices: np.ndarray,
+    data: np.ndarray,
+    *,
+    node_start: int,
+) -> None:
+    source_indices = node_start + np.repeat(
+        np.arange(indptr.size - 1, dtype=DEVICE_METADATA_DTYPE),
+        np.diff(indptr),
+    )
+    invalid_edge_order = (indices < source_indices) | ((indices == source_indices) & (data != 0))
+    if indices.size and np.any(invalid_edge_order):
+        raise ValueError("indices must be greater than their source nodes")
+
+
+def _summarize_canonical_block(block: LinearARGBlockArrays) -> _BlockPackingSummary:
+    nonunique_indices = block.nonunique_indices
+    assert nonunique_indices is not None
+    metrics = _block_metrics(block)
+    return _BlockPackingSummary(
+        field_lengths=metrics.field_lengths,
+        data_dtype=np.dtype(block.data.dtype),
+        n_samples=block.n_samples,
+        n_variants=block.n_variants,
+        min_index_to_keep=int(block.sample_indices[-1]) if block.sample_indices.size else 0,
+        compressed_length=int(nonunique_indices.max()) + 1 if nonunique_indices.size else 0,
+    )
+
+
+def _finalize_staged_descriptor(
+    planned: BlockDescriptor,
+    block: LinearARGBlockArrays,
+) -> BlockDescriptor:
+    """Validate one staged block against its plan and finalize compressed extent."""
+    summary = _summarize_canonical_block(block)
+    expected_lengths = (
+        planned.indptr_length,
+        planned.edge_length,
+        planned.edge_length,
+        planned.variant_length,
+        planned.variant_length,
+        planned.sample_length,
+        planned.node_length,
+        planned.variant_length,
+        planned.variant_length,
+    )
+    if summary.field_lengths != expected_lengths:
+        raise ValueError("staged block field lengths do not match the packing plan")
+    if planned.min_index_to_keep != planned.node_start + summary.min_index_to_keep:
+        raise ValueError("staged block minimum retained index does not match the packing plan")
+    compressed_length = summary.compressed_length
+    assert compressed_length is not None
+    if compressed_length > planned.compressed_length:
+        raise ValueError("staged block compressed extent exceeds its reserved packing span")
+    finalized = replace(planned, compressed_length=compressed_length)
+    _device_metadata_array(finalized.as_array_row(), name="block descriptor")
+    return finalized
 
 
 def _block_metrics(block: LinearARGBlockArrays) -> _BlockMetrics:
@@ -816,6 +929,22 @@ def _block_metrics(block: LinearARGBlockArrays) -> _BlockMetrics:
     solve_work = (block.indptr.size - 1) + block.indices.size
     return _BlockMetrics(
         field_lengths=field_lengths,
+        canonical_bytes=canonical_bytes,
+        solve_work=solve_work,
+        score_load=canonical_bytes + np.dtype(np.int32).itemsize * solve_work,
+    )
+
+
+def _summary_metrics(summary: _BlockPackingSummary) -> _BlockMetrics:
+    canonical_bytes = sum(
+        length * _field_dtype(name, summary.data_dtype).itemsize
+        for name, length in zip(GRAPH_FIELD_NAMES, summary.field_lengths, strict=True)
+    )
+    node_count = summary.field_lengths[GRAPH_FIELD_NAMES.index("indptr")] - 1
+    edge_count = summary.field_lengths[GRAPH_FIELD_NAMES.index("indices")]
+    solve_work = node_count + edge_count
+    return _BlockMetrics(
+        field_lengths=summary.field_lengths,
         canonical_bytes=canonical_bytes,
         solve_work=solve_work,
         score_load=canonical_bytes + np.dtype(np.int32).itemsize * solve_work,
@@ -961,51 +1090,61 @@ def _field_lengths_by_device(
 
 
 def _build_descriptors(
-    blocks: tuple[LinearARGBlockArrays, ...],
+    summaries: tuple[_BlockPackingSummary, ...],
     blocks_by_device: tuple[tuple[int, ...], ...],
 ) -> tuple[BlockDescriptor, ...]:
-    logical_variant_starts = np.insert(np.cumsum([block.n_variants for block in blocks]), 0, 0)
+    logical_variant_starts = np.insert(np.cumsum([summary.n_variants for summary in summaries]), 0, 0)
     descriptors: list[BlockDescriptor] = []
     for device, device_blocks in enumerate(blocks_by_device):
         indptr_start = edge_start = node_start = variant_start = sample_start = compressed_start = 0
         for logical_index in device_blocks:
-            block = blocks[logical_index]
-            nonunique_indices = block.nonunique_indices
-            assert nonunique_indices is not None
-            node_length = block.indptr.size - 1
-            edge_length = block.indices.size
-            variant_length = block.n_variants
-            sample_length = block.n_samples
-            compressed_length = int(nonunique_indices.max()) + 1 if nonunique_indices.size else 0
-            local_min_index = int(block.sample_indices[-1]) if block.sample_indices.size else 0
-            descriptors.append(
-                BlockDescriptor(
-                    device=device,
-                    logical_block_index=logical_index,
-                    indptr_start=indptr_start,
-                    indptr_length=block.indptr.size,
-                    edge_start=edge_start,
-                    edge_length=edge_length,
-                    node_start=node_start,
-                    node_length=node_length,
-                    variant_start=variant_start,
-                    variant_length=variant_length,
-                    sample_start=sample_start,
-                    sample_length=sample_length,
-                    compressed_start=compressed_start,
-                    compressed_length=compressed_length,
-                    min_index_to_keep=node_start + local_min_index,
-                    logical_variant_start=int(logical_variant_starts[logical_index]),
-                    logical_variant_stop=int(logical_variant_starts[logical_index + 1]),
-                )
+            summary = summaries[logical_index]
+            indptr_length = summary.field_lengths[GRAPH_FIELD_NAMES.index("indptr")]
+            edge_length = summary.field_lengths[GRAPH_FIELD_NAMES.index("indices")]
+            node_length = summary.field_lengths[GRAPH_FIELD_NAMES.index("nonunique_indices")]
+            variant_length = summary.n_variants
+            sample_length = summary.n_samples
+            compressed_length = summary.compressed_length
+            reserved_compressed_length = node_length if compressed_length is None else compressed_length
+            descriptor = BlockDescriptor(
+                device=device,
+                logical_block_index=logical_index,
+                indptr_start=indptr_start,
+                indptr_length=indptr_length,
+                edge_start=edge_start,
+                edge_length=edge_length,
+                node_start=node_start,
+                node_length=node_length,
+                variant_start=variant_start,
+                variant_length=variant_length,
+                sample_start=sample_start,
+                sample_length=sample_length,
+                compressed_start=compressed_start,
+                compressed_length=reserved_compressed_length,
+                min_index_to_keep=node_start + summary.min_index_to_keep,
+                logical_variant_start=int(logical_variant_starts[logical_index]),
+                logical_variant_stop=int(logical_variant_starts[logical_index + 1]),
             )
-            indptr_start += block.indptr.size
+            _device_metadata_array(descriptor.as_array_row(), name="block descriptor")
+            descriptors.append(descriptor)
+            indptr_start += indptr_length
             edge_start += edge_length
             node_start += node_length
             variant_start += variant_length
             sample_start += sample_length
-            compressed_start += compressed_length
+            compressed_start += reserved_compressed_length
     return tuple(descriptors)
+
+
+def _device_metadata_array(values: Any, *, name: str) -> np.ndarray:
+    array = np.asarray(values)
+    if not np.issubdtype(array.dtype, np.integer) or np.issubdtype(array.dtype, np.bool_):
+        raise ValueError(f"{name} must contain integers")
+    if array.size:
+        limits = np.iinfo(np.int32)
+        if int(array.min()) < limits.min or int(array.max()) > limits.max:
+            raise ValueError(f"{name} values must fit in int32 device metadata")
+    return np.asarray(array, dtype=DEVICE_METADATA_DTYPE)
 
 
 def _length_mapping(lengths: tuple[int, ...]) -> Mapping[str, int]:

@@ -1,9 +1,14 @@
+# pattern: Mixed (unavoidable)
+# Reason: Pure packing-contract tests and JAX device-ingress integration tests
+# share the same Phase 1 acceptance-criterion fixtures and assertions.
+
 from __future__ import annotations
 
 from dataclasses import replace
 from types import SimpleNamespace
 
 import jax
+import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
 import pytest
@@ -13,10 +18,12 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from linear_dag.core.jaxlinarg.ingress import (
     _assemble_single_device_arrays,
     _packed_from_block_arrays,
+    from_block_arrays,
     LinearARGBlockArrays as IngressLinearARGBlockArrays,
     read_hdf5_block_arrays,
 )
 from linear_dag.core.jaxlinarg.packing import (
+    _device_metadata_array,
     BLOCK_DESCRIPTOR_FIELDS,
     canonicalize_block_arrays,
     GRAPH_FIELD_NAMES,
@@ -59,13 +66,15 @@ def _block(
         raise ValueError("test blocks require at least n_nodes - 1 edges")
     edge_columns = np.minimum(np.arange(n_edges, dtype=np.int64), n_nodes - 1)
     indptr = np.searchsorted(edge_columns, np.arange(n_nodes + 1), side="left")
-    indices = (np.arange(n_edges, dtype=np.int64) + block_seed) % n_nodes
+    indices = np.minimum(edge_columns + 1 + block_seed % n_nodes, n_nodes - 1)
+    data = np.linspace(1.0, 2.0, n_edges, dtype=dtype)
+    data[indices == edge_columns] = 0
     variant_indices = np.arange(n_variants, dtype=np.int64) % n_nodes
     sample_indices = np.arange(n_nodes - 1, n_nodes - n_samples - 1, -1, dtype=np.int64)
     return LinearARGBlockArrays(
         indptr=indptr,
         indices=indices,
-        data=np.linspace(1.0, 2.0, n_edges, dtype=dtype),
+        data=data,
         variant_indices=variant_indices,
         flip=np.arange(n_variants) % 2 == 1,
         sample_indices=sample_indices,
@@ -158,6 +167,18 @@ def test_plan_byte_accounting_counts_mapping_and_excludes_descriptors() -> None:
     assert plan.diagnostics.padding_ratio == 1.0
 
 
+def test_plan_accounts_device_metadata_as_int32() -> None:
+    plan = plan_packing((_block(),), num_devices=1)
+
+    expected_entries = plan.descriptor_capacity * len(BLOCK_DESCRIPTOR_FIELDS) + len(VALID_LENGTH_FIELDS)
+    assert plan.diagnostics.descriptor_bytes == expected_entries * np.dtype(np.int32).itemsize
+
+
+def test_device_metadata_rejects_values_that_do_not_fit_int32() -> None:
+    with pytest.raises(ValueError, match="must fit in int32 device metadata"):
+        _device_metadata_array([np.iinfo(np.int32).max + 1], name="test metadata")
+
+
 def test_assignment_is_stable_complete_and_nonoverlapping() -> None:
     blocks = tuple(_block(block_seed=i) for i in range(4))
 
@@ -215,6 +236,27 @@ def test_plan_rejects_inconsistent_implicit_data_dtypes() -> None:
 def test_plan_rejects_invalid_block_metadata(mutate, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         plan_packing((mutate(_block()),), num_devices=1)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda block: replace(block, indices=np.array([1, 0], dtype=np.int32)),
+        lambda block: replace(
+            block,
+            indices=np.array([0, 2], dtype=np.int32),
+            data=np.array([1.0, 2.0], dtype=np.float32),
+        ),
+    ],
+    ids=("backward-edge", "nonzero-diagonal"),
+)
+def test_packed_and_exact_ragged_reject_the_same_invalid_csc_edge_order(mutate) -> None:
+    invalid = mutate(_block(n_nodes=3, n_edges=2, n_variants=1, n_samples=1))
+
+    with pytest.raises(ValueError, match="indices must be greater than their source nodes"):
+        plan_packing((invalid,), num_devices=1)
+    with pytest.raises(ValueError, match="indices must be greater than their source nodes"):
+        from_block_arrays(invalid)
 
 
 def test_skewed_plan_rejects_with_complete_diagnostics_and_override() -> None:
@@ -408,6 +450,15 @@ def test_validate_rejects_non_inert_padding() -> None:
         validate_packed_graph(_replace_buffer(packed, "data", data))
 
 
+def test_validate_rejects_backward_edge_in_packed_buffers() -> None:
+    packed = pack_blocks((_block(n_nodes=3, n_edges=2, n_variants=1, n_samples=1),), num_devices=1)
+    indices = packed.buffers.indices.copy()
+    indices[0, 1] = 0
+
+    with pytest.raises(ValueError, match="indices must be greater than their source nodes"):
+        validate_packed_graph(_replace_buffer(packed, "indices", indices))
+
+
 def test_padding_override_never_bypasses_structural_validation() -> None:
     packed = pack_blocks((_block(),), num_devices=2, allow_excess_padding=True)
     mapping = packed.buffers.logical_variant_indices.copy()
@@ -423,7 +474,7 @@ def test_packed_ingress_assembles_graph_axis_shards_with_exclusive_local_residen
     mesh = _two_device_graph_mesh_or_skip()
     blocks = tuple(_block(block_seed=index) for index in range(4))
 
-    op = _packed_from_block_arrays(blocks, mesh=mesh)
+    op = _packed_from_block_arrays(blocks, mesh=mesh).operator
 
     expected_devices = set(mesh.devices.reshape(-1).tolist())
     for name in PACKED_COMPONENT_NAMES:
@@ -482,9 +533,10 @@ def test_single_device_array_assembly_rejects_malformed_local_layout() -> None:
 def test_packed_ingress_empty_assignment_is_inert_on_its_device() -> None:
     mesh = _two_device_graph_mesh_or_skip()
 
-    op = _packed_from_block_arrays((_block(),), mesh=mesh, allow_excess_padding=True)
+    result = _packed_from_block_arrays((_block(),), mesh=mesh, allow_excess_padding=True)
+    op = result.operator
 
-    empty_device = op.diagnostics.staging_block_owners.index(0) ^ 1
+    empty_device = result.diagnostics.staging_block_owners.index(0) ^ 1
     valid_lengths = np.asarray(op.valid_lengths)
     assert np.all(valid_lengths[empty_device] == 0)
     for name in GRAPH_FIELD_NAMES:
@@ -502,8 +554,7 @@ def test_packed_ingress_reports_structural_staging_and_final_residency() -> None
     mesh = _two_device_graph_mesh_or_skip()
     blocks = tuple(_block(block_seed=index) for index in range(4))
 
-    op = _packed_from_block_arrays(blocks, mesh=mesh)
-    diagnostics = op.diagnostics
+    diagnostics = _packed_from_block_arrays(blocks, mesh=mesh).diagnostics
 
     assert diagnostics.staging_block_owners == (0, 1, 0, 1)
     expected_staging_bytes = max(_canonical_graph_bytes(canonicalize_block_arrays(block)) for block in blocks)
@@ -515,6 +566,31 @@ def test_packed_ingress_reports_structural_staging_and_final_residency() -> None
     assert diagnostics.staging_accounting == (
         "deterministic one-source-block ingress accounting; not a JAX allocator high-water mark"
     )
+
+
+@pytest.mark.parametrize("x64_enabled", [False, True], ids=("x64-off", "x64-on"))
+def test_packed_device_metadata_dtype_and_values_do_not_depend_on_x64(x64_enabled: bool) -> None:
+    previous_x64 = bool(jax.config.read("jax_enable_x64"))
+    try:
+        jax.config.update("jax_enable_x64", x64_enabled)
+        mesh = Mesh(np.asarray(jax.devices("cpu")[:1]), ("graph",))
+        blocks = (_block(n_nodes=5, n_edges=5, n_variants=3),)
+        expected = pack_blocks(blocks, num_devices=1)
+
+        result = _packed_from_block_arrays(blocks, mesh=mesh)
+
+        assert result.operator.block_descriptors.dtype == jnp.int32
+        assert result.operator.valid_lengths.dtype == jnp.int32
+        np.testing.assert_array_equal(
+            np.asarray(result.operator.block_descriptors),
+            expected.buffers.block_descriptors,
+        )
+        np.testing.assert_array_equal(
+            np.asarray(result.operator.valid_lengths),
+            expected.buffers.valid_lengths,
+        )
+    finally:
+        jax.config.update("jax_enable_x64", previous_x64)
 
 
 def test_packed_benchmark_metrics_and_table_are_calculated_from_diagnostics() -> None:

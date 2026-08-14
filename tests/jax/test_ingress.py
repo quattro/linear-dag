@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import gc
 import shutil
+import weakref
+
+from dataclasses import fields
 
 import equinox as eqx
 import h5py
@@ -12,6 +16,8 @@ import jax.tree_util as jtu
 import numpy as np
 
 from jax.sharding import Mesh, NamedSharding
+
+import linear_dag.core.jaxlinarg.ingress as ingress_module
 
 from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 from linear_dag.core.jaxlinarg.ingress import (
@@ -134,7 +140,8 @@ def test_private_packed_constructor_preserves_fixed_components_from_canonical_ar
     arrays = read_hdf5_block_arrays(linarg_h5_path, first_block_name)
     mesh = _graph_mesh()
 
-    op = _packed_from_block_arrays((arrays,), mesh=mesh)
+    result = _packed_from_block_arrays((arrays,), mesh=mesh)
+    op = result.operator
     expected = pack_blocks((arrays,), num_devices=1)
 
     assert isinstance(op, _PackedJaxLinearARG)
@@ -163,7 +170,62 @@ def test_private_packed_hdf5_and_generic_group_reader_match_host_packing(
         reader = type("GroupReader", (), {"root": {"blocks": file}})()
         from_groups = _packed_from_group_reader(reader, block_names, mesh=mesh)
 
-    _assert_packed_arrays_match_host(from_hdf5, expected)
-    _assert_packed_arrays_match_host(from_groups, expected)
+    _assert_packed_arrays_match_host(from_hdf5.operator, expected)
+    _assert_packed_arrays_match_host(from_groups.operator, expected)
     assert from_hdf5.diagnostics.staging_block_owners == (0,) * len(block_names)
     assert from_groups.diagnostics.staging_block_owners == (0,) * len(block_names)
+
+
+def test_packed_hdf5_reads_each_block_once_with_one_live_source_block(
+    linarg_h5_path,
+    linarg_block_metadata,
+    monkeypatch,
+) -> None:
+    block_names = tuple(linarg_block_metadata.get_column("block_name").to_list())
+    reads: list[str] = []
+    live_blocks: set[int] = set()
+    peak_live_blocks = 0
+    original = ingress_module._read_block_arrays_from_group
+
+    def tracked_read(group, *, dtype=None):
+        nonlocal peak_live_blocks
+        block = original(group, dtype=dtype)
+        block_id = len(reads)
+        reads.append(group.name.rsplit("/", maxsplit=1)[-1])
+        live_blocks.add(block_id)
+        peak_live_blocks = max(peak_live_blocks, len(live_blocks))
+        weakref.finalize(block, live_blocks.discard, block_id)
+        return block
+
+    monkeypatch.setattr(ingress_module, "_read_block_arrays_from_group", tracked_read)
+
+    _packed_from_hdf5(linarg_h5_path, block_names, mesh=_graph_mesh())
+    gc.collect()
+
+    assert reads == list(block_names)
+    assert peak_live_blocks == 1
+    assert not live_blocks
+
+
+def test_packed_carrier_static_definition_excludes_dataset_diagnostics(
+    linarg_h5_path,
+    linarg_block_metadata,
+) -> None:
+    mesh = _graph_mesh()
+    block_names = tuple(linarg_block_metadata.get_column("block_name").to_list())
+    first = _packed_from_block_arrays(
+        (read_hdf5_block_arrays(linarg_h5_path, block_names[0]),),
+        mesh=mesh,
+    )
+    second = _packed_from_block_arrays(
+        (read_hdf5_block_arrays(linarg_h5_path, block_names[1]),),
+        mesh=mesh,
+    )
+
+    expected_static_fields = ("n_samples", "n_variants", "capacities")
+    for result in (first, second):
+        static_fields = tuple(field.name for field in fields(result.operator) if field.metadata.get("static"))
+        assert static_fields == expected_static_fields
+        assert not hasattr(result.operator, "diagnostics")
+        assert len(jtu.tree_leaves(result.operator)) == len(PACKED_COMPONENT_NAMES)
+        assert type(result.operator) is _PackedJaxLinearARG

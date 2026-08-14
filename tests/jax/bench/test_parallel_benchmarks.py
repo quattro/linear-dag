@@ -116,21 +116,22 @@ def _benchmark_packed_ingress(
     block_names = tuple(linarg_block_metadata.get_column("block_name").to_list())
 
     start = time.perf_counter()
-    op = _packed_from_hdf5(
+    packed = _packed_from_hdf5(
         linarg_h5_path,
         block_names,
         mesh=mesh,
         allow_excess_padding=True,
     )
     construction_seconds = time.perf_counter() - start
+    op = packed.operator
     for name in PACKED_COMPONENT_NAMES:
         getattr(op, name).block_until_ready()
 
     observed_graph_bytes = _graph_bytes_by_device(op)
-    if sum(observed_graph_bytes.values()) != sum(op.diagnostics.final_graph_bytes_by_device):
+    if sum(observed_graph_bytes.values()) != sum(packed.diagnostics.final_graph_bytes_by_device):
         pytest.fail("packed ingress diagnostics do not match observed graph residency")
     return _packed_memory_result(
-        op.diagnostics,
+        packed.diagnostics,
         operator=f"packed_jax_lineararg_{num_devices}_device",
         construction_seconds=construction_seconds,
         resident_devices_valid=_packed_fields_have_expected_residency(op),
