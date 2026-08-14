@@ -106,10 +106,84 @@ class _PackedJaxLinearARG(eqx.Module):
             if array.sharding.mesh.axis_names != ("graph",) or array.sharding.spec[0] != "graph":
                 raise ValueError(f"{name} must be sharded on the dedicated graph axis")
 
+        from .packed_products import _validate_packed_carrier
+
+        _validate_packed_carrier(self)
+
     @property
     def shape(self) -> tuple[int, int]:
         """Return the logical sample-by-variant shape."""
         return (self.n_samples, self.n_variants)
+
+    def matmat(self, values: Any) -> Array:
+        r"""Multiply by the packed LinearARG with graph state explicit.
+
+        !!! info
+            The memory guarantee excludes raw bound-method closure capture.
+            Pass this carrier explicitly to `lineararg_matmat`, or
+            use [`compile_matmat`][linear_dag.core.jaxlinarg.ingress._PackedJaxLinearARG.compile_matmat].
+
+        **Arguments:**
+
+        - `values`: Rank-1 or rank-2 logical variant values.
+
+        **Returns:**
+
+        - Logical sample-space product.
+        """
+        from .packed_products import lineararg_matmat
+
+        return lineararg_matmat(self, values)
+
+    def rmatmat(self, values: Any) -> Array:
+        r"""Multiply by the transpose with graph state explicit.
+
+        !!! info
+            The memory guarantee excludes raw bound-method closure capture.
+            Pass this carrier explicitly to `lineararg_rmatmat`, or
+            use [`compile_rmatmat`][linear_dag.core.jaxlinarg.ingress._PackedJaxLinearARG.compile_rmatmat].
+
+        **Arguments:**
+
+        - `values`: Rank-1 or rank-2 logical sample values.
+
+        **Returns:**
+
+        - Logical variant-space product in exact variant order.
+        """
+        from .packed_products import lineararg_rmatmat
+
+        return lineararg_rmatmat(self, values)
+
+    def compile_matmat(self) -> Any:
+        r"""Compile a forward product without raw bound-method closure capture.
+
+        The returned Python wrapper retains this carrier for convenience but
+        supplies it as an explicit argument to a module-level JIT on every
+        invocation, preserving the graph-memory guarantee.
+
+        **Returns:**
+
+        - Callable compiled forward-product wrapper.
+        """
+        from .packed_products import compile_matmat
+
+        return compile_matmat(self)
+
+    def compile_rmatmat(self) -> Any:
+        r"""Compile a transpose product without raw bound-method closure capture.
+
+        The returned Python wrapper retains this carrier for convenience but
+        supplies it as an explicit argument to a module-level JIT on every
+        invocation, preserving the graph-memory guarantee.
+
+        **Returns:**
+
+        - Callable compiled transpose-product wrapper.
+        """
+        from .packed_products import compile_rmatmat
+
+        return compile_rmatmat(self)
 
 
 @dataclass(frozen=True)
