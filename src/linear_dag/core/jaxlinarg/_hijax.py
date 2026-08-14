@@ -11,9 +11,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 
+from jax._src import ad_util
+from jax._src.interpreters import ad
 from jax.experimental import hijax
-from jax.sharding import PartitionSpec as P
+from jax.sharding import NamedSharding, PartitionSpec as P
 
 from .packing import _PackedGraphLogicalMetadata, PACKED_COMPONENT_NAMES
 
@@ -305,6 +308,234 @@ def _validate_graph_pspec(spec: hijax.HiPspec, graph_type: _PackedGraphType) -> 
     if spec != expected:
         raise ValueError("packed graph shard_map specs must shard every lowered component on the graph axis")
     return spec
+
+
+class _PackedProductPrimitive(hijax.VJPHiPrimitive):
+    """Shared handwritten transform contract for one packed linear product."""
+
+    _direction: str
+    n_samples: int
+    n_variants: int
+    capacities: tuple[int, ...]
+    data_dtype: str
+    output_axes: tuple[Any, ...]
+
+    def __init__(
+        self,
+        graph_type: _PackedGraphType,
+        dense_type: Any,
+        *,
+        n_samples: int,
+        n_variants: int,
+        capacities: tuple[int, ...],
+        data_dtype: str,
+        output_axes: tuple[Any, ...],
+    ) -> None:
+        if not isinstance(graph_type, _PackedGraphType):
+            raise TypeError("packed product primitives require the private opaque graph type")
+        if len(dense_type.shape) != 2:
+            raise TypeError("packed product primitive dense operands must have rank two")
+        expected_rows = n_variants if self._direction == "matmat" else n_samples
+        output_rows = n_samples if self._direction == "matmat" else n_variants
+        if dense_type.shape[0] != expected_rows:
+            raise ValueError(f"packed {self._direction} expected leading dimension {expected_rows}")
+        if dense_type.dtype != graph_type.component_types[2].dtype:
+            raise TypeError("packed product dense operand dtype must match packed graph data")
+        if self._direction == "rmatmat" and output_axes:
+            raise ValueError("packed transpose products must return replicated logical variants")
+        if output_axes not in ((), ("graph",)):
+            raise ValueError("packed product output axes must be replicated or graph-sharded")
+        output_spec = P(*output_axes, *([None] * (2 - len(output_axes))))
+        graph_mesh = graph_type.component_types[0].sharding.mesh
+        self.in_avals = (graph_type, dense_type)
+        self.out_aval = dense_type.update(
+            shape=(output_rows, dense_type.shape[1]),
+            sharding=NamedSharding(graph_mesh, output_spec),
+        )
+        self.params = {
+            "n_samples": int(n_samples),
+            "n_variants": int(n_variants),
+            "capacities": tuple(int(value) for value in capacities),
+            "data_dtype": str(data_dtype),
+            "output_axes": tuple(output_axes),
+        }
+        super().__init__()
+
+    def _signature(self) -> Any:
+        from .packed_products import _PackedProductSignature
+
+        return _PackedProductSignature(
+            n_samples=self.n_samples,
+            n_variants=self.n_variants,
+            capacities=self.capacities,
+            data_dtype=self.data_dtype,
+        )
+
+    def expand(self, *args: Any) -> Any:
+        from .packed_products import _lineararg_matmat_graph, _lineararg_rmatmat_graph
+
+        graph, values = args
+        if self._direction == "matmat":
+            return _lineararg_matmat_graph(
+                graph,
+                values,
+                signature=self._signature(),
+                output_axes=self.output_axes,
+            )
+        return _lineararg_rmatmat_graph(graph, values, signature=self._signature())
+
+    def lin(self, nzs_in: Any, *primals: Any) -> tuple[Any, Any]:
+        graph, values = primals
+        _reject_nonzero_graph_input(nzs_in[0])
+        return self(graph, values), graph
+
+    def linearized(self, residuals: Any, *tangents: Any) -> Any:
+        graph = residuals
+        graph_tangent, values_tangent = tangents
+        _validate_graph_zero_tangent(graph_tangent)
+        if isinstance(values_tangent, ad_util.Zero):
+            return ad_util.Zero(self.out_aval.to_tangent_aval())
+        return self(graph, values_tangent)
+
+    jvp = hijax.jvp_from_lin
+
+    def vjp_fwd(self, nzs_in: Any, /, *args: Any) -> tuple[Any, Any]:
+        graph, values = args
+        _reject_nonzero_graph_input(nzs_in[0])
+        return self(graph, values), graph
+
+    def vjp_bwd_retval(self, graph: _PackedGraphValue, output_cotangent: Any):
+        return _PackedGraphZeroValue(graph.metadata), self._bind_companion(graph, output_cotangent)
+
+    def transpose(self, out_ct: Any, *maybe_accumulators: Any) -> None:
+        graph, values_accumulator = maybe_accumulators
+        if isinstance(graph, ad.GradAccum):
+            raise TypeError(f"{_OPAQUE_GRAPH_GUIDANCE}; graph differentiation is not supported")
+        if isinstance(values_accumulator, ad.GradAccum):
+            if isinstance(out_ct, ad_util.Zero):
+                values_accumulator.accum(ad_util.Zero(self.in_avals[1].to_ct_aval()))
+            else:
+                values_accumulator.accum(self._bind_companion(graph, out_ct))
+
+    def _bind_companion(self, graph: _PackedGraphValue, values: Any) -> Any:
+        signature = self._signature()
+        if self._direction == "matmat":
+            return _bind_rmatmat_rank2(graph, values, signature=signature)
+        return _bind_matmat_rank2(graph, values, signature=signature, output_axes=())
+
+    def batch(self, axis_data: Any, args: tuple[Any, Any], dims: tuple[Any, Any]):
+        graph, values = args
+        graph_dim, dense_dim = dims
+        if not _is_invariant_graph_mapping(graph_dim):
+            raise TypeError(f"{_OPAQUE_GRAPH_GUIDANCE}; mapped graph axes are not supported")
+        if dense_dim is None:
+            return self(graph, values), None
+        if not isinstance(dense_dim, int):
+            raise TypeError("packed product dense batching requires one integer mapped axis")
+        batch_size = axis_data.size
+        right_hand_sides = self.in_avals[1].shape[1]
+        moved = jnp.moveaxis(values, dense_dim, -1)
+        fused = moved.reshape(self.in_avals[1].shape[0], right_hand_sides * batch_size)
+        fused_output = self._bind_same(graph, fused)
+        restored = fused_output.reshape(self.out_aval.shape[0], right_hand_sides, batch_size)
+        return jnp.moveaxis(restored, -1, dense_dim), dense_dim
+
+    def _bind_same(self, graph: _PackedGraphValue, values: Any) -> Any:
+        signature = self._signature()
+        if self._direction == "matmat":
+            return _bind_matmat_rank2(graph, values, signature=signature, output_axes=self.output_axes)
+        return _bind_rmatmat_rank2(graph, values, signature=signature)
+
+
+class _PackedMatmatPrimitive(_PackedProductPrimitive):
+    """Private high-level primitive for packed forward products."""
+
+    _direction = "matmat"
+
+
+class _PackedRmatmatPrimitive(_PackedProductPrimitive):
+    """Private high-level primitive for packed transpose products."""
+
+    _direction = "rmatmat"
+
+
+def _reject_nonzero_graph_input(nonzero: bool) -> None:
+    if nonzero:
+        raise TypeError(f"{_OPAQUE_GRAPH_GUIDANCE}; graph differentiation is not supported")
+
+
+def _validate_graph_zero_tangent(tangent: Any) -> None:
+    if not isinstance(tangent, (_PackedGraphZeroValue, ad_util.Zero)):
+        raise TypeError(f"{_OPAQUE_GRAPH_GUIDANCE}; graph differentiation is not supported")
+
+
+def _is_invariant_graph_mapping(spec: Any) -> bool:
+    return spec is None or isinstance(spec, _PackedGraphMappingSpec) and not spec.mapped
+
+
+def _matmat_primitive(
+    graph: _PackedGraphValue,
+    values: Any,
+    *,
+    signature: Any | None = None,
+    output_axes: tuple[Any, ...] = (),
+) -> _PackedMatmatPrimitive:
+    signature = _signature_from_graph(graph) if signature is None else signature
+    return _PackedMatmatPrimitive(
+        jax.typeof(graph),
+        jax.typeof(values),
+        n_samples=signature.n_samples,
+        n_variants=signature.n_variants,
+        capacities=signature.capacities,
+        data_dtype=signature.data_dtype,
+        output_axes=output_axes,
+    )
+
+
+def _rmatmat_primitive(
+    graph: _PackedGraphValue,
+    values: Any,
+    *,
+    signature: Any | None = None,
+) -> _PackedRmatmatPrimitive:
+    signature = _signature_from_graph(graph) if signature is None else signature
+    return _PackedRmatmatPrimitive(
+        jax.typeof(graph),
+        jax.typeof(values),
+        n_samples=signature.n_samples,
+        n_variants=signature.n_variants,
+        capacities=signature.capacities,
+        data_dtype=signature.data_dtype,
+        output_axes=(),
+    )
+
+
+def _signature_from_graph(graph: _PackedGraphValue):
+    from .packed_products import _PackedProductSignature
+
+    graph_type = jax.typeof(graph)
+    return _PackedProductSignature(
+        n_samples=graph.metadata.n_samples,
+        n_variants=graph.metadata.n_variants,
+        capacities=graph.metadata.capacities,
+        data_dtype=str(graph_type.component_types[2].dtype),
+    )
+
+
+def _bind_matmat_rank2(
+    graph: _PackedGraphValue,
+    values: Any,
+    *,
+    signature: Any,
+    output_axes: tuple[Any, ...],
+) -> Any:
+    """Project-owned private binder for one rank-two forward product."""
+    return _matmat_primitive(graph, values, signature=signature, output_axes=output_axes)(graph, values)
+
+
+def _bind_rmatmat_rank2(graph: _PackedGraphValue, values: Any, *, signature: Any) -> Any:
+    """Project-owned private binder for one rank-two transpose product."""
+    return _rmatmat_primitive(graph, values, signature=signature)(graph, values)
 
 
 class _PackedGraphComponentPrimitive(hijax.HiPrimitive):

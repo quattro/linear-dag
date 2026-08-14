@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jax._src import ad_util
 from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec as P
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
@@ -22,6 +24,7 @@ import linear_dag
 import linear_dag.core
 import linear_dag.core.jaxlinarg
 
+from linear_dag.core.jaxlinarg import _hijax as hijax_adapter
 from linear_dag.core.jaxlinarg._hijax import (
     _graph_pspec_for_type,
     _packed_graph_component,
@@ -266,3 +269,194 @@ def test_public_exports_and_annotations_do_not_expose_hijax() -> None:
         public_values = tuple(name for name in vars(module) if not name.startswith("_"))
         visible = (*exported_names, *annotations, *public_values)
         assert not any(token in item for token in forbidden for item in visible)
+
+
+@pytest.mark.parametrize(
+    ("method", "companion", "leading_dimension"),
+    [
+        ("matmat", "rmatmat", "n_variants"),
+        ("rmatmat", "matmat", "n_samples"),
+    ],
+)
+def test_packed_product_jvp_and_vjp_use_paired_products(
+    method: str,
+    companion: str,
+    leading_dimension: str,
+) -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    values = jnp.arange(getattr(operator, leading_dimension) * 2, dtype=jnp.float32).reshape(-1, 2) / 5
+    tangent = jnp.flip(values, axis=0) + 0.25
+
+    primal, primal_tangent = jax.jvp(
+        lambda operand: getattr(operator, method)(operand),
+        (values,),
+        (tangent,),
+    )
+    expected_primal = getattr(operator, method)(values)
+    expected_tangent = getattr(operator, method)(tangent)
+    cotangent = jnp.arange(primal.size, dtype=primal.dtype).reshape(primal.shape) / 7
+    _, pullback = jax.vjp(lambda operand: getattr(operator, method)(operand), values)
+    (actual_cotangent,) = pullback(cotangent)
+    expected_cotangent = getattr(operator, companion)(cotangent)
+
+    np.testing.assert_allclose(primal, expected_primal, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(primal_tangent, expected_tangent, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(actual_cotangent, expected_cotangent, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("method", "companion", "leading_dimension"),
+    [
+        ("matmat", "rmatmat", "n_variants"),
+        ("rmatmat", "matmat", "n_samples"),
+    ],
+)
+def test_packed_product_linearize_transpose_and_finite_difference(
+    method: str,
+    companion: str,
+    leading_dimension: str,
+) -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    values = jnp.arange(getattr(operator, leading_dimension), dtype=jnp.float32) / 3
+    tangent = jnp.asarray([0.75, -0.5], dtype=jnp.float32)
+    primal, linearized = jax.linearize(lambda operand: getattr(operator, method)(operand), values)
+    expected_tangent = getattr(operator, method)(tangent)
+    cotangent = jnp.asarray([0.25, -1.0], dtype=jnp.float32)
+    (transposed,) = jax.linear_transpose(
+        lambda operand: getattr(operator, method)(operand),
+        values,
+    )(cotangent)
+    expected_transposed = getattr(operator, companion)(cotangent)
+
+    def scalar_loss(operand):
+        return jnp.vdot(getattr(operator, method)(operand), cotangent)
+
+    epsilon = jnp.asarray(1e-3, dtype=values.dtype)
+    finite_difference = (scalar_loss(values + epsilon * tangent) - scalar_loss(values - epsilon * tangent)) / (
+        2 * epsilon
+    )
+
+    np.testing.assert_allclose(primal, getattr(operator, method)(values), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(linearized(tangent), expected_tangent, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(transposed, expected_transposed, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(finite_difference, jnp.vdot(expected_transposed, tangent), rtol=2e-3, atol=2e-3)
+
+
+def test_packed_product_composes_with_jit_grad_value_and_grad_and_second_order() -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    values = jnp.asarray([0.25, -0.75], dtype=jnp.float32)
+
+    def loss(graph_operator, operand):
+        product = graph_operator.matmat(operand)
+        return 0.5 * jnp.vdot(product, product)
+
+    expected_gradient = operator.rmatmat(operator.matmat(values))
+    eager_value, eager_gradient = jax.value_and_grad(loss, argnums=1)(operator, values)
+    jit_value, jit_gradient = jax.jit(jax.value_and_grad(loss, argnums=1))(operator, values)
+    grad_jit = jax.grad(jax.jit(loss), argnums=1)(operator, values)
+
+    def dense_gradient(operand):
+        return jax.grad(loss, argnums=1)(operator, operand)
+
+    hessian_vector = jax.jvp(dense_gradient, (values,), (jnp.ones_like(values),))[1]
+    expected_hessian_vector = operator.rmatmat(operator.matmat(jnp.ones_like(values)))
+
+    np.testing.assert_allclose(eager_gradient, expected_gradient, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(jit_gradient, expected_gradient, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(grad_jit, expected_gradient, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(hessian_vector, expected_hessian_vector, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(jit_value, eager_value, rtol=1e-6, atol=1e-6)
+
+
+def test_packed_product_dense_vmap_fuses_vector_and_matrix_batches() -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    vector_batch = jnp.arange(6, dtype=jnp.float32).reshape(3, operator.n_variants) / 4
+    matrix_batch = jnp.arange(12, dtype=jnp.float32).reshape(3, operator.n_variants, 2) / 5
+
+    actual_vectors = jax.vmap(operator.matmat)(vector_batch)
+    actual_matrices = jax.vmap(operator.matmat)(matrix_batch)
+    expected_vectors = jnp.stack([operator.matmat(value) for value in vector_batch])
+    expected_matrices = jnp.stack([operator.matmat(value) for value in matrix_batch])
+
+    np.testing.assert_allclose(actual_vectors, expected_vectors, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(actual_matrices, expected_matrices, rtol=1e-6, atol=1e-6)
+
+
+def test_packed_product_invariant_graph_scan_remat_and_dce() -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    values = jnp.arange(6, dtype=jnp.float32).reshape(3, operator.n_variants) / 4
+
+    def body(graph_operator, operand):
+        return graph_operator, graph_operator.matmat(operand)
+
+    final_operator, scanned = jax.lax.scan(body, operator, values)
+    rematerialized = jax.jit(jax.remat(lambda graph_operator, operand: graph_operator.matmat(operand)))(
+        operator,
+        values[0],
+    )
+    dce_ir = str(
+        jax.jit(lambda graph_operator, operand: (graph_operator.matmat(operand), operand)[1])
+        .lower(operator, values[0])
+        .compiler_ir(dialect="stablehlo")
+    )
+
+    assert jax.typeof(final_operator.graph) == jax.typeof(operator.graph)
+    np.testing.assert_allclose(scanned, jnp.stack([operator.matmat(value) for value in values]), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(rematerialized, operator.matmat(values[0]), rtol=1e-6, atol=1e-6)
+    assert "sdy.manual_computation" not in dce_ir
+
+
+def test_packed_product_symbolic_zero_dense_tangent_has_output_type() -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    values = jnp.ones((operator.n_variants, 1), dtype=jnp.float32)
+    primitive = hijax_adapter._matmat_primitive(operator.graph, values)
+    graph_zero = jax.typeof(operator.graph).vspace_zero()
+    dense_zero = ad_util.Zero(jax.typeof(values).to_tangent_aval())
+
+    _, residual = primitive.lin((False, False), operator.graph, values)
+    result = primitive.linearized(residual, graph_zero, dense_zero)
+
+    assert isinstance(result, ad_util.Zero)
+    assert result.aval == primitive.out_aval.to_tangent_aval()
+
+
+def test_packed_product_rejects_graph_differentiation_and_batching() -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    values = jnp.ones((operator.n_variants, 1), dtype=jnp.float32)
+
+    with pytest.raises(TypeError, match="opaque graph.*invariant"):
+        jax.jvp(
+            lambda graph_operator: graph_operator.matmat(values),
+            (operator,),
+            (operator,),
+        )
+    signature = hijax_adapter._signature_from_graph(operator.graph)
+    with pytest.raises(TypeError, match="opaque graph.*invariant"):
+        jax.vmap(
+            lambda graph: hijax_adapter._bind_matmat_rank2(
+                graph,
+                values,
+                signature=signature,
+                output_axes=(),
+            ),
+            in_axes=hijax_adapter._PackedGraphMappingSpec(mapped=True),
+            axis_size=2,
+        )(operator.graph)
+
+
+def test_packed_product_high_level_jaxpr_has_one_project_product_equation() -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    values = jnp.ones((operator.n_variants, 2), dtype=jnp.float32)
+
+    closed_jaxpr = jax.make_jaxpr(lambda graph_operator, operand: graph_operator.matmat(operand))(operator, values)
+    product_equations = [
+        equation
+        for equation in closed_jaxpr.jaxpr.eqns
+        if equation.primitive.name == "call_hi_primitive"
+        and type(equation.params["_prim"]).__name__ == "_PackedMatmatPrimitive"
+    ]
+
+    assert len(product_equations) == 1
+    primitive = product_equations[0].params["_prim"]
+    assert all(isinstance(value, (str, int, tuple, np.dtype)) for value in primitive.params.values())
+    assert not any(isinstance(value, (_PackedGraphValue, jax.Array, Mesh)) for value in primitive.params.values())

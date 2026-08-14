@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, cast, Generic, TYPE_CHECKING, TypeVar
 
 import jax
@@ -23,6 +24,7 @@ from .kernels.pure_jax import (
 )
 from .operator import _as_rank2_matrix
 from .packing import (
+    _packed_graph_component,
     _packed_graph_sharding_spec,
     BLOCK_DESCRIPTOR_FIELDS,
     GRAPH_FIELD_NAMES,
@@ -36,6 +38,16 @@ if TYPE_CHECKING:
 _DESCRIPTOR_INDEX = {name: index for index, name in enumerate(BLOCK_DESCRIPTOR_FIELDS)}
 _VALID_LENGTH_INDEX = {name: index for index, name in enumerate(VALID_LENGTH_FIELDS)}
 _CAPACITY_INDEX = {name: index for index, name in enumerate(GRAPH_FIELD_NAMES)}
+
+
+@dataclass(frozen=True, slots=True)
+class _PackedProductSignature:
+    """Hashable logical facts needed by fixed-shape packed algebra."""
+
+    n_samples: int
+    n_variants: int
+    capacities: tuple[int, ...]
+    data_dtype: str
 
 
 def lineararg_matmat(
@@ -80,38 +92,24 @@ def lineararg_matmat(
     matrix, was_vector = _as_rank2_matrix(
         values,
         expected_rows=operator.n_variants,
-        dtype=operator.data.dtype,
+        dtype=_packed_data_dtype(operator),
     )
     mesh = _operator_mesh(operator)
-    graph_spec = _packed_graph_sharding_spec(operator.graph)
+    matrix = jax.device_put(matrix, NamedSharding(mesh, P()))
     output_spec = _forward_output_spec(
         operator,
         out_sharding=out_sharding,
         mesh=mesh,
         logical_result_rank=1 if was_vector else 2,
     )
-    if output_spec == P():
-        result = jax.jit(
-            jax.shard_map(
-                _replicated_matmat_rank2,
-                mesh=mesh,
-                in_specs=(graph_spec, P()),
-                out_specs=P(),
-                axis_names={"graph"},
-                check_vma=True,
-            )
-        )(operator, matrix)
-    else:
-        result = jax.jit(
-            jax.shard_map(
-                _sample_sharded_matmat_rank2,
-                mesh=mesh,
-                in_specs=(graph_spec, P()),
-                out_specs=P("graph"),
-                axis_names={"graph"},
-                check_vma=True,
-            )
-        )(operator, matrix)
+    from ._hijax import _bind_matmat_rank2
+
+    result = _bind_matmat_rank2(
+        operator.graph,
+        matrix,
+        signature=_packed_product_signature(operator),
+        output_axes=tuple(output_spec),
+    )
     return result[:, 0] if was_vector else result
 
 
@@ -142,20 +140,17 @@ def lineararg_rmatmat(operator: _PackedJaxLinearARG, values: ArrayLike) -> Array
     matrix, was_vector = _as_rank2_matrix(
         values,
         expected_rows=operator.n_samples,
-        dtype=operator.data.dtype,
+        dtype=_packed_data_dtype(operator),
     )
     mesh = _operator_mesh(operator)
-    graph_spec = _packed_graph_sharding_spec(operator.graph)
-    result = jax.jit(
-        jax.shard_map(
-            _replicated_rmatmat_rank2,
-            mesh=mesh,
-            in_specs=(graph_spec, P()),
-            out_specs=P(),
-            axis_names={"graph"},
-            check_vma=True,
-        )
-    )(operator, matrix)
+    matrix = jax.device_put(matrix, NamedSharding(mesh, P()))
+    from ._hijax import _bind_rmatmat_rank2
+
+    result = _bind_rmatmat_rank2(
+        operator.graph,
+        matrix,
+        signature=_packed_product_signature(operator),
+    )
     return result[:, 0] if was_vector else result
 
 
@@ -199,6 +194,85 @@ def _compiled_lineararg_rmatmat(operator: _PackedJaxLinearARG, values: ArrayLike
     return lineararg_rmatmat(operator, values)
 
 
+def _lineararg_matmat_graph(
+    graph: Any,
+    values: Array,
+    *,
+    signature: _PackedProductSignature,
+    output_axes: tuple[Any, ...] = (),
+) -> Array:
+    """Expand one forward packed product from explicit graph state."""
+    graph_spec = _packed_graph_sharding_spec(graph)
+    mesh = _graph_abstract_mesh(graph)
+    if output_axes == ():
+        body = partial(_replicated_matmat_graph_rank2, signature=signature)
+        output_spec = P()
+    elif output_axes == ("graph",):
+        body = partial(_sample_sharded_matmat_graph_rank2, signature=signature)
+        output_spec = P("graph")
+    else:
+        raise ValueError("packed forward primitive output axes must be replicated or graph-sharded")
+    return jax.jit(
+        jax.shard_map(
+            body,
+            mesh=mesh,
+            in_specs=(graph_spec, P()),
+            out_specs=output_spec,
+            axis_names={"graph"},
+            check_vma=True,
+        )
+    )(graph, values)
+
+
+def _lineararg_rmatmat_graph(
+    graph: Any,
+    values: Array,
+    *,
+    signature: _PackedProductSignature,
+) -> Array:
+    """Expand one transpose packed product from explicit graph state."""
+    graph_spec = _packed_graph_sharding_spec(graph)
+    mesh = _graph_abstract_mesh(graph)
+    return jax.jit(
+        jax.shard_map(
+            partial(_replicated_rmatmat_graph_rank2, signature=signature),
+            mesh=mesh,
+            in_specs=(graph_spec, P()),
+            out_specs=P(),
+            axis_names={"graph"},
+            check_vma=True,
+        )
+    )(graph, values)
+
+
+def _replicated_matmat_graph_rank2(
+    graph: Any,
+    values: Array,
+    *,
+    signature: _PackedProductSignature,
+) -> Array:
+    return lax.psum(_local_matmat_graph_rank2(graph, values, signature), "graph")
+
+
+def _sample_sharded_matmat_graph_rank2(
+    graph: Any,
+    values: Array,
+    *,
+    signature: _PackedProductSignature,
+) -> Array:
+    partial_result = _local_matmat_graph_rank2(graph, values, signature)
+    return lax.psum_scatter(partial_result, "graph", scatter_dimension=0, tiled=True)
+
+
+def _replicated_rmatmat_graph_rank2(
+    graph: Any,
+    values: Array,
+    *,
+    signature: _PackedProductSignature,
+) -> Array:
+    return lax.psum(_local_rmatmat_graph_rank2(graph, values, signature), "graph")
+
+
 def _replicated_matmat_rank2(operator: _PackedJaxLinearARG, values: Array) -> Array:
     return lax.psum(_local_matmat_rank2(operator, values), "graph")
 
@@ -214,44 +288,54 @@ def _replicated_rmatmat_rank2(operator: _PackedJaxLinearARG, values: Array) -> A
 
 def _local_matmat_rank2(operator: _PackedJaxLinearARG, values: Array) -> Array:
     """Return one graph shard's sample-space partial product."""
-    graph = _remove_local_graph_axis(operator)
+    return _local_matmat_graph_rank2(operator.graph, values, _packed_product_signature(operator))
+
+
+def _local_matmat_graph_rank2(graph_value: Any, values: Array, signature: _PackedProductSignature) -> Array:
+    """Return one graph shard's sample-space partial product from explicit state."""
+    graph = _remove_local_graph_axis(graph_value)
     descriptors = graph["block_descriptors"]
     block_count = graph["valid_lengths"][_VALID_LENGTH_INDEX["block_descriptors"]]
-    initial = jnp.zeros((operator.n_samples, values.shape[1]), dtype=values.dtype)
+    initial = jnp.zeros((signature.n_samples, values.shape[1]), dtype=values.dtype)
     initial = initial + block_count.astype(values.dtype) * 0
 
     def add_descriptor(slot: int, result: Array) -> Array:
         descriptor = descriptors[slot]
         valid = slot < block_count
-        return result + _forward_descriptor_product(operator, graph, descriptor, valid, values)
+        return result + _forward_descriptor_product(signature, graph, descriptor, valid, values)
 
     return lax.fori_loop(0, descriptors.shape[0], add_descriptor, initial)
 
 
 def _local_rmatmat_rank2(operator: _PackedJaxLinearARG, values: Array) -> Array:
     """Return one graph shard's logical variant-space partial product."""
-    graph = _remove_local_graph_axis(operator)
+    return _local_rmatmat_graph_rank2(operator.graph, values, _packed_product_signature(operator))
+
+
+def _local_rmatmat_graph_rank2(graph_value: Any, values: Array, signature: _PackedProductSignature) -> Array:
+    """Return one graph shard's variant-space partial product from explicit state."""
+    graph = _remove_local_graph_axis(graph_value)
     descriptors = graph["block_descriptors"]
     block_count = graph["valid_lengths"][_VALID_LENGTH_INDEX["block_descriptors"]]
-    initial = jnp.zeros((operator.n_variants, values.shape[1]), dtype=values.dtype)
+    initial = jnp.zeros((signature.n_variants, values.shape[1]), dtype=values.dtype)
     initial = initial + block_count.astype(values.dtype) * 0
 
     def add_descriptor(slot: int, result: Array) -> Array:
         descriptor = descriptors[slot]
         valid = slot < block_count
-        return result + _reverse_descriptor_product(operator, graph, descriptor, valid, values)
+        return result + _reverse_descriptor_product(signature, graph, descriptor, valid, values)
 
     return lax.fori_loop(0, descriptors.shape[0], add_descriptor, initial)
 
 
 def _forward_descriptor_product(
-    operator: _PackedJaxLinearARG,
+    signature: _PackedProductSignature,
     graph: dict[str, Array],
     descriptor: Array,
     valid: Array,
     values: Array,
 ) -> Array:
-    views = _descriptor_views(operator, graph, descriptor, valid)
+    views = _descriptor_views(signature, graph, descriptor, valid)
     variant_capacity = views["variant_indices"].shape[0]
     variant_mask = jnp.arange(variant_capacity, dtype=jnp.int32) < views["variant_length"]
     logical_indices = jnp.where(variant_mask, views["logical_variant_indices"], 0)
@@ -262,7 +346,7 @@ def _forward_descriptor_product(
     seeds = values[logical_indices, :] * flip_sign[:, None]
     seeds = jnp.where(variant_mask[:, None], seeds, jnp.zeros_like(seeds))
     compressed = jnp.zeros(
-        (operator.capacities[_CAPACITY_INDEX["nonunique_indices"]], values.shape[1]),
+        (signature.capacities[_CAPACITY_INDEX["nonunique_indices"]], values.shape[1]),
         dtype=values.dtype,
     )
     compressed = compressed.at[variant_rows, :].add(seeds)
@@ -281,16 +365,16 @@ def _forward_descriptor_product(
 
 
 def _reverse_descriptor_product(
-    operator: _PackedJaxLinearARG,
+    signature: _PackedProductSignature,
     graph: dict[str, Array],
     descriptor: Array,
     valid: Array,
     values: Array,
 ) -> Array:
-    views = _descriptor_views(operator, graph, descriptor, valid)
+    views = _descriptor_views(signature, graph, descriptor, valid)
     sample_rows = views["nonunique_indices"][views["sample_indices"]]
     compressed = jnp.zeros(
-        (operator.capacities[_CAPACITY_INDEX["nonunique_indices"]], values.shape[1]),
+        (signature.capacities[_CAPACITY_INDEX["nonunique_indices"]], values.shape[1]),
         dtype=values.dtype,
     )
     sample_seeds = jnp.where(valid, values, jnp.zeros_like(values))
@@ -312,12 +396,12 @@ def _reverse_descriptor_product(
     block_values = jnp.where(views["flip"][:, None], total[None, :] - block_values, block_values)
     block_values = jnp.where(variant_mask[:, None], block_values, jnp.zeros_like(block_values))
     logical_indices = jnp.where(variant_mask, views["logical_variant_indices"], 0)
-    result = jnp.zeros((operator.n_variants, values.shape[1]), dtype=values.dtype)
+    result = jnp.zeros((signature.n_variants, values.shape[1]), dtype=values.dtype)
     return result.at[logical_indices, :].add(block_values)
 
 
 def _descriptor_views(
-    operator: _PackedJaxLinearARG,
+    signature: _PackedProductSignature,
     graph: dict[str, Array],
     descriptor: Array,
     valid: Array,
@@ -352,7 +436,7 @@ def _descriptor_views(
         sample_start,
         sample_length,
         node_start,
-        size=operator.n_samples,
+        size=signature.n_samples,
     )
     sample_indices = sample_indices - node_start
     min_index_to_keep = value("min_index_to_keep") - node_start
@@ -388,8 +472,30 @@ def _fixed_span(
     return jnp.where(offsets < length, gathered, padding)
 
 
-def _remove_local_graph_axis(operator: _PackedJaxLinearARG) -> dict[str, Array]:
-    return {name: getattr(operator, name)[0] for name in (*GRAPH_FIELD_NAMES, "block_descriptors", "valid_lengths")}
+def _remove_local_graph_axis(graph: Any) -> dict[str, Array]:
+    names = (*GRAPH_FIELD_NAMES, "block_descriptors", "valid_lengths")
+    return {name: _packed_graph_component(graph, index)[0] for index, name in enumerate(names)}
+
+
+def _graph_abstract_mesh(graph: Any) -> Any:
+    graph_type = jax.typeof(graph)
+    mesh = graph_type.component_types[0].sharding.mesh
+    if mesh.axis_names != ("graph",):
+        raise ValueError('packed product graph type must retain the dedicated "graph" mesh axis')
+    return mesh
+
+
+def _packed_product_signature(operator: _PackedJaxLinearARG) -> _PackedProductSignature:
+    return _PackedProductSignature(
+        n_samples=operator.n_samples,
+        n_variants=operator.n_variants,
+        capacities=operator.capacities,
+        data_dtype=str(_packed_data_dtype(operator)),
+    )
+
+
+def _packed_data_dtype(operator: _PackedJaxLinearARG) -> Any:
+    return jax.typeof(operator.graph).component_types[_CAPACITY_INDEX["data"]].dtype
 
 
 def _operator_mesh(operator: _PackedJaxLinearARG) -> Mesh:
