@@ -1,4 +1,6 @@
-# pattern: Imperative Shell
+# pattern: Mixed (unavoidable)
+# Reason: The opt-in benchmark shell shares pure metric extraction and table
+# formatting with the executable benchmark so reported IR facts stay aligned.
 
 from __future__ import annotations
 
@@ -15,11 +17,13 @@ import numpy as np
 import polars as pl
 import pytest
 
+from jax.extend import core as jax_core
 from jax.sharding import Mesh, NamedSharding
 
 from linear_dag.core.jaxlinarg import Backend, JaxParallelOperator
 from linear_dag.core.jaxlinarg.ingress import _packed_from_hdf5, _PackedJaxLinearARG
 from linear_dag.core.jaxlinarg.kernels import ffi_cpu
+from linear_dag.core.jaxlinarg.packed_products import lineararg_matmat
 from linear_dag.core.jaxlinarg.packing import GRAPH_FIELD_NAMES, PACKED_COMPONENT_NAMES
 from linear_dag.core.parallel_processing import ParallelOperator
 
@@ -45,6 +49,9 @@ class ParallelBenchmarkResult:
     component_count: int | None = None
     pytree_leaf_count: int | None = None
     resident_devices_valid: bool | None = None
+    graph_constant_bytes: int | None = None
+    graph_operand_count: int | None = None
+    stablehlo_operation_count: int | None = None
 
 
 def test_jax_parallel_operator_benchmark(
@@ -130,11 +137,15 @@ def _benchmark_packed_ingress(
     observed_graph_bytes = _graph_bytes_by_device(op)
     if sum(observed_graph_bytes.values()) != sum(packed.diagnostics.final_graph_bytes_by_device):
         pytest.fail("packed ingress diagnostics do not match observed graph residency")
+    graph_constant_bytes, graph_operand_count, stablehlo_operation_count = _packed_ir_metrics(op)
     return _packed_memory_result(
         packed.diagnostics,
         operator=f"packed_jax_lineararg_{num_devices}_device",
         construction_seconds=construction_seconds,
         resident_devices_valid=_packed_fields_have_expected_residency(op),
+        graph_constant_bytes=graph_constant_bytes,
+        graph_operand_count=graph_operand_count,
+        stablehlo_operation_count=stablehlo_operation_count,
     )
 
 
@@ -144,6 +155,9 @@ def _packed_memory_result(
     operator: str,
     construction_seconds: float,
     resident_devices_valid: bool,
+    graph_constant_bytes: int | None = None,
+    graph_operand_count: int | None = None,
+    stablehlo_operation_count: int | None = None,
 ) -> ParallelBenchmarkResult:
     """Convert packed ingress diagnostics into the shared benchmark record."""
     final_graph_bytes = tuple(int(value) for value in diagnostics.final_graph_bytes_by_device)
@@ -163,7 +177,68 @@ def _packed_memory_result(
         component_count=int(diagnostics.component_count),
         pytree_leaf_count=int(diagnostics.pytree_leaf_count),
         resident_devices_valid=resident_devices_valid,
+        graph_constant_bytes=graph_constant_bytes,
+        graph_operand_count=graph_operand_count,
+        stablehlo_operation_count=stablehlo_operation_count,
     )
+
+
+def _packed_ir_metrics(op: _PackedJaxLinearARG) -> tuple[int, int, int]:
+    """Return explicit forward-program constant, operand, and operation counts."""
+    values = jax.ShapeDtypeStruct((op.n_variants, 1), op.data.dtype)
+    closed_jaxpr = jax.make_jaxpr(lineararg_matmat)(op, values)
+    stablehlo = jax.jit(lineararg_matmat).lower(op, values).compiler_ir("stablehlo")
+    return (
+        _closed_jaxpr_array_constant_bytes(closed_jaxpr),
+        _stablehlo_graph_operand_count(stablehlo),
+        _stablehlo_operation_count(stablehlo),
+    )
+
+
+def _closed_jaxpr_array_constant_bytes(closed_jaxpr: jax_core.ClosedJaxpr) -> int:
+    total = 0
+
+    def visit(value: Any) -> None:
+        nonlocal total
+        if isinstance(value, jax_core.ClosedJaxpr):
+            for constant in value.consts:
+                if isinstance(constant, (jax.Array, np.ndarray)):
+                    total += int(constant.size * constant.dtype.itemsize)
+            visit(value.jaxpr)
+        elif isinstance(value, jax_core.Jaxpr):
+            for equation in value.eqns:
+                visit(equation.params)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                visit(nested)
+        elif isinstance(value, (tuple, list)):
+            for nested in value:
+                visit(nested)
+
+    visit(closed_jaxpr)
+    return total
+
+
+def _walk_ir_operations(value: Any):
+    operation = getattr(value, "operation", value)
+    yield operation
+    for region in operation.regions:
+        for block in region.blocks:
+            for nested in block.operations:
+                yield from _walk_ir_operations(nested)
+
+
+def _stablehlo_graph_operand_count(stablehlo: Any) -> int:
+    main = next(
+        operation
+        for operation in stablehlo.body.operations
+        if operation.operation.name == "func.func" and str(operation.attributes["sym_name"]) == '"main"'
+    )
+    return sum("graph" in str(attributes) for attributes in main.attributes["arg_attrs"])
+
+
+def _stablehlo_operation_count(stablehlo: Any) -> int:
+    return sum(operation.name.startswith("stablehlo.") for operation in _walk_ir_operations(stablehlo))
 
 
 def _packed_gate_failures(result: ParallelBenchmarkResult) -> tuple[str, ...]:
@@ -437,8 +512,9 @@ def _format_results_table(results: list[ParallelBenchmarkResult]) -> str:
     lines = [
         "| operator | operation | k | median seconds | ratio to ParallelOperator "
         "| canonical graph MiB | padded graph MiB | descriptor MiB | padding ratio "
-        "| resident graph MiB | max device graph MiB | staging MiB | components | PyTree leaves |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| resident graph MiB | max device graph MiB | staging MiB | components | PyTree leaves "
+        "| graph constant bytes | graph operands | StableHLO ops |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for result in sorted(results, key=lambda item: (item.operation, item.operator, item.k)):
         ratio = "" if result.ratio_to_parallel_operator is None else f"{result.ratio_to_parallel_operator:.3f}"
@@ -452,11 +528,17 @@ def _format_results_table(results: list[ParallelBenchmarkResult]) -> str:
         staging_mib = _format_mib(result.staging_bytes)
         component_count = "" if result.component_count is None else str(result.component_count)
         pytree_leaf_count = "" if result.pytree_leaf_count is None else str(result.pytree_leaf_count)
+        graph_constant_bytes = "" if result.graph_constant_bytes is None else str(result.graph_constant_bytes)
+        graph_operand_count = "" if result.graph_operand_count is None else str(result.graph_operand_count)
+        stablehlo_operation_count = (
+            "" if result.stablehlo_operation_count is None else str(result.stablehlo_operation_count)
+        )
         lines.append(
             f"| {result.operator} | {result.operation} | {k} | "
             f"{result.median_seconds:.6f} | {ratio} | {canonical_mib} | {padded_mib} | {descriptor_mib} | "
             f"{padding_ratio} | {resident_mib} | {max_device_mib} | {staging_mib} | "
-            f"{component_count} | {pytree_leaf_count} |"
+            f"{component_count} | {pytree_leaf_count} | {graph_constant_bytes} | "
+            f"{graph_operand_count} | {stablehlo_operation_count} |"
         )
     return "\n".join(lines)
 

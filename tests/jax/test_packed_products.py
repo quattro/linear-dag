@@ -15,6 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jax.extend import core as jax_core
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from scipy import sparse
 
@@ -33,8 +34,10 @@ from linear_dag.core.jaxlinarg.packing import (
     BLOCK_DESCRIPTOR_FIELDS,
     LinearARGBlockArrays,
     PACKED_COMPONENT_NAMES,
+    VALID_LENGTH_FIELDS,
 )
 from linear_dag.core.lineararg import LinearARG
+from tests.jax.bench import test_parallel_benchmarks
 
 
 def _graph_mesh(num_devices: int = 1) -> Mesh:
@@ -107,6 +110,122 @@ def _larger_block(*, dtype: Any = np.float32) -> LinearARGBlockArrays:
         allele_counts=np.asarray([1, 1, 1], dtype=np.int32),
         n_variants=3,
         n_samples=2,
+    )
+
+
+def _empty_variant_block(*, dtype: Any = np.float32) -> LinearARGBlockArrays:
+    return LinearARGBlockArrays(
+        indptr=np.asarray([0, 0, 0], dtype=np.int32),
+        indices=np.asarray([], dtype=np.int32),
+        data=np.asarray([], dtype=dtype),
+        variant_indices=np.asarray([], dtype=np.int32),
+        flip=np.asarray([], dtype=np.bool_),
+        sample_indices=np.asarray([1, 0], dtype=np.int32),
+        nonunique_indices=np.asarray([0, 1], dtype=np.int32),
+        allele_counts=np.asarray([], dtype=np.int32),
+        n_variants=0,
+        n_samples=2,
+    )
+
+
+def _fixed_capacity_different_block_count_operators() -> tuple[_PackedJaxLinearARG, _PackedJaxLinearARG]:
+    mesh = _two_device_graph_mesh_or_skip()
+    one_block = _packed_from_block_arrays(
+        (_repeated_variant_block(),),
+        mesh=mesh,
+        allow_excess_padding=True,
+    ).operator
+    two_blocks = _packed_from_block_arrays(
+        (_repeated_variant_block(), _empty_variant_block()),
+        mesh=mesh,
+        allow_excess_padding=True,
+    ).operator
+    return one_block, two_blocks
+
+
+def _recursive_closed_jaxpr_constant_metrics(closed_jaxpr: jax_core.ClosedJaxpr) -> tuple[int, int]:
+    array_constant_bytes = 0
+    constvar_count = 0
+
+    def visit(value: Any) -> None:
+        nonlocal array_constant_bytes, constvar_count
+        if isinstance(value, jax_core.ClosedJaxpr):
+            for constant in value.consts:
+                if isinstance(constant, (jax.Array, np.ndarray)):
+                    array_constant_bytes += int(constant.size * constant.dtype.itemsize)
+            visit(value.jaxpr)
+        elif isinstance(value, jax_core.Jaxpr):
+            constvar_count += len(value.constvars)
+            for equation in value.eqns:
+                visit(equation.params)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                visit(nested)
+        elif isinstance(value, (tuple, list)):
+            for nested in value:
+                visit(nested)
+
+    visit(closed_jaxpr)
+    return array_constant_bytes, constvar_count
+
+
+def _recursive_jaxpr_equation_structure(closed_jaxpr: jax_core.ClosedJaxpr) -> tuple[Any, ...]:
+    structures: list[Any] = []
+
+    def visit(value: Any, path: tuple[Any, ...]) -> None:
+        if isinstance(value, jax_core.ClosedJaxpr):
+            visit(value.jaxpr, path)
+        elif isinstance(value, jax_core.Jaxpr):
+            structures.append((path, tuple(equation.primitive.name for equation in value.eqns)))
+            for equation_index, equation in enumerate(value.eqns):
+                for name, nested in sorted(equation.params.items()):
+                    visit(nested, (*path, equation_index, name))
+        elif isinstance(value, dict):
+            for name, nested in sorted(value.items()):
+                visit(nested, (*path, name))
+        elif isinstance(value, (tuple, list)):
+            for index, nested in enumerate(value):
+                visit(nested, (*path, index))
+
+    visit(closed_jaxpr, ())
+    return tuple(structures)
+
+
+def _walk_ir_operations(value: Any):
+    operation = getattr(value, "operation", value)
+    yield operation
+    for region in operation.regions:
+        for block in region.blocks:
+            for nested in block.operations:
+                yield from _walk_ir_operations(nested)
+
+
+def _ir_operation_names(stablehlo: Any) -> tuple[str, ...]:
+    return tuple(operation.name for operation in _walk_ir_operations(stablehlo))
+
+
+def _stablehlo_operation_count(stablehlo: Any) -> int:
+    return sum(name.startswith("stablehlo.") for name in _ir_operation_names(stablehlo))
+
+
+def _main_graph_operand_attributes(stablehlo: Any) -> tuple[str, ...]:
+    main = next(
+        operation
+        for operation in stablehlo.body.operations
+        if operation.operation.name == "func.func" and str(operation.attributes["sym_name"]) == '"main"'
+    )
+    argument_attributes = main.attributes["arg_attrs"]
+    return tuple(str(attributes) for attributes in argument_attributes if "graph" in str(attributes))
+
+
+def _collective_type_signatures(stablehlo: Any, name: str) -> tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]:
+    return tuple(
+        (
+            tuple(str(operand.type) for operand in operation.operands),
+            tuple(str(result.type) for result in operation.results),
+        )
+        for operation in _walk_ir_operations(stablehlo)
+        if operation.name == name
     )
 
 
@@ -292,12 +411,17 @@ def test_shard_map_graph_fields_retain_one_assigned_local_shard() -> None:
         mesh=mesh,
         allow_excess_padding=True,
     ).operator
+    original_residency = {
+        name: tuple((shard.device, shard.index) for shard in getattr(operator, name).addressable_shards)
+        for name in PACKED_COMPONENT_NAMES
+    }
     operator.matmat(jnp.ones((operator.n_variants, 1), dtype=jnp.float32)).block_until_ready()
     operator.rmatmat(jnp.ones((operator.n_samples, 1), dtype=jnp.float32)).block_until_ready()
 
     for name in PACKED_COMPONENT_NAMES:
         array = getattr(operator, name)
         assert len(array.addressable_shards) == 2
+        assert tuple((shard.device, shard.index) for shard in array.addressable_shards) == original_residency[name]
         for shard in array.addressable_shards:
             assert shard.data.shape[0] == 1
             assert shard.data.devices() == {shard.device}
@@ -326,13 +450,19 @@ def test_shard_map_sample_sharded_forward_uses_compatible_reduce_scatter() -> No
     expected = _packed_from_block_arrays(blocks, mesh=_graph_mesh(), allow_excess_padding=True).operator.matmat(w)
 
     actual = lineararg_matmat(operator, w, out_sharding=requested)
-    stablehlo = str(
+    stablehlo_module = (
         jax.jit(partial(lineararg_matmat, out_sharding=requested)).lower(operator, w).compiler_ir("stablehlo")
     )
+    stablehlo = str(stablehlo_module)
 
     assert isinstance(actual.sharding, NamedSharding)
     assert actual.sharding.spec == P("graph")
     assert "stablehlo.reduce_scatter" in stablehlo
+    assert "stablehlo.all_gather" not in stablehlo
+    assert "stablehlo.collective_broadcast" not in stablehlo
+    assert _collective_type_signatures(stablehlo_module, "stablehlo.reduce_scatter") == (
+        (("tensor<2x2xf32>",), ("tensor<1x2xf32>",)),
+    )
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
 
 
@@ -438,3 +568,153 @@ def test_shard_map_reduce_scatter_rejects_indivisible_sample_dimension() -> None
 
     with pytest.raises(ValueError, match="divisible"):
         lineararg_matmat(operator, jnp.ones((1, 1), dtype=jnp.float32), out_sharding=requested)
+
+
+@pytest.mark.parametrize(
+    ("function", "compile_method", "leading_dimension"),
+    [
+        (lineararg_matmat, "compile_matmat", "n_variants"),
+        (lineararg_rmatmat, "compile_rmatmat", "n_samples"),
+    ],
+)
+def test_explicit_and_safe_product_jaxprs_have_no_array_constants(
+    function,
+    compile_method: str,
+    leading_dimension: str,
+) -> None:
+    operator = _packed_from_block_arrays(
+        (_repeated_variant_block(),),
+        mesh=_two_device_graph_mesh_or_skip(),
+        allow_excess_padding=True,
+    ).operator
+    values = jnp.ones((getattr(operator, leading_dimension), 2), dtype=jnp.float32)
+    compiled = getattr(operator, compile_method)()
+
+    explicit_jaxpr = jax.make_jaxpr(function)(operator, values)
+    safe_jaxpr = jax.make_jaxpr(compiled.compiled_function)(compiled.operator, values)
+
+    assert _recursive_closed_jaxpr_constant_metrics(explicit_jaxpr) == (0, 0)
+    assert _recursive_closed_jaxpr_constant_metrics(safe_jaxpr) == (0, 0)
+
+
+def test_closed_over_product_diagnostic_exposes_graph_constants() -> None:
+    operator = _packed_from_block_arrays(
+        (_repeated_variant_block(),),
+        mesh=_two_device_graph_mesh_or_skip(),
+        allow_excess_padding=True,
+    ).operator
+    values = jnp.ones((operator.n_variants, 2), dtype=jnp.float32)
+    expected_bytes = sum(int(getattr(operator, name).nbytes) for name in PACKED_COMPONENT_NAMES)
+
+    closed_jaxpr = jax.make_jaxpr(lambda operand: operator.matmat(operand))(values)
+    constant_bytes, constvar_count = _recursive_closed_jaxpr_constant_metrics(closed_jaxpr)
+
+    assert constant_bytes == expected_bytes
+    assert constvar_count == len(PACKED_COMPONENT_NAMES)
+
+
+@pytest.mark.parametrize(
+    ("function", "leading_dimension"),
+    [
+        (lineararg_matmat, "n_variants"),
+        (lineararg_rmatmat, "n_samples"),
+    ],
+)
+def test_fixed_capacity_source_block_count_preserves_jaxpr_and_stablehlo_structure(
+    function,
+    leading_dimension: str,
+) -> None:
+    operators = _fixed_capacity_different_block_count_operators()
+    values = tuple(jnp.ones((getattr(operator, leading_dimension), 2), dtype=jnp.float32) for operator in operators)
+    closed_jaxprs = tuple(
+        jax.make_jaxpr(function)(operator, operand) for operator, operand in zip(operators, values, strict=True)
+    )
+    stablehlos = tuple(
+        jax.jit(function).lower(operator, operand).compiler_ir("stablehlo")
+        for operator, operand in zip(operators, values, strict=True)
+    )
+
+    assert operators[0].capacities == operators[1].capacities
+    assert operators[0].block_descriptors.shape == operators[1].block_descriptors.shape
+    assert jax.tree_util.tree_structure(operators[0]) == jax.tree_util.tree_structure(operators[1])
+    block_count_column = VALID_LENGTH_FIELDS.index("block_descriptors")
+    assert tuple(int(np.asarray(operator.valid_lengths)[:, block_count_column].sum()) for operator in operators) == (
+        1,
+        2,
+    )
+    assert len({_recursive_jaxpr_equation_structure(jaxpr) for jaxpr in closed_jaxprs}) == 1
+    assert len({_stablehlo_operation_count(stablehlo) for stablehlo in stablehlos}) == 1
+    assert len({_main_graph_operand_attributes(stablehlo) for stablehlo in stablehlos}) == 1
+    assert len({_ir_operation_names(stablehlo).count("stablehlo.case") for stablehlo in stablehlos}) == 1
+
+
+@pytest.mark.parametrize(
+    ("function", "leading_dimension", "collective"),
+    [
+        (lineararg_matmat, "n_variants", "stablehlo.all_reduce"),
+        (lineararg_rmatmat, "n_samples", "stablehlo.all_reduce"),
+    ],
+)
+def test_lowered_ir_preserves_graph_sharding_and_collects_only_dense_results(
+    function,
+    leading_dimension: str,
+    collective: str,
+) -> None:
+    operator = _packed_from_block_arrays(
+        (_repeated_variant_block(),),
+        mesh=_two_device_graph_mesh_or_skip(),
+        allow_excess_padding=True,
+    ).operator
+    values = jnp.ones((getattr(operator, leading_dimension), 2), dtype=jnp.float32)
+    stablehlo = jax.jit(function).lower(operator, values).compiler_ir("stablehlo")
+    names = _ir_operation_names(stablehlo)
+    graph_operand_attributes = _main_graph_operand_attributes(stablehlo)
+
+    assert len(graph_operand_attributes) == len(PACKED_COMPONENT_NAMES) - 1
+    assert all("sdy.sharding" in attributes and '"graph"' in attributes for attributes in graph_operand_attributes)
+    assert "sdy.manual_computation" in names
+    assert "stablehlo.broadcast_in_dim" in names
+    assert "stablehlo.all_gather" not in names
+    assert "stablehlo.collective_broadcast" not in names
+    assert _collective_type_signatures(stablehlo, collective) == ((("tensor<2x2xf32>",), ("tensor<2x2xf32>",)),)
+
+
+def test_packed_benchmark_contract_includes_ir_metric_columns() -> None:
+    result_fields = {field.name for field in fields(test_parallel_benchmarks.ParallelBenchmarkResult)}
+    assert {
+        "graph_constant_bytes",
+        "graph_operand_count",
+        "stablehlo_operation_count",
+    } <= result_fields
+
+    packed = _packed_from_block_arrays(
+        (_repeated_variant_block(),),
+        mesh=_two_device_graph_mesh_or_skip(),
+        allow_excess_padding=True,
+    )
+    operator = packed.operator
+    constant_bytes, operand_count, operation_count = test_parallel_benchmarks._packed_ir_metrics(operator)
+    values = jax.ShapeDtypeStruct((operator.n_variants, 1), operator.data.dtype)
+    closed_jaxpr = jax.make_jaxpr(lineararg_matmat)(operator, values)
+    stablehlo = jax.jit(lineararg_matmat).lower(operator, values).compiler_ir("stablehlo")
+    result = test_parallel_benchmarks._packed_memory_result(
+        packed.diagnostics,
+        operator="packed",
+        construction_seconds=0.0,
+        resident_devices_valid=True,
+        graph_constant_bytes=constant_bytes,
+        graph_operand_count=operand_count,
+        stablehlo_operation_count=operation_count,
+    )
+    table = test_parallel_benchmarks._format_results_table([result])
+
+    assert constant_bytes == 0
+    assert operand_count == len(PACKED_COMPONENT_NAMES) - 1
+    assert (constant_bytes, operand_count, operation_count) == (
+        _recursive_closed_jaxpr_constant_metrics(closed_jaxpr)[0],
+        len(_main_graph_operand_attributes(stablehlo)),
+        _stablehlo_operation_count(stablehlo),
+    )
+    assert "graph constant bytes" in table
+    assert "graph operands" in table
+    assert "StableHLO ops" in table
