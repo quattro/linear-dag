@@ -3,10 +3,10 @@ requires = [
   "hatchling",
   "hatch-vcs",
   "hatch-cython",
-  "jax>=0.10,<0.11",
-  "jaxlib>=0.10,<0.11",
-  "numpy",
-  "scipy>=1.14.1",
+  "jax==0.11.0",
+  "jaxlib==0.11.0",
+  "numpy>=2.1",
+  "scipy>=1.15",
   "setuptools>=80.9.0",
 ]
 build-backend = "hatchling.build"
@@ -16,7 +16,7 @@ name = "linear-dag"
 dynamic = ["version"]
 description = ''
 readme = "README.md"
-requires-python = ">=3.11,<3.15"
+requires-python = ">=3.12,<3.15"
 license = "MIT"
 keywords = [
   "statistics",
@@ -37,7 +37,6 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Information Analysis",
   "Topic :: Scientific/Engineering :: Mathematics",
   "Programming Language :: Python",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
@@ -45,12 +44,12 @@ classifiers = [
 ]
 dependencies = [
   "cyvcf2",
-  "jax>=0.10,<0.11",
-  "jaxlib>=0.10,<0.11",
+  "jax==0.11.0",
+  "jaxlib==0.11.0",
   "equinox>=0.11.10",
   "jaxtyping>=0.2.36",
-  "numpy",
-  "scipy>=1.14.1",
+  "numpy>=2.1",
+  "scipy>=1.15",
   "polars>=1.25.0",
   "psutil",
   "h5py>=3.13.0",
@@ -107,11 +106,11 @@ exclude = ["docs/"]
 dependencies = [
   "coverage[toml]>=6.5",
   "pytest",
-  "numpy",
+  "numpy>=2.1",
 ]
 
 [tool.hatch.build.targets.wheel.hooks.cython]
-dependencies = ["Cython", "numpy", "hatch-cython", "scipy"]
+dependencies = ["Cython", "numpy>=2.1", "hatch-cython", "scipy>=1.15"]
 
 [tool.hatch.build.targets.wheel.hooks.cython.options]
 src = "linear_dag"
@@ -135,7 +134,7 @@ cov = [
 ]
 
 [[tool.hatch.envs.all.matrix]]
-python = ["3.11", "3.12", "3.13", "3.14"]
+python = ["3.12", "3.13", "3.14"]
 
 [tool.hatch.envs.lint]
 detached = true
@@ -158,7 +157,7 @@ all = [
 ]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 120
 
 [tool.ruff.lint]
