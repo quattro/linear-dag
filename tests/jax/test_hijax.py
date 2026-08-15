@@ -309,6 +309,42 @@ else:
 
 
 @pytest.mark.parametrize(
+    ("mutation", "qualified_name"),
+    [
+        ("hijax.HiPrimitive.bind = lambda self, arg: None", "HiPrimitive.bind"),
+        ("hijax.VJPHiPrimitive.__call__ = lambda self, arg: None", "VJPHiPrimitive.__call__"),
+    ],
+)
+def test_hijax_compatibility_rejects_changed_binder_signatures_in_isolated_import(
+    mutation: str,
+    qualified_name: str,
+) -> None:
+    script = f"""
+import jax.experimental.hijax as hijax
+
+{mutation}
+try:
+    import linear_dag.core.jaxlinarg._hijax
+except ImportError as error:
+    print(error)
+else:
+    raise SystemExit("changed HiJAX binder signature was accepted")
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "JAX/JAXlib 0.11.0" in completed.stdout
+    assert qualified_name in completed.stdout
+
+
+@pytest.mark.parametrize(
     ("method", "companion", "leading_dimension"),
     [
         ("matmat", "rmatmat", "n_variants"),
@@ -450,11 +486,162 @@ def test_packed_product_symbolic_zero_dense_tangent_has_output_type() -> None:
     graph_zero = jax.typeof(operator.graph).vspace_zero()
     dense_zero = ad_util.Zero(jax.typeof(values).to_tangent_aval())
 
-    _, residual = primitive.lin((False, False), operator.graph, values)
+    _, residual, output_nonzero = primitive.lin((False, False), operator.graph, values)
     result = primitive.linearized(residual, graph_zero, dense_zero)
 
+    assert output_nonzero is False
     assert isinstance(result, ad_util.Zero)
     assert result.aval == primitive.out_aval.to_tangent_aval()
+
+
+def test_packed_product_actual_jvp_preserves_symbolic_zero_product_path() -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    values = jnp.ones((operator.n_variants, 1), dtype=jnp.float32)
+    tangent = jnp.full_like(values, 2.0)
+
+    def forward(operand):
+        return operator.matmat(jax.lax.stop_gradient(operand)), operand
+
+    (_, primal_passthrough), (product_tangent, passthrough_tangent) = jax.jvp(
+        forward,
+        (values,),
+        (tangent,),
+    )
+
+    np.testing.assert_array_equal(product_tangent, jnp.zeros_like(operator.matmat(values)))
+    np.testing.assert_array_equal(primal_passthrough, values)
+    np.testing.assert_array_equal(passthrough_tangent, tangent)
+
+
+def test_packed_product_actual_vjp_accepts_symbolic_zero_output_cotangent() -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    values = jnp.ones((operator.n_variants, 1), dtype=jnp.float32)
+    output, pullback = jax.vjp(lambda operand: (operator.matmat(operand), operand), values)
+    product_zero = ad_util.Zero(jax.typeof(output[0]).to_ct_aval())
+    passthrough_cotangent = jnp.full_like(values, 3.0)
+
+    (actual_cotangent,) = pullback((product_zero, passthrough_cotangent))
+
+    np.testing.assert_array_equal(actual_cotangent, passthrough_cotangent)
+
+
+def test_packed_product_reverse_symbolic_zero_remains_symbolic() -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    values = jnp.ones((operator.n_variants, 2), dtype=jnp.float32)
+    primitive = hijax_adapter._matmat_primitive(operator.graph, values)
+    output_zero = ad_util.Zero(primitive.out_aval.to_ct_aval())
+    _, residual, output_nonzero = primitive.vjp_fwd((False, True), operator.graph, values)
+
+    graph_cotangent, dense_cotangent = primitive.vjp_bwd_retval(residual, output_zero)
+    _, inactive_residual, inactive_output_nonzero = primitive.vjp_fwd((False, False), operator.graph, values)
+    inactive_graph_cotangent, inactive_dense_cotangent = primitive.vjp_bwd_retval(
+        inactive_residual,
+        jnp.ones(primitive.out_aval.shape, dtype=primitive.out_aval.dtype),
+    )
+
+    assert output_nonzero is True
+    assert isinstance(graph_cotangent, _PackedGraphZeroValue)
+    assert isinstance(dense_cotangent, ad_util.Zero)
+    assert dense_cotangent.aval == primitive.in_avals[1].to_ct_aval()
+    assert inactive_output_nonzero is False
+    assert isinstance(inactive_graph_cotangent, _PackedGraphZeroValue)
+    assert isinstance(inactive_dense_cotangent, ad_util.Zero)
+    assert inactive_dense_cotangent.aval == primitive.in_avals[1].to_ct_aval()
+
+
+def test_packed_product_identity_includes_dense_and_graph_abstract_signatures() -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    graph_type = jax.typeof(operator.graph)
+    signature = hijax_adapter._signature_from_graph(operator.graph)
+    narrow_values = jnp.ones((operator.n_variants, 1), dtype=jnp.float32)
+    wide_values = jnp.ones((operator.n_variants, 3), dtype=jnp.float32)
+
+    def primitive_for(candidate_graph_type, candidate_values):
+        return hijax_adapter._PackedMatmatPrimitive(
+            candidate_graph_type,
+            jax.typeof(candidate_values),
+            n_samples=signature.n_samples,
+            n_variants=signature.n_variants,
+            capacities=signature.capacities,
+            data_dtype=signature.data_dtype,
+            output_axes=(),
+        )
+
+    def replace_component(index, component_type):
+        components = list(graph_type.component_types)
+        components[index] = component_type
+        return replace(graph_type, component_types=tuple(components))
+
+    narrow = primitive_for(graph_type, narrow_values)
+    wide = primitive_for(graph_type, wide_values)
+    changed_component = graph_type.component_types[1].update(
+        shape=(graph_type.component_types[1].shape[0], graph_type.component_types[1].shape[1] + 1)
+    )
+    changed_shape = primitive_for(replace_component(1, changed_component), narrow_values)
+    changed_dtype = primitive_for(
+        replace_component(1, graph_type.component_types[1].update(dtype=jnp.float32)),
+        narrow_values,
+    )
+    changed_sharding = primitive_for(
+        replace_component(
+            1,
+            graph_type.component_types[1].update(
+                sharding=NamedSharding(
+                    graph_type.component_types[1].sharding.mesh.update_axis_types({"graph": AxisType.Explicit}),
+                    P("graph", None),
+                )
+            ),
+        ),
+        narrow_values,
+    )
+
+    assert narrow != wide
+    assert hash(narrow) != hash(wide)
+    assert len({narrow, changed_shape, changed_dtype, changed_sharding}) == 4
+    assert "dense_abstract_signature" in narrow.params
+    assert "graph_abstract_signature" in narrow.params
+    assert _contains_only_normalized_signature_values(narrow.params["dense_abstract_signature"])
+    assert _contains_only_normalized_signature_values(narrow.params["graph_abstract_signature"])
+
+
+@pytest.mark.parametrize(
+    ("method", "companion_type"),
+    [
+        ("matmat", "_PackedRmatmatPrimitive"),
+        ("rmatmat", "_PackedMatmatPrimitive"),
+    ],
+)
+def test_packed_product_differentiated_jaxpr_uses_companion_primitive(
+    method: str,
+    companion_type: str,
+) -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    leading_dimension = operator.n_variants if method == "matmat" else operator.n_samples
+    values = jnp.ones((leading_dimension, 2), dtype=jnp.float32)
+
+    differentiated = jax.make_jaxpr(jax.grad(lambda operand: jnp.sum(getattr(operator, method)(operand))))(values)
+    primitive_types = [
+        type(equation.params["_prim"]).__name__
+        for equation in differentiated.jaxpr.eqns
+        if equation.primitive.name == "call_hi_primitive"
+    ]
+
+    assert companion_type in primitive_types
+
+
+def test_packed_product_vjp_residual_contains_one_graph_and_no_dense_primal() -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    values = jnp.ones((operator.n_variants, 3), dtype=jnp.float32)
+
+    _, pullback = jax.vjp(lambda operand: operator.matmat(operand), values)
+
+    assert len(pullback.args_res) == 1
+    assert type(pullback.args_res[0]).__name__ == "NotNeeded"
+    assert len(pullback.opaque_residuals) == 1
+    assert pullback.opaque_residuals[0] is operator.graph
+    assert len(pullback.jaxpr.constvars) == 1
+    assert isinstance(pullback.jaxpr.constvars[0].aval, _PackedGraphType)
+    assert all(residual is not values for residual in pullback.opaque_residuals)
 
 
 def test_packed_product_rejects_graph_differentiation_and_batching() -> None:
@@ -512,7 +699,15 @@ def test_project_binders_keep_graph_arrays_out_of_params_and_closures() -> None:
 
     assert len(equation.invars) == 2
     assert isinstance(equation.invars[0].aval, _PackedGraphType)
-    assert set(primitive.params) == {"n_samples", "n_variants", "capacities", "data_dtype", "output_axes"}
+    assert set(primitive.params) == {
+        "n_samples",
+        "n_variants",
+        "capacities",
+        "data_dtype",
+        "output_axes",
+        "dense_abstract_signature",
+        "graph_abstract_signature",
+    }
     assert all(_is_hashable(value) for value in primitive.params.values())
     assert not any(isinstance(value, (_PackedGraphValue, jax.Array, Mesh)) for value in primitive.params.values())
     for binder in (hijax_adapter._bind_matmat_rank2, hijax_adapter._bind_rmatmat_rank2):
@@ -527,3 +722,9 @@ def _is_hashable(value: Any) -> bool:
     except TypeError:
         return False
     return True
+
+
+def _contains_only_normalized_signature_values(value: Any) -> bool:
+    if isinstance(value, tuple):
+        return all(_contains_only_normalized_signature_values(item) for item in value)
+    return value is None or isinstance(value, (bool, int, str))

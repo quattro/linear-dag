@@ -47,11 +47,13 @@ _REQUIRED_HIJAX_SIGNATURES = {
     "HiPspec.to_ct_spec": "(self)",
     "MappingSpec": "()",
     "HiPrimitive": "(name)",
+    "HiPrimitive.bind": "(self, *args, **params)",
     "HiPrimitive.abstract_eval": "(self, *arg_avals, **params)",
     "HiPrimitive.to_lojax": "(self, *lotypes_wrapped_in_hitypes, **params)",
     "HiPrimitive.jvp": "(self, primals, tangents, **params)",
     "HiPrimitive.transpose": "(self, *args, **params)",
     "VJPHiPrimitive": "()",
+    "VJPHiPrimitive.__call__": "(self, *args)",
     "VJPHiPrimitive.expand": "(self, *args)",
     "VJPHiPrimitive.lin": "(self, nzs_in, *primals)",
     "VJPHiPrimitive.linearized": "(self, residuals, *tangents)",
@@ -388,6 +390,83 @@ def _validate_graph_pspec(spec: hijax.HiPspec, graph_type: _PackedGraphType) -> 
     return spec
 
 
+def _shape_signature(shape: tuple[Any, ...]) -> tuple[int | str, ...]:
+    return tuple(int(dimension) if isinstance(dimension, int) else str(dimension) for dimension in shape)
+
+
+def _partition_spec_signature(spec: P) -> tuple[Any, ...]:
+    def normalize_axis(axis: Any) -> Any:
+        if axis is None:
+            return None
+        if isinstance(axis, tuple):
+            return tuple(normalize_axis(item) for item in axis)
+        return str(axis)
+
+    return tuple(normalize_axis(axis) for axis in spec)
+
+
+def _mesh_signature(mesh: Any) -> tuple[Any, ...]:
+    abstract_device = getattr(mesh, "abstract_device", None)
+    abstract_device_signature = (
+        ()
+        if abstract_device is None
+        else (
+            str(abstract_device.device_kind),
+            None if abstract_device.num_cores is None else int(abstract_device.num_cores),
+            str(abstract_device.platform),
+        )
+    )
+    try:
+        devices = tuple(
+            (
+                str(device.platform),
+                int(device.process_index),
+                int(device.id),
+                str(device.device_kind),
+            )
+            for device in mesh.devices.flat
+        )
+    except (AttributeError, ValueError):
+        devices = ()
+    return (
+        tuple(str(name) for name in mesh.axis_names),
+        tuple((str(name), int(size)) for name, size in mesh.shape.items()),
+        tuple(str(axis_type) for axis_type in mesh.axis_types),
+        abstract_device_signature,
+        devices,
+    )
+
+
+def _sharding_signature(sharding: Any) -> tuple[Any, ...]:
+    if isinstance(sharding, NamedSharding):
+        return (
+            "NamedSharding",
+            _mesh_signature(sharding.mesh),
+            _partition_spec_signature(sharding.spec),
+            str(sharding.memory_kind),
+        )
+    return (
+        f"{type(sharding).__module__}.{type(sharding).__qualname__}",
+        str(sharding),
+    )
+
+
+def _dense_abstract_signature(dense_type: Any) -> tuple[Any, ...]:
+    return ("dense", _shape_signature(dense_type.shape), str(dense_type.dtype))
+
+
+def _graph_abstract_signature(graph_type: _PackedGraphType) -> tuple[Any, ...]:
+    return tuple(
+        (
+            "component",
+            _shape_signature(component_type.shape),
+            str(component_type.dtype),
+            _sharding_signature(component_type.sharding),
+        )
+        for component_type in graph_type.component_types
+    )
+
+
 class _PackedProductPrimitive(hijax.VJPHiPrimitive):
     """Shared handwritten transform contract for one packed linear product."""
 
@@ -436,6 +515,8 @@ class _PackedProductPrimitive(hijax.VJPHiPrimitive):
             "capacities": tuple(int(value) for value in capacities),
             "data_dtype": str(data_dtype),
             "output_axes": tuple(output_axes),
+            "dense_abstract_signature": _dense_abstract_signature(dense_type),
+            "graph_abstract_signature": _graph_abstract_signature(graph_type),
         }
         super().__init__()
 
@@ -462,13 +543,14 @@ class _PackedProductPrimitive(hijax.VJPHiPrimitive):
             )
         return _lineararg_rmatmat_graph(graph, values, signature=self._signature())
 
-    def lin(self, nzs_in: Any, *primals: Any) -> tuple[Any, Any]:
+    def lin(self, nzs_in: Any, *primals: Any) -> tuple[Any, Any, bool]:
         graph, values = primals
         _reject_nonzero_graph_input(nzs_in[0])
-        return self(graph, values), graph
+        dense_nonzero = bool(nzs_in[1])
+        return self(graph, values), (graph, dense_nonzero), dense_nonzero
 
     def linearized(self, residuals: Any, *tangents: Any) -> Any:
-        graph = residuals
+        graph, _ = residuals
         graph_tangent, values_tangent = tangents
         _validate_graph_zero_tangent(graph_tangent)
         if isinstance(values_tangent, ad_util.Zero):
@@ -477,13 +559,20 @@ class _PackedProductPrimitive(hijax.VJPHiPrimitive):
 
     jvp = hijax.jvp_from_lin
 
-    def vjp_fwd(self, nzs_in: Any, /, *args: Any) -> tuple[Any, Any]:
+    def vjp_fwd(self, nzs_in: Any, /, *args: Any) -> tuple[Any, Any, bool]:
         graph, values = args
         _reject_nonzero_graph_input(nzs_in[0])
-        return self(graph, values), graph
+        dense_nonzero = bool(nzs_in[1])
+        return self(graph, values), (graph, dense_nonzero), dense_nonzero
 
-    def vjp_bwd_retval(self, graph: _PackedGraphValue, output_cotangent: Any):
-        return _PackedGraphZeroValue(graph.metadata), self._bind_companion(graph, output_cotangent)
+    def vjp_bwd_retval(self, residuals: tuple[_PackedGraphValue, bool], output_cotangent: Any):
+        graph, dense_nonzero = residuals
+        graph_cotangent = _PackedGraphZeroValue(graph.metadata)
+        if not dense_nonzero or isinstance(output_cotangent, ad_util.Zero):
+            dense_cotangent = ad_util.Zero(self.in_avals[1].to_ct_aval())
+        else:
+            dense_cotangent = self._bind_companion(graph, output_cotangent)
+        return graph_cotangent, dense_cotangent
 
     def transpose(self, out_ct: Any, *maybe_accumulators: Any) -> None:
         graph, values_accumulator = maybe_accumulators
