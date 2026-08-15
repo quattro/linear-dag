@@ -66,6 +66,16 @@ _REQUIRED_HIJAX_SIGNATURES = {
 }
 
 
+class _PackedGraphDType:
+    """Sentinel rejected by dtype consumers but accepted by JAX type probes."""
+
+    def __repr__(self) -> str:
+        return f"{_OPAQUE_GRAPH_GUIDANCE}; graph differentiation is not supported"
+
+
+_PACKED_GRAPH_DTYPE = _PackedGraphDType()
+
+
 def _assert_hijax_compatibility() -> None:
     """Fail once, at the adapter boundary, for unsupported HiJAX surfaces."""
     incompatibilities = []
@@ -259,6 +269,11 @@ class _PackedGraphType(hijax.HiType):
     def __post_init__(self) -> None:
         if len(self.component_types) != len(PACKED_COMPONENT_NAMES):
             raise ValueError(f"packed graph type must contain {len(PACKED_COMPONENT_NAMES)} component types")
+
+    @property
+    def dtype(self) -> _PackedGraphDType:
+        """Return a sentinel that makes generic dtype consumers fail actionably."""
+        return _PACKED_GRAPH_DTYPE
 
     def lo_ty(self) -> list[Any]:
         return list(self.component_types)

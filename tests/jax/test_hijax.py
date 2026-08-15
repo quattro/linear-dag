@@ -441,18 +441,48 @@ def test_packed_product_composes_with_jit_grad_value_and_grad_and_second_order()
     np.testing.assert_allclose(jit_value, eager_value, rtol=1e-6, atol=1e-6)
 
 
-def test_packed_product_dense_vmap_fuses_vector_and_matrix_batches() -> None:
+@pytest.mark.parametrize(
+    ("method", "leading_dimension"),
+    [
+        ("matmat", "n_variants"),
+        ("rmatmat", "n_samples"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("right_hand_sides", "mapped_axis"),
+    [
+        (None, 0),
+        (None, 1),
+        (2, 0),
+        (2, 1),
+        (2, 2),
+    ],
+)
+def test_packed_product_dense_vmap_fuses_vector_and_matrix_batches(
+    method: str,
+    leading_dimension: str,
+    right_hand_sides: int | None,
+    mapped_axis: int,
+) -> None:
     operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
-    vector_batch = jnp.arange(6, dtype=jnp.float32).reshape(3, operator.n_variants) / 4
-    matrix_batch = jnp.arange(12, dtype=jnp.float32).reshape(3, operator.n_variants, 2) / 5
+    logical_shape = (getattr(operator, leading_dimension),)
+    if right_hand_sides is not None:
+        logical_shape += (right_hand_sides,)
+    batch_size = 3
+    batch_first = (
+        jnp.arange(batch_size * np.prod(logical_shape), dtype=jnp.float32).reshape(
+            batch_size,
+            *logical_shape,
+        )
+        / 5
+    )
+    values = jnp.moveaxis(batch_first, 0, mapped_axis)
+    product = getattr(operator, method)
 
-    actual_vectors = jax.vmap(operator.matmat)(vector_batch)
-    actual_matrices = jax.vmap(operator.matmat)(matrix_batch)
-    expected_vectors = jnp.stack([operator.matmat(value) for value in vector_batch])
-    expected_matrices = jnp.stack([operator.matmat(value) for value in matrix_batch])
+    actual = jax.vmap(product, in_axes=mapped_axis, out_axes=mapped_axis)(values)
+    expected = jnp.stack([product(value) for value in batch_first], axis=mapped_axis)
 
-    np.testing.assert_allclose(actual_vectors, expected_vectors, rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(actual_matrices, expected_matrices, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 
 
 def test_packed_product_invariant_graph_scan_remat_and_dce() -> None:
@@ -726,17 +756,46 @@ def test_packed_product_vjp_residual_contains_one_graph_and_no_dense_primal() ->
     assert all(residual is not values for residual in pullback.opaque_residuals)
 
 
-def test_packed_product_rejects_graph_differentiation_and_batching() -> None:
+@pytest.mark.parametrize(
+    "transform",
+    ["jvp", "vjp", "grad", "jacfwd", "jacrev", "linear_transpose"],
+)
+def test_packed_product_rejects_every_graph_differentiation_transform_actionably(transform: str) -> None:
     operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
     values = jnp.ones((operator.n_variants, 1), dtype=jnp.float32)
+    signature = hijax_adapter._signature_from_graph(operator.graph)
+
+    def product(graph):
+        return hijax_adapter._bind_matmat_rank2(
+            graph,
+            values,
+            signature=signature,
+            output_axes=(),
+        )
+
+    def differentiate_graph() -> None:
+        if transform == "jvp":
+            jax.jvp(product, (operator.graph,), (operator.graph,))
+        elif transform == "vjp":
+            jax.vjp(product, operator.graph)
+        elif transform == "grad":
+            jax.grad(lambda graph: jnp.sum(product(graph)))(operator.graph)
+        elif transform == "jacfwd":
+            jax.jacfwd(product)(operator.graph)
+        elif transform == "jacrev":
+            jax.jacrev(product)(operator.graph)
+        else:
+            jax.linear_transpose(product, operator.graph)(jnp.ones((operator.n_samples, 1), dtype=jnp.float32))
 
     with pytest.raises(TypeError, match="opaque graph.*invariant"):
-        jax.jvp(
-            lambda graph_operator: graph_operator.matmat(values),
-            (operator,),
-            (operator,),
-        )
+        differentiate_graph()
+
+
+def test_packed_product_rejects_graph_batching() -> None:
+    operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
+    values = jnp.ones((operator.n_variants, 1), dtype=jnp.float32)
     signature = hijax_adapter._signature_from_graph(operator.graph)
+
     with pytest.raises(TypeError, match="opaque graph.*invariant"):
         jax.vmap(
             lambda graph: hijax_adapter._bind_matmat_rank2(
