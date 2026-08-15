@@ -405,6 +405,10 @@ def _partition_spec_signature(spec: P) -> tuple[Any, ...]:
     return tuple(normalize_axis(axis) for axis in spec)
 
 
+def _axis_names_signature(axis_names: Any) -> tuple[str, ...]:
+    return tuple(sorted(str(axis_name) for axis_name in axis_names))
+
+
 def _mesh_signature(mesh: Any) -> tuple[Any, ...]:
     abstract_device = getattr(mesh, "abstract_device", None)
     abstract_device_signature = (
@@ -439,11 +443,15 @@ def _mesh_signature(mesh: Any) -> tuple[Any, ...]:
 
 def _sharding_signature(sharding: Any) -> tuple[Any, ...]:
     if isinstance(sharding, NamedSharding):
+        logical_device_ids = getattr(sharding, "_logical_device_ids", None)
+        if logical_device_ids is not None:
+            logical_device_ids = tuple(int(device_id) for device_id in logical_device_ids.flat)
         return (
             "NamedSharding",
             _mesh_signature(sharding.mesh),
             _partition_spec_signature(sharding.spec),
             str(sharding.memory_kind),
+            logical_device_ids,
         )
     return (
         f"{type(sharding).__module__}.{type(sharding).__qualname__}",
@@ -451,17 +459,43 @@ def _sharding_signature(sharding: Any) -> tuple[Any, ...]:
     )
 
 
+def _manual_axis_type_signature(manual_axis_type: Any) -> tuple[Any, ...]:
+    unreduced_kind = manual_axis_type.unreduced_kind
+    return (
+        "ManualAxisType",
+        _axis_names_signature(manual_axis_type.varying),
+        _axis_names_signature(manual_axis_type.unreduced),
+        _axis_names_signature(manual_axis_type.reduced),
+        None
+        if unreduced_kind is None
+        else (f"{type(unreduced_kind).__module__}.{type(unreduced_kind).__qualname__}", unreduced_kind.name),
+    )
+
+
+def _memory_space_signature(memory_space: Any) -> tuple[str, str]:
+    return (f"{type(memory_space).__module__}.{type(memory_space).__qualname__}", memory_space.name)
+
+
+def _shaped_array_signature(array_type: Any) -> tuple[Any, ...]:
+    return (
+        ("shape", _shape_signature(array_type.shape)),
+        ("dtype", str(array_type.dtype)),
+        ("weak_type", bool(array_type.weak_type)),
+        ("sharding", _sharding_signature(array_type.sharding)),
+        ("manual_axis_type", _manual_axis_type_signature(array_type.manual_axis_type)),
+        ("memory_space", _memory_space_signature(array_type.memory_space)),
+    )
+
+
 def _dense_abstract_signature(dense_type: Any) -> tuple[Any, ...]:
-    return ("dense", _shape_signature(dense_type.shape), str(dense_type.dtype))
+    return ("dense", *_shaped_array_signature(dense_type))
 
 
 def _graph_abstract_signature(graph_type: _PackedGraphType) -> tuple[Any, ...]:
     return tuple(
         (
             "component",
-            _shape_signature(component_type.shape),
-            str(component_type.dtype),
-            _sharding_signature(component_type.sharding),
+            *_shaped_array_signature(component_type),
         )
         for component_type in graph_type.component_types
     )
@@ -547,10 +581,10 @@ class _PackedProductPrimitive(hijax.VJPHiPrimitive):
         graph, values = primals
         _reject_nonzero_graph_input(nzs_in[0])
         dense_nonzero = bool(nzs_in[1])
-        return self(graph, values), (graph, dense_nonzero), dense_nonzero
+        return self(graph, values), graph, dense_nonzero
 
     def linearized(self, residuals: Any, *tangents: Any) -> Any:
-        graph, _ = residuals
+        graph = residuals
         graph_tangent, values_tangent = tangents
         _validate_graph_zero_tangent(graph_tangent)
         if isinstance(values_tangent, ad_util.Zero):
@@ -563,12 +597,11 @@ class _PackedProductPrimitive(hijax.VJPHiPrimitive):
         graph, values = args
         _reject_nonzero_graph_input(nzs_in[0])
         dense_nonzero = bool(nzs_in[1])
-        return self(graph, values), (graph, dense_nonzero), dense_nonzero
+        return self(graph, values), graph, dense_nonzero
 
-    def vjp_bwd_retval(self, residuals: tuple[_PackedGraphValue, bool], output_cotangent: Any):
-        graph, dense_nonzero = residuals
+    def vjp_bwd_retval(self, graph: _PackedGraphValue, output_cotangent: Any):
         graph_cotangent = _PackedGraphZeroValue(graph.metadata)
-        if not dense_nonzero or isinstance(output_cotangent, ad_util.Zero):
+        if isinstance(output_cotangent, ad_util.Zero):
             dense_cotangent = ad_util.Zero(self.in_avals[1].to_ct_aval())
         else:
             dense_cotangent = self._bind_companion(graph, output_cotangent)
