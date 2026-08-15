@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from functools import cached_property
-from typing import Any
+from typing import Any, cast, Protocol, TYPE_CHECKING
 
 import equinox as eqx
 import jax
@@ -22,6 +22,23 @@ from .wrapper import (
     _mesh_assembly_device,
     JaxParallelOperator,
 )
+
+if TYPE_CHECKING:
+    from .ingress import _PackedJaxLinearARG
+
+
+class _GenotypeOperator(Protocol):
+    """Private structural surface consumed by GRM algebra."""
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        ...
+
+    def matmat(self, x: ArrayLike, /) -> Array:
+        ...
+
+    def rmatmat(self, x: ArrayLike, /) -> Array:
+        ...
 
 
 class JaxGRMOperator(eqx.Module):
@@ -58,14 +75,14 @@ class JaxGRMOperator(eqx.Module):
 
     """
 
-    operator: JaxLinearARG | JaxParallelOperator
+    operator: _GenotypeOperator
     alpha: float = eqx.field(default=-1.0, converter=float, static=True)
     center: bool = eqx.field(default=True, converter=bool, static=True)
     iids: Any = eqx.field(default=None, static=True)
 
     def __check_init__(self) -> None:
-        if not isinstance(self.operator, (JaxLinearARG, JaxParallelOperator)):
-            raise TypeError("operator must be a JaxLinearARG or JaxParallelOperator")
+        if not _is_supported_grm_operator(self.operator):
+            raise TypeError("operator must be an exact or private packed JAX LinearARG operator")
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -75,7 +92,7 @@ class JaxGRMOperator(eqx.Module):
     @property
     def dtype(self) -> object:
         """Return the wrapped operator dtype."""
-        return self.operator.blocks[0].dtype if isinstance(self.operator, JaxParallelOperator) else self.operator.dtype
+        return _operator_dtype(self.operator)
 
     def matmat(self, x: ArrayLike) -> Array:
         """Multiply by the implicit genetic relatedness matrix.
@@ -88,6 +105,9 @@ class JaxGRMOperator(eqx.Module):
 
         - GRM product with the same rank convention as the input.
         """
+        if _is_packed_operator(self.operator):
+            return _packed_grm_matmat(self, x)
+
         x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.dtype)
 
         @jax.custom_vjp
@@ -115,8 +135,10 @@ class JaxGRMOperator(eqx.Module):
                 alpha=self.alpha,
                 center=self.center,
             )
-        else:
+        elif isinstance(self.operator, JaxParallelOperator):
             result = self._device_local_matmat_rank2(x)
+        else:
+            raise TypeError("exact GRM execution requires a JaxLinearARG or JaxParallelOperator")
         return result
 
     def matmat_blockwise(self, x: ArrayLike) -> Array:
@@ -141,6 +163,8 @@ class JaxGRMOperator(eqx.Module):
 
         - `ValueError`: If `x` has an incompatible rank or leading dimension.
         """
+        if not isinstance(self.operator, JaxParallelOperator):
+            raise TypeError("blockwise GRM execution requires an exact-ragged JaxParallelOperator")
         x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.dtype)
         result = self._matmat_blockwise_rank2(x)
         return result[:, 0] if was_vector else result
@@ -164,15 +188,13 @@ class JaxGRMOperator(eqx.Module):
 
     @cached_property
     def _device_blocks(self) -> tuple[tuple[jax.Device | None, JaxLinearARG], ...]:
-        blocks = self.operator.blocks if isinstance(self.operator, JaxParallelOperator) else (self.operator,)
-        devices = (
-            _devices_for_blocks(
-                self.operator.mesh,
-                self.operator.block_ranges,
-                n_blocks=len(blocks),
-            )
-            if isinstance(self.operator, JaxParallelOperator)
-            else (None,)
+        if not isinstance(self.operator, JaxParallelOperator):
+            raise TypeError("device blocks are available only for an exact-ragged JaxParallelOperator")
+        blocks = self.operator.blocks
+        devices = _devices_for_blocks(
+            self.operator.mesh,
+            self.operator.block_ranges,
+            n_blocks=len(blocks),
         )
         return tuple(zip(devices, blocks, strict=True))
 
@@ -217,6 +239,85 @@ class JaxGRMOperator(eqx.Module):
         for contribution in contributions:
             result = result + _device_put_if_needed(contribution, assembly_device)
         return result
+
+
+def _packed_grm_matmat(grm: JaxGRMOperator, values: ArrayLike) -> Array:
+    """Compose one packed GRM product with the carrier supplied explicitly."""
+    if not isinstance(grm, JaxGRMOperator) or not _is_packed_operator(grm.operator):
+        raise TypeError("packed GRM products require a JaxGRMOperator wrapping private packed graph state")
+    matrix, was_vector = _as_rank2_matrix(
+        values,
+        expected_rows=grm.shape[0],
+        dtype=grm.dtype,
+    )
+    packed_operator = cast("_PackedJaxLinearARG", grm.operator)
+    result = _packed_grm_product(
+        packed_operator,
+        matrix,
+        alpha=grm.alpha,
+        center=grm.center,
+    )
+    return result[:, 0] if was_vector else result
+
+
+def _packed_grm_product(
+    operator: _PackedJaxLinearARG,
+    values: Array,
+    *,
+    alpha: float,
+    center: bool,
+) -> Array:
+    from .packed_products import lineararg_matmat, lineararg_rmatmat
+
+    frequencies = _packed_logical_allele_counts(operator, dtype=values.dtype) / jnp.asarray(
+        operator.shape[0], dtype=values.dtype
+    )
+    pq = frequencies * (1 - frequencies)
+    weights = jnp.where(pq > 0, pq**alpha, jnp.zeros_like(pq))
+
+    variant_scores = lineararg_rmatmat(operator, values)
+    if center:
+        value_sums = jnp.sum(values, axis=0, keepdims=True)
+        weighted_scores = weights[:, None] * (variant_scores - frequencies[:, None] * value_sums)
+        correction = jnp.sum(frequencies[:, None] * weighted_scores, axis=0, keepdims=True)
+    else:
+        correction = None
+        weighted_scores = weights[:, None] * variant_scores
+
+    result = lineararg_matmat(operator, weighted_scores)
+    if center:
+        assert correction is not None
+        result = result - correction
+    return result
+
+
+def _packed_logical_allele_counts(operator: _PackedJaxLinearARG, *, dtype: Any) -> Array:
+    """Restore packed allele counts to exact logical variant order."""
+    packed_counts = jnp.asarray(getattr(operator, "allele_counts")).reshape(-1)
+    logical_indices = jnp.asarray(getattr(operator, "logical_variant_indices")).reshape(-1)
+    valid = logical_indices >= 0
+    destinations = jnp.where(valid, logical_indices, 0)
+    updates = jnp.where(valid, packed_counts, 0)
+    counts = jnp.zeros((operator.shape[1],), dtype=packed_counts.dtype).at[destinations].add(updates)
+    return jnp.asarray(counts, dtype=dtype)
+
+
+def _operator_dtype(operator: _GenotypeOperator) -> object:
+    if isinstance(operator, JaxParallelOperator):
+        return operator.blocks[0].dtype
+    if _is_packed_operator(operator):
+        return getattr(operator, "data").dtype
+    return getattr(operator, "dtype")
+
+
+def _is_packed_operator(operator: object) -> bool:
+    from .ingress import _PackedJaxLinearARG
+
+    return isinstance(operator, _PackedJaxLinearARG)
+
+
+def _is_supported_grm_operator(operator: object) -> bool:
+    return isinstance(operator, (JaxLinearARG, JaxParallelOperator)) or _is_packed_operator(operator)
 
 
 @eqx.filter_jit
