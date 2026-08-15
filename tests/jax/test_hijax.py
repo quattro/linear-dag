@@ -11,6 +11,7 @@ import tomllib
 
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import jax
@@ -42,6 +43,7 @@ from linear_dag.core.jaxlinarg.ingress import _packed_from_block_arrays
 from linear_dag.core.jaxlinarg.packing import LinearARGBlockArrays, PACKED_COMPONENT_NAMES
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_FORBIDDEN_HIJAX_TOKENS = ("_hijax", "HiType", "HiPspec", "MappingSpec", "Primitive")
 
 
 def _graph_mesh(num_devices: int = 1) -> Mesh:
@@ -91,6 +93,84 @@ def _operator(*blocks: LinearARGBlockArrays, mesh: Mesh | None = None, dtype: An
         dtype=dtype,
         allow_excess_padding=True,
     ).operator
+
+
+def _assert_hijax_free(label: str, value: Any) -> None:
+    text = str(value)
+    leaked_token = next((token for token in _FORBIDDEN_HIJAX_TOKENS if token in text), None)
+    assert leaked_token is None, f"{label} exposed forbidden HiJAX token {leaked_token}: {text}"
+
+
+def _inspectable_callable(descriptor: Any) -> Any | None:
+    if isinstance(descriptor, (classmethod, staticmethod)):
+        return descriptor.__func__
+    if isinstance(descriptor, property):
+        return descriptor.fget
+    return descriptor if callable(descriptor) else None
+
+
+def _assert_callable_is_hijax_free(label: str, value: Any) -> None:
+    for surface_name, surface in (
+        ("module", getattr(value, "__module__", "")),
+        ("qualname", getattr(value, "__qualname__", "")),
+        ("annotations", inspect.get_annotations(value, eval_str=False)),
+        ("docstring", inspect.getdoc(value) or ""),
+    ):
+        _assert_hijax_free(f"{label} {surface_name}", surface)
+    try:
+        signature = inspect.signature(value)
+    except (TypeError, ValueError):
+        pass
+    else:
+        _assert_hijax_free(f"{label} signature", signature)
+    try:
+        source = inspect.getsource(value)
+    except (OSError, TypeError):
+        pass
+    else:
+        _assert_hijax_free(f"{label} source", source)
+
+
+def _assert_public_module_is_hijax_free(module: ModuleType) -> None:
+    declared_exports = getattr(module, "__all__", None)
+    names = (
+        tuple(declared_exports)
+        if declared_exports is not None
+        else tuple(name for name in vars(module) if not name.startswith("_"))
+    )
+    assert names, f"{module.__name__} has no inspectable public objects"
+    _assert_hijax_free(f"{module.__name__} annotations", getattr(module, "__annotations__", {}))
+
+    for name in names:
+        value = getattr(module, name)
+        _assert_hijax_free(f"{module.__name__}.{name} name", name)
+        _assert_hijax_free(
+            f"{module.__name__}.{name} type",
+            f"{type(value).__module__}.{type(value).__qualname__}",
+        )
+        if not callable(value):
+            continue
+        _assert_callable_is_hijax_free(f"{module.__name__}.{name}", value)
+        if inspect.isclass(value):
+            for method_name, descriptor in vars(value).items():
+                if method_name.startswith("_"):
+                    continue
+                method = _inspectable_callable(descriptor)
+                if method is not None:
+                    _assert_callable_is_hijax_free(f"{module.__name__}.{name}.{method_name}", method)
+
+
+def _assert_pytree_leaves_are_hijax_free(value: Any) -> None:
+    leaves = jax.tree.leaves(value)
+    assert leaves, f"{type(value).__qualname__} unexpectedly has no PyTree leaves"
+    for index, leaf in enumerate(leaves):
+        _assert_hijax_free(
+            f"{type(value).__qualname__} PyTree leaf {index}",
+            (
+                f"{type(leaf).__module__}.{type(leaf).__qualname__}",
+                repr(jax.typeof(leaf)),
+            ),
+        )
 
 
 def test_supported_runtime_metadata_and_lock_are_consistent() -> None:
@@ -263,23 +343,94 @@ def test_graph_zero_contract_has_no_array_payload_and_adds_inertly() -> None:
 
 
 def test_public_exports_and_annotations_do_not_expose_hijax() -> None:
-    forbidden = ("_hijax", "HiType", "HiPspec", "MappingSpec", "Primitive")
     modules = (linear_dag, linear_dag.core, linear_dag.core.jaxlinarg)
 
     for module in modules:
-        exported_names = tuple(getattr(module, "__all__", ()))
-        annotations = tuple(str(annotation) for annotation in getattr(module, "__annotations__", {}).values())
-        public_values = tuple(name for name in vars(module) if not name.startswith("_"))
-        visible = (*exported_names, *annotations, *public_values)
-        assert not any(token in item for token in forbidden for item in visible)
+        _assert_public_module_is_hijax_free(module)
 
-        for name in exported_names:
-            exported = getattr(module, name)
-            if callable(exported):
-                signature = inspect.signature(exported)
-                generated_annotations = inspect.get_annotations(exported, eval_str=False)
-                assert not any(token in str(signature) for token in forbidden)
-                assert not any(token in str(generated_annotations) for token in forbidden)
+
+def test_public_isolation_audit_detects_leaked_annotation_without_dunder_all() -> None:
+    synthetic_module = ModuleType("synthetic_public_module")
+
+    def leaked(graph: Any) -> None:
+        del graph
+
+    leaked.__module__ = synthetic_module.__name__
+    leaked.__annotations__["graph"] = "HiType"
+    setattr(synthetic_module, "leaked", leaked)
+
+    assert not hasattr(synthetic_module, "__all__")
+    with pytest.raises(AssertionError, match="HiType"):
+        _assert_public_module_is_hijax_free(synthetic_module)
+
+
+def test_exact_public_jax_operator_pytrees_do_not_expose_hijax() -> None:
+    arrays = _block()
+    block = linear_dag.JaxLinearARG.from_lineararg_arrays(
+        indptr=arrays.indptr,
+        indices=arrays.indices,
+        data=arrays.data,
+        variant_indices=arrays.variant_indices,
+        flip=arrays.flip,
+        sample_indices=arrays.sample_indices,
+        nonunique_indices=arrays.nonunique_indices,
+        allele_counts=arrays.allele_counts,
+        n_variants=arrays.n_variants,
+        n_samples=arrays.n_samples,
+        backend=linear_dag.Backend.PURE_JAX,
+    )
+    parallel = linear_dag.JaxParallelOperator(
+        blocks=(block,),
+        variant_offsets=(0, block.n_variants),
+        mesh=Mesh(np.asarray(jax.devices("cpu")[:1]), ("blocks",)),
+        block_ranges=((0, 1),),
+        backend=linear_dag.Backend.PURE_JAX,
+    )
+    grm = linear_dag.JaxGRMOperator(block)
+
+    assert type(block) is linear_dag.JaxLinearARG
+    assert type(parallel) is linear_dag.JaxParallelOperator
+    assert type(grm) is linear_dag.JaxGRMOperator
+    for operator in (block, parallel, grm):
+        _assert_pytree_leaves_are_hijax_free(operator)
+
+
+def test_missing_hijax_module_failure_is_actionable_and_chained_in_isolated_import() -> None:
+    script = """
+import importlib.abc
+import sys
+
+class BlockHiJAX(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        del path, target
+        if fullname == "jax.experimental.hijax":
+            raise ModuleNotFoundError("blocked whole HiJAX module")
+        return None
+
+sys.meta_path.insert(0, BlockHiJAX())
+try:
+    import linear_dag.core.jaxlinarg._hijax
+except ImportError as error:
+    if error.__cause__ is None:
+        raise SystemExit("missing chained import cause")
+    print(error)
+    print(f"cause={type(error.__cause__).__name__}: {error.__cause__}")
+else:
+    raise SystemExit("missing HiJAX module was accepted")
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=_REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert "JAX/JAXlib 0.11.0" in completed.stdout
+    assert "jax.experimental.hijax" in completed.stdout
+    assert "cause=ModuleNotFoundError: blocked whole HiJAX module" in completed.stdout
 
 
 def test_hijax_compatibility_failure_is_actionable_in_isolated_import() -> None:

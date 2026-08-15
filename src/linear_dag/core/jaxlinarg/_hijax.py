@@ -18,13 +18,21 @@ import jaxlib
 
 from jax._src import ad_util
 from jax._src.interpreters import ad
-from jax.experimental import hijax
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from .packing import _PackedGraphLogicalMetadata, PACKED_COMPONENT_NAMES
 
 _OPAQUE_GRAPH_GUIDANCE = "packed LinearARG opaque graph state must be used as an invariant operand"
 _SUPPORTED_JAX_VERSION = "0.11.0"
+
+try:
+    from jax.experimental import hijax
+except ImportError as error:
+    raise ImportError(
+        "linear_dag's private packed adapter supports exactly JAX/JAXlib 0.11.0 and requires "
+        "jax.experimental.hijax, but the experimental module could not be imported"
+    ) from error
+
 _REQUIRED_HIJAX_SIGNATURES = {
     "HiType": "()",
     "HiType.lo_ty": "(self)",
