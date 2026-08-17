@@ -25,6 +25,24 @@ GRAPH_FIELD_NAMES = (
 )
 PACKED_COMPONENT_NAMES = (*GRAPH_FIELD_NAMES, "block_descriptors", "valid_lengths")
 VALID_LENGTH_FIELDS = (*GRAPH_FIELD_NAMES, "block_descriptors")
+# Native packed solves consume a narrower, versioned view of the host packing
+# descriptor. Every offset below is rebased into its device-local flattened
+# graph buffer; lengths are counts in that buffer's element units. Padded rows
+# retain the version, set ``valid`` to zero, and zero every remaining column.
+PACKED_FFI_DESCRIPTOR_VERSION = 1
+PACKED_FFI_DESCRIPTOR_FIELDS = (
+    "version",
+    "valid",
+    "node_start",
+    "node_length",
+    "indptr_start",
+    "indptr_length",
+    "edge_start",
+    "edge_length",
+    "compressed_start",
+    "compressed_length",
+    "min_index_to_keep",
+)
 BLOCK_DESCRIPTOR_FIELDS = (
     "logical_block_index",
     "indptr_start",
