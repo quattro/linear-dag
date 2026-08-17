@@ -108,10 +108,12 @@ parallel_op = JaxParallelOperator.from_hdf5(
 ```
 
 `Backend.AUTO` resolves from the active JAX platform. On CPU it uses
-`Backend.FFI_CPU` when the native handler is registered and otherwise falls back
-to `Backend.PURE_JAX`. Accelerator platforms currently use `Backend.PURE_JAX`.
-Explicit `Backend.FFI_CPU` requests also fall back to `Backend.PURE_JAX` with a
-warning when the native handler is unavailable.
+`Backend.FFI_CPU` when the representation's complete native target set is
+registered and otherwise falls back to `Backend.PURE_JAX`. Accelerator platforms
+currently use `Backend.PURE_JAX`. Explicit `Backend.FFI_CPU` requests are strict:
+operator construction raises a `RuntimeError` on non-CPU platforms or when the
+representation's required native targets are unavailable. Use `Backend.AUTO` for
+silent fallback or `Backend.PURE_JAX` to require the portable implementation.
 
 For a multi-device mesh, each ragged LinearARG block is stored only on its
 assigned device. `JaxParallelOperator` compiles and caches one exact-shape

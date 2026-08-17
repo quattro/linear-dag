@@ -1,9 +1,13 @@
-# pattern: Functional Core
+# pattern: Mixed (unavoidable)
+# Reason: Backend policy tests are pure, while the public documentation
+# contract test reads the repository README.
 
 from __future__ import annotations
 
 import sys
 import types
+
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -12,6 +16,22 @@ import linear_dag.core.jaxlinarg.kernels as kernels_pkg
 import linear_dag.core.jaxlinarg.operator as jaxlinarg_operator
 
 from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_readme_documents_strict_explicit_ffi_backend_failure_and_portable_choices():
+    readme = (_REPO_ROOT / "README.md").read_text()
+    jax_section = readme.split("### JAX LinearARG operators", maxsplit=1)[1].split(
+        "### Genome-wide association studies",
+        maxsplit=1,
+    )[0]
+    normalized = " ".join(jax_section.split())
+
+    assert "Explicit `Backend.FFI_CPU` requests are strict" in normalized
+    assert "construction raises a `RuntimeError`" in normalized
+    assert "Use `Backend.AUTO` for silent fallback or `Backend.PURE_JAX`" in normalized
+    assert "Explicit `Backend.FFI_CPU` requests also fall back" not in normalized
 
 
 def _minimal_operator_kwargs() -> dict:
