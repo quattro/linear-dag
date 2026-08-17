@@ -80,6 +80,7 @@ class _PackedJaxLinearARG(eqx.Module):
     capacities: tuple[int, ...] = eqx.field(static=True)
     graph_mesh: Mesh = eqx.field(static=True)
     graph: Any
+    backend: Backend = eqx.field(default=Backend.PURE_JAX, converter=resolve_backend, static=True)
 
     def __check_init__(self) -> None:
         arrays = self.graph.components
@@ -239,6 +240,7 @@ def _packed_from_block_arrays(
     blocks: Iterable[LinearARGBlockArrays],
     *,
     mesh: Mesh,
+    backend: Backend = Backend.PURE_JAX,
     dtype: Any = None,
     max_padding_ratio: float = 1.25,
     allow_excess_padding: bool = False,
@@ -261,7 +263,7 @@ def _packed_from_block_arrays(
         source_blocks[logical_block_index] = None
         return block
 
-    return _packed_from_plan(load_block, plan=plan, mesh=mesh)
+    return _packed_from_plan(load_block, plan=plan, mesh=mesh, backend=backend)
 
 
 def _packed_from_hdf5(
@@ -269,6 +271,7 @@ def _packed_from_hdf5(
     block_names: Iterable[Any],
     *,
     mesh: Mesh,
+    backend: Backend = Backend.PURE_JAX,
     dtype: Any = None,
     max_padding_ratio: float = 1.25,
     allow_excess_padding: bool = False,
@@ -291,7 +294,7 @@ def _packed_from_hdf5(
         def load_block(logical_block_index: int) -> LinearARGBlockArrays:
             return _read_block_arrays_from_group(file[names[logical_block_index]], dtype=normalized_dtype)
 
-        return _packed_from_plan(load_block, plan=plan, mesh=mesh)
+        return _packed_from_plan(load_block, plan=plan, mesh=mesh, backend=backend)
 
 
 def _packed_from_group_reader(
@@ -299,6 +302,7 @@ def _packed_from_group_reader(
     block_names: Iterable[Any],
     *,
     mesh: Mesh,
+    backend: Backend = Backend.PURE_JAX,
     dtype: Any = None,
     max_padding_ratio: float = 1.25,
     allow_excess_padding: bool = False,
@@ -320,7 +324,7 @@ def _packed_from_group_reader(
     def load_block(logical_block_index: int) -> LinearARGBlockArrays:
         return _read_block_arrays_from_group(blocks_group[names[logical_block_index]], dtype=normalized_dtype)
 
-    return _packed_from_plan(load_block, plan=plan, mesh=mesh)
+    return _packed_from_plan(load_block, plan=plan, mesh=mesh, backend=backend)
 
 
 def _packed_from_plan(
@@ -328,6 +332,7 @@ def _packed_from_plan(
     *,
     plan: PackingPlan,
     mesh: Mesh,
+    backend: Backend,
 ) -> _PackedIngressResult:
     packed, staging_bytes_by_block = _stage_blocks(load_block, plan=plan)
     arrays = {name: _assemble_host_shards(getattr(packed.buffers, name), mesh=mesh) for name in PACKED_COMPONENT_NAMES}
@@ -370,6 +375,7 @@ def _packed_from_plan(
             n_variants=plan.n_variants,
             capacities=tuple(plan.capacities.values()),
             graph_mesh=mesh,
+            backend=backend,
             graph=_make_packed_graph_value(
                 tuple(arrays[name] for name in PACKED_COMPONENT_NAMES),
                 metadata=_PackedGraphLogicalMetadata(

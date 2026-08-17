@@ -222,7 +222,7 @@ def test_packed_carrier_static_definition_excludes_dataset_diagnostics(
         mesh=mesh,
     )
 
-    expected_static_fields = ("n_samples", "n_variants", "capacities", "graph_mesh")
+    expected_static_fields = ("n_samples", "n_variants", "capacities", "graph_mesh", "backend")
     for result in (first, second):
         static_fields = tuple(field.name for field in fields(result.operator) if field.metadata.get("static"))
         assert static_fields == expected_static_fields

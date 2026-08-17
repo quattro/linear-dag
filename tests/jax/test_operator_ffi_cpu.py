@@ -94,3 +94,18 @@ def test_jax_lineararg_explicit_ffi_cpu_fallback_warns_and_runs_pure_jax(monkeyp
 
     assert op.backend is Backend.PURE_JAX
     np.testing.assert_allclose(np.asarray(op.matmat(oracle_case.w)), oracle_case.Xw, rtol=1e-5, atol=1e-5)
+
+
+def test_exact_ffi_backend_does_not_route_through_packed_targets(monkeypatch, oracle_case):
+    if jax.default_backend() != "cpu":
+        pytest.skip("FFI_CPU operator dispatch is only required on CPU platforms")
+
+    def fail_packed(*args, **kwargs):
+        raise AssertionError("exact FFI products must not use packed targets")
+
+    monkeypatch.setattr(ffi_cpu, "ffi_cpu_packed_solve_forward", fail_packed)
+    monkeypatch.setattr(ffi_cpu, "ffi_cpu_packed_solve_backward", fail_packed)
+    op = _operator_from_case(oracle_case, backend=Backend.FFI_CPU)
+
+    np.testing.assert_allclose(np.asarray(op.matmat(oracle_case.w)), oracle_case.Xw, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(op.rmatmat(oracle_case.y)), oracle_case.XTy, rtol=1e-5, atol=1e-5)

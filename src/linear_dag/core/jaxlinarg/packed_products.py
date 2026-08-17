@@ -18,16 +18,19 @@ from jax import lax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from jaxtyping import Array, ArrayLike
 
+from .kernels import ffi_cpu
 from .kernels.pure_jax import (
     pure_jax_solve_backward_compressed,
     pure_jax_solve_forward_compressed,
 )
-from .operator import _as_rank2_matrix
+from .operator import _as_rank2_matrix, Backend
 from .packing import (
     _packed_graph_component,
     _packed_graph_sharding_spec,
     BLOCK_DESCRIPTOR_FIELDS,
     GRAPH_FIELD_NAMES,
+    PACKED_FFI_DESCRIPTOR_FIELDS,
+    PACKED_FFI_DESCRIPTOR_VERSION,
     VALID_LENGTH_FIELDS,
 )
 
@@ -48,6 +51,7 @@ class _PackedProductSignature:
     n_variants: int
     capacities: tuple[int, ...]
     data_dtype: str
+    backend: Backend = Backend.PURE_JAX
 
 
 def lineararg_matmat(
@@ -296,13 +300,26 @@ def _local_matmat_graph_rank2(graph_value: Any, values: Array, signature: _Packe
     graph = _remove_local_graph_axis(graph_value)
     descriptors = graph["block_descriptors"]
     block_count = graph["valid_lengths"][_VALID_LENGTH_INDEX["block_descriptors"]]
+    compressed = jnp.zeros(
+        (signature.capacities[_CAPACITY_INDEX["nonunique_indices"]], values.shape[1]),
+        dtype=values.dtype,
+    )
+    compressed = compressed + block_count.astype(values.dtype) * 0
+
+    def seed_descriptor(slot: int, state: Array) -> Array:
+        descriptor = descriptors[slot]
+        valid = slot < block_count
+        return _forward_descriptor_seed(signature, graph, descriptor, valid, values, state)
+
+    seeded = lax.fori_loop(0, descriptors.shape[0], seed_descriptor, compressed)
+    solved = _packed_solve_forward(graph, descriptors, block_count, seeded, signature=signature)
     initial = jnp.zeros((signature.n_samples, values.shape[1]), dtype=values.dtype)
     initial = initial + block_count.astype(values.dtype) * 0
 
     def add_descriptor(slot: int, result: Array) -> Array:
         descriptor = descriptors[slot]
         valid = slot < block_count
-        return result + _forward_descriptor_product(signature, graph, descriptor, valid, values)
+        return result + _forward_descriptor_result(signature, graph, descriptor, valid, values, solved)
 
     return lax.fori_loop(0, descriptors.shape[0], add_descriptor, initial)
 
@@ -317,23 +334,37 @@ def _local_rmatmat_graph_rank2(graph_value: Any, values: Array, signature: _Pack
     graph = _remove_local_graph_axis(graph_value)
     descriptors = graph["block_descriptors"]
     block_count = graph["valid_lengths"][_VALID_LENGTH_INDEX["block_descriptors"]]
+    compressed = jnp.zeros(
+        (signature.capacities[_CAPACITY_INDEX["nonunique_indices"]], values.shape[1]),
+        dtype=values.dtype,
+    )
+    compressed = compressed + block_count.astype(values.dtype) * 0
+
+    def seed_descriptor(slot: int, state: Array) -> Array:
+        descriptor = descriptors[slot]
+        valid = slot < block_count
+        return _reverse_descriptor_seed(signature, graph, descriptor, valid, values, state)
+
+    seeded = lax.fori_loop(0, descriptors.shape[0], seed_descriptor, compressed)
+    solved = _packed_solve_backward(graph, descriptors, block_count, seeded, signature=signature)
     initial = jnp.zeros((signature.n_variants, values.shape[1]), dtype=values.dtype)
     initial = initial + block_count.astype(values.dtype) * 0
 
     def add_descriptor(slot: int, result: Array) -> Array:
         descriptor = descriptors[slot]
         valid = slot < block_count
-        return result + _reverse_descriptor_product(signature, graph, descriptor, valid, values)
+        return result + _reverse_descriptor_result(signature, graph, descriptor, valid, values, solved)
 
     return lax.fori_loop(0, descriptors.shape[0], add_descriptor, initial)
 
 
-def _forward_descriptor_product(
+def _forward_descriptor_seed(
     signature: _PackedProductSignature,
     graph: dict[str, Array],
     descriptor: Array,
     valid: Array,
     values: Array,
+    compressed: Array,
 ) -> Array:
     views = _descriptor_views(signature, graph, descriptor, valid)
     variant_capacity = views["variant_indices"].shape[0]
@@ -345,52 +376,56 @@ def _forward_descriptor_product(
     flip_sign = jnp.where(flip, -1, 1).astype(values.dtype)
     seeds = values[logical_indices, :] * flip_sign[:, None]
     seeds = jnp.where(variant_mask[:, None], seeds, jnp.zeros_like(seeds))
-    compressed = jnp.zeros(
-        (signature.capacities[_CAPACITY_INDEX["nonunique_indices"]], values.shape[1]),
-        dtype=values.dtype,
-    )
-    compressed = compressed.at[variant_rows, :].add(seeds)
-    solved = pure_jax_solve_forward_compressed(
-        views["indptr"],
-        views["indices"],
-        views["data"],
-        views["nonunique_indices"],
-        cast(Any, views["min_index_to_keep"]),
-        compressed,
-    )
-    sample_rows = views["nonunique_indices"][views["sample_indices"]]
-    flip_sum = jnp.sum(jnp.where(flip[:, None], values[logical_indices, :], 0), axis=0)
-    result = solved[sample_rows, :] + flip_sum
-    return jnp.where(valid, result, jnp.zeros_like(result))
+    aggregate_rows = views["compressed_start"] + variant_rows
+    return compressed.at[aggregate_rows, :].add(seeds)
 
 
-def _reverse_descriptor_product(
+def _forward_descriptor_result(
     signature: _PackedProductSignature,
     graph: dict[str, Array],
     descriptor: Array,
     valid: Array,
     values: Array,
+    solved: Array,
 ) -> Array:
     views = _descriptor_views(signature, graph, descriptor, valid)
-    sample_rows = views["nonunique_indices"][views["sample_indices"]]
-    compressed = jnp.zeros(
-        (signature.capacities[_CAPACITY_INDEX["nonunique_indices"]], values.shape[1]),
-        dtype=values.dtype,
-    )
+    variant_capacity = views["variant_indices"].shape[0]
+    variant_mask = jnp.arange(variant_capacity, dtype=jnp.int32) < views["variant_length"]
+    logical_indices = jnp.where(variant_mask, views["logical_variant_indices"], 0)
+    flip = variant_mask & views["flip"]
+    sample_rows = views["compressed_start"] + views["nonunique_indices"][views["sample_indices"]]
+    flip_sum = jnp.sum(jnp.where(flip[:, None], values[logical_indices, :], 0), axis=0)
+    result = solved[sample_rows, :] + flip_sum
+    return jnp.where(valid, result, jnp.zeros_like(result))
+
+
+def _reverse_descriptor_seed(
+    signature: _PackedProductSignature,
+    graph: dict[str, Array],
+    descriptor: Array,
+    valid: Array,
+    values: Array,
+    compressed: Array,
+) -> Array:
+    views = _descriptor_views(signature, graph, descriptor, valid)
+    sample_rows = views["compressed_start"] + views["nonunique_indices"][views["sample_indices"]]
     sample_seeds = jnp.where(valid, values, jnp.zeros_like(values))
-    compressed = compressed.at[sample_rows, :].set(sample_seeds)
-    solved = pure_jax_solve_backward_compressed(
-        views["indptr"],
-        views["indices"],
-        views["data"],
-        views["nonunique_indices"],
-        cast(Any, views["min_index_to_keep"]),
-        compressed,
-    )
+    return compressed.at[sample_rows, :].add(sample_seeds)
+
+
+def _reverse_descriptor_result(
+    signature: _PackedProductSignature,
+    graph: dict[str, Array],
+    descriptor: Array,
+    valid: Array,
+    values: Array,
+    solved: Array,
+) -> Array:
+    views = _descriptor_views(signature, graph, descriptor, valid)
     variant_capacity = views["variant_indices"].shape[0]
     variant_mask = jnp.arange(variant_capacity, dtype=jnp.int32) < views["variant_length"]
     variant_nodes = jnp.where(variant_mask, views["variant_indices"], 0)
-    variant_rows = views["nonunique_indices"][variant_nodes]
+    variant_rows = views["compressed_start"] + views["nonunique_indices"][variant_nodes]
     block_values = solved[variant_rows, :]
     total = jnp.sum(values, axis=0)
     block_values = jnp.where(views["flip"][:, None], total[None, :] - block_values, block_values)
@@ -398,6 +433,137 @@ def _reverse_descriptor_product(
     logical_indices = jnp.where(variant_mask, views["logical_variant_indices"], 0)
     result = jnp.zeros((signature.n_variants, values.shape[1]), dtype=values.dtype)
     return result.at[logical_indices, :].add(block_values)
+
+
+def _packed_solve_forward(
+    graph: dict[str, Array],
+    descriptors: Array,
+    block_count: Array,
+    compressed: Array,
+    *,
+    signature: _PackedProductSignature,
+) -> Array:
+    if signature.backend is Backend.FFI_CPU:
+        return ffi_cpu.ffi_cpu_packed_solve_forward(
+            graph["indptr"],
+            graph["indices"],
+            graph["data"],
+            graph["nonunique_indices"],
+            _ffi_descriptor_buffer(descriptors, block_count),
+            compressed,
+        )
+    return _pure_jax_packed_solve(
+        graph,
+        descriptors,
+        block_count,
+        compressed,
+        signature=signature,
+        forward=True,
+    )
+
+
+def _packed_solve_backward(
+    graph: dict[str, Array],
+    descriptors: Array,
+    block_count: Array,
+    compressed: Array,
+    *,
+    signature: _PackedProductSignature,
+) -> Array:
+    if signature.backend is Backend.FFI_CPU:
+        return ffi_cpu.ffi_cpu_packed_solve_backward(
+            graph["indptr"],
+            graph["indices"],
+            graph["data"],
+            graph["nonunique_indices"],
+            _ffi_descriptor_buffer(descriptors, block_count),
+            compressed,
+        )
+    return _pure_jax_packed_solve(
+        graph,
+        descriptors,
+        block_count,
+        compressed,
+        signature=signature,
+        forward=False,
+    )
+
+
+def _pure_jax_packed_solve(
+    graph: dict[str, Array],
+    descriptors: Array,
+    block_count: Array,
+    compressed: Array,
+    *,
+    signature: _PackedProductSignature,
+    forward: bool,
+) -> Array:
+    solve = pure_jax_solve_forward_compressed if forward else pure_jax_solve_backward_compressed
+
+    def solve_descriptor(slot: int, aggregate: Array) -> Array:
+        descriptor = descriptors[slot]
+        valid = slot < block_count
+        views = _descriptor_views(signature, graph, descriptor, valid)
+        local = _fixed_span(
+            aggregate,
+            views["compressed_start"],
+            views["compressed_length"],
+            0,
+        )
+        solved = solve(
+            views["indptr"],
+            views["indices"],
+            views["data"],
+            views["nonunique_indices"],
+            cast(Any, views["min_index_to_keep"]),
+            local,
+        )
+        return _add_span_delta(
+            aggregate,
+            local,
+            solved,
+            views["compressed_start"],
+            views["compressed_length"],
+        )
+
+    return lax.fori_loop(0, descriptors.shape[0], solve_descriptor, compressed)
+
+
+def _add_span_delta(
+    aggregate: Array,
+    before: Array,
+    after: Array,
+    start: Array,
+    length: Array,
+) -> Array:
+    offsets = jnp.arange(aggregate.shape[0], dtype=jnp.int32)
+    positions = jnp.clip(start + offsets, 0, max(aggregate.shape[0] - 1, 0))
+    delta = jnp.where((offsets < length)[:, None], after - before, jnp.zeros_like(after))
+    return aggregate.at[positions, :].add(delta)
+
+
+def _ffi_descriptor_buffer(descriptors: Array, block_count: Array) -> Array:
+    slots = jnp.arange(descriptors.shape[0], dtype=jnp.int32)
+    valid = slots < block_count
+
+    def column(name: str) -> Array:
+        values = descriptors[:, _DESCRIPTOR_INDEX[name]]
+        return jnp.where(valid, values, 0)
+
+    fields = {
+        "version": jnp.full_like(slots, PACKED_FFI_DESCRIPTOR_VERSION),
+        "valid": valid.astype(jnp.int32),
+        "node_start": column("node_start"),
+        "node_length": column("node_length"),
+        "indptr_start": column("indptr_start"),
+        "indptr_length": column("indptr_length"),
+        "edge_start": column("edge_start"),
+        "edge_length": column("edge_length"),
+        "compressed_start": column("compressed_start"),
+        "compressed_length": column("compressed_length"),
+        "min_index_to_keep": column("min_index_to_keep"),
+    }
+    return jnp.stack(tuple(fields[name] for name in PACKED_FFI_DESCRIPTOR_FIELDS), axis=1)
 
 
 def _descriptor_views(
@@ -450,6 +616,8 @@ def _descriptor_views(
         "logical_variant_indices": logical_indices,
         "sample_indices": sample_indices,
         "variant_length": variant_length,
+        "compressed_start": compressed_start,
+        "compressed_length": value("compressed_length"),
         "min_index_to_keep": min_index_to_keep,
     }
 
@@ -469,7 +637,9 @@ def _fixed_span(
     positions = jnp.clip(start + offsets, 0, max(values.shape[0] - 1, 0))
     gathered = values[positions]
     padding = jnp.asarray(pad_value, dtype=values.dtype)
-    return jnp.where(offsets < length, gathered, padding)
+    mask = offsets < length
+    mask = mask.reshape(mask.shape + (1,) * (gathered.ndim - mask.ndim))
+    return jnp.where(mask, gathered, padding)
 
 
 def _remove_local_graph_axis(graph: Any) -> dict[str, Array]:
@@ -491,6 +661,7 @@ def _packed_product_signature(operator: _PackedJaxLinearARG) -> _PackedProductSi
         n_variants=operator.n_variants,
         capacities=operator.capacities,
         data_dtype=str(_packed_data_dtype(operator)),
+        backend=operator.backend,
     )
 
 

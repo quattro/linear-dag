@@ -532,6 +532,7 @@ class _PackedProductPrimitive(hijax.VJPHiPrimitive):
     n_variants: int
     capacities: tuple[int, ...]
     data_dtype: str
+    backend: str
     output_axes: tuple[Any, ...]
 
     def __init__(
@@ -544,6 +545,7 @@ class _PackedProductPrimitive(hijax.VJPHiPrimitive):
         capacities: tuple[int, ...],
         data_dtype: str,
         output_axes: tuple[Any, ...],
+        backend: str = "pure_jax",
     ) -> None:
         if not isinstance(graph_type, _PackedGraphType):
             raise TypeError("packed product primitives require the private opaque graph type")
@@ -571,6 +573,7 @@ class _PackedProductPrimitive(hijax.VJPHiPrimitive):
             "n_variants": int(n_variants),
             "capacities": tuple(int(value) for value in capacities),
             "data_dtype": str(data_dtype),
+            "backend": str(backend),
             "output_axes": tuple(output_axes),
             "dense_abstract_signature": _dense_abstract_signature(dense_type),
             "graph_abstract_signature": _graph_abstract_signature(graph_type),
@@ -578,6 +581,7 @@ class _PackedProductPrimitive(hijax.VJPHiPrimitive):
         super().__init__()
 
     def _signature(self) -> Any:
+        from .operator import Backend
         from .packed_products import _PackedProductSignature
 
         return _PackedProductSignature(
@@ -585,6 +589,7 @@ class _PackedProductPrimitive(hijax.VJPHiPrimitive):
             n_variants=self.n_variants,
             capacities=self.capacities,
             data_dtype=self.data_dtype,
+            backend=Backend(self.backend),
         )
 
     def expand(self, *args: Any) -> Any:
@@ -711,6 +716,7 @@ def _matmat_primitive(
         n_variants=signature.n_variants,
         capacities=signature.capacities,
         data_dtype=signature.data_dtype,
+        backend=signature.backend.value,
         output_axes=output_axes,
     )
 
@@ -729,11 +735,13 @@ def _rmatmat_primitive(
         n_variants=signature.n_variants,
         capacities=signature.capacities,
         data_dtype=signature.data_dtype,
+        backend=signature.backend.value,
         output_axes=(),
     )
 
 
 def _signature_from_graph(graph: _PackedGraphValue):
+    from .operator import Backend
     from .packed_products import _PackedProductSignature
 
     graph_type = jax.typeof(graph)
@@ -742,6 +750,7 @@ def _signature_from_graph(graph: _PackedGraphValue):
         n_variants=graph.metadata.n_variants,
         capacities=graph.metadata.capacities,
         data_dtype=str(graph_type.component_types[2].dtype),
+        backend=Backend.PURE_JAX,
     )
 
 

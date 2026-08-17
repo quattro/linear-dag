@@ -40,6 +40,7 @@ from linear_dag.core.jaxlinarg._hijax import (
     _PackedGraphZeroValue,
 )
 from linear_dag.core.jaxlinarg.ingress import _packed_from_block_arrays
+from linear_dag.core.jaxlinarg.kernels import ffi_cpu
 from linear_dag.core.jaxlinarg.packing import LinearARGBlockArrays, PACKED_COMPONENT_NAMES
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -86,11 +87,17 @@ def _empty_block() -> LinearARGBlockArrays:
     )
 
 
-def _operator(*blocks: LinearARGBlockArrays, mesh: Mesh | None = None, dtype: Any = None):
+def _operator(
+    *blocks: LinearARGBlockArrays,
+    mesh: Mesh | None = None,
+    dtype: Any = None,
+    backend: linear_dag.Backend = linear_dag.Backend.PURE_JAX,
+):
     return _packed_from_block_arrays(
         blocks,
         mesh=_graph_mesh() if mesh is None else mesh,
         dtype=dtype,
+        backend=backend,
         allow_excess_padding=True,
     ).operator
 
@@ -660,6 +667,68 @@ def test_packed_product_invariant_graph_scan_remat_and_dce() -> None:
     assert "sdy.manual_computation" not in dce_ir
 
 
+def test_packed_ffi_backend_composes_through_dense_transform_matrix() -> None:
+    ffi_cpu.is_ffi_cpu_available.cache_clear()
+    operator = _operator(
+        _block(),
+        mesh=_two_device_graph_mesh_or_skip(),
+        backend=linear_dag.Backend.FFI_CPU,
+    )
+    pure = _operator(
+        _block(),
+        mesh=operator.graph_mesh,
+        backend=linear_dag.Backend.PURE_JAX,
+    )
+    values = jnp.asarray([0.25, -0.75], dtype=jnp.float32)
+    tangent = jnp.asarray([-0.5, 1.25], dtype=jnp.float32)
+
+    def product(graph_operator, operand):
+        return graph_operator.matmat(operand)
+
+    def loss(graph_operator, operand):
+        result = product(graph_operator, operand)
+        return jnp.sum(jnp.tanh(result) ** 2)
+
+    jit_result = jax.jit(product)(operator, values)
+    primal, jvp_result = jax.jvp(lambda operand: product(operator, operand), (values,), (tangent,))
+    _, pullback = jax.vjp(lambda operand: product(operator, operand), values)
+    (vjp_result,) = pullback(tangent)
+    gradient = jax.jit(jax.grad(loss, argnums=1))(operator, values)
+    hvp = jax.jvp(lambda operand: jax.grad(loss, argnums=1)(operator, operand), (values,), (tangent,))[1]
+    batched = jax.vmap(lambda operand: product(operator, operand))(jnp.stack((values, tangent)))
+    _, scanned = jax.lax.scan(
+        lambda graph_operator, operand: (graph_operator, product(graph_operator, operand)),
+        operator,
+        jnp.stack((values, tangent)),
+    )
+    rematerialized = jax.jit(jax.remat(product))(operator, values)
+
+    np.testing.assert_allclose(jit_result, product(pure, values), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(primal, product(pure, values), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(jvp_result, product(pure, tangent), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(vjp_result, pure.rmatmat(tangent), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(gradient, jax.grad(loss, argnums=1)(pure, values), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        hvp,
+        jax.jvp(lambda operand: jax.grad(loss, argnums=1)(pure, operand), (values,), (tangent,))[1],
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    expected_batch = jnp.stack((product(pure, values), product(pure, tangent)))
+    np.testing.assert_allclose(batched, expected_batch, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(scanned, expected_batch, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(rematerialized, product(pure, values), rtol=1e-6, atol=1e-6)
+
+    high_jaxpr = str(jax.make_jaxpr(product)(operator, values))
+    lowered = str(jax.jit(product).lower(operator, values).compiler_ir("stablehlo"))
+    gradient_ir = str(jax.jit(jax.grad(loss, argnums=1)).lower(operator, values).compiler_ir("stablehlo"))
+    assert "ffi_call" not in high_jaxpr
+    assert "'backend': 'ffi_cpu'" in high_jaxpr
+    assert "linear_dag_jaxlinarg_packed_solve_forward_f32" in lowered
+    assert "linear_dag_jaxlinarg_packed_solve_forward_f32" in gradient_ir
+    assert "linear_dag_jaxlinarg_packed_solve_backward_f32" in gradient_ir
+
+
 def test_packed_product_symbolic_zero_dense_tangent_has_output_type() -> None:
     operator = _operator(_block(), mesh=_two_device_graph_mesh_or_skip())
     values = jnp.ones((operator.n_variants, 1), dtype=jnp.float32)
@@ -996,6 +1065,7 @@ def test_project_binders_keep_graph_arrays_out_of_params_and_closures() -> None:
         "n_variants",
         "capacities",
         "data_dtype",
+        "backend",
         "output_axes",
         "dense_abstract_signature",
         "graph_abstract_signature",

@@ -19,12 +19,13 @@ from jax.extend import core as jax_core
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from scipy import sparse
 
-from linear_dag.core.jaxlinarg import packed_products as packed_products_module
+from linear_dag.core.jaxlinarg import Backend, JaxGRMOperator, packed_products as packed_products_module
 from linear_dag.core.jaxlinarg.ingress import (
     _packed_from_block_arrays,
     _PackedJaxLinearARG,
     from_block_arrays,
 )
+from linear_dag.core.jaxlinarg.kernels import ffi_cpu
 from linear_dag.core.jaxlinarg.packed_products import (
     _local_matmat_rank2,
     _local_rmatmat_rank2,
@@ -786,6 +787,70 @@ def test_lowered_ir_preserves_graph_sharding_and_collects_only_dense_results(
     assert "stablehlo.all_gather" not in names
     assert "stablehlo.collective_broadcast" not in names
     assert _collective_type_signatures(stablehlo, collective) == ((("tensor<2x2xf32>",), ("tensor<2x2xf32>",)),)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_packed_ffi_backend_matches_pure_jax_exact_and_grm(dtype: Any) -> None:
+    ffi_cpu.is_ffi_cpu_available.cache_clear()
+    if dtype is np.float64 and not jax.config.jax_enable_x64:
+        pytest.skip("JAX x64 is disabled")
+    mesh = _two_device_graph_mesh_or_skip()
+    blocks = (_repeated_variant_block(dtype=dtype), _empty_variant_block(dtype=dtype))
+    pure = _packed_from_block_arrays(
+        blocks,
+        mesh=mesh,
+        dtype=dtype,
+        backend=Backend.PURE_JAX,
+        allow_excess_padding=True,
+    ).operator
+    ffi = _packed_from_block_arrays(
+        blocks,
+        mesh=mesh,
+        dtype=dtype,
+        backend=Backend.FFI_CPU,
+        allow_excess_padding=True,
+    ).operator
+    exact = from_block_arrays(blocks[0], backend=Backend.FFI_CPU, dtype=dtype)
+    weights = jnp.asarray([[0.25, -0.5], [1.25, 0.75]], dtype=dtype)
+    samples = jnp.asarray([[0.5, -1.0], [1.5, 0.25]], dtype=dtype)
+
+    assert pure.backend is Backend.PURE_JAX
+    assert ffi.backend is Backend.FFI_CPU
+    np.testing.assert_allclose(ffi.matmat(weights), pure.matmat(weights), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(ffi.rmatmat(samples), pure.rmatmat(samples), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(ffi.matmat(weights), exact.matmat(weights), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        JaxGRMOperator(ffi, alpha=0.5).matmat(samples),
+        JaxGRMOperator(pure, alpha=0.5).matmat(samples),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_packed_ffi_lowering_keeps_custom_call_inside_local_shard_body() -> None:
+    ffi_cpu.is_ffi_cpu_available.cache_clear()
+    operator = _packed_from_block_arrays(
+        (_repeated_variant_block(), _empty_variant_block(), _empty_variant_block()),
+        mesh=_two_device_graph_mesh_or_skip(),
+        backend=Backend.FFI_CPU,
+        allow_excess_padding=True,
+    ).operator
+    values = jnp.ones((operator.n_variants, 2), dtype=jnp.float32)
+
+    stablehlo = jax.jit(lineararg_matmat).lower(operator, values).compiler_ir("stablehlo")
+    text = str(stablehlo)
+    names = _ir_operation_names(stablehlo)
+
+    assert operator.block_descriptors.shape[1] == 2
+    assert text.count("linear_dag_jaxlinarg_packed_solve_forward_f32") == 1
+    assert "sdy.manual_computation" in names
+    assert "stablehlo.all_reduce" in names
+    assert "stablehlo.all_gather" not in names
+    assert "stablehlo.collective_broadcast" not in names
+    assert all(
+        "sdy.sharding" in attributes and '"graph"' in attributes
+        for attributes in _main_graph_operand_attributes(stablehlo)
+    )
 
 
 def test_packed_benchmark_contract_includes_ir_metric_columns() -> None:
