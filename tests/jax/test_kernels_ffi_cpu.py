@@ -195,7 +195,7 @@ def test_ffi_solve_wrapper_does_not_call_ffi_when_unavailable(monkeypatch):
 def test_packed_ffi_solve_wrapper_uses_distinct_target_and_aliases_only_state(
     monkeypatch, wrapper_name, expected_target
 ):
-    monkeypatch.setattr(ffi_cpu, "is_ffi_cpu_available", lambda: True)
+    monkeypatch.setattr(ffi_cpu, "is_ffi_cpu_packed_available", lambda: True)
     captured = {}
 
     def fake_ffi_call(target_name, result_shape_dtypes, **kwargs):
@@ -224,7 +224,7 @@ def test_packed_ffi_solve_wrapper_uses_distinct_target_and_aliases_only_state(
 
 @pytest.mark.skipif(not jax.config.jax_enable_x64, reason="JAX x64 is disabled")
 def test_packed_ffi_solve_wrapper_uses_float64_target_when_enabled(monkeypatch):
-    monkeypatch.setattr(ffi_cpu, "is_ffi_cpu_available", lambda: True)
+    monkeypatch.setattr(ffi_cpu, "is_ffi_cpu_packed_available", lambda: True)
     captured = {}
 
     def fake_ffi_call(target_name, result_shape_dtypes, **kwargs):
@@ -242,8 +242,8 @@ def test_packed_ffi_solve_wrapper_uses_float64_target_when_enabled(monkeypatch):
 
 
 def test_packed_ffi_solve_wrapper_does_not_call_ffi_when_unavailable(monkeypatch):
-    monkeypatch.setattr(ffi_cpu, "is_ffi_cpu_available", lambda: False)
-    monkeypatch.setattr(ffi_cpu, "last_ffi_cpu_error", lambda: ImportError("missing packed targets"))
+    monkeypatch.setattr(ffi_cpu, "is_ffi_cpu_packed_available", lambda: False)
+    monkeypatch.setattr(ffi_cpu, "last_ffi_cpu_packed_error", lambda: ImportError("missing packed targets"))
 
     def fail_ffi_call(*args, **kwargs):
         raise AssertionError("ffi_call should not be invoked when the handler is absent")
@@ -260,6 +260,14 @@ def test_native_ffi_cpu_handler_is_available_on_cpu():
     ffi_cpu.is_ffi_cpu_available.cache_clear()
 
     assert ffi_cpu.is_ffi_cpu_available()
+
+
+def test_native_packed_ffi_cpu_handler_is_available_on_cpu():
+    if jax.default_backend() != "cpu":
+        pytest.skip("native CPU FFI handler is only required on CPU platforms")
+    ffi_cpu.is_ffi_cpu_packed_available.cache_clear()
+
+    assert ffi_cpu.is_ffi_cpu_packed_available()
 
 
 def test_native_ffi_cpu_blas_flag_is_boolean_on_cpu():

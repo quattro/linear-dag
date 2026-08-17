@@ -669,6 +669,7 @@ def test_packed_product_invariant_graph_scan_remat_and_dce() -> None:
 
 def test_packed_ffi_backend_composes_through_dense_transform_matrix() -> None:
     ffi_cpu.is_ffi_cpu_available.cache_clear()
+    ffi_cpu.is_ffi_cpu_packed_available.cache_clear()
     operator = _operator(
         _block(),
         mesh=_two_device_graph_mesh_or_skip(),

@@ -1,10 +1,8 @@
 # pattern: Mixed (unavoidable)
-# Reason: Backend dispatch is pure, but module construction must normalize the
-# requested runtime backend and emit the required user-facing fallback warning.
+# Reason: Backend policy is pure, but capability resolution observes the active
+# JAX runtime and the process-wide native target registry.
 
 """Single-block JAX LinearARG operator and numerical backend dispatch."""
-
-import warnings
 
 from collections.abc import Mapping
 from enum import Enum
@@ -28,9 +26,10 @@ from .kernels.pure_jax import (
 class Backend(str, Enum):
     """Select the numerical implementation for JAX LinearARG solves.
 
-    `AUTO` uses the native CPU FFI extension when it is available on CPU and
-    otherwise resolves to `PURE_JAX`. `FFI_CPU` also falls back to `PURE_JAX`,
-    but emits a warning when the native extension cannot be registered.
+    `AUTO` silently uses the representation's complete native CPU FFI target
+    set on CPU and otherwise resolves to `PURE_JAX`. `FFI_CPU` is strict: it
+    raises during operator construction when the active platform is not CPU or
+    the exact or packed target set required by that operator is incomplete.
 
     !!! Example
 
@@ -60,7 +59,12 @@ _BACKWARD_SOLVERS = {
 }
 
 
-def resolve_backend(requested: Backend, *, platform: str | None = None) -> Backend:
+def resolve_backend(
+    requested: Backend,
+    *,
+    platform: str | None = None,
+    require_packed_targets: bool = False,
+) -> Backend:
     """Resolve a backend request against the active JAX runtime.
 
     **Arguments:**
@@ -68,34 +72,44 @@ def resolve_backend(requested: Backend, *, platform: str | None = None) -> Backe
     - `requested`: Requested backend policy.
     - `platform`: Optional JAX platform override. This exists for diagnostics
       and tests; normal callers should use the active platform.
+    - `require_packed_targets`: Whether the caller requires the packed
+      descriptor-aware target set rather than the exact single-block targets.
 
     **Returns:**
 
     - A concrete executable backend.
 
-    **Warns:**
+    **Raises:**
 
-    - `UserWarning`: If `FFI_CPU` is requested but its native handler is
-      unavailable. The returned backend is then `PURE_JAX`.
+    - `RuntimeError`: If `FFI_CPU` is requested explicitly on a non-CPU
+      platform or its representation-specific target set is unavailable.
     """
     requested = Backend(requested)
     platform = (jax.default_backend() if platform is None else platform).lower()
+    is_available = ffi_cpu.is_ffi_cpu_packed_available if require_packed_targets else ffi_cpu.is_ffi_cpu_available
 
     if requested is Backend.PURE_JAX:
         return Backend.PURE_JAX
     if requested is Backend.AUTO:
-        if platform == "cpu" and ffi_cpu.is_ffi_cpu_available():
+        if platform == "cpu" and is_available():
             return Backend.FFI_CPU
         return Backend.PURE_JAX
     if requested is Backend.FFI_CPU:
-        if ffi_cpu.is_ffi_cpu_available():
-            return Backend.FFI_CPU
-        warnings.warn(
-            _ffi_cpu_unavailable_message(),
-            UserWarning,
-            stacklevel=2,
-        )
-        return Backend.PURE_JAX
+        if platform != "cpu":
+            raise RuntimeError(
+                _ffi_cpu_unavailable_message(
+                    require_packed_targets=require_packed_targets,
+                    platform=platform,
+                )
+            )
+        if not is_available():
+            raise RuntimeError(
+                _ffi_cpu_unavailable_message(
+                    require_packed_targets=require_packed_targets,
+                    platform=platform,
+                )
+            )
+        return Backend.FFI_CPU
     raise ValueError(f"unknown backend: {requested}")
 
 
@@ -105,10 +119,11 @@ class JaxLinearARG(eqx.Module):
     !!! info
         `Backend.PURE_JAX` is always available and supports JAX transforms.
         `Backend.FFI_CPU` uses the native CPU FFI handler when it is installed;
-        if the handler is unavailable, explicit FFI CPU requests warn and fall
-        back to `Backend.PURE_JAX`. Accelerator platforms currently use
-        `Backend.PURE_JAX`. Reverse-mode autodiff is supported through custom
-        VJP rules; forward mode is not supported for the solve primitive.
+        explicit FFI CPU requests fail during construction when its exact
+        single-block targets are unavailable or the active platform is not CPU.
+        `Backend.AUTO` silently selects the portable pure-JAX path in those
+        cases. Reverse-mode autodiff is supported through custom VJP rules;
+        forward mode is not supported for the exact solve primitive.
 
         The LinearARG arrays are opaque, fixed operator state. Autodiff is
         defined with respect to arrays passed to `matmat` and `rmatmat`, not
@@ -194,7 +209,9 @@ class JaxLinearARG(eqx.Module):
         **Raises:**
 
         - `ValueError`: If array shapes, indices, or backend settings are invalid.
+        - `RuntimeError`: If an explicitly requested backend is unavailable.
         """
+        backend = resolve_backend(backend)
         dtype = jnp.dtype(dtype)
         n_variants = int(n_variants)
         n_samples = int(n_samples)
@@ -624,11 +641,17 @@ def _validate_array_contract(
         raise ValueError("nonunique_indices contains an out-of-range compressed index")
 
 
-def _ffi_cpu_unavailable_message() -> str:
-    error = ffi_cpu.last_ffi_cpu_error()
-    if error is None:
-        return "FFI_CPU backend is unavailable; falling back to PURE_JAX."
-    return f"FFI_CPU backend is unavailable ({error}); falling back to PURE_JAX."
+def _ffi_cpu_unavailable_message(*, require_packed_targets: bool, platform: str) -> str:
+    representation = "packed" if require_packed_targets else "exact"
+    if platform != "cpu":
+        reason = f"the active platform is {platform!r}, but CPU FFI requires 'cpu'"
+    else:
+        error = ffi_cpu.last_ffi_cpu_packed_error() if require_packed_targets else ffi_cpu.last_ffi_cpu_error()
+        reason = "the required targets are not registered" if error is None else str(error)
+    return (
+        f"FFI_CPU backend is unavailable for the {representation} LinearARG representation: {reason}. "
+        "Select Backend.AUTO for silent portable selection or Backend.PURE_JAX to require the portable backend."
+    )
 
 
 def _as_rank2_matrix(x: ArrayLike, *, expected_rows: int, dtype: Any) -> tuple[Array, bool]:
@@ -820,17 +843,11 @@ _solve_backward.defvjp(_solve_backward_fwd, _solve_backward_bwd)
 
 
 def _resolve_solve_backend(backend: Backend) -> Backend:
-    # Backend availability is resolved once at the solve boundary so the primal
-    # helpers and VJP helpers can share identical fallback behavior.
-    if backend is Backend.AUTO:
+    # Construction stores a concrete backend. Retain a boundary check for
+    # direct internal solve calls so explicit unavailable FFI never reaches
+    # tracing or an FFI invocation.
+    if backend in (Backend.AUTO, Backend.FFI_CPU):
         backend = resolve_backend(backend)
-    if backend is Backend.FFI_CPU and not ffi_cpu.is_ffi_cpu_available():
-        warnings.warn(
-            _ffi_cpu_unavailable_message(),
-            UserWarning,
-            stacklevel=2,
-        )
-        return Backend.PURE_JAX
     if backend not in _FORWARD_SOLVERS:
         raise ValueError(f"unknown backend: {backend.value}")
     return backend

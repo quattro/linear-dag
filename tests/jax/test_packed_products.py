@@ -792,6 +792,7 @@ def test_lowered_ir_preserves_graph_sharding_and_collects_only_dense_results(
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_packed_ffi_backend_matches_pure_jax_exact_and_grm(dtype: Any) -> None:
     ffi_cpu.is_ffi_cpu_available.cache_clear()
+    ffi_cpu.is_ffi_cpu_packed_available.cache_clear()
     if dtype is np.float64 and not jax.config.jax_enable_x64:
         pytest.skip("JAX x64 is disabled")
     mesh = _two_device_graph_mesh_or_skip()
@@ -829,6 +830,7 @@ def test_packed_ffi_backend_matches_pure_jax_exact_and_grm(dtype: Any) -> None:
 
 def test_packed_ffi_lowering_keeps_custom_call_inside_local_shard_body() -> None:
     ffi_cpu.is_ffi_cpu_available.cache_clear()
+    ffi_cpu.is_ffi_cpu_packed_available.cache_clear()
     operator = _packed_from_block_arrays(
         (_repeated_variant_block(), _empty_variant_block(), _empty_variant_block()),
         mesh=_two_device_graph_mesh_or_skip(),
@@ -859,6 +861,12 @@ def test_packed_benchmark_contract_includes_ir_metric_columns() -> None:
         "graph_constant_bytes",
         "graph_operand_count",
         "stablehlo_operation_count",
+        "requested_backend",
+        "resolved_backend",
+        "ffi_cpu_exact_available",
+        "ffi_cpu_packed_available",
+        "ffi_cpu_blas_backend",
+        "ffi_cpu_native_tuning",
     } <= result_fields
 
     packed = _packed_from_block_arrays(
@@ -892,3 +900,7 @@ def test_packed_benchmark_contract_includes_ir_metric_columns() -> None:
     assert "graph constant bytes" in table
     assert "graph operands" in table
     assert "StableHLO ops" in table
+    assert result.requested_backend is Backend.PURE_JAX
+    assert result.resolved_backend is Backend.PURE_JAX
+    assert "requested backend" in table
+    assert "resolved backend" in table

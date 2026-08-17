@@ -52,6 +52,76 @@ class ParallelBenchmarkResult:
     graph_constant_bytes: int | None = None
     graph_operand_count: int | None = None
     stablehlo_operation_count: int | None = None
+    requested_backend: Backend | None = None
+    resolved_backend: Backend | None = None
+    ffi_cpu_built: bool | None = None
+    ffi_cpu_exact_available: bool | None = None
+    ffi_cpu_packed_available: bool | None = None
+    ffi_cpu_blas_enabled: bool | None = None
+    ffi_cpu_blas_backend: str | None = None
+    ffi_cpu_native_tuning: bool | None = None
+
+    def __post_init__(self) -> None:
+        if "ffi_cpu" in self.operator.lower() and self.resolved_backend is not Backend.FFI_CPU:
+            observed = None if self.resolved_backend is None else self.resolved_backend.value
+            raise ValueError(f"FFI-labeled benchmark row must have resolved backend ffi_cpu; observed {observed}")
+
+
+def _ffi_build_metadata() -> dict[str, Any]:
+    return {
+        "ffi_cpu_built": ffi_cpu.is_ffi_cpu_built(),
+        "ffi_cpu_exact_available": ffi_cpu.is_ffi_cpu_available(),
+        "ffi_cpu_packed_available": ffi_cpu.is_ffi_cpu_packed_available(),
+        "ffi_cpu_blas_enabled": ffi_cpu.is_ffi_cpu_blas_enabled(),
+        "ffi_cpu_blas_backend": ffi_cpu.ffi_cpu_blas_backend(),
+        "ffi_cpu_native_tuning": ffi_cpu.is_ffi_cpu_native_tuning_enabled(),
+    }
+
+
+def test_benchmark_rows_record_requested_resolved_and_native_backend_configuration(monkeypatch):
+    monkeypatch.setattr(ffi_cpu, "is_ffi_cpu_built", lambda: True)
+    monkeypatch.setattr(ffi_cpu, "is_ffi_cpu_available", lambda: True)
+    monkeypatch.setattr(ffi_cpu, "is_ffi_cpu_packed_available", lambda: False)
+    monkeypatch.setattr(ffi_cpu, "is_ffi_cpu_blas_enabled", lambda: True)
+    monkeypatch.setattr(ffi_cpu, "ffi_cpu_blas_backend", lambda: "openblas")
+    monkeypatch.setattr(ffi_cpu, "is_ffi_cpu_native_tuning_enabled", lambda: True)
+
+    result = ParallelBenchmarkResult(
+        operator="jax_parallel_ffi_cpu_1_device",
+        operation="matmat",
+        k=4,
+        median_seconds=0.1,
+        ratio_to_parallel_operator=1.0,
+        requested_backend=Backend.FFI_CPU,
+        resolved_backend=Backend.FFI_CPU,
+        **_ffi_build_metadata(),
+    )
+    table = _format_results_table([result])
+
+    assert result.requested_backend is Backend.FFI_CPU
+    assert result.resolved_backend is Backend.FFI_CPU
+    assert result.ffi_cpu_built is True
+    assert result.ffi_cpu_exact_available is True
+    assert result.ffi_cpu_packed_available is False
+    assert result.ffi_cpu_blas_enabled is True
+    assert result.ffi_cpu_blas_backend == "openblas"
+    assert result.ffi_cpu_native_tuning is True
+    assert "requested backend" in table
+    assert "resolved backend" in table
+    assert "openblas" in table
+
+
+def test_ffi_labeled_benchmark_row_rejects_non_ffi_resolution():
+    with pytest.raises(ValueError, match="FFI-labeled benchmark row.*resolved.*ffi_cpu"):
+        ParallelBenchmarkResult(
+            operator="jax_parallel_ffi_cpu_1_device",
+            operation="matmat",
+            k=4,
+            median_seconds=0.1,
+            ratio_to_parallel_operator=1.0,
+            requested_backend=Backend.FFI_CPU,
+            resolved_backend=Backend.PURE_JAX,
+        )
 
 
 def test_jax_parallel_operator_benchmark(
@@ -146,6 +216,8 @@ def _benchmark_packed_ingress(
         graph_constant_bytes=graph_constant_bytes,
         graph_operand_count=graph_operand_count,
         stablehlo_operation_count=stablehlo_operation_count,
+        requested_backend=Backend.PURE_JAX,
+        resolved_backend=op.backend,
     )
 
 
@@ -158,6 +230,8 @@ def _packed_memory_result(
     graph_constant_bytes: int | None = None,
     graph_operand_count: int | None = None,
     stablehlo_operation_count: int | None = None,
+    requested_backend: Backend = Backend.PURE_JAX,
+    resolved_backend: Backend = Backend.PURE_JAX,
 ) -> ParallelBenchmarkResult:
     """Convert packed ingress diagnostics into the shared benchmark record."""
     final_graph_bytes = tuple(int(value) for value in diagnostics.final_graph_bytes_by_device)
@@ -180,6 +254,9 @@ def _packed_memory_result(
         graph_constant_bytes=graph_constant_bytes,
         graph_operand_count=graph_operand_count,
         stablehlo_operation_count=stablehlo_operation_count,
+        requested_backend=requested_backend,
+        resolved_backend=resolved_backend,
+        **_ffi_build_metadata(),
     )
 
 
@@ -304,6 +381,9 @@ def _time_parallel_operator(
                     k,
                     _time_call(lambda matrix=matrix: op.matmat(matrix)),
                     1.0,
+                    requested_backend=None,
+                    resolved_backend=None,
+                    **_ffi_build_metadata(),
                 )
             )
         for k, matrix in sample_inputs.items():
@@ -314,6 +394,9 @@ def _time_parallel_operator(
                     k,
                     _time_call(lambda matrix=matrix: op.rmatmat(matrix)),
                     1.0,
+                    requested_backend=None,
+                    resolved_backend=None,
+                    **_ffi_build_metadata(),
                 )
             )
         return results
@@ -355,6 +438,9 @@ def _time_jax_parallel_operator(
                 runtime / baselines[("matmat", k)],
                 resident_graph_bytes,
                 max_device_graph_bytes,
+                requested_backend=config.backend,
+                resolved_backend=op.blocks[0].backend,
+                **_ffi_build_metadata(),
             )
         )
     for k, matrix in sample_inputs.items():
@@ -374,6 +460,9 @@ def _time_jax_parallel_operator(
                 runtime / baselines[("rmatmat", k)],
                 resident_graph_bytes,
                 max_device_graph_bytes,
+                requested_backend=config.backend,
+                resolved_backend=op.blocks[0].backend,
+                **_ffi_build_metadata(),
             )
         )
     return results
@@ -530,10 +619,12 @@ def _print_results(results: list[ParallelBenchmarkResult]) -> None:
 def _format_results_table(results: list[ParallelBenchmarkResult]) -> str:
     lines = [
         "| operator | operation | k | median seconds | ratio to ParallelOperator "
+        "| requested backend | resolved backend | FFI built | exact FFI | packed FFI | BLAS enabled | BLAS backend "
+        "| native tuning "
         "| canonical graph MiB | padded graph MiB | descriptor MiB | padding ratio "
         "| resident graph MiB | max device graph MiB | staging MiB | components | PyTree leaves "
         "| graph constant bytes | graph operands | StableHLO ops |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "|---|---|---:|---:|---:|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for result in sorted(results, key=lambda item: (item.operation, item.operator, item.k)):
         ratio = "" if result.ratio_to_parallel_operator is None else f"{result.ratio_to_parallel_operator:.3f}"
@@ -552,9 +643,22 @@ def _format_results_table(results: list[ParallelBenchmarkResult]) -> str:
         stablehlo_operation_count = (
             "" if result.stablehlo_operation_count is None else str(result.stablehlo_operation_count)
         )
+        requested_backend = "" if result.requested_backend is None else result.requested_backend.value
+        resolved_backend = "" if result.resolved_backend is None else result.resolved_backend.value
+        ffi_cpu_built = "" if result.ffi_cpu_built is None else str(result.ffi_cpu_built)
+        ffi_cpu_exact_available = "" if result.ffi_cpu_exact_available is None else str(result.ffi_cpu_exact_available)
+        ffi_cpu_packed_available = (
+            "" if result.ffi_cpu_packed_available is None else str(result.ffi_cpu_packed_available)
+        )
+        ffi_cpu_blas_enabled = "" if result.ffi_cpu_blas_enabled is None else str(result.ffi_cpu_blas_enabled)
+        ffi_cpu_native_tuning = "" if result.ffi_cpu_native_tuning is None else str(result.ffi_cpu_native_tuning)
+        ffi_cpu_blas_backend = "" if result.ffi_cpu_blas_backend is None else result.ffi_cpu_blas_backend
         lines.append(
             f"| {result.operator} | {result.operation} | {k} | "
-            f"{result.median_seconds:.6f} | {ratio} | {canonical_mib} | {padded_mib} | {descriptor_mib} | "
+            f"{result.median_seconds:.6f} | {ratio} | {requested_backend} | {resolved_backend} | "
+            f"{ffi_cpu_built} | {ffi_cpu_exact_available} | {ffi_cpu_packed_available} | "
+            f"{ffi_cpu_blas_enabled} | {ffi_cpu_blas_backend} | {ffi_cpu_native_tuning} | "
+            f"{canonical_mib} | {padded_mib} | {descriptor_mib} | "
             f"{padding_ratio} | {resident_mib} | {max_device_mib} | {staging_mib} | "
             f"{component_count} | {pytree_leaf_count} | {graph_constant_bytes} | "
             f"{graph_operand_count} | {stablehlo_operation_count} |"

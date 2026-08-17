@@ -121,7 +121,7 @@ class JaxParallelOperator(eqx.Module):
     variant_offsets: tuple[int, ...] = eqx.field(converter=_int_tuple, static=True)
     mesh: Mesh | AbstractMesh = eqx.field(static=True)
     block_ranges: tuple[tuple[int, int], ...] = eqx.field(converter=_range_tuple, static=True)
-    backend: Backend = eqx.field(default=Backend.AUTO, converter=Backend, static=True)
+    backend: Backend = eqx.field(default=Backend.AUTO, converter=resolve_backend, static=True)
 
     @classmethod
     def from_linearargs(
@@ -152,9 +152,11 @@ class JaxParallelOperator(eqx.Module):
         **Raises:**
 
         - `ValueError`: If block settings, shapes, or mesh ranges are invalid.
+        - `RuntimeError`: If `Backend.FFI_CPU` is explicitly requested but its
+          exact single-block targets are unavailable on the active platform.
         """
         lineargs = tuple(lineargs)
-        backend = _backend_for_lineargs(lineargs, backend=backend)
+        backend = resolve_backend(_backend_for_lineargs(lineargs, backend=backend))
         metadata = _metadata_from_lineargs(lineargs)
         block_ranges = split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh))
         block_devices = _devices_for_blocks(mesh, block_ranges, n_blocks=len(lineargs))
@@ -201,7 +203,10 @@ class JaxParallelOperator(eqx.Module):
         **Raises:**
 
         - `ValueError`: If metadata, block settings, shapes, or mesh ranges are invalid.
+        - `RuntimeError`: If `Backend.FFI_CPU` is explicitly requested but its
+          exact single-block targets are unavailable on the active platform.
         """
+        backend = resolve_backend(backend)
         metadata = list_blocks(path) if block_metadata is None else block_metadata
         block_names = metadata.get_column("block_name").to_list()
         block_ranges = split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh))
@@ -250,7 +255,10 @@ class JaxParallelOperator(eqx.Module):
         **Raises:**
 
         - `ValueError`: If metadata, block settings, shapes, or mesh ranges are invalid.
+        - `RuntimeError`: If `Backend.FFI_CPU` is explicitly requested but its
+          exact single-block targets are unavailable on the active platform.
         """
+        backend = resolve_backend(backend)
         metadata = reader.list_blocks() if block_metadata is None else block_metadata
         block_names = metadata.get_column("block_name").to_list()
         block_ranges = split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh))

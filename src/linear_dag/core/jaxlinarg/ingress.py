@@ -8,6 +8,7 @@ import warnings
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from functools import partial
 from importlib import import_module
 from importlib.util import find_spec
 from os import PathLike
@@ -50,6 +51,10 @@ from .packing import (
 _STAGING_ACCOUNTING_NOTE = "deterministic one-source-block ingress accounting; not a JAX allocator high-water mark"
 
 
+def _resolve_packed_backend(requested: Backend) -> Backend:
+    return resolve_backend(requested, require_packed_targets=True)
+
+
 @dataclass(frozen=True)
 class _PackedIngressDiagnostics:
     """Host-staging and final device-residency accounting for packed ingress.
@@ -80,7 +85,11 @@ class _PackedJaxLinearARG(eqx.Module):
     capacities: tuple[int, ...] = eqx.field(static=True)
     graph_mesh: Mesh = eqx.field(static=True)
     graph: Any
-    backend: Backend = eqx.field(default=Backend.PURE_JAX, converter=resolve_backend, static=True)
+    backend: Backend = eqx.field(
+        default=Backend.PURE_JAX,
+        converter=partial(resolve_backend, require_packed_targets=True),
+        static=True,
+    )
 
     def __check_init__(self) -> None:
         arrays = self.graph.components
@@ -246,6 +255,7 @@ def _packed_from_block_arrays(
     allow_excess_padding: bool = False,
 ) -> _PackedIngressResult:
     """Construct the private packed carrier from canonical host blocks."""
+    backend = _resolve_packed_backend(backend)
     source_blocks: list[LinearARGBlockArrays | None] = list(blocks)
     normalized_dtype = _normalize_dtype(dtype)
     plan = plan_packing(
@@ -277,6 +287,7 @@ def _packed_from_hdf5(
     allow_excess_padding: bool = False,
 ) -> _PackedIngressResult:
     """Construct the private packed carrier from named HDF5 blocks."""
+    backend = _resolve_packed_backend(backend)
     names = tuple(block_names)
     normalized_dtype = _normalize_dtype(dtype)
     _ensure_hdf5_plugins()
@@ -308,6 +319,7 @@ def _packed_from_group_reader(
     allow_excess_padding: bool = False,
 ) -> _PackedIngressResult:
     """Construct from the existing duck-typed group-reader test seam."""
+    backend = _resolve_packed_backend(backend)
     names = tuple(block_names)
     normalized_dtype = _normalize_dtype(dtype)
 
@@ -334,6 +346,7 @@ def _packed_from_plan(
     mesh: Mesh,
     backend: Backend,
 ) -> _PackedIngressResult:
+    backend = _resolve_packed_backend(backend)
     packed, staging_bytes_by_block = _stage_blocks(load_block, plan=plan)
     arrays = {name: _assemble_host_shards(getattr(packed.buffers, name), mesh=mesh) for name in PACKED_COMPONENT_NAMES}
     for array in arrays.values():
@@ -513,6 +526,7 @@ def from_lineararg(
 
     - A [`linear_dag.core.jaxlinarg.JaxLinearARG`][].
     """
+    backend = resolve_backend(backend)
     dtype = _normalize_dtype(dtype)
     graph = _as_csc(linarg.A)
     n_nodes = graph.shape[0]
@@ -521,8 +535,6 @@ def from_lineararg(
     indptr = np.asarray(graph.indptr, dtype=np.int32)
     indices = np.asarray(graph.indices, dtype=np.int32)
     data = np.asarray(graph.data, dtype=np.dtype(dtype))
-    resolved_backend = resolve_backend(backend)
-
     return JaxLinearARG.from_lineararg_arrays(
         **_block_arrays_kwargs(
             LinearARGBlockArrays(
@@ -538,7 +550,7 @@ def from_lineararg(
                 n_samples=int(linarg.shape[0]),
             )
         ),
-        backend=resolved_backend,
+        backend=backend,
         dtype=dtype,
     )
 
@@ -567,6 +579,7 @@ def from_hdf5_block(
     - A [`linear_dag.core.jaxlinarg.JaxLinearARG`][].
     """
     del load_metadata
+    backend = resolve_backend(backend)
     return from_block_arrays(read_hdf5_block_arrays(path, block, dtype=dtype), backend=backend, dtype=dtype)
 
 
@@ -588,6 +601,7 @@ def from_zarr_group(
 
     - A [`linear_dag.core.jaxlinarg.JaxLinearARG`][].
     """
+    backend = resolve_backend(backend)
     return from_block_arrays(read_zarr_block_arrays(group, dtype=dtype), backend=backend, dtype=dtype)
 
 
@@ -609,6 +623,7 @@ def from_block_arrays(
 
     - A [`linear_dag.core.jaxlinarg.JaxLinearARG`][].
     """
+    backend = resolve_backend(backend)
     dtype = _normalize_dtype(dtype)
     return JaxLinearARG.from_lineararg_arrays(
         **_block_arrays_kwargs(arrays),
@@ -662,6 +677,7 @@ def read_hdf5_blocks(
 
     - Tuple of [`linear_dag.core.jaxlinarg.JaxLinearARG`][] blocks.
     """
+    backend = resolve_backend(backend)
     _ensure_hdf5_plugins()
     with h5py.File(_hdf5_path(path), "r") as file:
         return tuple(
@@ -716,6 +732,7 @@ def read_zarr_blocks(
 
     - Tuple of [`linear_dag.core.jaxlinarg.JaxLinearARG`][] blocks.
     """
+    backend = resolve_backend(backend)
     blocks_group = reader.root["blocks"]
     return tuple(from_zarr_group(blocks_group[block_name], backend=backend, dtype=dtype) for block_name in block_names)
 

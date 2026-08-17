@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from functools import cache
 from importlib import import_module
-from typing import Any
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -27,20 +27,57 @@ FFI_CPU_PACKED_SOLVE_BACKWARD_F32 = "linear_dag_jaxlinarg_packed_solve_backward_
 FFI_CPU_PACKED_SOLVE_FORWARD_F64 = "linear_dag_jaxlinarg_packed_solve_forward_f64"
 FFI_CPU_PACKED_SOLVE_BACKWARD_F64 = "linear_dag_jaxlinarg_packed_solve_backward_f64"
 
+FFI_CPU_EXACT_TARGETS = (
+    FFI_CPU_SOLVE_FORWARD_F32,
+    FFI_CPU_SOLVE_BACKWARD_F32,
+    FFI_CPU_SOLVE_FORWARD_F64,
+    FFI_CPU_SOLVE_BACKWARD_F64,
+)
+FFI_CPU_PACKED_TARGETS = (
+    FFI_CPU_PACKED_SOLVE_FORWARD_F32,
+    FFI_CPU_PACKED_SOLVE_BACKWARD_F32,
+    FFI_CPU_PACKED_SOLVE_FORWARD_F64,
+    FFI_CPU_PACKED_SOLVE_BACKWARD_F64,
+)
+
+
+class _FfiCpuTargetStatus(NamedTuple):
+    available: bool
+    error: Exception | None
+
+
+class _FfiCpuLoadResult(NamedTuple):
+    implementation: Any | None
+    exact: _FfiCpuTargetStatus
+    packed: _FfiCpuTargetStatus
+
+
 _last_ffi_cpu_error: Exception | None = None
+_last_ffi_cpu_packed_error: Exception | None = None
 
 
 @cache
 def is_ffi_cpu_available() -> bool:
-    """Return whether the native CPU FFI handler can be imported and registered."""
+    """Return whether every exact single-block CPU FFI target is registered."""
     global _last_ffi_cpu_error
     try:
-        _load_ffi_cpu_impl()
+        status = _load_ffi_cpu_impl().exact
     except Exception as error:
-        _last_ffi_cpu_error = error
-        return False
-    _last_ffi_cpu_error = None
-    return True
+        status = _unavailable_target_status("exact", error)
+    _last_ffi_cpu_error = status.error
+    return status.available
+
+
+@cache
+def is_ffi_cpu_packed_available() -> bool:
+    """Return whether every packed descriptor-aware CPU FFI target is registered."""
+    global _last_ffi_cpu_packed_error
+    try:
+        status = _load_ffi_cpu_impl().packed
+    except Exception as error:
+        status = _unavailable_target_status("packed", error)
+    _last_ffi_cpu_packed_error = status.error
+    return status.available
 
 
 def is_ffi_cpu_built() -> bool:
@@ -53,8 +90,13 @@ def is_ffi_cpu_built() -> bool:
 
 
 def last_ffi_cpu_error() -> Exception | None:
-    """Return the last native CPU FFI import or registration error."""
+    """Return the last exact-target CPU FFI import or registration error."""
     return _last_ffi_cpu_error
+
+
+def last_ffi_cpu_packed_error() -> Exception | None:
+    """Return the last packed-target CPU FFI import or registration error."""
+    return _last_ffi_cpu_packed_error
 
 
 def is_ffi_cpu_blas_enabled() -> bool:
@@ -89,13 +131,65 @@ def _import_ffi_cpu_impl() -> Any:
 
 
 @cache
-def _load_ffi_cpu_impl() -> Any:
-    _ffi_cpu_impl = _import_ffi_cpu_impl()
+def _load_ffi_cpu_impl() -> _FfiCpuLoadResult:
     # Registration mutates JAX's process-wide FFI registry, so the cached
-    # loader performs it at most once per extension module instance.
-    for name, capsule in _ffi_cpu_impl.registrations().items():
-        jax.ffi.register_ffi_target(name, capsule, platform="cpu", api_version=1)
-    return _ffi_cpu_impl
+    # loader performs each complete target-set registration at most once per
+    # extension module instance. Completeness is checked before registering a
+    # member of a set, keeping exact and packed capability states independent.
+    try:
+        implementation = _import_ffi_cpu_impl()
+    except Exception as error:
+        return _FfiCpuLoadResult(
+            None,
+            _unavailable_target_status("exact", error),
+            _unavailable_target_status("packed", error),
+        )
+
+    try:
+        registrations = dict(implementation.registrations())
+    except Exception as error:
+        return _FfiCpuLoadResult(
+            implementation,
+            _unavailable_target_status("exact", error),
+            _unavailable_target_status("packed", error),
+        )
+
+    return _FfiCpuLoadResult(
+        implementation,
+        _register_target_set("exact", FFI_CPU_EXACT_TARGETS, registrations),
+        _register_target_set("packed", FFI_CPU_PACKED_TARGETS, registrations),
+    )
+
+
+def _register_target_set(
+    representation: str,
+    target_names: tuple[str, ...],
+    registrations: dict[str, Any],
+) -> _FfiCpuTargetStatus:
+    missing = tuple(name for name in target_names if name not in registrations)
+    if missing:
+        return _unavailable_target_status(
+            representation,
+            RuntimeError(f"missing targets: {', '.join(missing)}"),
+        )
+    try:
+        for name in target_names:
+            jax.ffi.register_ffi_target(
+                name,
+                registrations[name],
+                platform="cpu",
+                api_version=1,
+            )
+    except Exception as error:
+        return _unavailable_target_status(representation, error)
+    return _FfiCpuTargetStatus(True, None)
+
+
+def _unavailable_target_status(representation: str, error: Exception) -> _FfiCpuTargetStatus:
+    return _FfiCpuTargetStatus(
+        False,
+        RuntimeError(f"{representation} CPU FFI targets are unavailable: {error}"),
+    )
 
 
 def ffi_cpu_solve_forward(
@@ -312,8 +406,8 @@ def _ffi_cpu_packed_solve(
     descriptors: Any,
     b: Any,
 ) -> jax.Array:
-    if not is_ffi_cpu_available():
-        detail = last_ffi_cpu_error()
+    if not is_ffi_cpu_packed_available():
+        detail = last_ffi_cpu_packed_error()
         suffix = f": {detail}" if detail is not None else ""
         raise RuntimeError(f"packed CPU FFI backend is unavailable{suffix}")
     descriptors = jnp.asarray(descriptors)

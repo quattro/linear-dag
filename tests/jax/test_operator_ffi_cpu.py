@@ -86,14 +86,22 @@ def test_jax_lineararg_auto_resolves_to_ffi_cpu_when_handler_is_available(oracle
     np.testing.assert_allclose(np.asarray(op.matmat(oracle_case.w)), oracle_case.Xw, rtol=1e-5, atol=1e-5)
 
 
-def test_jax_lineararg_explicit_ffi_cpu_fallback_warns_and_runs_pure_jax(monkeypatch, oracle_case):
+def test_jax_lineararg_explicit_ffi_cpu_unavailable_fails_before_ffi_invocation(monkeypatch, oracle_case):
     monkeypatch.setattr(jaxlinarg_operator.ffi_cpu, "is_ffi_cpu_available", lambda: False)
+    monkeypatch.setattr(
+        jaxlinarg_operator.ffi_cpu,
+        "last_ffi_cpu_error",
+        lambda: RuntimeError("exact registration unavailable"),
+    )
 
-    with pytest.warns(UserWarning, match="FFI_CPU backend is unavailable"):
-        op = _operator_from_case(oracle_case, backend=Backend.FFI_CPU)
+    def fail_ffi_call(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("explicit unavailable FFI must fail before ffi_call")
 
-    assert op.backend is Backend.PURE_JAX
-    np.testing.assert_allclose(np.asarray(op.matmat(oracle_case.w)), oracle_case.Xw, rtol=1e-5, atol=1e-5)
+    monkeypatch.setattr(ffi_cpu.jax.ffi, "ffi_call", fail_ffi_call)
+
+    with pytest.raises(RuntimeError, match="exact.*exact registration unavailable"):
+        _operator_from_case(oracle_case, backend=Backend.FFI_CPU)
 
 
 def test_exact_ffi_backend_does_not_route_through_packed_targets(monkeypatch, oracle_case):
