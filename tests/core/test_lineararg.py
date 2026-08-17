@@ -61,6 +61,8 @@ def test_streamed_vcf_hdf5_matches_materialized_csc(test_data_dir, tmp_path, pha
         np.testing.assert_array_equal(f["indices"][:], genotypes.indices)
         np.testing.assert_array_equal(f["indptr"][:], genotypes.indptr)
         assert f["data"].dtype == genotypes.data.dtype
+        assert f["indices"].dtype == genotypes.indices.dtype
+        assert f["indptr"].dtype == genotypes.indptr.dtype
         np.testing.assert_array_equal(f["flip"][:], flip)
         expected_iids = [iid for iid in iids for _ in range(2)] if phased else iids
         assert [iid.decode() for iid in f["iids"][:]] == expected_iids

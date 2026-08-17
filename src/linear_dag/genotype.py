@@ -124,6 +124,9 @@ def write_vcf_to_hdf5(
     batch_columns: int = 100_000,
 ):
     """Stream retained VCF columns into an on-disk CSC representation."""
+    if batch_nnz <= 0 or batch_columns <= 0:
+        raise ValueError("batch_nnz and batch_columns must be positive")
+
     iids, num_rows, columns = _iter_vcf_columns(
         path,
         phased=phased,
@@ -174,11 +177,32 @@ def write_vcf_to_hdf5(
                 shape=(1,),
                 maxshape=(None,),
                 chunks=(max(1, batch_columns),),
-                dtype=np.int64,
+                dtype=np.int32,
                 compression="gzip",
                 shuffle=True,
             )
             indptr_dataset[0] = 0
+
+            def upgrade_indptr_to_int64():
+                nonlocal indptr_dataset
+                if indptr_dataset.dtype == np.dtype(np.int64):
+                    return
+                old_indptr = indptr_dataset
+                upgraded = f.create_dataset(
+                    "_indptr64",
+                    shape=old_indptr.shape,
+                    maxshape=(None,),
+                    chunks=old_indptr.chunks,
+                    dtype=np.int64,
+                    compression="gzip",
+                    shuffle=True,
+                )
+                for start in range(0, len(old_indptr), batch_columns):
+                    stop = min(start + batch_columns, len(old_indptr))
+                    upgraded[start:stop] = old_indptr[start:stop]
+                del f["indptr"]
+                f.move("_indptr64", "indptr")
+                indptr_dataset = f["indptr"]
 
             def flush():
                 nonlocal buffered_nnz
@@ -206,6 +230,8 @@ def write_vcf_to_hdf5(
                 data_chunks.append(values.astype(data_dtype, copy=False))
                 buffered_nnz += len(indices)
                 total_nnz += len(indices)
+                if total_nnz > np.iinfo(np.int32).max:
+                    upgrade_indptr_to_int64()
                 pointer_buffer.append(total_nnz)
                 num_variants += 1
                 flip.append(is_flipped)
@@ -220,6 +246,8 @@ def write_vcf_to_hdf5(
                     flush()
 
             flush()
+            if max(num_rows, num_variants) > np.iinfo(np.int32).max:
+                upgrade_indptr_to_int64()
 
             if num_variants == 0:
                 for key in list(f.keys()):
