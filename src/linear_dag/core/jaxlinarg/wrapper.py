@@ -17,7 +17,7 @@ import polars as pl
 from jax.sharding import AbstractMesh, Mesh
 from jaxtyping import Array, ArrayLike
 
-from linear_dag.core.lineararg import list_blocks
+from linear_dag.core.lineararg import LinearARG, list_blocks
 
 from .operator import _as_rank2_matrix, Backend, JaxLinearARG, resolve_backend
 
@@ -156,6 +156,7 @@ class JaxParallelOperator(eqx.Module):
           exact single-block targets are unavailable on the active platform.
         """
         lineargs = tuple(lineargs)
+        _validate_exact_linearg_sources(lineargs)
         backend = resolve_backend(_backend_for_lineargs(lineargs, backend=backend))
         metadata = _metadata_from_lineargs(lineargs)
         block_ranges = split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh))
@@ -284,6 +285,8 @@ class JaxParallelOperator(eqx.Module):
     def __check_init__(self) -> None:
         if not self.blocks:
             raise ValueError("blocks must contain at least one JaxLinearARG")
+        if not all(isinstance(block, JaxLinearARG) for block in self.blocks):
+            raise TypeError("blocks must contain only exact JaxLinearARG blocks")
         n_samples = {block.n_samples for block in self.blocks}
         if len(n_samples) != 1:
             raise ValueError("all blocks must have the same n_samples")
@@ -455,6 +458,11 @@ def _backend_for_lineargs(lineargs: tuple[Any, ...], *, backend: Backend) -> Bac
             f"prebuilt JaxLinearARG block backends must be consistent when wrapper backend is AUTO; observed {observed}"
         )
     return next(iter(prebuilt_backends))
+
+
+def _validate_exact_linearg_sources(lineargs: tuple[Any, ...]) -> None:
+    if not all(isinstance(linearg, (LinearARG, JaxLinearARG)) for linearg in lineargs):
+        raise TypeError("lineargs must contain only LinearARG or exact JaxLinearARG blocks")
 
 
 def _validate_jax_block_settings(

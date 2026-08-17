@@ -20,6 +20,7 @@ from linear_dag.core.jaxlinarg import (
     split_blocks_by_n_entries,
     variant_offsets_from_metadata,
 )
+from linear_dag.core.jaxlinarg.ingress import _PackedJaxLinearARG
 from linear_dag.core.lineararg import LinearARG
 
 
@@ -156,6 +157,25 @@ def test_jax_parallel_operator_construction_rejects_mismatched_sample_counts():
             backend=Backend.PURE_JAX,
             block_ranges=((0, 2),),
         )
+
+
+def test_jax_parallel_operator_rejects_private_packed_carrier_as_exact_block(
+    linarg_h5_path,
+    first_block_name,
+) -> None:
+    packed = _PackedJaxLinearARG.from_hdf5_block(linarg_h5_path, first_block_name)
+
+    with pytest.raises(TypeError, match="exact JaxLinearARG blocks"):
+        JaxParallelOperator(
+            blocks=(packed,),
+            variant_offsets=(0, packed.shape[1]),
+            mesh=_mesh(),
+            backend=Backend.PURE_JAX,
+            block_ranges=((0, 1),),
+        )
+
+    with pytest.raises(TypeError, match="LinearARG or exact JaxLinearARG"):
+        JaxParallelOperator.from_linearargs((packed,), mesh=_mesh(), backend=Backend.PURE_JAX)
 
 
 @pytest.mark.skipif(

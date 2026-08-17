@@ -743,6 +743,55 @@ def test_estimate_h2g_jax_backend_uses_jax_grm_operator(tmp_path: Path, monkeypa
     assert captured["grm"] is fake_grm
 
 
+def test_open_jax_grm_operator_keeps_exact_ragged_cli_route(monkeypatch):
+    from types import SimpleNamespace
+
+    from linear_dag.core import jaxlinarg as jaxlinarg_module
+    from linear_dag.core.jaxlinarg import Backend, JaxParallelOperator
+    from linear_dag.core.jaxlinarg.ingress import _PackedJaxLinearARG
+
+    exact_operator = object()
+    captured: dict[str, object] = {}
+
+    def fake_exact_from_hdf5(cls, path, *, mesh, block_metadata, backend):
+        captured.update(path=path, mesh=mesh, block_metadata=block_metadata, backend=backend)
+        return exact_operator
+
+    def fail_packed_from_hdf5(cls, *args, **kwargs):
+        raise AssertionError("--jax-backend must remain on exact-ragged during coexistence")
+
+    def fake_grm(operator, *, alpha, iids):
+        return SimpleNamespace(operator=operator, alpha=alpha, iids=iids)
+
+    monkeypatch.setattr(JaxParallelOperator, "from_hdf5", classmethod(fake_exact_from_hdf5))
+    monkeypatch.setattr(_PackedJaxLinearARG, "from_hdf5", classmethod(fail_packed_from_hdf5))
+    monkeypatch.setattr(jaxlinarg_module, "JaxGRMOperator", fake_grm)
+    monkeypatch.setattr(cli, "list_iids", lambda path: ("iid-1", "iid-2"))
+    metadata = pl.DataFrame(
+        {
+            "block_name": ["1:0-1"],
+            "n_entries": [1],
+            "n_variants": [1],
+            "n_samples": [2],
+        }
+    )
+    args = Namespace(
+        linarg_path="lineararg.h5",
+        num_processes=1,
+        maf_log10_threshold=None,
+        bed=None,
+        bed_maf_log10_threshold=None,
+    )
+
+    with cli._open_jax_grm_operator(args, metadata, logging.getLogger("linear_dag.tests.cli")) as grm:
+        assert grm.operator is exact_operator
+
+    assert captured["path"] == "lineararg.h5"
+    assert captured["block_metadata"] is metadata
+    assert captured["backend"] is Backend.AUTO
+    assert tuple(getattr(captured["mesh"], "axis_names")) == ("blocks",)
+
+
 def test_estimate_h2g_jax_backend_rejects_variant_filters(tmp_path: Path, monkeypatch):
     block_metadata = pl.DataFrame(
         {
