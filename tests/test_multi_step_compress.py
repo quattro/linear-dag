@@ -65,10 +65,20 @@ def test_multi_step_compress_pipeline():
             msc_step1(jobs_metadata=str(jobs_metadata), small_job_id=small_job_id)
 
             # Verify step 1 output
+            genotype_matrix = test_dir / "genotype_matrices" / f"{small_job_id}_{small_region}.h5"
             fwd_graph = test_dir / "forward_backward_graphs" / f"{small_job_id}_{small_region}_forward_graph.h5"
             bwd_graph = test_dir / "forward_backward_graphs" / f"{small_job_id}_{small_region}_backward_graph.h5"
             assert fwd_graph.exists()
             assert bwd_graph.exists()
+
+            # Step 2 needs only shape and column pointers from the genotype artifact.
+            with h5py.File(genotype_matrix, "a") as f:
+                has_genotype_payload = "data" in f
+                if has_genotype_payload:
+                    genotype_data = f["data"][:]
+                    genotype_indices = f["indices"][:]
+                    del f["data"]
+                    del f["indices"]
 
             # Step 2: Run reduction union and find recombinations
             print(f"  Running msc_step2 for job {small_job_id}...")
@@ -77,6 +87,12 @@ def test_multi_step_compress_pipeline():
             # Verify step 2 output
             brick_graph = test_dir / "brick_graph_partitions" / f"{small_job_id}_{small_region}.h5"
             assert brick_graph.exists()
+
+            # Later pipeline steps consume the full genotype matrix.
+            if has_genotype_payload:
+                with h5py.File(genotype_matrix, "a") as f:
+                    f.create_dataset("data", data=genotype_data)
+                    f.create_dataset("indices", data=genotype_indices)
 
         # Step 3: Merge small brick graph blocks
         print(f"\nRunning msc_step3 for large job {large_job_id}...")

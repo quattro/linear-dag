@@ -16,7 +16,7 @@ from .core.brick_graph import BrickGraph, merge_brick_graphs, read_graph_from_di
 from .core.lineararg import LinearARG, make_triangular, remove_degree_zero_nodes
 from .core.one_summed_cy import linearize_brick_graph
 from .core.recombination import Recombination
-from .genotype import read_vcf
+from .genotype import write_vcf_to_hdf5
 from .memory_logger import MemoryLogger
 
 
@@ -245,8 +245,8 @@ def msc_step1(
 ):
     """Run multi-step compression step 1 for one small partition.
 
-    This step materializes the genotype matrix and forward/backward graph for the
-    selected small job.
+    This step streams genotype columns into an on-disk CSC artifact, then builds
+    forward and backward graph files from bounded carrier-index batches.
 
     !!! info
 
@@ -696,10 +696,10 @@ def make_genotype_matrix(
     sex_path=None,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
-    """Materialize one regional genotype matrix plus variant metadata sidecars.
+    """Stream one regional genotype matrix plus variant metadata sidecars.
 
-    This helper reads one genomic region from a VCF/BCF, writes the sparse
-    genotype matrix to HDF5, and writes variant metadata to a text sidecar used
+    This helper reads one genomic region from a VCF/BCF, appends bounded batches
+    of sparse columns to HDF5, and writes variant metadata to a text sidecar used
     by later merge stages.
 
     !!! info
@@ -727,10 +727,12 @@ def make_genotype_matrix(
         with open(sex_path, "r") as f:
             sex = np.array([int(line.strip()) for line in f])
 
-    logger.info("Reading vcf as sparse matrix")
+    logger.info("Streaming VCF columns to sparse genotype storage")
     t1 = time.time()
-    genotypes, flip, v_info, iids = read_vcf(
+    genotype_path = f"{out}/genotype_matrices/{partition_number}_{region}.h5"
+    v_info = write_vcf_to_hdf5(
         vcf_path,
+        genotype_path,
         phased=phased,
         region=region,
         flip_minor_alleles=flip_minor_alleles,
@@ -740,33 +742,16 @@ def make_genotype_matrix(
         remove_multiallelics=remove_multiallelics,
         sex=sex,
     )
-    if genotypes is None:
+    if v_info is None:
         logger.info("No variants found")
-        with h5py.File(f"{out}/genotype_matrices/{partition_number}_{region}.h5", "w") as f:
-            f.attrs["is_empty"] = True
-
         with open(f"{out}/variant_metadata/{partition_number}_{region}.txt", "w") as f:
             f.write("# No variants found in this region\n")
 
         return None
 
-    if phased:
-        iids = [id_ for id_ in iids for _ in range(2)]
-
     t2 = time.time()
-    logger.info(f"vcf to sparse matrix completed in {np.round(t2 - t1, 3)} seconds")
-    logger.info("Saving genotype matrix and variant metadata")
-
-    with h5py.File(f"{out}/genotype_matrices/{partition_number}_{region}.h5", "w") as f:
-        f.create_dataset("shape", data=genotypes.shape, compression="gzip", shuffle=True)
-        f.create_dataset("indptr", data=genotypes.indptr, compression="gzip", shuffle=True)
-        f.create_dataset("indices", data=genotypes.indices, compression="gzip", shuffle=True)
-        f.create_dataset("data", data=genotypes.data, compression="gzip", shuffle=True)
-        f.create_dataset("flip", data=flip, compression="gzip", shuffle=True)
-        f.create_dataset("iids", data=iids, compression="gzip", shuffle=True)
-        if sex_path is not None:
-            f.create_dataset("sex", data=sex, compression="gzip", shuffle=True)
-        f.attrs["is_empty"] = False
+    logger.info(f"VCF streaming completed in {np.round(t2 - t1, 3)} seconds")
+    logger.info("Saving variant metadata")
 
     v_info.write_csv(f"{out}/variant_metadata/{partition_number}_{region}.txt", separator=" ")
 
@@ -793,9 +778,10 @@ def run_forward_backward(
     os.makedirs(f"{out}/forward_backward_graphs/", exist_ok=True)
 
     logger = _coerce_logger(logger, log_file=f"{out}/logs/{partition_identifier}_forward_backward.log")
-    logger.info("Loading genotype matrix")
+    logger.info("Loading genotype shape")
     t1 = time.time()
-    with h5py.File(f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5", "r") as f:
+    genotype_path = f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5"
+    with h5py.File(genotype_path, "r") as f:
         is_empty = f.attrs.get("is_empty", False)
         if is_empty:
             with h5py.File(f"{out}/forward_backward_graphs/{partition_identifier}_forward_graph.h5", "w") as f:
@@ -806,15 +792,14 @@ def run_forward_backward(
                 f.write("# No variants found in this region\n")
             logger.info("Genotype matrix is empty")
             return None
-        genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
+        shape = tuple(f["shape"][:])
     t2 = time.time()
-    logger.info(f"Genotype matrix loaded in {np.round(t2 - t1, 3)} seconds")
-    logger.info("Running forward and backward brick graph algorithms")
+    logger.info(f"Genotype shape {shape} loaded in {np.round(t2 - t1, 3)} seconds")
+    logger.info("Running sequential forward and backward brick graph algorithms from disk")
     t3 = time.time()
-    sample_indices = BrickGraph.forward_backward(
-        genotypes,
+    sample_indices = BrickGraph.forward_backward_from_hdf5(
+        genotype_path,
         add_samples=True,
-        save_to_disk=True,
         out=f"{out}/forward_backward_graphs/{partition_identifier}",
     )
     np.savetxt(f"{out}/forward_backward_graphs/{partition_identifier}_sample_indices.txt", sample_indices)
@@ -830,9 +815,10 @@ def reduction_union_recom(
 ):
     """Build one recombination-aware brick-graph partition from step-1 artifacts.
 
-    The routine loads the sparse genotype matrix plus forward/backward graphs,
-    forms the reduction-union graph, inserts recombination nodes, and writes the
-    resulting adjacency plus index arrays to disk.
+    The routine reads the genotype shape plus forward/backward graphs, forms the
+    reduction-union graph, inserts recombination nodes, and writes the resulting
+    adjacency plus index arrays to disk. Genotype column pointers are loaded only
+    after graph serialization for final statistics.
 
     !!! info
 
@@ -844,7 +830,7 @@ def reduction_union_recom(
 
     logger = _coerce_logger(logger, log_file=f"{out}/logs/{partition_identifier}_reduction_union_recom.log")
 
-    logger.info("Loading genotypes, forward and backward graphs, and sample indices")
+    logger.info("Loading forward and backward graphs and sample indices")
     t1 = time.time()
     with h5py.File(f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5", "r") as f:
         is_empty = f.attrs.get("is_empty", False)
@@ -852,8 +838,7 @@ def reduction_union_recom(
             with h5py.File(f"{out}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
                 f.attrs["is_empty"] = True
             return None
-        genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
-    n, m = genotypes.shape
+        n, m = f["shape"][:]
     forward_graph = read_graph_from_disk(
         f"{mount_point}{out}/forward_backward_graphs/{partition_identifier}_forward_graph.h5"
     )
@@ -867,6 +852,7 @@ def reduction_union_recom(
     logger.info("Combining nodes and computing reduction union")
     t3 = time.time()
     brick_graph, variant_indices = BrickGraph.combine_graphs(forward_graph, backward_graph, m)
+    del forward_graph, backward_graph
     t4 = time.time()
     logger.info(f"Combined nodes and computed reduction union in {np.round(t4 - t3, 3)} seconds")
 
@@ -876,6 +862,7 @@ def reduction_union_recom(
     logger.info("Finding recombinations")
     t5 = time.time()
     recom = Recombination.from_graph(brick_graph)
+    del brick_graph
     recom.find_recombinations()
     t6 = time.time()
     logger.info(f"Found recombinations in {np.round(t6 - t5, 3)} seconds")
@@ -883,21 +870,33 @@ def reduction_union_recom(
     for i in sample_indices:
         assert len(list(recom.successors(int(i)))) == 0
 
-    adj_mat = recom.to_csc()
+    indptr, indices, data, num_nodes = recom.to_csc_arrays()
+    del recom
+    brickgraph_nnz = len(data)
 
     logger.info("Saving brick graph")
     with h5py.File(f"{out}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
-        f.attrs["n"] = adj_mat.shape[0]
-        f.create_dataset("indptr", data=adj_mat.indptr, compression="gzip", shuffle=True)
-        f.create_dataset("indices", data=adj_mat.indices, compression="gzip", shuffle=True)
-        f.create_dataset("data", data=adj_mat.data, compression="gzip", shuffle=True)
+        f.attrs["n"] = num_nodes
+        f.create_dataset("indptr", data=indptr, compression="gzip", shuffle=True)
+        f.create_dataset("indices", data=indices, compression="gzip", shuffle=True)
+        f.create_dataset("data", data=data, compression="gzip", shuffle=True)
         f.create_dataset("variant_indices", data=np.array(variant_indices), compression="gzip", shuffle=True)
         f.create_dataset("sample_indices", data=np.array(sample_indices), compression="gzip", shuffle=True)
 
-    af = np.diff(genotypes.indptr) / n
+    del indptr, indices, data
+    with h5py.File(f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5", "r") as f:
+        genotype_indptr = f["indptr"][:]
+    af = np.diff(genotype_indptr) / n
     geno_nnz = np.sum(n * np.minimum(af, 1 - af))
-    nnz_ratio = geno_nnz / adj_mat.nnz
-    logger.info(f"Stats - n: {n}, m: {m}, geno_nnz: {geno_nnz}, brickgraph_nnz: {adj_mat.nnz}, nnz_ratio: {nnz_ratio}")
+    nnz_ratio = geno_nnz / brickgraph_nnz
+    logger.info(
+        "Stats - n: %s, m: %s, geno_nnz: %s, brickgraph_nnz: %s, nnz_ratio: %s",
+        n,
+        m,
+        geno_nnz,
+        brickgraph_nnz,
+        nnz_ratio,
+    )
 
 
 def infer_brick_graph(

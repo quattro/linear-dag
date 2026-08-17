@@ -1,15 +1,16 @@
+import shutil
+import subprocess
+
 import h5py
 import numpy as np
 import polars as pl
 import pytest
-import shutil
-import subprocess
 
 from scipy.sparse import csc_matrix
 
 from linear_dag.core.lineararg import LinearARG, list_blocks
 from linear_dag.core.operators import get_diploid_operator
-from linear_dag.genotype import read_vcf
+from linear_dag.genotype import read_vcf, write_vcf_to_hdf5
 
 
 def test_lineararg(linarg_h5_path):
@@ -37,6 +38,58 @@ def test_read_vcf(test_data_dir):
     assert genotypes.shape[0] == len(iids) * 2  # phased
     assert genotypes.shape[1] == len(v_info)
     assert len(flip) == len(v_info)
+
+
+@pytest.mark.parametrize("phased", [True, False])
+def test_streamed_vcf_hdf5_matches_materialized_csc(test_data_dir, tmp_path, phased):
+    vcf_path = test_data_dir / "1kg_small.vcf"
+    h5_path = tmp_path / "genotypes.h5"
+    genotypes, flip, v_info, iids = read_vcf(vcf_path, phased=phased, flip_minor_alleles=True)
+
+    streamed_v_info = write_vcf_to_hdf5(
+        vcf_path,
+        h5_path,
+        phased=phased,
+        flip_minor_alleles=True,
+        batch_nnz=17,
+        batch_columns=5,
+    )
+
+    with h5py.File(h5_path, "r") as f:
+        streamed = csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
+        np.testing.assert_array_equal(f["data"][:], genotypes.data)
+        np.testing.assert_array_equal(f["indices"][:], genotypes.indices)
+        np.testing.assert_array_equal(f["indptr"][:], genotypes.indptr)
+        assert f["data"].dtype == genotypes.data.dtype
+        assert f["indices"].dtype == genotypes.indices.dtype
+        assert f["indptr"].dtype == genotypes.indptr.dtype
+        np.testing.assert_array_equal(f["flip"][:], flip)
+        expected_iids = [iid for iid in iids for _ in range(2)] if phased else iids
+        assert [iid.decode() for iid in f["iids"][:]] == expected_iids
+        assert not f.attrs["is_empty"]
+
+    np.testing.assert_array_equal(streamed.toarray(), genotypes.toarray())
+    assert streamed_v_info.equals(v_info)
+
+
+def test_streamed_vcf_hdf5_upgrades_both_index_arrays(test_data_dir, tmp_path):
+    vcf_path = test_data_dir / "1kg_small.vcf"
+    h5_path = tmp_path / "genotypes.h5"
+    genotypes, *_ = read_vcf(vcf_path)
+
+    write_vcf_to_hdf5(
+        vcf_path,
+        h5_path,
+        batch_nnz=17,
+        batch_columns=5,
+        _index_dtype_max=200,
+    )
+
+    with h5py.File(h5_path, "r") as f:
+        assert f["indices"].dtype == np.dtype(np.int64)
+        assert f["indptr"].dtype == np.dtype(np.int64)
+        np.testing.assert_array_equal(f["indices"][:], genotypes.indices)
+        np.testing.assert_array_equal(f["indptr"][:], genotypes.indptr)
 
 
 def test_read_vcf_rejects_multiallelic_by_default(test_data_dir):
