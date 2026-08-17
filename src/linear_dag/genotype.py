@@ -3,15 +3,246 @@ import os
 
 from collections import defaultdict
 from os import PathLike
-from typing import DefaultDict, Optional, Union
+from typing import Optional, Union
 
 import cyvcf2 as cv
+import h5py
 import numpy as np
 import polars as pl
 
 from numpy.typing import NDArray
 from scipy.io import mmread
 from scipy.sparse import csc_matrix
+
+
+def _iter_vcf_columns(
+    path: Union[str, PathLike],
+    phased: bool = True,
+    region: Optional[str] = None,
+    flip_minor_alleles: bool = False,
+    samples: Optional[list[str]] = None,
+    maf_filter: float = None,
+    remove_indels: bool = False,
+    remove_multiallelics: bool = False,
+    sex: np.array = None,
+):
+    """Return sample metadata and an iterator over retained sparse VCF columns."""
+    if samples is not None:
+        vcf_samples = cv.VCF(path, lazy=True).samples
+        samples_to_load = list(set(samples) & set(vcf_samples))
+        if not samples_to_load:
+            raise ValueError("Samples specified but none found in VCF")
+        if len(samples_to_load) == len(vcf_samples):
+            samples_to_load = None
+    else:
+        samples_to_load = None
+
+    vcf = cv.VCF(path, gts012=True, strict_gt=True, samples=samples_to_load)
+    iids = vcf.samples
+    ploidy = 1 if phased else 2
+
+    if phased:
+        read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2])  # noqa: E731
+    else:
+        read_gt = lambda var: var.gt_types  # noqa: E731
+
+    if sex is not None:
+        mask = 2 * np.where(sex == 1)[0] + 1
+        indices_to_keep = np.array([i for i in range(2 * len(vcf.samples)) if i not in mask])
+        num_rows = len(indices_to_keep)
+    else:
+        indices_to_keep = None
+        num_rows = len(iids) * (2 if phased else 1)
+
+    if region:
+        interval = region.split(":")[1]
+        start = int(float(interval.split("-")[0]))
+        end = int(float(interval.split("-")[1]))
+    else:
+        start = 0
+        end = np.inf
+
+    variants = vcf(region) if region else vcf
+
+    def columns():
+        for var in variants:
+            if (var.POS < start) or (var.POS > end):
+                continue
+
+            if len(var.ALT) > 1:
+                if remove_multiallelics:
+                    continue
+                variant_id = var.ID if var.ID is not None else "."
+                raise ValueError(
+                    "Multiallelic variant encountered in VCF/BCF input: "
+                    f"{var.CHROM}:{var.POS} ID={variant_id} REF={var.REF} ALT={','.join(var.ALT)}. "
+                    "Multiallelic variants are not supported by default; use "
+                    "`remove_multiallelics=True` or `--remove-multiallelics` to exclude them."
+                )
+
+            if remove_indels and (any(len(alt) != 1 for alt in var.ALT) or len(var.REF) != 1):
+                continue
+
+            gts = read_gt(var)
+            if indices_to_keep is not None:
+                gts = gts[indices_to_keep]
+                assert np.all((gts == 0) | (gts == 1)), (
+                    "Haplotype vector contains non 0 or 1 values. Check genotype data or sex vector."
+                )
+
+            is_flipped = False
+            if flip_minor_alleles:
+                af = np.mean(gts) / ploidy
+                if af > 0.5:
+                    gts = ploidy - gts
+                    is_flipped = True
+
+            if maf_filter is not None:
+                af = np.mean(gts) / ploidy
+                if (af < maf_filter) or (1 - af < maf_filter):
+                    continue
+
+            indices = np.flatnonzero(gts)
+            metadata = (var.CHROM, var.POS, var.ID, var.REF, ",".join(var.ALT))
+            yield indices, gts[indices], is_flipped, metadata
+
+    return iids, num_rows, columns()
+
+
+def write_vcf_to_hdf5(
+    path: Union[str, PathLike],
+    output_path: Union[str, PathLike],
+    phased: bool = True,
+    region: Optional[str] = None,
+    flip_minor_alleles: bool = False,
+    samples: Optional[list[str]] = None,
+    maf_filter: float = None,
+    remove_indels: bool = False,
+    remove_multiallelics: bool = False,
+    sex: np.array = None,
+    batch_nnz: int = 1_000_000,
+    batch_columns: int = 100_000,
+):
+    """Stream retained VCF columns into an on-disk CSC representation."""
+    iids, num_rows, columns = _iter_vcf_columns(
+        path,
+        phased=phased,
+        region=region,
+        flip_minor_alleles=flip_minor_alleles,
+        samples=samples,
+        maf_filter=maf_filter,
+        remove_indels=remove_indels,
+        remove_multiallelics=remove_multiallelics,
+        sex=sex,
+    )
+
+    output_path = str(output_path)
+    partial_path = f"{output_path}.partial"
+    index_chunks = []
+    data_chunks = []
+    pointer_buffer = []
+    buffered_nnz = 0
+    total_nnz = 0
+    num_variants = 0
+    flip = []
+    var_table = defaultdict(list)
+
+    try:
+        with h5py.File(partial_path, "w") as f:
+            chunk_size = min(max(1, batch_nnz), 100_000)
+            data_dtype = np.int16 if phased else np.int32
+            indices_dataset = f.create_dataset(
+                "indices",
+                shape=(0,),
+                maxshape=(None,),
+                chunks=(chunk_size,),
+                dtype=np.int32,
+                compression="gzip",
+                shuffle=True,
+            )
+            data_dataset = f.create_dataset(
+                "data",
+                shape=(0,),
+                maxshape=(None,),
+                chunks=(chunk_size,),
+                dtype=data_dtype,
+                compression="gzip",
+                shuffle=True,
+            )
+            indptr_dataset = f.create_dataset(
+                "indptr",
+                shape=(1,),
+                maxshape=(None,),
+                chunks=(max(1, batch_columns),),
+                dtype=np.int64,
+                compression="gzip",
+                shuffle=True,
+            )
+            indptr_dataset[0] = 0
+
+            def flush():
+                nonlocal buffered_nnz
+                if index_chunks:
+                    indices = np.concatenate(index_chunks).astype(np.int32, copy=False)
+                    values = np.concatenate(data_chunks).astype(data_dtype, copy=False)
+                    start = indices_dataset.shape[0]
+                    stop = start + len(indices)
+                    indices_dataset.resize((stop,))
+                    data_dataset.resize((stop,))
+                    indices_dataset[start:stop] = indices
+                    data_dataset[start:stop] = values
+                    index_chunks.clear()
+                    data_chunks.clear()
+                    buffered_nnz = 0
+                if pointer_buffer:
+                    start = indptr_dataset.shape[0]
+                    stop = start + len(pointer_buffer)
+                    indptr_dataset.resize((stop,))
+                    indptr_dataset[start:stop] = pointer_buffer
+                    pointer_buffer.clear()
+
+            for indices, values, is_flipped, metadata in columns:
+                index_chunks.append(indices.astype(np.int32, copy=False))
+                data_chunks.append(values.astype(data_dtype, copy=False))
+                buffered_nnz += len(indices)
+                total_nnz += len(indices)
+                pointer_buffer.append(total_nnz)
+                num_variants += 1
+                flip.append(is_flipped)
+                chrom, pos, variant_id, ref, alt = metadata
+                var_table["CHROM"].append(chrom)
+                var_table["POS"].append(pos)
+                var_table["ID"].append(variant_id)
+                var_table["REF"].append(ref)
+                var_table["ALT"].append(alt)
+
+                if buffered_nnz >= batch_nnz or len(pointer_buffer) >= batch_columns:
+                    flush()
+
+            flush()
+
+            if num_variants == 0:
+                for key in list(f.keys()):
+                    del f[key]
+                f.attrs["is_empty"] = True
+            else:
+                f.create_dataset("shape", data=(num_rows, num_variants), compression="gzip", shuffle=True)
+                f.create_dataset("flip", data=np.asarray(flip), compression="gzip", shuffle=True)
+                output_iids = [iid for iid in iids for _ in range(2)] if phased else iids
+                f.create_dataset("iids", data=output_iids, compression="gzip", shuffle=True)
+                if sex is not None:
+                    f.create_dataset("sex", data=sex, compression="gzip", shuffle=True)
+                f.attrs["is_empty"] = False
+
+        os.replace(partial_path, output_path)
+    except BaseException:
+        if os.path.exists(partial_path):
+            os.remove(partial_path)
+        raise
+
+    if num_variants == 0:
+        return None
+    return pl.DataFrame(var_table)
 
 
 def read_vcf(
@@ -68,108 +299,33 @@ def read_vcf(
       or if a multiallelic variant is encountered and `remove_multiallelics=False`.
     """
 
-    def _update_dict_from_vcf(var: cv.Variant, data: DefaultDict[str, list]) -> DefaultDict[str, list]:
-        data["CHROM"].append(var.CHROM)
-        data["POS"].append(var.POS)
-        data["ID"].append(var.ID)
-        data["REF"].append(var.REF)
-        data["ALT"].append(",".join(var.ALT))
-
-        return data
-
-    if samples is not None:
-        # we parse header twice; once to pull samples, and then again later on with subset of samples
-        vcf_samples = cv.VCF(path, lazy=True).samples
-        samples_to_load = list(set(samples) & set(vcf_samples))
-        if not samples_to_load:
-            raise ValueError("Samples specified but none found in VCF")
-
-        if len(samples_to_load) == len(vcf_samples):
-            # optimization to not bother when all samples were present
-            samples_to_load = None
-    else:
-        samples_to_load = None
-
-    vcf = cv.VCF(path, gts012=True, strict_gt=True, samples=samples_to_load)
-    iids = vcf.samples
+    iids, num_rows, columns = _iter_vcf_columns(
+        path,
+        phased=phased,
+        region=region,
+        flip_minor_alleles=flip_minor_alleles,
+        samples=samples,
+        maf_filter=maf_filter,
+        remove_indels=remove_indels,
+        remove_multiallelics=remove_multiallelics,
+        sex=sex,
+    )
     data = []
     idxs = []
     ptrs = [0]
     flip = []
-
-    ploidy = 1 if phased else 2
-
-    # push most of the branching up here to define functions for fewer branch conditions during loop
-    if phased:
-        read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2])  # noqa: E731
-    else:
-        read_gt = lambda var: var.gt_types  # noqa: E731
-
-    if sex is not None:
-        mask = 2 * np.where(sex == 1)[0] + 1
-        indices_to_keep = np.array([i for i in range(2 * len(vcf.samples)) if i not in mask])
-
-    def final_read(var, flip_minor_alleles):
-        gts = read_gt(var)
-        if sex is not None:
-            gts = gts[indices_to_keep]
-            assert np.all(
-                (gts == 0) | (gts == 1)
-            ), "Haplotype vector contains non 0 or 1 values. Check genotype data or sex vector."
-
-        if not flip_minor_alleles:
-            return gts, False
-        af = np.mean(gts) / ploidy
-        if af > 0.5:
-            return ploidy - gts, True
-        else:
-            return gts, False
-
     var_table = defaultdict(list)
-    if region:
-        tmp = region.split(":")[1]
-        start = int(float(tmp.split("-")[0]))
-        end = int(float(tmp.split("-")[1]))
-    else:
-        tmp = None
-        start = 0
-        end = np.inf
-
-    variants = vcf(region) if region else vcf
-
-    # TODO: handle missing data
-    for var in variants:
-        if (var.POS < start) or (var.POS > end):
-            continue  # ignore indels that are outside of region
-
-        if len(var.ALT) > 1:
-            if remove_multiallelics:
-                continue
-            variant_id = var.ID if var.ID is not None else "."
-            raise ValueError(
-                "Multiallelic variant encountered in VCF/BCF input: "
-                f"{var.CHROM}:{var.POS} ID={variant_id} REF={var.REF} ALT={','.join(var.ALT)}. "
-                "Multiallelic variants are not supported by default; use "
-                "`remove_multiallelics=True` or `--remove-multiallelics` to exclude them."
-            )
-
-        if remove_indels:
-            if any(len(alt) != 1 for alt in var.ALT) or len(var.REF) != 1:
-                continue
-
-        gts, is_flipped = final_read(var, flip_minor_alleles)
-
-        if maf_filter is not None:
-            af = np.mean(gts) / ploidy
-            if (af < maf_filter) or (1 - af < maf_filter):
-                continue
-
-        (idx,) = np.where(gts != 0)
-        data.append(gts[idx])
-        idxs.append(idx)
-        ptrs.append(ptrs[-1] + len(idx))
+    for indices, values, is_flipped, metadata in columns:
+        idxs.append(indices)
+        data.append(values)
+        ptrs.append(ptrs[-1] + len(indices))
         flip.append(is_flipped)
-        var_table = _update_dict_from_vcf(var, var_table)
+        chrom, pos, variant_id, ref, alt = metadata
+        var_table["CHROM"].append(chrom)
+        var_table["POS"].append(pos)
+        var_table["ID"].append(variant_id)
+        var_table["REF"].append(ref)
+        var_table["ALT"].append(alt)
 
     v_info = pl.DataFrame(var_table)
 
@@ -179,9 +335,7 @@ def read_vcf(
     data = np.concatenate(data)
     idxs = np.concatenate(idxs)
     ptrs = np.array(ptrs)
-    genotypes = csc_matrix(
-        (data, idxs, ptrs), shape=(gts.shape[0], len(ptrs) - 1)
-    )  # some samples may have no variants, so shape must be specified
+    genotypes = csc_matrix((data, idxs, ptrs), shape=(num_rows, len(ptrs) - 1))
     flip = np.array(flip)
 
     return genotypes, flip, v_info, iids

@@ -16,7 +16,7 @@ from .core.brick_graph import BrickGraph, merge_brick_graphs, read_graph_from_di
 from .core.lineararg import LinearARG, make_triangular, remove_degree_zero_nodes
 from .core.one_summed_cy import linearize_brick_graph
 from .core.recombination import Recombination
-from .genotype import read_vcf
+from .genotype import write_vcf_to_hdf5
 from .memory_logger import MemoryLogger
 
 
@@ -245,8 +245,8 @@ def msc_step1(
 ):
     """Run multi-step compression step 1 for one small partition.
 
-    This step materializes the genotype matrix and forward/backward graph for the
-    selected small job.
+    This step streams genotype columns into an on-disk CSC artifact, then builds
+    forward and backward graph files from bounded carrier-index batches.
 
     !!! info
 
@@ -696,10 +696,10 @@ def make_genotype_matrix(
     sex_path=None,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
 ):
-    """Materialize one regional genotype matrix plus variant metadata sidecars.
+    """Stream one regional genotype matrix plus variant metadata sidecars.
 
-    This helper reads one genomic region from a VCF/BCF, writes the sparse
-    genotype matrix to HDF5, and writes variant metadata to a text sidecar used
+    This helper reads one genomic region from a VCF/BCF, appends bounded batches
+    of sparse columns to HDF5, and writes variant metadata to a text sidecar used
     by later merge stages.
 
     !!! info
@@ -727,10 +727,12 @@ def make_genotype_matrix(
         with open(sex_path, "r") as f:
             sex = np.array([int(line.strip()) for line in f])
 
-    logger.info("Reading vcf as sparse matrix")
+    logger.info("Streaming VCF columns to sparse genotype storage")
     t1 = time.time()
-    genotypes, flip, v_info, iids = read_vcf(
+    genotype_path = f"{out}/genotype_matrices/{partition_number}_{region}.h5"
+    v_info = write_vcf_to_hdf5(
         vcf_path,
+        genotype_path,
         phased=phased,
         region=region,
         flip_minor_alleles=flip_minor_alleles,
@@ -740,33 +742,16 @@ def make_genotype_matrix(
         remove_multiallelics=remove_multiallelics,
         sex=sex,
     )
-    if genotypes is None:
+    if v_info is None:
         logger.info("No variants found")
-        with h5py.File(f"{out}/genotype_matrices/{partition_number}_{region}.h5", "w") as f:
-            f.attrs["is_empty"] = True
-
         with open(f"{out}/variant_metadata/{partition_number}_{region}.txt", "w") as f:
             f.write("# No variants found in this region\n")
 
         return None
 
-    if phased:
-        iids = [id_ for id_ in iids for _ in range(2)]
-
     t2 = time.time()
-    logger.info(f"vcf to sparse matrix completed in {np.round(t2 - t1, 3)} seconds")
-    logger.info("Saving genotype matrix and variant metadata")
-
-    with h5py.File(f"{out}/genotype_matrices/{partition_number}_{region}.h5", "w") as f:
-        f.create_dataset("shape", data=genotypes.shape, compression="gzip", shuffle=True)
-        f.create_dataset("indptr", data=genotypes.indptr, compression="gzip", shuffle=True)
-        f.create_dataset("indices", data=genotypes.indices, compression="gzip", shuffle=True)
-        f.create_dataset("data", data=genotypes.data, compression="gzip", shuffle=True)
-        f.create_dataset("flip", data=flip, compression="gzip", shuffle=True)
-        f.create_dataset("iids", data=iids, compression="gzip", shuffle=True)
-        if sex_path is not None:
-            f.create_dataset("sex", data=sex, compression="gzip", shuffle=True)
-        f.attrs["is_empty"] = False
+    logger.info(f"VCF streaming completed in {np.round(t2 - t1, 3)} seconds")
+    logger.info("Saving variant metadata")
 
     v_info.write_csv(f"{out}/variant_metadata/{partition_number}_{region}.txt", separator=" ")
 
@@ -793,9 +778,10 @@ def run_forward_backward(
     os.makedirs(f"{out}/forward_backward_graphs/", exist_ok=True)
 
     logger = _coerce_logger(logger, log_file=f"{out}/logs/{partition_identifier}_forward_backward.log")
-    logger.info("Loading genotype matrix")
+    logger.info("Loading genotype shape")
     t1 = time.time()
-    with h5py.File(f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5", "r") as f:
+    genotype_path = f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5"
+    with h5py.File(genotype_path, "r") as f:
         is_empty = f.attrs.get("is_empty", False)
         if is_empty:
             with h5py.File(f"{out}/forward_backward_graphs/{partition_identifier}_forward_graph.h5", "w") as f:
@@ -806,15 +792,14 @@ def run_forward_backward(
                 f.write("# No variants found in this region\n")
             logger.info("Genotype matrix is empty")
             return None
-        genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
+        shape = tuple(f["shape"][:])
     t2 = time.time()
-    logger.info(f"Genotype matrix loaded in {np.round(t2 - t1, 3)} seconds")
-    logger.info("Running forward and backward brick graph algorithms")
+    logger.info(f"Genotype shape {shape} loaded in {np.round(t2 - t1, 3)} seconds")
+    logger.info("Running sequential forward and backward brick graph algorithms from disk")
     t3 = time.time()
-    sample_indices = BrickGraph.forward_backward(
-        genotypes,
+    sample_indices = BrickGraph.forward_backward_from_hdf5(
+        genotype_path,
         add_samples=True,
-        save_to_disk=True,
         out=f"{out}/forward_backward_graphs/{partition_identifier}",
     )
     np.savetxt(f"{out}/forward_backward_graphs/{partition_identifier}_sample_indices.txt", sample_indices)
@@ -830,9 +815,10 @@ def reduction_union_recom(
 ):
     """Build one recombination-aware brick-graph partition from step-1 artifacts.
 
-    The routine loads the sparse genotype matrix plus forward/backward graphs,
-    forms the reduction-union graph, inserts recombination nodes, and writes the
-    resulting adjacency plus index arrays to disk.
+    The routine reads the genotype shape plus forward/backward graphs, forms the
+    reduction-union graph, inserts recombination nodes, and writes the resulting
+    adjacency plus index arrays to disk. Genotype column pointers are loaded only
+    after graph serialization for final statistics.
 
     !!! info
 
