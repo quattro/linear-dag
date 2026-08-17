@@ -124,6 +124,25 @@ def get_pairing_matrix(two_n: int) -> LinearOperator:
     return pairing_matrix
 
 
+class _DiploidOperator(LinearOperator):
+    def __init__(self, haploid_operator: LinearOperator):
+        two_n = haploid_operator.shape[0]
+        if two_n % 2 != 0:
+            raise ValueError("Number of rows in haploid_operator must be even")
+        self.haploid_operator = haploid_operator
+        self.pairing_matrix = aslinearoperator(get_pairing_matrix(two_n))
+        super().__init__(dtype=haploid_operator.dtype, shape=(two_n // 2, haploid_operator.shape[1]))
+
+    def _matmat(self, other: np.ndarray) -> np.ndarray:
+        return self.pairing_matrix @ (self.haploid_operator @ other)
+
+    def _rmatmat(self, other: np.ndarray) -> np.ndarray:
+        diploid_dosage_rmatmat = getattr(self.haploid_operator, "diploid_dosage_rmatmat", None)
+        if callable(diploid_dosage_rmatmat):
+            return diploid_dosage_rmatmat(other)
+        return self.haploid_operator.T @ (self.pairing_matrix.T @ other)
+
+
 def get_diploid_operator(haploid_operator: LinearOperator) -> LinearOperator:
     """Convert a haploid operator into a diploid operator by row pairing.
 
@@ -143,6 +162,9 @@ def get_diploid_operator(haploid_operator: LinearOperator) -> LinearOperator:
     - `ValueError`: If the haploid row count is odd.
     """
     two_n = haploid_operator.shape[0]
+    diploid_dosage_rmatmat = getattr(haploid_operator, "diploid_dosage_rmatmat", None)
+    if callable(diploid_dosage_rmatmat):
+        return _DiploidOperator(haploid_operator)
     return aslinearoperator(get_pairing_matrix(two_n)) @ haploid_operator
 
 

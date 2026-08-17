@@ -249,6 +249,35 @@ def test_read_write_matmul(tmp_path, test_data_dir):
     assert np.all(num_carriers == loaded_linarg.number_of_carriers())
 
 
+def test_diploid_operator_uses_lineararg_dosage_fast_path(test_data_dir):
+    vcf_path = test_data_dir / "1kg_small.vcf"
+    linarg, genotypes = LinearARG.from_vcf(vcf_path, return_genotypes=True)
+    linarg = linarg.add_individual_nodes()
+    diploid_operator = get_diploid_operator(linarg)
+
+    rng = np.random.default_rng(42)
+    right = rng.normal(size=(linarg.shape[0] // 2, 3)).astype(np.float32)
+    expected = genotypes.T @ np.repeat(right, 2, axis=0)
+
+    np.testing.assert_allclose(diploid_operator.T @ right, expected, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(linarg.diploid_dosage_rmatmat(right), expected, rtol=1e-5, atol=1e-5)
+
+
+def test_diploid_operator_preserves_generic_linear_operator_fallback(test_data_dir):
+    vcf_path = test_data_dir / "1kg_small.vcf"
+    _, genotypes = LinearARG.from_vcf(vcf_path, return_genotypes=True)
+    diploid_operator = get_diploid_operator(genotypes)
+
+    rng = np.random.default_rng(43)
+    left = rng.normal(size=(genotypes.shape[0] // 2, 2)).astype(np.float32)
+    right = rng.normal(size=(genotypes.shape[1], 2)).astype(np.float32)
+
+    np.testing.assert_allclose(diploid_operator.T @ left, genotypes.T @ np.repeat(left, 2, axis=0), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        diploid_operator @ right, (genotypes @ right)[0::2] + (genotypes @ right)[1::2], rtol=1e-5, atol=1e-5
+    )
+
+
 def test_get_carriers_subset(test_data_dir):
     """Test get_carriers_subset method against linarg @ indicator."""
     vcf_path = test_data_dir / "1kg_small.vcf"
