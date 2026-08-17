@@ -97,7 +97,7 @@ class PackingConfig:
 
     num_devices: int
     data_dtype: np.dtype[Any]
-    max_padding_ratio: float = 1.25
+    max_padding_ratio: float | None = 1.25
     allow_excess_padding: bool = False
 
 
@@ -136,6 +136,7 @@ class PackingDiagnostics:
     padded_graph_bytes: int
     descriptor_bytes: int
     padding_ratio: float
+    max_padding_ratio: float | None
     device_graph_bytes: tuple[int, ...]
     device_solve_work: tuple[int, ...]
     device_score_loads: tuple[int, ...]
@@ -238,6 +239,69 @@ class _BlockPackingSummary:
     compressed_length: int | None
 
 
+def _block_packing_summary_from_arrays(
+    arrays: LinearARGBlockArrays,
+    *,
+    dtype: Any,
+) -> _BlockPackingSummary:
+    """Derive planning facts without materializing canonical array copies."""
+    data_dtype = np.dtype(dtype)
+    if not np.issubdtype(data_dtype, np.floating):
+        raise ValueError("data dtype must be a floating dtype")
+    n_samples = _nonnegative_int(arrays.n_samples, name="n_samples")
+    n_variants = _nonnegative_int(arrays.n_variants, name="n_variants")
+
+    def length(values: Any, *, name: str) -> int:
+        shape = np.shape(values)
+        if len(shape) != 1:
+            raise ValueError(f"{name} must be one-dimensional")
+        return int(shape[0])
+
+    indptr_length = length(arrays.indptr, name="indptr")
+    node_count = indptr_length - 1
+    if node_count < 1:
+        raise ValueError("indptr must describe at least one node")
+    edge_length = length(arrays.indices, name="indices")
+    if length(arrays.data, name="data") != edge_length:
+        raise ValueError("data length must match indices")
+    if length(arrays.variant_indices, name="variant_indices") != n_variants:
+        raise ValueError("variant_indices length must match n_variants")
+    if length(arrays.flip, name="flip") != n_variants:
+        raise ValueError("flip length must match n_variants")
+    if length(arrays.sample_indices, name="sample_indices") != n_samples:
+        raise ValueError("sample_indices length must match n_samples")
+    nonunique_length = (
+        node_count if arrays.nonunique_indices is None else length(arrays.nonunique_indices, name="nonunique_indices")
+    )
+    allele_count_length = (
+        n_variants if arrays.allele_counts is None else length(arrays.allele_counts, name="allele_counts")
+    )
+    if nonunique_length != node_count:
+        raise ValueError("nonunique_indices length must match node count")
+    if allele_count_length != n_variants:
+        raise ValueError("allele_counts length must match n_variants")
+
+    sample_indices = np.asarray(arrays.sample_indices)
+    return _BlockPackingSummary(
+        field_lengths=(
+            indptr_length,
+            edge_length,
+            edge_length,
+            n_variants,
+            n_variants,
+            n_samples,
+            nonunique_length,
+            allele_count_length,
+            n_variants,
+        ),
+        data_dtype=data_dtype,
+        n_samples=n_samples,
+        n_variants=n_variants,
+        min_index_to_keep=int(sample_indices[-1]) if sample_indices.size else 0,
+        compressed_length=None,
+    )
+
+
 @dataclass(frozen=True)
 class _BlockMetrics:
     field_lengths: tuple[int, ...]
@@ -302,7 +366,7 @@ def plan_packing(
     *,
     num_devices: int,
     dtype: Any = None,
-    max_padding_ratio: float = 1.25,
+    max_padding_ratio: float | None = 1.25,
     allow_excess_padding: bool = False,
 ) -> PackingPlan:
     """Build a deterministic whole-block packing plan.
@@ -331,14 +395,16 @@ def _plan_packing_from_summaries(
     *,
     num_devices: int,
     dtype: Any,
-    max_padding_ratio: float = 1.25,
+    max_padding_ratio: float | None = 1.25,
     allow_excess_padding: bool = False,
 ) -> PackingPlan:
     """Plan from metadata summaries without owning source graph arrays."""
     if isinstance(num_devices, bool) or not isinstance(num_devices, (int, np.integer)) or num_devices < 1:
         raise ValueError("num_devices must be at least 1")
-    if isinstance(max_padding_ratio, bool) or not np.isfinite(max_padding_ratio) or max_padding_ratio < 1.0:
-        raise ValueError("max_padding_ratio must be finite and at least 1.0")
+    if max_padding_ratio is not None and (
+        isinstance(max_padding_ratio, bool) or not np.isfinite(max_padding_ratio) or max_padding_ratio < 1.0
+    ):
+        raise ValueError("max_padding_ratio must be None or a finite value of at least 1.0")
     if not isinstance(allow_excess_padding, (bool, np.bool_)):
         raise ValueError("allow_excess_padding must be Boolean")
 
@@ -357,7 +423,7 @@ def _plan_packing_from_summaries(
     config = PackingConfig(
         num_devices=int(num_devices),
         data_dtype=data_dtype,
-        max_padding_ratio=float(max_padding_ratio),
+        max_padding_ratio=None if max_padding_ratio is None else float(max_padding_ratio),
         allow_excess_padding=bool(allow_excess_padding),
     )
     metrics = tuple(_summary_metrics(summary) for summary in block_summaries)
@@ -408,19 +474,25 @@ def _plan_packing_from_summaries(
         padded_graph_bytes=padded_bytes,
         descriptor_bytes=descriptor_bytes,
         padding_ratio=padding_ratio,
+        max_padding_ratio=config.max_padding_ratio,
         device_graph_bytes=device_graph_bytes,
         device_solve_work=device_solve_work,
         device_score_loads=device_score_loads,
-        padding_override=config.allow_excess_padding,
+        padding_override=config.allow_excess_padding or config.max_padding_ratio is None,
         rebalance_steps=rebalance_steps,
     )
 
-    if padding_ratio > config.max_padding_ratio and not config.allow_excess_padding:
+    if (
+        config.max_padding_ratio is not None
+        and padding_ratio > config.max_padding_ratio
+        and not config.allow_excess_padding
+    ):
         raise ValueError(
             "whole-block packing exceeds max_padding_ratio after rebalancing: "
             f"canonical bytes={canonical_bytes}, padded bytes={padded_bytes}, "
             f"padding ratio={padding_ratio:.6f}, per-device loads={device_graph_bytes}. "
-            "Pass allow_excess_padding=True for an explicit override or use the exact-ragged fallback; "
+            "Pass a larger max_padding_ratio or max_padding_ratio=None for an explicit override "
+            "(legacy allow_excess_padding=True is also accepted), or use the exact-ragged fallback; "
             "source graph blocks are indivisible."
         )
 
@@ -443,7 +515,7 @@ def pack_blocks(
     *,
     num_devices: int,
     dtype: Any = None,
-    max_padding_ratio: float = 1.25,
+    max_padding_ratio: float | None = 1.25,
     allow_excess_padding: bool = False,
 ) -> PackedGraph:
     """Pack canonical LinearARG blocks into equal-capacity host shard buffers."""

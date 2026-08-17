@@ -323,6 +323,20 @@ def test_skewed_plan_rejects_with_complete_diagnostics_and_override() -> None:
     assert len(plan.diagnostics.device_solve_work) == 2
 
 
+def test_padding_limit_accepts_larger_ratio_or_none_as_explicit_override() -> None:
+    blocks = (_block(n_nodes=20, n_edges=30, n_variants=10), _block(n_nodes=2, n_edges=1, n_variants=1))
+
+    larger_limit = plan_packing(blocks, num_devices=2, max_padding_ratio=3.0)
+    no_limit = plan_packing(blocks, num_devices=2, max_padding_ratio=None)
+
+    assert larger_limit.diagnostics.padding_ratio <= 3.0
+    assert larger_limit.diagnostics.max_padding_ratio == 3.0
+    assert not larger_limit.diagnostics.padding_override
+    assert no_limit.diagnostics.padding_ratio > 1.25
+    assert no_limit.diagnostics.max_padding_ratio is None
+    assert no_limit.diagnostics.padding_override
+
+
 def test_bundled_two_block_fixture_requires_explicit_padding_override(
     linarg_h5_path,
     linarg_block_metadata,

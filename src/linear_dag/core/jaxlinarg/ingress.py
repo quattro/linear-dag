@@ -19,6 +19,7 @@ import h5py
 import jax
 import jax.numpy as jnp
 import numpy as np
+import polars as pl
 
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jaxtyping import Array
@@ -30,6 +31,7 @@ from .operator import Backend, JaxLinearARG, resolve_backend
 from .packing import (
     _allocate_host_buffers,
     _block_metrics,
+    _block_packing_summary_from_arrays,
     _BlockPackingSummary,
     _finalize_staged_descriptor,
     _make_packed_graph_value,
@@ -43,12 +45,13 @@ from .packing import (
     PACKED_COMPONENT_NAMES,
     PackedGraph,
     PackingPlan,
-    plan_packing,
     VALID_LENGTH_FIELDS,
     validate_packed_graph,
 )
 
 _STAGING_ACCOUNTING_NOTE = "deterministic one-source-block ingress accounting; not a JAX allocator high-water mark"
+_ROOT_GRAPH_DATASETS = frozenset(("indptr", "indices", "data", "variant_indices", "flip"))
+_ROOT_GRAPH_ATTRIBUTES = frozenset(("n", "n_samples", "n_variants", "n_entries"))
 
 
 def _resolve_packed_backend(requested: Backend) -> Backend:
@@ -72,6 +75,7 @@ class _PackedIngressDiagnostics:
     final_graph_bytes_by_device: tuple[int, ...]
     final_bytes_by_device: tuple[int, ...]
     padding_ratio: float
+    max_padding_ratio: float | None
     component_count: int
     pytree_leaf_count: int
     staging_accounting: str = _STAGING_ACCOUNTING_NOTE
@@ -90,6 +94,138 @@ class _PackedJaxLinearARG(eqx.Module):
         converter=partial(resolve_backend, require_packed_targets=True),
         static=True,
     )
+    iids: tuple[str, ...] | None = eqx.field(default=None, converter=lambda value: _iid_tuple(value), static=True)
+
+    @classmethod
+    def from_lineararg_arrays(
+        cls,
+        *,
+        indptr: Any,
+        indices: Any,
+        data: Any,
+        variant_indices: Any,
+        flip: Any,
+        sample_indices: Any,
+        nonunique_indices: Any,
+        n_variants: int,
+        n_samples: int,
+        allele_counts: Any = None,
+        iids: Any = None,
+        mesh: Mesh | None = None,
+        backend: Backend = Backend.AUTO,
+        dtype: Any = None,
+        max_padding_ratio: float | None = 1.25,
+    ) -> _PackedJaxLinearARG:
+        """Construct the private candidate from one block of host arrays."""
+        block = LinearARGBlockArrays(
+            indptr=np.asarray(indptr),
+            indices=np.asarray(indices),
+            data=np.asarray(data),
+            variant_indices=np.asarray(variant_indices),
+            flip=np.asarray(flip),
+            sample_indices=np.asarray(sample_indices),
+            nonunique_indices=None if nonunique_indices is None else np.asarray(nonunique_indices),
+            allele_counts=None if allele_counts is None else np.asarray(allele_counts),
+            n_variants=n_variants,
+            n_samples=n_samples,
+        )
+        return _packed_from_block_arrays(
+            (block,),
+            mesh=_single_block_mesh(mesh),
+            backend=backend,
+            dtype=dtype,
+            max_padding_ratio=max_padding_ratio,
+            iids=iids,
+        ).operator
+
+    @classmethod
+    def from_lineararg(
+        cls,
+        linarg: LinearARG,
+        *,
+        mesh: Mesh | None = None,
+        backend: Backend = Backend.AUTO,
+        dtype: Any = None,
+        max_padding_ratio: float | None = 1.25,
+    ) -> _PackedJaxLinearARG:
+        """Construct the private candidate from one in-memory LinearARG."""
+        return _packed_from_block_arrays(
+            (_lineararg_block_arrays(linarg, dtype=dtype),),
+            mesh=_single_block_mesh(mesh),
+            backend=backend,
+            dtype=dtype,
+            max_padding_ratio=max_padding_ratio,
+            iids=getattr(linarg, "iids", None),
+        ).operator
+
+    @classmethod
+    def from_linearargs(
+        cls,
+        lineargs: Iterable[LinearARG],
+        *,
+        mesh: Mesh,
+        backend: Backend = Backend.AUTO,
+        dtype: Any = None,
+        max_padding_ratio: float | None = 1.25,
+    ) -> _PackedJaxLinearARG:
+        """Construct the private candidate from in-memory LinearARG blocks."""
+        sources = tuple(lineargs)
+        iids = _shared_lineararg_iids(sources)
+        blocks = (_lineararg_block_arrays(linarg, dtype=dtype) for linarg in sources)
+        return _packed_from_block_arrays(
+            blocks,
+            mesh=mesh,
+            backend=backend,
+            dtype=dtype,
+            max_padding_ratio=max_padding_ratio,
+            iids=iids,
+        ).operator
+
+    @classmethod
+    def from_hdf5_block(
+        cls,
+        path: str | PathLike[str],
+        block: Any = None,
+        *,
+        mesh: Mesh | None = None,
+        backend: Backend = Backend.AUTO,
+        load_metadata: bool = False,
+        dtype: Any = None,
+        max_padding_ratio: float | None = 1.25,
+    ) -> _PackedJaxLinearARG:
+        """Construct the private candidate from one HDF5 block or root file."""
+        del load_metadata
+        return _packed_from_hdf5(
+            path,
+            None if block is None else (block,),
+            mesh=_single_block_mesh(mesh),
+            backend=backend,
+            dtype=dtype,
+            max_padding_ratio=max_padding_ratio,
+            root_only=block is None,
+        ).operator
+
+    @classmethod
+    def from_hdf5(
+        cls,
+        path: str | PathLike[str],
+        *,
+        mesh: Mesh,
+        block_metadata: pl.DataFrame | None = None,
+        backend: Backend = Backend.AUTO,
+        dtype: Any = None,
+        max_padding_ratio: float | None = 1.25,
+    ) -> _PackedJaxLinearARG:
+        """Construct the private candidate from an HDF5 LinearARG file."""
+        return _packed_from_hdf5(
+            path,
+            None,
+            mesh=mesh,
+            block_metadata=block_metadata,
+            backend=backend,
+            dtype=dtype,
+            max_padding_ratio=max_padding_ratio,
+        ).operator
 
     def __check_init__(self) -> None:
         arrays = self.graph.components
@@ -165,6 +301,11 @@ class _PackedJaxLinearARG(eqx.Module):
     def shape(self) -> tuple[int, int]:
         """Return the logical sample-by-variant shape."""
         return (self.n_samples, self.n_variants)
+
+    @property
+    def dtype(self) -> jnp.dtype:
+        """Return the packed edge-data dtype."""
+        return self.data.dtype
 
     def matmat(self, values: Any) -> Array:
         r"""Multiply by the packed LinearARG with graph state explicit.
@@ -251,49 +392,70 @@ def _packed_from_block_arrays(
     mesh: Mesh,
     backend: Backend = Backend.PURE_JAX,
     dtype: Any = None,
-    max_padding_ratio: float = 1.25,
+    max_padding_ratio: float | None = 1.25,
     allow_excess_padding: bool = False,
+    iids: Any = None,
 ) -> _PackedIngressResult:
     """Construct the private packed carrier from canonical host blocks."""
     backend = _resolve_packed_backend(backend)
-    source_blocks: list[LinearARGBlockArrays | None] = list(blocks)
+    loaded_blocks = list(blocks)
     normalized_dtype = _normalize_dtype(dtype)
-    plan = plan_packing(
-        (block for block in source_blocks if block is not None),
+    plan = _plan_packing_from_summaries(
+        (_block_packing_summary_from_arrays(block, dtype=normalized_dtype) for block in loaded_blocks),
         num_devices=_graph_mesh_devices(mesh),
         dtype=normalized_dtype,
         max_padding_ratio=max_padding_ratio,
         allow_excess_padding=allow_excess_padding,
     )
+    pending_blocks: list[LinearARGBlockArrays | None] = list(loaded_blocks)
+    del loaded_blocks
 
     def load_block(logical_block_index: int) -> LinearARGBlockArrays:
-        block = source_blocks[logical_block_index]
+        block = pending_blocks[logical_block_index]
         if block is None:
             raise RuntimeError("canonical block source was released before staging")
-        source_blocks[logical_block_index] = None
+        pending_blocks[logical_block_index] = None
         return block
 
-    return _packed_from_plan(load_block, plan=plan, mesh=mesh, backend=backend)
+    return _packed_from_plan(load_block, plan=plan, mesh=mesh, backend=backend, iids=iids)
 
 
 def _packed_from_hdf5(
     path: str | PathLike[str],
-    block_names: Iterable[Any],
+    block_names: Iterable[Any] | None = None,
     *,
     mesh: Mesh,
+    block_metadata: pl.DataFrame | None = None,
     backend: Backend = Backend.PURE_JAX,
     dtype: Any = None,
-    max_padding_ratio: float = 1.25,
+    max_padding_ratio: float | None = 1.25,
     allow_excess_padding: bool = False,
+    root_only: bool = False,
 ) -> _PackedIngressResult:
-    """Construct the private packed carrier from named HDF5 blocks."""
+    """Construct the private packed carrier from a validated HDF5 layout."""
     backend = _resolve_packed_backend(backend)
-    names = tuple(block_names)
     normalized_dtype = _normalize_dtype(dtype)
     _ensure_hdf5_plugins()
 
     with h5py.File(_hdf5_path(path), "r") as file:
-        summaries = tuple(_block_packing_summary_from_group(file[name], dtype=normalized_dtype) for name in names)
+        layout = _hdf5_layout(file)
+        if root_only and layout != "root":
+            raise ValueError("block=None is valid only for a root-level single-block HDF5 file")
+        if layout == "root":
+            if block_metadata is not None:
+                raise ValueError("block_metadata is not valid for a root-level single-block HDF5 file")
+            if block_names is not None and tuple(block_names):
+                raise ValueError("block names are not valid for a root-level single-block HDF5 file")
+            groups = (file,)
+        else:
+            names = _validated_hdf5_block_names(
+                file,
+                block_names=block_names,
+                block_metadata=block_metadata,
+            )
+            groups = tuple(file[name] for name in names)
+
+        summaries = tuple(_block_packing_summary_from_group(group, dtype=normalized_dtype) for group in groups)
         plan = _plan_packing_from_summaries(
             summaries,
             num_devices=_graph_mesh_devices(mesh),
@@ -303,9 +465,15 @@ def _packed_from_hdf5(
         )
 
         def load_block(logical_block_index: int) -> LinearARGBlockArrays:
-            return _read_block_arrays_from_group(file[names[logical_block_index]], dtype=normalized_dtype)
+            return _read_block_arrays_from_group(groups[logical_block_index], dtype=normalized_dtype)
 
-        return _packed_from_plan(load_block, plan=plan, mesh=mesh, backend=backend)
+        return _packed_from_plan(
+            load_block,
+            plan=plan,
+            mesh=mesh,
+            backend=backend,
+            iids=_read_hdf5_iids(file),
+        )
 
 
 def _packed_from_group_reader(
@@ -315,7 +483,7 @@ def _packed_from_group_reader(
     mesh: Mesh,
     backend: Backend = Backend.PURE_JAX,
     dtype: Any = None,
-    max_padding_ratio: float = 1.25,
+    max_padding_ratio: float | None = 1.25,
     allow_excess_padding: bool = False,
 ) -> _PackedIngressResult:
     """Construct from the existing duck-typed group-reader test seam."""
@@ -336,7 +504,7 @@ def _packed_from_group_reader(
     def load_block(logical_block_index: int) -> LinearARGBlockArrays:
         return _read_block_arrays_from_group(blocks_group[names[logical_block_index]], dtype=normalized_dtype)
 
-    return _packed_from_plan(load_block, plan=plan, mesh=mesh, backend=backend)
+    return _packed_from_plan(load_block, plan=plan, mesh=mesh, backend=backend, iids=None)
 
 
 def _packed_from_plan(
@@ -345,6 +513,7 @@ def _packed_from_plan(
     plan: PackingPlan,
     mesh: Mesh,
     backend: Backend,
+    iids: Any,
 ) -> _PackedIngressResult:
     backend = _resolve_packed_backend(backend)
     packed, staging_bytes_by_block = _stage_blocks(load_block, plan=plan)
@@ -379,6 +548,7 @@ def _packed_from_plan(
         final_graph_bytes_by_device=final_graph_bytes,
         final_bytes_by_device=final_bytes,
         padding_ratio=plan.diagnostics.padding_ratio,
+        max_padding_ratio=plan.diagnostics.max_padding_ratio,
         component_count=len(PACKED_COMPONENT_NAMES),
         pytree_leaf_count=1,
     )
@@ -389,6 +559,7 @@ def _packed_from_plan(
             capacities=tuple(plan.capacities.values()),
             graph_mesh=mesh,
             backend=backend,
+            iids=iids,
             graph=_make_packed_graph_value(
                 tuple(arrays[name] for name in PACKED_COMPONENT_NAMES),
                 metadata=_PackedGraphLogicalMetadata(
@@ -506,6 +677,171 @@ def _resident_bytes_by_device(
                 raise ValueError(f"packed array has an unexpected resident device {shard.device}")
             byte_counts[shard.device] += int(shard.data.on_device_size_in_bytes())
     return tuple(byte_counts[device] for device in device_order)
+
+
+def _single_block_mesh(mesh: Mesh | None) -> Mesh:
+    if mesh is None:
+        mesh = Mesh(np.asarray((jax.devices()[0],)), ("graph",))
+    if _graph_mesh_devices(mesh) != 1:
+        raise ValueError("single-block packed construction requires a one-device graph mesh")
+    return mesh
+
+
+def _iid_tuple(values: Any) -> tuple[str, ...] | None:
+    if values is None:
+        return None
+    if isinstance(values, pl.Series):
+        values = values.to_list()
+    return tuple(str(value) for value in values)
+
+
+def _shared_lineararg_iids(lineargs: tuple[LinearARG, ...]) -> tuple[str, ...] | None:
+    if not lineargs:
+        raise ValueError("at least one LinearARG block is required")
+    iids = tuple(_iid_tuple(getattr(linarg, "iids", None)) for linarg in lineargs)
+    first = iids[0]
+    if any(current != first for current in iids[1:]):
+        raise ValueError("all LinearARG blocks must have identical IID metadata")
+    return first
+
+
+def _lineararg_block_arrays(linarg: LinearARG, *, dtype: Any = None) -> LinearARGBlockArrays:
+    """Convert one in-memory LinearARG into canonical host transfer arrays."""
+    normalized_dtype = _normalize_dtype(dtype)
+    graph = _as_csc(linarg.A)
+    n_nodes = graph.shape[0]
+    return LinearARGBlockArrays(
+        indptr=np.asarray(graph.indptr, dtype=np.int32),
+        indices=np.asarray(graph.indices, dtype=np.int32),
+        data=np.asarray(graph.data, dtype=np.dtype(normalized_dtype)),
+        variant_indices=np.asarray(linarg.variant_indices, dtype=np.int32),
+        flip=np.asarray(linarg.flip, dtype=np.bool_),
+        sample_indices=np.asarray(linarg.sample_indices, dtype=np.int32),
+        nonunique_indices=_canonical_nonunique_indices(getattr(linarg, "nonunique_indices", None), n_nodes),
+        allele_counts=_cached_allele_counts(linarg),
+        n_variants=int(linarg.shape[1]),
+        n_samples=int(linarg.shape[0]),
+    )
+
+
+def _hdf5_layout(file: h5py.File) -> str:
+    groups = tuple(name for name in file if isinstance(file[name], h5py.Group))
+    root_datasets = {name for name in _ROOT_GRAPH_DATASETS if name in file and isinstance(file[name], h5py.Dataset)}
+    root_attributes = {name for name in _ROOT_GRAPH_ATTRIBUTES if name in file.attrs}
+    if groups:
+        if root_datasets or root_attributes:
+            raise ValueError("mixed root-level graph and block-group HDF5 layouts are ambiguous")
+        return "blocks"
+    missing_datasets = _ROOT_GRAPH_DATASETS - root_datasets
+    missing_attributes = _ROOT_GRAPH_ATTRIBUTES - root_attributes
+    if missing_datasets or missing_attributes:
+        missing = sorted((*missing_datasets, *missing_attributes))
+        raise ValueError(f"empty or corrupt HDF5 source is missing root graph fields: {missing}")
+    return "root"
+
+
+def _hdf5_block_sort_key(block_name: str) -> tuple[int, int | str, float]:
+    parts = block_name.split("_")
+    if len(parts) == 3:
+        chrom, start, _ = parts
+    else:
+        try:
+            chrom, interval = block_name.split(":", maxsplit=1)
+            start = interval.split("-", maxsplit=1)[0]
+        except ValueError as error:
+            raise ValueError(f"HDF5 block name {block_name!r} does not encode chromosome/start order") from error
+    normalized_chrom = chrom[3:] if chrom.startswith("chr") else chrom
+    try:
+        chrom_key: tuple[int, int | str] = (0, int(normalized_chrom))
+    except ValueError:
+        chrom_key = (1, normalized_chrom)
+    try:
+        start_key = float(start)
+    except ValueError:
+        start_key = float("inf")
+    return (*chrom_key, start_key)
+
+
+def _ordered_hdf5_block_names(file: h5py.File) -> tuple[str, ...]:
+    names = tuple(name for name in file if isinstance(file[name], h5py.Group))
+    return tuple(sorted(names, key=_hdf5_block_sort_key))
+
+
+def _validated_hdf5_block_names(
+    file: h5py.File,
+    *,
+    block_names: Iterable[Any] | None,
+    block_metadata: pl.DataFrame | None,
+) -> tuple[str, ...]:
+    canonical_names = _ordered_hdf5_block_names(file)
+    if not canonical_names:
+        raise ValueError("HDF5 source contains no LinearARG blocks")
+
+    requested = None if block_names is None else tuple(str(name) for name in block_names)
+    if requested is not None and len(set(requested)) != len(requested):
+        raise ValueError("block names must be unique")
+
+    if block_metadata is None:
+        selected = canonical_names if requested is None else requested
+    else:
+        if not isinstance(block_metadata, pl.DataFrame):
+            raise TypeError("block_metadata must be a Polars DataFrame")
+        required_columns = {"block_name", "n_entries", "n_variants", "n_samples"}
+        missing_columns = required_columns - set(block_metadata.columns)
+        if missing_columns:
+            raise ValueError(f"block_metadata is missing required columns: {sorted(missing_columns)}")
+        metadata_names = tuple(str(name) for name in block_metadata.get_column("block_name").to_list())
+        if len(set(metadata_names)) != len(metadata_names):
+            raise ValueError("block_metadata block_name values must be unique")
+        if requested is None:
+            selected = metadata_names
+        else:
+            requested_set = set(requested)
+            selected = tuple(name for name in metadata_names if name in requested_set)
+            if set(selected) != requested_set:
+                missing = sorted(requested_set - set(selected))
+                raise ValueError(f"block_metadata does not contain requested blocks: {missing}")
+
+        rows = {str(row["block_name"]): row for row in block_metadata.iter_rows(named=True)}
+        for name in selected:
+            if name not in file or not isinstance(file[name], h5py.Group):
+                raise ValueError(f"block_metadata names an HDF5 block that does not exist: {name!r}")
+            _validate_hdf5_metadata_row(rows[name], file[name])
+
+    unknown = sorted(set(selected) - set(canonical_names))
+    if unknown:
+        raise ValueError(f"requested HDF5 blocks do not exist: {unknown}")
+    expected_order = tuple(name for name in canonical_names if name in set(selected))
+    if tuple(selected) != expected_order:
+        raise ValueError("HDF5 block order must match canonical chromosome/start order")
+    if not selected:
+        raise ValueError("HDF5 block selection is empty")
+    return tuple(selected)
+
+
+def _validate_hdf5_metadata_row(row: dict[str, Any], group: h5py.Group) -> None:
+    expected = {
+        "n_entries": _group_array_length(group, "indices"),
+        "n_variants": int(group.attrs["n_variants"]),
+        "n_samples": int(group.attrs["n_samples"]),
+    }
+    if "n" in row:
+        expected["n"] = int(group.attrs["n"])
+    for name, expected_value in expected.items():
+        try:
+            observed = int(row[name])
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"block_metadata {name} must be an integer") from error
+        if observed != expected_value:
+            raise ValueError(
+                f"block_metadata {name} mismatch for {group.name!r}: expected {expected_value}, observed {observed}"
+            )
+
+
+def _read_hdf5_iids(file: h5py.File) -> tuple[str, ...]:
+    if "iids" not in file or not isinstance(file["iids"], h5py.Dataset):
+        raise ValueError("iids not found in HDF5 file")
+    return tuple(str(value) for value in np.asarray(file["iids"][:]).astype(str).tolist())
 
 
 def from_lineararg(
@@ -794,6 +1130,8 @@ def _block_packing_summary_from_group(group: Any, *, dtype: Any) -> _BlockPackin
 
     indptr_length = _group_array_length(group, "indptr")
     edge_length = _group_array_length(group, "indices")
+    if "n_entries" not in group.attrs or int(group.attrs["n_entries"]) != edge_length:
+        raise ValueError("n_entries metadata must match indices")
     if indptr_length != n_nodes + 1:
         raise ValueError("indptr metadata length must equal n + 1")
     if _group_array_length(group, "data") != edge_length:

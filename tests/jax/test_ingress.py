@@ -14,12 +14,14 @@ import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
+import polars as pl
+import pytest
 
 from jax.sharding import Mesh, NamedSharding
 
 import linear_dag.core.jaxlinarg.ingress as ingress_module
 
-from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
+from linear_dag.core.jaxlinarg import Backend, JaxLinearARG, JaxParallelOperator
 from linear_dag.core.jaxlinarg.ingress import (
     _packed_from_block_arrays,
     _packed_from_group_reader,
@@ -222,7 +224,7 @@ def test_packed_carrier_static_definition_excludes_dataset_diagnostics(
         mesh=mesh,
     )
 
-    expected_static_fields = ("n_samples", "n_variants", "capacities", "graph_mesh", "backend")
+    expected_static_fields = ("n_samples", "n_variants", "capacities", "graph_mesh", "backend", "iids")
     for result in (first, second):
         static_fields = tuple(field.name for field in fields(result.operator) if field.metadata.get("static"))
         assert static_fields == expected_static_fields
@@ -230,3 +232,217 @@ def test_packed_carrier_static_definition_excludes_dataset_diagnostics(
         assert not hasattr(result.operator, "diagnostics")
         assert len(jtu.tree_leaves(result.operator)) == 1
         assert type(result.operator) is _PackedJaxLinearARG
+
+
+def test_private_packed_target_in_memory_constructors_preserve_contract(oracle_case) -> None:
+    block = oracle_case.linarg
+    arrays = ingress_module._lineararg_block_arrays(block, dtype=np.float64)
+
+    from_arrays = _PackedJaxLinearARG.from_lineararg_arrays(
+        indptr=arrays.indptr,
+        indices=arrays.indices,
+        data=arrays.data,
+        variant_indices=arrays.variant_indices,
+        flip=arrays.flip,
+        sample_indices=arrays.sample_indices,
+        nonunique_indices=arrays.nonunique_indices,
+        allele_counts=arrays.allele_counts,
+        n_variants=arrays.n_variants,
+        n_samples=arrays.n_samples,
+        iids=block.iids,
+        dtype=np.float64,
+    )
+    from_lineararg = _PackedJaxLinearARG.from_lineararg(block, dtype=np.float64)
+    from_plural = _PackedJaxLinearARG.from_linearargs((block,), mesh=_graph_mesh(), dtype=np.float64)
+
+    expected_iids = tuple(block.iids.to_list())
+    expected_dtype = jax.dtypes.canonicalize_dtype(np.dtype(np.float64))
+    for operator in (from_arrays, from_lineararg, from_plural):
+        assert operator.shape == block.shape
+        assert operator.dtype == expected_dtype
+        assert operator.iids == expected_iids
+        np.testing.assert_allclose(np.asarray(operator.matmat(oracle_case.w)), oracle_case.Xw, rtol=1e-5, atol=1e-5)
+
+
+def test_private_packed_hdf5_constructor_validates_metadata_and_preserves_subset_order(
+    linarg_h5_path,
+    linarg_block_metadata,
+) -> None:
+    metadata = linarg_block_metadata.select("block_name", "n", "n_entries", "n_variants", "n_samples")
+    selected = metadata.head(1)
+
+    operator = _PackedJaxLinearARG.from_hdf5(
+        linarg_h5_path,
+        mesh=_graph_mesh(),
+        block_metadata=selected,
+    )
+    expected = LinearARG.read(linarg_h5_path, block=selected["block_name"][0])
+
+    assert operator.shape == expected.shape
+    assert expected.iids is not None
+    assert operator.iids == tuple(expected.iids.to_list())
+
+    reordered = metadata.reverse()
+    with pytest.raises(ValueError, match="block order"):
+        _PackedJaxLinearARG.from_hdf5(
+            linarg_h5_path,
+            mesh=_graph_mesh(),
+            block_metadata=reordered,
+            max_padding_ratio=None,
+        )
+
+    mismatched = selected.with_columns((pl.col("n_entries") + 1).alias("n_entries"))
+    with pytest.raises(ValueError, match="n_entries"):
+        _PackedJaxLinearARG.from_hdf5(
+            linarg_h5_path,
+            mesh=_graph_mesh(),
+            block_metadata=mismatched,
+        )
+
+
+def test_private_packed_root_hdf5_matches_lineararg_and_rejects_mixed_layout(
+    linarg_h5_path,
+    first_block_name,
+    tmp_path,
+) -> None:
+    source = LinearARG.read(linarg_h5_path, block=first_block_name)
+    root_path = tmp_path / "root_lineararg.h5"
+    source.write(root_path)
+
+    operator = _PackedJaxLinearARG.from_hdf5(root_path, mesh=_graph_mesh(), dtype=np.float32)
+    by_block = _PackedJaxLinearARG.from_hdf5_block(root_path, None, dtype=np.float32)
+    rng = np.random.default_rng(20260817)
+    weights = rng.normal(size=(source.shape[1], 2)).astype(np.float32)
+
+    assert source.iids is not None
+    assert operator.iids == tuple(source.iids.to_list())
+    assert by_block.shape == source.shape
+    np.testing.assert_allclose(np.asarray(operator.matmat(weights)), np.asarray(source @ weights), rtol=1e-5, atol=1e-5)
+
+    with h5py.File(root_path, "a") as file:
+        file.create_group("chr1:0-1")
+    with pytest.raises(ValueError, match="mixed.*root.*block"):
+        _PackedJaxLinearARG.from_hdf5(root_path, mesh=_graph_mesh())
+
+
+def test_private_packed_hdf5_products_match_exact_ragged(
+    linarg_h5_path,
+    linarg_block_metadata,
+) -> None:
+    metadata = linarg_block_metadata.select("block_name", "n", "n_entries", "n_variants", "n_samples")
+    packed = _PackedJaxLinearARG.from_hdf5(
+        linarg_h5_path,
+        mesh=_graph_mesh(),
+        block_metadata=metadata,
+    )
+    exact_mesh = Mesh(np.asarray(jax.devices("cpu")[:1]), ("blocks",))
+    exact = JaxParallelOperator.from_hdf5(
+        linarg_h5_path,
+        mesh=exact_mesh,
+        block_metadata=linarg_block_metadata,
+        backend=Backend.PURE_JAX,
+    )
+    rng = np.random.default_rng(20260817)
+    weights = rng.normal(size=(packed.shape[1], 2)).astype(np.float32)
+    samples = rng.normal(size=(packed.shape[0], 2)).astype(np.float32)
+
+    np.testing.assert_allclose(
+        np.asarray(packed.matmat(weights)),
+        np.asarray(exact.matmat(weights)),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        np.asarray(packed.rmatmat(samples)),
+        np.asarray(exact.rmatmat(samples)),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_private_packed_plural_ingress_converts_and_canonicalizes_each_block_once(
+    linarg_h5_path,
+    linarg_block_metadata,
+    monkeypatch,
+) -> None:
+    block_names = linarg_block_metadata.get_column("block_name").to_list()
+    lineargs = tuple(LinearARG.read(linarg_h5_path, block=name) for name in block_names)
+    conversions: list[int] = []
+    canonicalizations: list[int] = []
+    original_convert = ingress_module._lineararg_block_arrays
+    original_canonicalize = ingress_module.canonicalize_block_arrays
+
+    def tracked_convert(linarg, *, dtype=None):
+        conversions.append(id(linarg))
+        return original_convert(linarg, dtype=dtype)
+
+    def tracked_canonicalize(arrays, *, dtype=None):
+        canonicalizations.append(id(arrays))
+        return original_canonicalize(arrays, dtype=dtype)
+
+    monkeypatch.setattr(ingress_module, "_lineararg_block_arrays", tracked_convert)
+    monkeypatch.setattr(ingress_module, "canonicalize_block_arrays", tracked_canonicalize)
+
+    operator = _PackedJaxLinearARG.from_linearargs(lineargs, mesh=_graph_mesh())
+
+    assert operator.shape[1] == sum(linarg.shape[1] for linarg in lineargs)
+    assert conversions == [id(linarg) for linarg in lineargs]
+    assert len(canonicalizations) == len(lineargs)
+    assert len(set(canonicalizations)) == len(lineargs)
+
+
+def test_private_packed_plural_ingress_rejects_inconsistent_iids(
+    linarg_h5_path,
+    linarg_block_metadata,
+) -> None:
+    block_names = linarg_block_metadata.get_column("block_name").to_list()
+    lineargs = [LinearARG.read(linarg_h5_path, block=name) for name in block_names]
+    second_iids = lineargs[1].iids
+    assert second_iids is not None
+    lineargs[1].iids = pl.Series([*second_iids[:-1], "different-iid"])
+
+    with pytest.raises(ValueError, match="identical IID metadata"):
+        _PackedJaxLinearARG.from_linearargs(lineargs, mesh=_graph_mesh())
+
+
+def test_private_packed_hdf5_opens_once_and_never_uses_eager_block_reader(
+    linarg_h5_path,
+    linarg_block_metadata,
+    monkeypatch,
+) -> None:
+    opens = 0
+    original_file = h5py.File
+
+    def tracked_file(*args, **kwargs):
+        nonlocal opens
+        opens += 1
+        return original_file(*args, **kwargs)
+
+    def fail_eager_reader(*args, **kwargs):
+        raise AssertionError("packed HDF5 ingress must not construct eager exact blocks")
+
+    monkeypatch.setattr(h5py, "File", tracked_file)
+    monkeypatch.setattr(ingress_module, "read_hdf5_blocks", fail_eager_reader)
+
+    _PackedJaxLinearARG.from_hdf5(
+        linarg_h5_path,
+        mesh=_graph_mesh(),
+        block_metadata=linarg_block_metadata,
+    )
+
+    assert opens == 1
+
+
+def test_private_packed_hdf5_rejects_empty_and_partial_root_sources(tmp_path) -> None:
+    empty_path = tmp_path / "empty.h5"
+    with h5py.File(empty_path, "w"):
+        pass
+
+    with pytest.raises(ValueError, match="empty or corrupt"):
+        _PackedJaxLinearARG.from_hdf5(empty_path, mesh=_graph_mesh())
+
+    with h5py.File(empty_path, "a") as file:
+        file.create_dataset("indptr", data=np.array([0, 0], dtype=np.int32))
+        file.attrs["n"] = 1
+    with pytest.raises(ValueError, match="missing root graph fields"):
+        _PackedJaxLinearARG.from_hdf5(empty_path, mesh=_graph_mesh())
