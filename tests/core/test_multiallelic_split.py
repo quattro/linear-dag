@@ -2,11 +2,14 @@ import logging
 import shutil
 import subprocess
 
+import h5py
 import numpy as np
 import pytest
 
+from scipy.sparse import csc_matrix
+
 from linear_dag.core.lineararg import LinearARG
-from linear_dag.genotype import _genotype_digest, read_vcf
+from linear_dag.genotype import _genotype_digest, read_vcf, write_vcf_to_hdf5
 
 
 EXPECTED_PHASED = np.array(
@@ -117,6 +120,32 @@ def test_native_unphased_split_is_alt_specific_dosage(test_data_dir):
 
     np.testing.assert_array_equal(genotypes.toarray(), EXPECTED_PHASED.reshape(4, 2, 9).sum(axis=1))
     assert list(zip(variants["POS"], variants["ID"], variants["ALT"])) == EXPECTED_VARIANTS
+
+
+def test_streamed_multiallelic_split_matches_materialized_output(test_data_dir, tmp_path):
+    path = test_data_dir / "multiallelic_split.vcf"
+    output_path = tmp_path / "split-genotypes.h5"
+    genotypes, flip, variants, iids = read_vcf(path, split_multiallelics=True)
+
+    streamed_variants = write_vcf_to_hdf5(
+        path,
+        output_path,
+        split_multiallelics=True,
+        batch_nnz=7,
+        batch_columns=2,
+    )
+
+    with h5py.File(output_path, "r") as output:
+        streamed = csc_matrix(
+            (output["data"][:], output["indices"][:], output["indptr"][:]),
+            shape=output["shape"][:],
+        )
+        np.testing.assert_array_equal(output["flip"][:], flip)
+        assert [iid.decode() for iid in output["iids"][:]] == [iid for iid in iids for _ in range(2)]
+        assert not output.attrs["is_empty"]
+
+    np.testing.assert_array_equal(streamed.toarray(), genotypes.toarray())
+    assert streamed_variants.equals(variants)
 
 
 def test_filters_and_flips_are_applied_per_alt(test_data_dir):
