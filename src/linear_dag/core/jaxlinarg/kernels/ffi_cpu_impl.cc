@@ -180,7 +180,13 @@ ffi::Error ValidatePackedSolve(
     ffi::BufferR1<dtype> data,
     ffi::BufferR1<ffi::S32> nonunique_indices,
     ffi::BufferR2<ffi::S32> descriptors,
-    ffi::BufferR2<dtype> b) {
+    ffi::BufferR2<dtype> b,
+    ffi::ResultBufferR2<dtype> out) {
+  if (out->dimensions()[0] != b.dimensions()[0] ||
+      out->dimensions()[1] != b.dimensions()[1]) {
+    return ffi::Error::InvalidArgument(
+        "packed output buffer dimensions must match the right-hand-side buffer");
+  }
   if (descriptors.dimensions()[1] != kPackedDescriptorColumnCount) {
     return ffi::Error::InvalidArgument(
         "packed descriptor buffer has an unsupported column count");
@@ -318,7 +324,7 @@ ffi::Error SolvePackedForwardCompressed(
     ffi::BufferR2<dtype> b,
     ffi::ResultBufferR2<dtype> out) {
   ffi::Error error = ValidatePackedSolve(
-      indptr, indices, data, nonunique_indices, descriptors, b);
+      indptr, indices, data, nonunique_indices, descriptors, b, out);
   if (!error.success()) {
     return error;
   }
@@ -373,7 +379,7 @@ ffi::Error SolvePackedBackwardCompressed(
     ffi::BufferR2<dtype> b,
     ffi::ResultBufferR2<dtype> out) {
   ffi::Error error = ValidatePackedSolve(
-      indptr, indices, data, nonunique_indices, descriptors, b);
+      indptr, indices, data, nonunique_indices, descriptors, b, out);
   if (!error.success()) {
     return error;
   }

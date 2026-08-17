@@ -414,6 +414,33 @@ def test_native_packed_ffi_cpu_rejects_nonmonotonic_indptr():
         ffi_cpu.ffi_cpu_packed_solve_forward(*args).block_until_ready()
 
 
+@pytest.mark.parametrize(
+    "target_name",
+    [
+        ffi_cpu.FFI_CPU_PACKED_SOLVE_FORWARD_F32,
+        ffi_cpu.FFI_CPU_PACKED_SOLVE_BACKWARD_F32,
+    ],
+)
+@pytest.mark.parametrize(
+    "result_shape",
+    [(5, 2), (4, 3)],
+    ids=["larger_rows", "larger_columns"],
+)
+def test_native_packed_ffi_cpu_rejects_oversized_raw_result_shape(target_name, result_shape):
+    if jax.default_backend() != "cpu":
+        pytest.skip("native CPU FFI handler is only required on CPU platforms")
+    ffi_cpu.is_ffi_cpu_packed_available.cache_clear()
+    assert ffi_cpu.is_ffi_cpu_packed_available()
+    call = jax.ffi.ffi_call(
+        target_name,
+        jax.ShapeDtypeStruct(result_shape, jnp.float32),
+        vmap_method="sequential",
+    )
+
+    with pytest.raises(Exception, match="INVALID_ARGUMENT.*output.*dimensions.*match"):
+        call(*_packed_solve_args(n_blocks=1, descriptor_capacity=1)).block_until_ready()
+
+
 def test_packed_ffi_cpu_rejects_invalid_descriptor_shape_before_call():
     args = list(_packed_solve_args(n_blocks=1, descriptor_capacity=1))
     args[4] = jnp.zeros((1, 2), dtype=jnp.int32)
