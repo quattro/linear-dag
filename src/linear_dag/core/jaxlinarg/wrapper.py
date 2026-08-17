@@ -121,7 +121,7 @@ class JaxParallelOperator(eqx.Module):
     variant_offsets: tuple[int, ...] = eqx.field(converter=_int_tuple, static=True)
     mesh: Mesh | AbstractMesh = eqx.field(static=True)
     block_ranges: tuple[tuple[int, int], ...] = eqx.field(converter=_range_tuple, static=True)
-    backend: Backend = eqx.field(default=Backend.AUTO, converter=resolve_backend, static=True)
+    backend: Backend = eqx.field(default=Backend.AUTO, converter=Backend, static=True)
 
     @classmethod
     def from_linearargs(

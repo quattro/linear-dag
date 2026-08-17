@@ -203,6 +203,49 @@ def test_jax_parallel_operator_construction_rejects_offsets_that_mismatch_blocks
         )
 
 
+def test_jax_parallel_operator_direct_construction_auto_preserves_prebuilt_backend(monkeypatch):
+    block = _tiny_block()
+    monkeypatch.setattr(
+        "linear_dag.core.jaxlinarg.operator.ffi_cpu.is_ffi_cpu_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "linear_dag.core.jaxlinarg.operator.jax.default_backend",
+        lambda: "cpu",
+    )
+
+    operator = JaxParallelOperator(
+        blocks=(block,),
+        variant_offsets=(0, 1),
+        mesh=_mesh(),
+        block_ranges=((0, 1),),
+    )
+
+    assert operator.backend is Backend.AUTO
+    assert operator.blocks[0].backend is Backend.PURE_JAX
+
+
+def test_jax_parallel_operator_direct_construction_rejects_explicit_backend_mismatch(monkeypatch):
+    block = _tiny_block()
+    monkeypatch.setattr(
+        "linear_dag.core.jaxlinarg.operator.ffi_cpu.is_ffi_cpu_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "linear_dag.core.jaxlinarg.operator.jax.default_backend",
+        lambda: "cpu",
+    )
+
+    with pytest.raises(ValueError, match="backend"):
+        JaxParallelOperator(
+            blocks=(block,),
+            variant_offsets=(0, 1),
+            mesh=_mesh(),
+            backend=Backend.FFI_CPU,
+            block_ranges=((0, 1),),
+        )
+
+
 def test_jax_parallel_operator_construction_rejects_block_ranges_that_do_not_cover_mesh_axis():
     first = _tiny_block(n_variants=1)
     second = _tiny_block(n_variants=1)
