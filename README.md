@@ -81,7 +81,11 @@ linarg = LinearARG.read(hdf5_path, block=block_to_load)
 ### JAX LinearARG operators
 
 The JAX operator API exposes `JaxLinearARG`, `JaxParallelOperator`, and `Backend`
-from the top-level package.
+from the top-level package. The public exact-ragged path keeps one exact
+`JaxLinearARG` per source block; an internal packed candidate remains under
+promotion testing and has no public import path. See the
+[JAX API guide](docs/api/jax.md) for the coexistence, compilation, and storage
+contracts.
 
 ```python
 import jax
@@ -122,10 +126,11 @@ mesh's first device. Call `parallel_op.matmat(...)` and
 `parallel_op.rmatmat(...)` directly; wrapping a bound multi-block method in an
 additional `jax.jit` captures the operator arrays as constants and defeats this
 placement contract. The same restriction applies to `JaxGRMOperator.matmat`
-when its underlying operator is multi-block. Prefer the `from_linearargs`,
-`from_hdf5`, or `from_zarr` factories; direct construction with a concrete mesh
-requires every block to be placed on its assigned device and otherwise fails
-fast.
+when its underlying operator is multi-block. Prefer the `from_linearargs` or
+`from_hdf5` factories; direct construction with a concrete mesh requires every
+block to be placed on its assigned device and otherwise fails fast. Durable
+reconstruction on this branch uses the existing HDF5 schema. Real Zarr support
+remains a downstream `genoio` integration gate.
 
 Benchmark gates are opt-in so normal test runs stay fast:
 

@@ -26,3 +26,17 @@ At a high level, these operators:
         show_bases: true
         members:
             - from_hdf5
+
+## JAX exact-ragged fallback
+
+[`linear_dag.core.jaxlinarg.JaxParallelOperator`][] is the public JAX
+compatibility path for multi-block data. It keeps exact block shapes, places
+blocks on their assigned devices, and runs cached per-device-range programs. It
+doesn't create worker processes or shared-memory segments, so it isn't a context
+manager.
+
+The packed representation remains an internal candidate during promotion
+testing. Select `JaxParallelOperator` explicitly when whole-block packing exceeds
+its configured padding limit; a failed packed construction doesn't switch to the
+exact-ragged path automatically. The [JAX operator guide](jax.md) documents the
+compiled-call, backend, ingress, and fallback contracts.

@@ -218,10 +218,25 @@ kodama rhe \
 
 | Flag | Description |
 |------|-------------|
+| `--jax-backend` | Use the experimental public exact-ragged JAX GRM path |
 | `--num-matvecs` | Number of matrix-vector products for trace estimation |
 | `--estimator` | Trace estimator: `hutchinson`, `hutch++`, or `xnystrace` |
 | `--sampler` | Sampling distribution: `normal`, `sphere`, or `rademacher` |
 | `--seed` | Random seed for reproducibility |
+
+### Experimental JAX execution
+
+`--jax-backend` is an RHE-only coexistence flag. It constructs the public
+exact-ragged `JaxParallelOperator` from HDF5 and wraps it in `JaxGRMOperator`;
+it does not select the internal packed candidate. The route requests
+`Backend.AUTO`, which uses complete exact CPU FFI targets when available on CPU
+and otherwise uses portable pure JAX. The flag isn't a backend enum selector and
+doesn't change the default Cython path when omitted.
+
+When `--jax-backend` is active, `--num-processes` limits the number of JAX
+devices used by the exact-ragged mesh. The current experimental route rejects
+`--maf-log10-threshold`, `--bed`, and `--bed-maf-log10-threshold` before operator
+construction. It doesn't change the HDF5 schema or enable packed serialization.
 
 ---
 

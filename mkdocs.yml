@@ -113,6 +113,7 @@ nav:
       - 'api/heritability.md'
     - Data Structures:
       - 'api/linear_arg.md'
+      - JAX operators: api/jax.md
       - 'api/parallel_ops.md'
   - Reference:
       - FAQ: faq.md
