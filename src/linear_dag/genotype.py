@@ -122,6 +122,7 @@ def write_vcf_to_hdf5(
     sex: np.array = None,
     batch_nnz: int = 1_000_000,
     batch_columns: int = 100_000,
+    _index_dtype_max: int = np.iinfo(np.int32).max,
 ):
     """Stream retained VCF columns into an on-disk CSC representation."""
     if batch_nnz <= 0 or batch_columns <= 0:
@@ -154,12 +155,13 @@ def write_vcf_to_hdf5(
         with h5py.File(partial_path, "w") as f:
             chunk_size = min(max(1, batch_nnz), 100_000)
             data_dtype = np.int16 if phased else np.int32
+            index_dtype = np.int64 if num_rows > _index_dtype_max else np.int32
             indices_dataset = f.create_dataset(
                 "indices",
                 shape=(0,),
                 maxshape=(None,),
                 chunks=(chunk_size,),
-                dtype=np.int32,
+                dtype=index_dtype,
                 compression="gzip",
                 shuffle=True,
             )
@@ -177,37 +179,41 @@ def write_vcf_to_hdf5(
                 shape=(1,),
                 maxshape=(None,),
                 chunks=(max(1, batch_columns),),
-                dtype=np.int32,
+                dtype=index_dtype,
                 compression="gzip",
                 shuffle=True,
             )
             indptr_dataset[0] = 0
 
-            def upgrade_indptr_to_int64():
-                nonlocal indptr_dataset
-                if indptr_dataset.dtype == np.dtype(np.int64):
+            def upgrade_index_arrays_to_int64():
+                nonlocal indices_dataset, indptr_dataset
+                if indices_dataset.dtype == np.dtype(np.int64):
                     return
-                old_indptr = indptr_dataset
-                upgraded = f.create_dataset(
-                    "_indptr64",
-                    shape=old_indptr.shape,
-                    maxshape=(None,),
-                    chunks=old_indptr.chunks,
-                    dtype=np.int64,
-                    compression="gzip",
-                    shuffle=True,
-                )
-                for start in range(0, len(old_indptr), batch_columns):
-                    stop = min(start + batch_columns, len(old_indptr))
-                    upgraded[start:stop] = old_indptr[start:stop]
-                del f["indptr"]
-                f.move("_indptr64", "indptr")
+                for name, dataset, copy_batch in (
+                    ("indices", indices_dataset, batch_nnz),
+                    ("indptr", indptr_dataset, batch_columns),
+                ):
+                    upgraded = f.create_dataset(
+                        f"_{name}64",
+                        shape=dataset.shape,
+                        maxshape=(None,),
+                        chunks=dataset.chunks,
+                        dtype=np.int64,
+                        compression="gzip",
+                        shuffle=True,
+                    )
+                    for start in range(0, len(dataset), copy_batch):
+                        stop = min(start + copy_batch, len(dataset))
+                        upgraded[start:stop] = dataset[start:stop]
+                    del f[name]
+                    f.move(f"_{name}64", name)
+                indices_dataset = f["indices"]
                 indptr_dataset = f["indptr"]
 
             def flush():
                 nonlocal buffered_nnz
                 if index_chunks:
-                    indices = np.concatenate(index_chunks).astype(np.int32, copy=False)
+                    indices = np.concatenate(index_chunks).astype(indices_dataset.dtype, copy=False)
                     values = np.concatenate(data_chunks).astype(data_dtype, copy=False)
                     start = indices_dataset.shape[0]
                     stop = start + len(indices)
@@ -226,14 +232,14 @@ def write_vcf_to_hdf5(
                     pointer_buffer.clear()
 
             for indices, values, is_flipped, metadata in columns:
-                index_chunks.append(indices.astype(np.int32, copy=False))
+                index_chunks.append(indices)
                 data_chunks.append(values.astype(data_dtype, copy=False))
                 buffered_nnz += len(indices)
                 total_nnz += len(indices)
-                if total_nnz > np.iinfo(np.int32).max:
-                    upgrade_indptr_to_int64()
                 pointer_buffer.append(total_nnz)
                 num_variants += 1
+                if total_nnz > _index_dtype_max or num_variants > _index_dtype_max:
+                    upgrade_index_arrays_to_int64()
                 flip.append(is_flipped)
                 chrom, pos, variant_id, ref, alt = metadata
                 var_table["CHROM"].append(chrom)
@@ -246,8 +252,8 @@ def write_vcf_to_hdf5(
                     flush()
 
             flush()
-            if max(num_rows, num_variants) > np.iinfo(np.int32).max:
-                upgrade_indptr_to_int64()
+            if max(num_rows, num_variants) > _index_dtype_max:
+                upgrade_index_arrays_to_int64()
 
             if num_variants == 0:
                 for key in list(f.keys()):

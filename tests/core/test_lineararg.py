@@ -72,6 +72,26 @@ def test_streamed_vcf_hdf5_matches_materialized_csc(test_data_dir, tmp_path, pha
     assert streamed_v_info.equals(v_info)
 
 
+def test_streamed_vcf_hdf5_upgrades_both_index_arrays(test_data_dir, tmp_path):
+    vcf_path = test_data_dir / "1kg_small.vcf"
+    h5_path = tmp_path / "genotypes.h5"
+    genotypes, *_ = read_vcf(vcf_path)
+
+    write_vcf_to_hdf5(
+        vcf_path,
+        h5_path,
+        batch_nnz=17,
+        batch_columns=5,
+        _index_dtype_max=200,
+    )
+
+    with h5py.File(h5_path, "r") as f:
+        assert f["indices"].dtype == np.dtype(np.int64)
+        assert f["indptr"].dtype == np.dtype(np.int64)
+        np.testing.assert_array_equal(f["indices"][:], genotypes.indices)
+        np.testing.assert_array_equal(f["indptr"][:], genotypes.indptr)
+
+
 def test_read_vcf_rejects_multiallelic_by_default(test_data_dir):
     """Test that multiallelic records fail unless explicitly excluded."""
     vcf_path = test_data_dir / "tiny.ma.vcf.gz"
