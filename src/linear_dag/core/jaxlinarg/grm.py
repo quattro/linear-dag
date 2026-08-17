@@ -159,6 +159,8 @@ class JaxGRMOperator(eqx.Module):
         **Raises:**
 
         - `ValueError`: If `x` has an incompatible rank or leading dimension.
+        - `TypeError`: If the wrapped operator is not an exact-ragged
+          [`linear_dag.core.jaxlinarg.JaxParallelOperator`][].
         """
         if not isinstance(self.operator, JaxParallelOperator):
             raise TypeError("blockwise GRM execution requires an exact-ragged JaxParallelOperator")

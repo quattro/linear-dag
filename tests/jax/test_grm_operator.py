@@ -427,6 +427,16 @@ def test_packed_grm_blockwise_fallback_is_rejected_as_exact_ragged_only(oracle_c
         grm.matmat_blockwise(values)
 
 
+def test_grm_matmat_blockwise_documents_exact_ragged_type_error() -> None:
+    docstring = inspect.getdoc(JaxGRMOperator.matmat_blockwise) or ""
+    contract = " ".join(docstring.split())
+
+    assert (
+        "- `TypeError`: If the wrapped operator is not an exact-ragged "
+        "[`linear_dag.core.jaxlinarg.JaxParallelOperator`][]." in contract
+    )
+
+
 def test_packed_grm_zero_frequency_variants_are_inert(oracle_case) -> None:
     block = replace(
         _block_arrays(oracle_case.linarg),
