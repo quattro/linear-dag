@@ -844,7 +844,7 @@ def reduction_union_recom(
 
     logger = _coerce_logger(logger, log_file=f"{out}/logs/{partition_identifier}_reduction_union_recom.log")
 
-    logger.info("Loading genotypes, forward and backward graphs, and sample indices")
+    logger.info("Loading forward and backward graphs and sample indices")
     t1 = time.time()
     with h5py.File(f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5", "r") as f:
         is_empty = f.attrs.get("is_empty", False)
@@ -852,8 +852,7 @@ def reduction_union_recom(
             with h5py.File(f"{out}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
                 f.attrs["is_empty"] = True
             return None
-        genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
-    n, m = genotypes.shape
+        n, m = f["shape"][:]
     forward_graph = read_graph_from_disk(
         f"{mount_point}{out}/forward_backward_graphs/{partition_identifier}_forward_graph.h5"
     )
@@ -867,6 +866,7 @@ def reduction_union_recom(
     logger.info("Combining nodes and computing reduction union")
     t3 = time.time()
     brick_graph, variant_indices = BrickGraph.combine_graphs(forward_graph, backward_graph, m)
+    del forward_graph, backward_graph
     t4 = time.time()
     logger.info(f"Combined nodes and computed reduction union in {np.round(t4 - t3, 3)} seconds")
 
@@ -876,6 +876,7 @@ def reduction_union_recom(
     logger.info("Finding recombinations")
     t5 = time.time()
     recom = Recombination.from_graph(brick_graph)
+    del brick_graph
     recom.find_recombinations()
     t6 = time.time()
     logger.info(f"Found recombinations in {np.round(t6 - t5, 3)} seconds")
@@ -883,21 +884,33 @@ def reduction_union_recom(
     for i in sample_indices:
         assert len(list(recom.successors(int(i)))) == 0
 
-    adj_mat = recom.to_csc()
+    indptr, indices, data, num_nodes = recom.to_csc_arrays()
+    del recom
+    brickgraph_nnz = len(data)
 
     logger.info("Saving brick graph")
     with h5py.File(f"{out}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
-        f.attrs["n"] = adj_mat.shape[0]
-        f.create_dataset("indptr", data=adj_mat.indptr, compression="gzip", shuffle=True)
-        f.create_dataset("indices", data=adj_mat.indices, compression="gzip", shuffle=True)
-        f.create_dataset("data", data=adj_mat.data, compression="gzip", shuffle=True)
+        f.attrs["n"] = num_nodes
+        f.create_dataset("indptr", data=indptr, compression="gzip", shuffle=True)
+        f.create_dataset("indices", data=indices, compression="gzip", shuffle=True)
+        f.create_dataset("data", data=data, compression="gzip", shuffle=True)
         f.create_dataset("variant_indices", data=np.array(variant_indices), compression="gzip", shuffle=True)
         f.create_dataset("sample_indices", data=np.array(sample_indices), compression="gzip", shuffle=True)
 
-    af = np.diff(genotypes.indptr) / n
+    del indptr, indices, data
+    with h5py.File(f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5", "r") as f:
+        genotype_indptr = f["indptr"][:]
+    af = np.diff(genotype_indptr) / n
     geno_nnz = np.sum(n * np.minimum(af, 1 - af))
-    nnz_ratio = geno_nnz / adj_mat.nnz
-    logger.info(f"Stats - n: {n}, m: {m}, geno_nnz: {geno_nnz}, brickgraph_nnz: {adj_mat.nnz}, nnz_ratio: {nnz_ratio}")
+    nnz_ratio = geno_nnz / brickgraph_nnz
+    logger.info(
+        "Stats - n: %s, m: %s, geno_nnz: %s, brickgraph_nnz: %s, nnz_ratio: %s",
+        n,
+        m,
+        geno_nnz,
+        brickgraph_nnz,
+        nnz_ratio,
+    )
 
 
 def infer_brick_graph(

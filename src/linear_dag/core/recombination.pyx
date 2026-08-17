@@ -46,7 +46,10 @@ cdef class Recombination(DiGraph):
     @staticmethod
     def from_graph(brick_graph: DiGraph) -> Recombination:
         n, m = brick_graph.maximum_node_index() + 1, brick_graph.number_of_edges
-        result = Recombination(n + m // 4 + 1, m)
+        # Factoring a clique adds exactly two replacement edges before the
+        # factored edges are released. Reserve those two slots so the first
+        # recombination does not trigger DiGraph's geometric pool expansion.
+        result = Recombination(n + m // 4 + 1, m + 2)
         result.copy_from(brick_graph)
         result.compute_cliques()
         result.collect_cliques()
