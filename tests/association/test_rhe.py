@@ -1,8 +1,11 @@
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import polars as pl
 import pytest
+
+from scipy.sparse.linalg import LinearOperator
 
 from linear_dag.association.heritability import (
     _hutchinson_estimator,
@@ -96,7 +99,7 @@ def test_residualized_operator_hutchinson_targets_projected_kernel_traces():
     trace, square_trace, _ = _hutchinson_estimator(
         operator,
         n,
-        lambda sample_count, num_samples: (np.sqrt(sample_count) * np.eye(sample_count, num_samples)),
+        lambda sample_count, num_samples: np.sqrt(sample_count) * np.eye(sample_count, num_samples),
     )
 
     np.testing.assert_allclose(trace, np.trace(projected_grm), atol=1e-10)
@@ -323,3 +326,39 @@ def test_rhe_workflow_accepts_unified_grm_constructor_kwargs(linarg_h5_path: Pat
     h2g = observed.get_column("h2g").to_numpy()
     assert h2g.shape == (len(PHENO_COLS),)
     assert np.all(np.isfinite(h2g))
+
+
+def test_numpy_rhe_rejects_zero_iid_overlap_before_graph_products() -> None:
+    class RecordingGRM(LinearOperator):
+        iids = pl.Series("iids", ["genotype-a", "genotype-a", "genotype-b", "genotype-b"])
+
+        def __init__(self) -> None:
+            self.product_calls = 0
+            super().__init__(dtype=np.dtype(np.float64), shape=(4, 4))
+
+        def _matmat(self, values: np.ndarray) -> np.ndarray:
+            self.product_calls += 1
+            return values
+
+    grm = RecordingGRM()
+    data = pl.DataFrame(
+        {
+            "iid": ["phenotype-a", "phenotype-b"],
+            "trait": [0.25, -0.5],
+            "intercept": [1.0, 0.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="no overlapping IIDs"):
+        randomized_haseman_elston(
+            cast(GRMOperator, grm),
+            data.lazy(),
+            ["trait"],
+            ["intercept"],
+            num_matvecs=1,
+            trace_est="hutchinson",
+            sampler="normal",
+            seed=1,
+        )
+
+    assert grm.product_calls == 0

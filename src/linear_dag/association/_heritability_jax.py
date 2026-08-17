@@ -10,8 +10,9 @@ import os
 
 from collections.abc import Callable
 from functools import partial
-from typing import Optional, Union
+from typing import Any, cast, Optional, Union
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -22,7 +23,8 @@ from jaxtyping import Array
 from numpy.random import Generator
 
 from linear_dag.core.alignment import get_iid_alignment, IidAlignment
-from linear_dag.core.jaxlinarg import JaxGRMOperator
+from linear_dag.core.jaxlinarg import JaxGRMOperator, JaxParallelOperator
+from linear_dag.core.jaxlinarg.grm import _is_packed_operator
 
 _BLOCKWISE_GRM_ENV = "LINEAR_DAG_JAX_RHE_BLOCKWISE_GRM"
 _FALSE_ENV_VALUES = {"0", "false", "no", "off"}
@@ -54,9 +56,7 @@ def randomized_haseman_elston(
         sampler,
     )
 
-    if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
-        raise ValueError("First column of covar_cols should be '1'")
-
+    _validate_rhe_columns(data, pheno_cols, covar_cols)
     prepared = _prepare_jax_rhe_inputs(grm, data, pheno_cols, covar_cols)
     _validate_num_matvecs(num_matvecs, prepared.yresid.shape[0], trace_est)
 
@@ -132,22 +132,95 @@ class _PreparedRHEInputs(tuple):
         return self[2]
 
 
-class _ResidualizedJaxGRM:
-    def __init__(self, base_matmat: Callable[[Array], Array], covariates: Array, *, jit_matmat: bool = True):
-        self._base_matmat = base_matmat
-        self._basis = _orthonormal_covariate_basis(covariates)
-        self.shape = (covariates.shape[0], covariates.shape[0])
-        self.residual_rank = self.shape[0] - self._basis.shape[1]
-        self.matmat = jax.jit(self._matmat) if jit_matmat else self._matmat
+class _ResidualizedJaxGRM(eqx.Module):
+    """Private explicit carrier for one IID-aligned, residualized JAX GRM."""
 
-    def _project(self, values: Array) -> Array:
-        if self._basis.shape[1] == 0:
-            return values
-        return values - self._basis @ (self._basis.T @ values)
+    grm: Any
+    left_indices: Array
+    right_indices: Array
+    basis: Array
+    shape: tuple[int, int] = eqx.field(static=True)
+    residual_rank: int = eqx.field(static=True)
+    use_blockwise_grm: bool = eqx.field(static=True)
+    use_explicit_packed_grm: bool = eqx.field(static=True)
 
-    def _matmat(self, values: Array) -> Array:
-        projected = self._project(values)
-        return self._project(self._base_matmat(projected))
+    def __check_init__(self) -> None:
+        if self.left_indices.ndim != 1 or self.right_indices.ndim != 1:
+            raise ValueError("IID alignment indices must be rank-1 arrays")
+        if self.left_indices.shape != self.right_indices.shape:
+            raise ValueError("IID alignment index arrays must have the same shape")
+        if self.basis.ndim != 2 or self.basis.shape[0] != self.shape[0]:
+            raise ValueError("Covariate basis rows must match residualized GRM dimensions")
+        if self.shape[0] != self.shape[1]:
+            raise ValueError("Residualized JAX GRM must be square")
+        if self.residual_rank != self.shape[0] - self.basis.shape[1]:
+            raise ValueError("Residual rank must equal sample count minus covariate rank")
+        if self.grm.shape[0] != self.grm.shape[1]:
+            raise ValueError("Residualized JAX GRM requires a square base operator")
+        if self.use_blockwise_grm and self.use_explicit_packed_grm:
+            raise ValueError("Packed GRM execution cannot use the exact-ragged blockwise fallback")
+
+    def matmat(self, values: Array) -> Array:
+        """Apply the residualized GRM while keeping packed graph state explicit."""
+        if self.use_explicit_packed_grm:
+            return _residualized_jax_grm_matmat(self, values)
+        return _residualized_jax_grm_matmat_impl(self, values)
+
+
+@jax.jit
+def _residualized_jax_grm_matmat(operator: _ResidualizedJaxGRM, values: Array) -> Array:
+    """JIT one packed residualized GRM call with every array as an operand."""
+    return _residualized_jax_grm_matmat_impl(operator, values)
+
+
+def _residualized_jax_grm_matmat_impl(operator: _ResidualizedJaxGRM, values: Array) -> Array:
+    matrix = jnp.asarray(values, dtype=operator.grm.dtype)
+    if matrix.ndim == 1:
+        matrix = matrix.reshape(-1, 1)
+        was_vector = True
+    elif matrix.ndim == 2:
+        was_vector = False
+    else:
+        raise ValueError(f"expected rank 1 or 2 input, got rank {matrix.ndim}")
+    if matrix.shape[0] != operator.shape[0]:
+        raise ValueError(f"expected leading dimension {operator.shape[0]}, got {matrix.shape[0]}")
+
+    projected = _project_off_covariates(matrix, operator.basis)
+    merged = projected[operator.left_indices]
+    haplotype_values = (
+        jnp.zeros(
+            (operator.grm.shape[0], matrix.shape[1]),
+            dtype=matrix.dtype,
+        )
+        .at[operator.right_indices]
+        .add(merged)
+    )
+    if operator.use_blockwise_grm:
+        haplotype_result = operator.grm.matmat_blockwise(haplotype_values)
+    else:
+        haplotype_result = operator.grm.matmat(haplotype_values)
+    merged_result = haplotype_result[operator.right_indices]
+    result = jnp.zeros_like(matrix).at[operator.left_indices].add(merged_result)
+    result = _project_off_covariates(0.5 * result, operator.basis)
+    return result[:, 0] if was_vector else result
+
+
+def _project_off_covariates(values: Array, basis: Array) -> Array:
+    if basis.shape[1] == 0:
+        return values
+    return values - basis @ (basis.T @ values)
+
+
+def _validate_rhe_columns(data: pl.LazyFrame, pheno_cols: list[str], covar_cols: list[str]) -> None:
+    if not pheno_cols:
+        raise ValueError("pheno_cols must contain at least one phenotype column")
+    if not covar_cols:
+        raise ValueError("covar_cols must contain at least one covariate column")
+    schema_names = set(data.collect_schema().names())
+    missing = [name for name in ("iid", *pheno_cols, *covar_cols) if name not in schema_names]
+    if missing:
+        missing_names = ", ".join(dict.fromkeys(missing))
+        raise ValueError(f"RHE data is missing required column(s): {missing_names}")
 
 
 def _prepare_jax_rhe_inputs(
@@ -163,8 +236,9 @@ def _prepare_jax_rhe_inputs(
     phenotypes = data.select(pheno_cols).collect().to_numpy(writable=True)
     covariates = data.select(covar_cols).collect().to_numpy(writable=True)
 
-    phenotypes_jax = jnp.asarray(phenotypes, dtype=grm.dtype)
-    covariates_jax = jnp.asarray(covariates, dtype=grm.dtype)
+    grm_dtype = cast(Any, grm.dtype)
+    phenotypes_jax = jnp.asarray(phenotypes, dtype=grm_dtype)
+    covariates_jax = jnp.asarray(covariates, dtype=grm_dtype)
     yresid, covariates_jax = _prep_for_h2_estimation_jax(phenotypes_jax, covariates_jax)
     return _PreparedRHEInputs(alignment, yresid, covariates_jax)
 
@@ -253,21 +327,31 @@ def _build_residualized_operator(
     covariates: Array,
 ) -> _ResidualizedJaxGRM:
     use_blockwise_grm = _should_use_blockwise_grm(grm)
-    grm_matmat = grm.matmat_blockwise if use_blockwise_grm else grm.matmat
-
-    def base_matmat(values: Array) -> Array:
-        merged = alignment.gather_left_jax(values)
-        haplotype_values = alignment.scatter_right_jax(merged)
-        haplotype_result = grm_matmat(haplotype_values)
-        merged_result = alignment.gather_right_jax(haplotype_result)
-        return 0.5 * alignment.scatter_left_jax(merged_result)
-
-    return _ResidualizedJaxGRM(base_matmat, covariates, jit_matmat=not use_blockwise_grm)
+    use_explicit_packed_grm = isinstance(grm, JaxGRMOperator) and _is_packed_operator(grm.operator)
+    numerical_grm = (
+        JaxGRMOperator(grm.operator, alpha=grm.alpha, center=grm.center) if isinstance(grm, JaxGRMOperator) else grm
+    )
+    basis = _orthonormal_covariate_basis(covariates)
+    shape = (alignment.n_left, alignment.n_left)
+    return _ResidualizedJaxGRM(
+        grm=numerical_grm,
+        left_indices=jnp.asarray(alignment.left_indices, dtype=jnp.int32),
+        right_indices=jnp.asarray(alignment.right_indices, dtype=jnp.int32),
+        basis=basis,
+        shape=shape,
+        residual_rank=shape[0] - basis.shape[1],
+        use_blockwise_grm=use_blockwise_grm,
+        use_explicit_packed_grm=use_explicit_packed_grm,
+    )
 
 
 def _should_use_blockwise_grm(grm: JaxGRMOperator) -> bool:
     setting = os.environ.get(_BLOCKWISE_GRM_ENV, "1").strip().lower()
-    return setting not in _FALSE_ENV_VALUES and hasattr(grm, "matmat_blockwise")
+    return (
+        setting not in _FALSE_ENV_VALUES
+        and isinstance(grm, JaxGRMOperator)
+        and isinstance(grm.operator, JaxParallelOperator)
+    )
 
 
 _Sampler = Callable[[int, int], Array]

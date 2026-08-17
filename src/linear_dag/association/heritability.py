@@ -87,12 +87,11 @@ def randomized_haseman_elston(
         sampler,
     )
 
-    if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
-        raise ValueError("First column of covar_cols should be '1'")
-
     # align and residualize
     _debug("randomized_haseman_elston: aligning phenotype rows to GRM identifiers")
     left_op, right_op = get_inner_merge_operators(data.select("iid").cast(pl.Utf8).collect().to_series(), grm.iids)
+    if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
+        raise ValueError("First column of covar_cols should be '1'")
     phenotypes = data.select(pheno_cols).collect().to_numpy(writable=True)
     covariates = data.select(covar_cols).collect().to_numpy(writable=True)
     yresid, covariates = _prep_for_h2_estimation(left_op, right_op, phenotypes, covariates)

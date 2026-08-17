@@ -198,6 +198,7 @@ def get_iid_alignment(left_ids: pl.Series, right_ids: pl.Series) -> IidAlignment
     **Raises:**
 
     - `TypeError`: If identifier dtypes differ.
+    - `ValueError`: If the two identifier vectors have no values in common.
     """
     if left_ids.dtype != right_ids.dtype:
         raise TypeError("Data types of left_ids and right_ids must match")
@@ -205,6 +206,8 @@ def get_iid_alignment(left_ids: pl.Series, right_ids: pl.Series) -> IidAlignment
     left_df = pl.LazyFrame({"id": left_ids}).with_row_index("left_idx")
     right_df = pl.LazyFrame({"id": right_ids}).with_row_index("right_idx")
     merged = left_df.join(right_df, on="id", how="inner").collect()
+    if merged.height == 0:
+        raise ValueError("IID alignment has no overlapping IIDs")
     return IidAlignment(
         left_indices=merged.get_column("left_idx").to_numpy(),
         right_indices=merged.get_column("right_idx").to_numpy(),

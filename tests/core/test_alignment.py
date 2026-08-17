@@ -96,3 +96,11 @@ def test_iid_alignment_rejects_dtype_mismatch() -> None:
 
     with pytest.raises(TypeError, match="Data types"):
         get_iid_alignment(row_ids, col_ids)
+
+
+def test_iid_alignment_rejects_empty_intersection() -> None:
+    row_ids = pl.Series("iid", ["phenotype-a", "phenotype-b"])
+    col_ids = pl.Series("iid", ["genotype-a", "genotype-b"])
+
+    with pytest.raises(ValueError, match="no overlapping IIDs"):
+        get_iid_alignment(row_ids, col_ids)
