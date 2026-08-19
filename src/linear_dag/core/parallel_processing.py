@@ -32,6 +32,7 @@ FLAGS = {
     "rmatmat": 3,
     "num_heterozygotes": 4,
     "weighted_heterozygotes": 5,
+    "diploid_dosage_rmatmat": 6,
 }
 assert len(np.unique([val for val in FLAGS.values()])) == len(FLAGS)
 
@@ -212,10 +213,15 @@ class _ParallelManager:
     def await_workers(self) -> None:
         """Wait for all workers to finish current task."""
         try:
-            for f in self.flags:
+            for i, f in enumerate(self.flags):
                 while f.value != FLAGS["wait"]:
                     if f.value == FLAGS["error"]:
-                        raise RuntimeError("Worker process encountered an error")
+                        raise RuntimeError(f"Worker process {i} encountered an error")
+                    process = self.processes[i] if i < len(self.processes) else None
+                    if process is not None and not process.is_alive():
+                        raise RuntimeError(
+                            f"Worker process {i} exited unexpectedly with exit code {process.exitcode}"
+                        )
                     time.sleep(0.001)
         except Exception as e:
             # Gracefully shutdown workers and clean up shared memory
@@ -494,6 +500,38 @@ class ParallelOperator(LinearOperator):
 
         return result
 
+    def diploid_dosage_rmatmat(self, other: np.ndarray) -> np.ndarray:
+        """Compute diploid dosage transpose products blockwise.
+
+        This is equivalent to ``get_diploid_operator(self).T @ other`` for
+        diploid ``other``. Each worker delegates to the block-level
+        ``LinearARG.diploid_dosage_rmatmat`` implementation, which avoids
+        traversing appended individual-node layers.
+        """
+        other = np.asarray(other, dtype=self.dtype)
+        if other.ndim == 1:
+            other = other.reshape(-1, 1)
+        if other.ndim != 2:
+            raise ValueError("other must be a vector or matrix")
+        if other.shape[0] != self.n_individuals:
+            raise ValueError(f"other should have size {self.n_individuals} in dim 0.")
+
+        result = np.empty((self.shape[1], other.shape[1]), dtype=self.dtype)
+
+        for start in range(0, other.shape[1], self._max_num_traits):
+            end = min(start + self._max_num_traits, other.shape[1])
+            self._num_traits.value = end - start
+
+            with self._sample_data_handle as sample_data:
+                sample_data[: end - start, : self.n_individuals] = other[:, start:end].T
+            self._manager.start_workers(FLAGS["diploid_dosage_rmatmat"])
+            self._manager.await_workers()
+
+            with self._variant_data_handle as variant_data:
+                result[:, start:end] = variant_data[:, : end - start]
+
+        return result
+
     def _matvec(self, x: np.ndarray) -> np.ndarray:
         return self._matmat(x.reshape(-1, 1))
 
@@ -590,6 +628,8 @@ class ParallelOperator(LinearOperator):
                 func = cls._worker_num_heterozygotes
             elif flag.value == FLAGS["weighted_heterozygotes"]:
                 func = cls._worker_weighted_heterozygotes
+            elif flag.value == FLAGS["diploid_dosage_rmatmat"]:
+                func = cls._worker_diploid_dosage_rmatmat
             else:
                 flag.value = FLAGS["error"]
                 raise ValueError(f"Unexpected flag value: {flag.value}; possible: {FLAGS}")
@@ -680,6 +720,17 @@ class ParallelOperator(LinearOperator):
 
         variant_indices = linarg.nonunique_indices[linarg.variant_indices]
         variant_data[:] = work[:, variant_indices].T
+
+    @classmethod
+    def _worker_diploid_dosage_rmatmat(
+        cls,
+        linarg: LinearARG,
+        sample_data: np.ndarray,
+        variant_data: np.ndarray,
+        sample_lock: Lock,
+    ) -> None:
+        weights = sample_data[: linarg.n_individuals, :]
+        variant_data[:] = linarg.diploid_dosage_rmatmat(weights)
 
     @classmethod
     def from_hdf5(

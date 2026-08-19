@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from linear_dag.core.lineararg import compute_variant_filter_mask, LinearARG, list_blocks
+from linear_dag.core.operators import get_diploid_operator
 from linear_dag.core.parallel_processing import GRMOperator, ParallelOperator
 
 
@@ -219,6 +220,23 @@ def test_rmatmat_matches_serial(linarg_h5_path: Path):
     Z_ser = np.vstack(Z_parts)
 
     assert np.allclose(Z_par, Z_ser, rtol=1e-5, atol=1e-5)
+
+
+def test_diploid_dosage_rmatmat_matches_serial(linarg_h5_path: Path):
+    hdf5_path = linarg_h5_path
+    linargs, _ = _load_serial_blocks(hdf5_path)
+
+    with ParallelOperator.from_hdf5(hdf5_path, num_processes=2) as par:
+        rng = np.random.default_rng(20260819)
+        W = rng.standard_normal((par.n_individuals, 3)).astype(np.float32)
+
+        Z_direct = par.diploid_dosage_rmatmat(W)
+        Z_operator = get_diploid_operator(par).T @ W
+
+    Z_ser = np.vstack([la.diploid_dosage_rmatmat(W) for la in linargs])
+
+    assert np.allclose(Z_direct, Z_ser, rtol=1e-5, atol=1e-5)
+    assert np.allclose(Z_operator, Z_ser, rtol=1e-5, atol=1e-5)
 
 
 def test_parallel_operator_alpha_is_no_op(linarg_h5_path: Path):
