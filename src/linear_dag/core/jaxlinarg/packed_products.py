@@ -837,7 +837,8 @@ def _validate_descriptor_metadata(
         raise ValueError("descriptor logical variant span is out of range")
     if descriptor["compressed_start"] < 0 or descriptor["compressed_length"] < 0:
         raise ValueError("descriptor compressed-row extent must be nonnegative")
-    if descriptor["compressed_start"] + descriptor["compressed_length"] > lengths["nonunique_indices"]:
+    compressed_capacity = operator.capacities[_CAPACITY_INDEX["nonunique_indices"]]
+    if descriptor["compressed_start"] + descriptor["compressed_length"] > compressed_capacity:
         raise ValueError("descriptor compressed-row extent is out of range")
     if not (
         descriptor["node_start"]

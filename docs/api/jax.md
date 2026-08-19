@@ -34,7 +34,7 @@ operator = JaxParallelOperator.from_hdf5(
     backend=Backend.AUTO,
 )
 
-variant_weights = jnp.ones((operator.shape[1], 4), dtype=operator.dtype)
+variant_weights = jnp.ones((operator.shape[1], 4), dtype=jnp.float32)
 sample_scores = operator.matmat(variant_weights)
 ```
 

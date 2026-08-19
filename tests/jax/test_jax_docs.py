@@ -19,6 +19,7 @@ def _normalized(relative_path: str) -> str:
 
 def test_jax_api_docs_define_the_explicit_operator_and_private_candidate_contract() -> None:
     docs = _normalized("docs/api/jax.md")
+    source = _read_document("docs/api/jax.md")
 
     assert "lineararg_matmat(operator, values)" in docs
     assert "loss(parameters, operator, phenotype)" in docs
@@ -33,6 +34,8 @@ def test_jax_api_docs_define_the_explicit_operator_and_private_candidate_contrac
     assert "_PackedJaxLinearARG" not in docs
     assert "linear_dag.core.jaxlinarg.ingress" not in docs
     assert "HiJAX" not in docs
+    assert "operator.dtype" not in source
+    assert "dtype=jnp.float32" in source
 
 
 def test_jax_api_docs_match_backend_ingress_and_fallback_boundaries() -> None:

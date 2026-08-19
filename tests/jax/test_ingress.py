@@ -32,7 +32,7 @@ from linear_dag.core.jaxlinarg.ingress import (
     read_hdf5_block_arrays,
     read_hdf5_blocks,
 )
-from linear_dag.core.jaxlinarg.packing import pack_blocks, PACKED_COMPONENT_NAMES
+from linear_dag.core.jaxlinarg.packing import BLOCK_DESCRIPTOR_FIELDS, pack_blocks, PACKED_COMPONENT_NAMES
 from linear_dag.core.lineararg import LinearARG
 
 
@@ -388,7 +388,71 @@ def test_private_packed_plural_ingress_converts_and_canonicalizes_each_block_onc
     assert operator.shape[1] == sum(linarg.shape[1] for linarg in lineargs)
     assert conversions == [id(linarg) for linarg in lineargs]
     assert len(canonicalizations) == len(lineargs)
-    assert len(set(canonicalizations)) == len(lineargs)
+
+
+def test_private_packed_plural_ingress_plans_then_stages_one_live_transfer_block(
+    linarg_h5_path,
+    linarg_block_metadata,
+    monkeypatch,
+) -> None:
+    block_names = linarg_block_metadata.get_column("block_name").to_list()
+    lineargs = tuple(LinearARG.read(linarg_h5_path, block=name) for name in block_names)
+    expected_staging = tuple(
+        ingress_module._block_metrics(
+            ingress_module.canonicalize_block_arrays(
+                ingress_module._lineararg_block_arrays(linarg),
+                dtype=np.float32,
+            )
+        ).canonical_bytes
+        for linarg in lineargs
+    )
+    events: list[str] = []
+    live_blocks: set[int] = set()
+    peak_live_blocks = 0
+    captured_diagnostics = []
+    original_convert = ingress_module._lineararg_block_arrays
+    original_canonicalize = ingress_module.canonicalize_block_arrays
+    original_plan = ingress_module._plan_packing_from_summaries
+    original_packed_from_plan = ingress_module._packed_from_plan
+
+    def tracked_convert(linarg, *, dtype=None):
+        nonlocal peak_live_blocks
+        block = original_convert(linarg, dtype=dtype)
+        block_id = id(block)
+        events.append("convert")
+        live_blocks.add(block_id)
+        peak_live_blocks = max(peak_live_blocks, len(live_blocks))
+        weakref.finalize(block, live_blocks.discard, block_id)
+        return block
+
+    def tracked_canonicalize(block, *, dtype=None):
+        events.append("canonicalize")
+        return original_canonicalize(block, dtype=dtype)
+
+    def tracked_plan(summaries, **kwargs):
+        plan = original_plan(summaries, **kwargs)
+        events.append("plan")
+        return plan
+
+    def tracked_packed_from_plan(*args, **kwargs):
+        result = original_packed_from_plan(*args, **kwargs)
+        captured_diagnostics.append(result.diagnostics)
+        return result
+
+    monkeypatch.setattr(ingress_module, "_lineararg_block_arrays", tracked_convert)
+    monkeypatch.setattr(ingress_module, "canonicalize_block_arrays", tracked_canonicalize)
+    monkeypatch.setattr(ingress_module, "_plan_packing_from_summaries", tracked_plan)
+    monkeypatch.setattr(ingress_module, "_packed_from_plan", tracked_packed_from_plan)
+
+    _PackedJaxLinearARG.from_linearargs(lineargs, mesh=_graph_mesh())
+    gc.collect()
+
+    assert events == ["plan", *(event for _ in lineargs for event in ("convert", "canonicalize"))]
+    assert peak_live_blocks == 1
+    assert not live_blocks
+    assert len(captured_diagnostics) == 1
+    assert captured_diagnostics[0].staging_bytes == max(expected_staging)
+    assert captured_diagnostics[0].staging_bytes_by_device == (max(expected_staging),)
 
 
 def test_private_packed_plural_ingress_rejects_inconsistent_iids(
@@ -446,3 +510,116 @@ def test_private_packed_hdf5_rejects_empty_and_partial_root_sources(tmp_path) ->
         file.attrs["n"] = 1
     with pytest.raises(ValueError, match="missing root graph fields"):
         _PackedJaxLinearARG.from_hdf5(empty_path, mesh=_graph_mesh())
+
+
+def _write_packed_hdf5_schema_variant(
+    path,
+    linarg,
+    *,
+    layout: str,
+    include_optional_arrays: bool,
+    include_n_individuals: bool,
+) -> tuple[str | None, int]:
+    graph = linarg.A.tocsc(copy=False)
+    n_nodes = int(graph.shape[0])
+    n_samples, n_variants = map(int, linarg.shape)
+    block_name = None if layout == "root" else "chr1:0-1"
+    with h5py.File(path, "w") as file:
+        group = file if block_name is None else file.create_group(block_name)
+        group.attrs.update(
+            {
+                "n": n_nodes,
+                "n_entries": int(graph.nnz),
+                "n_samples": n_samples,
+                "n_variants": n_variants,
+            }
+        )
+        if include_n_individuals:
+            group.attrs["n_individuals"] = 1
+        group.create_dataset("indptr", data=np.asarray(graph.indptr, dtype=np.int32))
+        group.create_dataset("indices", data=np.asarray(graph.indices, dtype=np.int32))
+        group.create_dataset("data", data=np.asarray(graph.data, dtype=np.float32))
+        group.create_dataset("variant_indices", data=np.asarray(linarg.variant_indices, dtype=np.int32))
+        group.create_dataset("flip", data=np.asarray(linarg.flip, dtype=np.bool_))
+        if include_optional_arrays:
+            group.create_dataset("nonunique_indices", data=np.arange(n_nodes, dtype=np.int32))
+            group.create_dataset("allele_counts", data=np.arange(n_variants, dtype=np.int32))
+        file.create_dataset("iids", data=np.asarray([f"iid-{index}" for index in range(n_samples)], dtype="S"))
+    return block_name, n_nodes
+
+
+@pytest.mark.parametrize("layout", ["root", "group"])
+@pytest.mark.parametrize("include_optional_arrays", [False, True])
+@pytest.mark.parametrize("include_n_individuals", [False, True])
+def test_private_packed_hdf5_accepts_schema_optional_arrays_and_individual_metadata(
+    oracle_case,
+    tmp_path,
+    layout,
+    include_optional_arrays,
+    include_n_individuals,
+) -> None:
+    path = tmp_path / f"{layout}-{include_optional_arrays}-{include_n_individuals}.h5"
+    block_name, n_nodes = _write_packed_hdf5_schema_variant(
+        path,
+        oracle_case.linarg,
+        layout=layout,
+        include_optional_arrays=include_optional_arrays,
+        include_n_individuals=include_n_individuals,
+    )
+
+    operator = _PackedJaxLinearARG.from_hdf5(path, mesh=_graph_mesh(), max_padding_ratio=None)
+    descriptor = np.asarray(operator.block_descriptors)[0, 0]
+    node_start = int(descriptor[BLOCK_DESCRIPTOR_FIELDS.index("node_start")])
+    node_length = int(descriptor[BLOCK_DESCRIPTOR_FIELDS.index("node_length")])
+    variant_start = int(descriptor[BLOCK_DESCRIPTOR_FIELDS.index("variant_start")])
+    variant_length = int(descriptor[BLOCK_DESCRIPTOR_FIELDS.index("variant_length")])
+    sample_start = int(descriptor[BLOCK_DESCRIPTOR_FIELDS.index("sample_start")])
+    sample_length = int(descriptor[BLOCK_DESCRIPTOR_FIELDS.index("sample_length")])
+    expected_nonunique = np.arange(n_nodes, dtype=np.int32)
+    expected_allele_counts = (
+        np.arange(operator.n_variants, dtype=np.int32)
+        if include_optional_arrays
+        else np.full(operator.n_variants, -1, dtype=np.int32)
+    )
+    expected_samples = ingress_module._sample_indices(
+        n_nodes,
+        operator.n_samples,
+        1 if include_n_individuals else None,
+    )
+
+    assert block_name is None or block_name == "chr1:0-1"
+    np.testing.assert_array_equal(
+        np.asarray(operator.nonunique_indices)[0, node_start : node_start + node_length],
+        expected_nonunique,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(operator.allele_counts)[0, variant_start : variant_start + variant_length],
+        expected_allele_counts,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(operator.sample_indices)[0, sample_start : sample_start + sample_length],
+        expected_samples,
+    )
+
+
+@pytest.mark.parametrize("column", ["n", "n_variants", "n_samples"])
+def test_private_packed_hdf5_rejects_each_shape_metadata_mismatch(
+    linarg_h5_path,
+    linarg_block_metadata,
+    column,
+) -> None:
+    selected = linarg_block_metadata.select(
+        "block_name",
+        "n",
+        "n_entries",
+        "n_variants",
+        "n_samples",
+    ).head(1)
+    mismatched = selected.with_columns((pl.col(column) + 1).alias(column))
+
+    with pytest.raises(ValueError, match=rf"block_metadata {column} mismatch"):
+        _PackedJaxLinearARG.from_hdf5(
+            linarg_h5_path,
+            mesh=_graph_mesh(),
+            block_metadata=mismatched,
+        )

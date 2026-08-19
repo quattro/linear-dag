@@ -89,6 +89,7 @@ class LinearARGBlockArrays:
     allele_counts: np.ndarray | None
     n_variants: int
     n_samples: int
+    n_nonunique_indices: int | None = None
 
 
 @dataclass(frozen=True)
@@ -281,6 +282,17 @@ def _block_packing_summary_from_arrays(
     if allele_count_length != n_variants:
         raise ValueError("allele_counts length must match n_variants")
 
+    compressed_length = None
+    if arrays.n_nonunique_indices is not None:
+        compressed_length = _nonnegative_int(arrays.n_nonunique_indices, name="n_nonunique_indices")
+        if arrays.nonunique_indices is None:
+            real_compressed_length = node_count
+        else:
+            nonunique_indices = np.asarray(arrays.nonunique_indices)
+            real_compressed_length = int(nonunique_indices.max()) + 1 if nonunique_indices.size else 0
+        if compressed_length < real_compressed_length:
+            raise ValueError("n_nonunique_indices cannot be smaller than the maximum nonunique index")
+
     sample_indices = np.asarray(arrays.sample_indices)
     return _BlockPackingSummary(
         field_lengths=(
@@ -298,7 +310,7 @@ def _block_packing_summary_from_arrays(
         n_samples=n_samples,
         n_variants=n_variants,
         min_index_to_keep=int(sample_indices[-1]) if sample_indices.size else 0,
-        compressed_length=None,
+        compressed_length=compressed_length,
     )
 
 
@@ -347,6 +359,13 @@ def canonicalize_block_arrays(arrays: LinearARGBlockArrays, *, dtype: Any = None
         n_variants=n_variants,
         n_samples=n_samples,
     )
+    real_n_nonunique_indices = int(nonunique_indices.max()) + 1 if nonunique_indices.size else 0
+    if arrays.n_nonunique_indices is None:
+        n_nonunique_indices = real_n_nonunique_indices
+    else:
+        n_nonunique_indices = _nonnegative_int(arrays.n_nonunique_indices, name="n_nonunique_indices")
+        if n_nonunique_indices < real_n_nonunique_indices:
+            raise ValueError("n_nonunique_indices cannot be smaller than the maximum nonunique index")
     return LinearARGBlockArrays(
         indptr=indptr,
         indices=indices,
@@ -358,6 +377,7 @@ def canonicalize_block_arrays(arrays: LinearARGBlockArrays, *, dtype: Any = None
         allele_counts=allele_counts,
         n_variants=n_variants,
         n_samples=n_samples,
+        n_nonunique_indices=n_nonunique_indices,
     )
 
 
@@ -440,6 +460,18 @@ def _plan_packing_from_summaries(
         max(device_lengths[field] for device_lengths in valid_lengths) for field in range(len(GRAPH_FIELD_NAMES))
     )
     descriptors = _build_descriptors(block_summaries, blocks_by_device)
+    compressed_capacity = max(
+        (
+            sum(descriptor.compressed_length for descriptor in descriptors if descriptor.device == device)
+            for device in range(config.num_devices)
+        ),
+        default=0,
+    )
+    nonunique_field = GRAPH_FIELD_NAMES.index("nonunique_indices")
+    capacities = tuple(
+        max(capacity, compressed_capacity) if field == nonunique_field else capacity
+        for field, capacity in enumerate(capacities)
+    )
     descriptor_capacity = max(len(device_blocks) for device_blocks in blocks_by_device)
     _device_metadata_array(
         [
@@ -490,7 +522,9 @@ def _plan_packing_from_summaries(
         raise ValueError(
             "whole-block packing exceeds max_padding_ratio after rebalancing: "
             f"canonical bytes={canonical_bytes}, padded bytes={padded_bytes}, "
-            f"padding ratio={padding_ratio:.6f}, per-device loads={device_graph_bytes}. "
+            f"padding ratio={padding_ratio:.6f}, "
+            f"configured max_padding_ratio={config.max_padding_ratio:.6f}, "
+            f"per-device loads={device_graph_bytes}. "
             "Pass a larger max_padding_ratio or max_padding_ratio=None for an explicit override "
             "(legacy allow_excess_padding=True is also accepted), or use the exact-ragged fallback; "
             "source graph blocks are indivisible."
@@ -624,6 +658,7 @@ def unpack_packed_blocks(packed: PackedGraph) -> tuple[LinearARGBlockArrays, ...
             allele_counts=np.asarray(packed.buffers.allele_counts[device, variant_slice], dtype=np.int32),
             n_variants=descriptor.variant_length,
             n_samples=descriptor.sample_length,
+            n_nonunique_indices=descriptor.compressed_length,
         )
     return tuple(blocks[index] for index in range(len(packed.plan.assignment)))
 
@@ -723,6 +758,9 @@ def _validated_descriptors(buffers: PackedHostBuffers, plan: PackingPlan) -> tup
             raise ValueError("descriptor logical variant span must match its variant count")
         if descriptor.compressed_start < 0 or descriptor.compressed_length < 0:
             raise ValueError("descriptor compressed-row extent must be nonnegative")
+        compressed_capacity = plan.capacities["nonunique_indices"]
+        if descriptor.compressed_start + descriptor.compressed_length > compressed_capacity:
+            raise ValueError("descriptor compressed-row extent exceeds its packed capacity")
         if not descriptor.node_start <= descriptor.min_index_to_keep < descriptor.node_start + descriptor.node_length:
             raise ValueError("descriptor min_index_to_keep must lie within its node span")
         if plan.assignment[descriptor.logical_block_index] != descriptor.device:
@@ -992,13 +1030,15 @@ def _summarize_canonical_block(block: LinearARGBlockArrays) -> _BlockPackingSumm
     nonunique_indices = block.nonunique_indices
     assert nonunique_indices is not None
     metrics = _block_metrics(block)
+    real_compressed_length = int(nonunique_indices.max()) + 1 if nonunique_indices.size else 0
+    compressed_length = real_compressed_length if block.n_nonunique_indices is None else block.n_nonunique_indices
     return _BlockPackingSummary(
         field_lengths=metrics.field_lengths,
         data_dtype=np.dtype(block.data.dtype),
         n_samples=block.n_samples,
         n_variants=block.n_variants,
         min_index_to_keep=int(block.sample_indices[-1]) if block.sample_indices.size else 0,
-        compressed_length=int(nonunique_indices.max()) + 1 if nonunique_indices.size else 0,
+        compressed_length=compressed_length,
     )
 
 

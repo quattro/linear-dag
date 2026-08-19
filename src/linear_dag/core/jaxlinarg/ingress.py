@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import warnings
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from importlib import import_module
@@ -109,11 +109,12 @@ class _PackedJaxLinearARG(eqx.Module):
         nonunique_indices: Any,
         n_variants: int,
         n_samples: int,
+        n_nonunique_indices: int | None = None,
         allele_counts: Any = None,
         iids: Any = None,
         mesh: Mesh | None = None,
         backend: Backend = Backend.AUTO,
-        dtype: Any = None,
+        dtype: Any = jnp.float32,
         max_padding_ratio: float | None = 1.25,
     ) -> _PackedJaxLinearARG:
         """Construct the private candidate from one block of host arrays."""
@@ -128,6 +129,7 @@ class _PackedJaxLinearARG(eqx.Module):
             allele_counts=None if allele_counts is None else np.asarray(allele_counts),
             n_variants=n_variants,
             n_samples=n_samples,
+            n_nonunique_indices=n_nonunique_indices,
         )
         return _packed_from_block_arrays(
             (block,),
@@ -149,13 +151,12 @@ class _PackedJaxLinearARG(eqx.Module):
         max_padding_ratio: float | None = 1.25,
     ) -> _PackedJaxLinearARG:
         """Construct the private candidate from one in-memory LinearARG."""
-        return _packed_from_block_arrays(
-            (_lineararg_block_arrays(linarg, dtype=dtype),),
+        return _packed_from_linearargs(
+            (linarg,),
             mesh=_single_block_mesh(mesh),
             backend=backend,
             dtype=dtype,
             max_padding_ratio=max_padding_ratio,
-            iids=getattr(linarg, "iids", None),
         ).operator
 
     @classmethod
@@ -169,16 +170,12 @@ class _PackedJaxLinearARG(eqx.Module):
         max_padding_ratio: float | None = 1.25,
     ) -> _PackedJaxLinearARG:
         """Construct the private candidate from in-memory LinearARG blocks."""
-        sources = tuple(lineargs)
-        iids = _shared_lineararg_iids(sources)
-        blocks = (_lineararg_block_arrays(linarg, dtype=dtype) for linarg in sources)
-        return _packed_from_block_arrays(
-            blocks,
+        return _packed_from_linearargs(
+            lineargs,
             mesh=mesh,
             backend=backend,
             dtype=dtype,
             max_padding_ratio=max_padding_ratio,
-            iids=iids,
         ).operator
 
     @classmethod
@@ -347,6 +344,26 @@ class _PackedJaxLinearARG(eqx.Module):
 
         return lineararg_rmatmat(self, values)
 
+    def matvec(self, x: Any) -> Array:
+        """Multiply a vector by the represented genotype matrix."""
+        return self.matmat(x)
+
+    def rmatvec(self, x: Any) -> Array:
+        """Multiply a vector by the transpose of the represented matrix."""
+        return self.rmatmat(x)
+
+    @property
+    def T(self) -> _PackedTransposeView:
+        """Return a lightweight transpose view."""
+        return self.transpose_view()
+
+    def transpose_view(self) -> _PackedTransposeView:
+        """Return a lightweight transpose view of this operator."""
+        return _PackedTransposeView(self)
+
+    def __matmul__(self, x: Any) -> Array:
+        return self.matmat(x)
+
     def compile_matmat(self) -> Any:
         r"""Compile a forward product without raw bound-method closure capture.
 
@@ -378,6 +395,46 @@ class _PackedJaxLinearARG(eqx.Module):
         return compile_rmatmat(self)
 
 
+class _PackedTransposeView(eqx.Module):
+    """Lightweight transpose view for the private packed candidate."""
+
+    parent: _PackedJaxLinearARG
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """Return the transposed operator shape."""
+        rows, columns = self.parent.shape
+        return (columns, rows)
+
+    def matmat(self, x: Any) -> Array:
+        """Multiply by the transposed matrix."""
+        return self.parent.rmatmat(x)
+
+    def rmatmat(self, x: Any) -> Array:
+        """Multiply by the original matrix."""
+        return self.parent.matmat(x)
+
+    def matvec(self, x: Any) -> Array:
+        """Multiply a vector by the transposed matrix."""
+        return self.matmat(x)
+
+    def rmatvec(self, x: Any) -> Array:
+        """Multiply a vector by the original matrix."""
+        return self.rmatmat(x)
+
+    @property
+    def T(self) -> _PackedJaxLinearARG:
+        """Return the original non-transposed operator."""
+        return self.transpose_view()
+
+    def transpose_view(self) -> _PackedJaxLinearARG:
+        """Return the original non-transposed operator."""
+        return self.parent
+
+    def __matmul__(self, x: Any) -> Array:
+        return self.matmat(x)
+
+
 @dataclass(frozen=True)
 class _PackedIngressResult:
     """Private packed operator plus host-only construction diagnostics."""
@@ -387,7 +444,7 @@ class _PackedIngressResult:
 
 
 def _packed_from_block_arrays(
-    blocks: Iterable[LinearARGBlockArrays],
+    blocks: Sequence[LinearARGBlockArrays],
     *,
     mesh: Mesh,
     backend: Backend = Backend.PURE_JAX,
@@ -397,25 +454,54 @@ def _packed_from_block_arrays(
     iids: Any = None,
 ) -> _PackedIngressResult:
     """Construct the private packed carrier from canonical host blocks."""
+    if not isinstance(blocks, Sequence):
+        raise TypeError("packed block arrays must be provided as a replayable sequence")
     backend = _resolve_packed_backend(backend)
-    loaded_blocks = list(blocks)
     normalized_dtype = _normalize_dtype(dtype)
     plan = _plan_packing_from_summaries(
-        (_block_packing_summary_from_arrays(block, dtype=normalized_dtype) for block in loaded_blocks),
+        (_block_packing_summary_from_arrays(block, dtype=normalized_dtype) for block in blocks),
         num_devices=_graph_mesh_devices(mesh),
         dtype=normalized_dtype,
         max_padding_ratio=max_padding_ratio,
         allow_excess_padding=allow_excess_padding,
     )
-    pending_blocks: list[LinearARGBlockArrays | None] = list(loaded_blocks)
-    del loaded_blocks
 
     def load_block(logical_block_index: int) -> LinearARGBlockArrays:
-        block = pending_blocks[logical_block_index]
-        if block is None:
-            raise RuntimeError("canonical block source was released before staging")
-        pending_blocks[logical_block_index] = None
-        return block
+        return blocks[logical_block_index]
+
+    return _packed_from_plan(load_block, plan=plan, mesh=mesh, backend=backend, iids=iids)
+
+
+def _packed_from_linearargs(
+    lineargs: Iterable[LinearARG],
+    *,
+    mesh: Mesh,
+    backend: Backend = Backend.PURE_JAX,
+    dtype: Any = None,
+    max_padding_ratio: float | None = 1.25,
+) -> _PackedIngressResult:
+    """Plan from lightweight summaries, then convert and stage one block at a time."""
+    backend = _resolve_packed_backend(backend)
+    normalized_dtype = _normalize_dtype(dtype)
+    pending_sources: list[LinearARG | None] = list(lineargs)
+    iids = _shared_lineararg_iids(pending_sources)
+    plan = _plan_packing_from_summaries(
+        (
+            _lineararg_packing_summary(linarg, dtype=normalized_dtype)
+            for linarg in pending_sources
+            if linarg is not None
+        ),
+        num_devices=_graph_mesh_devices(mesh),
+        dtype=normalized_dtype,
+        max_padding_ratio=max_padding_ratio,
+    )
+
+    def load_block(logical_block_index: int) -> LinearARGBlockArrays:
+        linarg = pending_sources[logical_block_index]
+        if linarg is None:
+            raise RuntimeError("LinearARG source was released before staging")
+        pending_sources[logical_block_index] = None
+        return _lineararg_block_arrays(linarg, dtype=normalized_dtype)
 
     return _packed_from_plan(load_block, plan=plan, mesh=mesh, backend=backend, iids=iids)
 
@@ -695,9 +781,11 @@ def _iid_tuple(values: Any) -> tuple[str, ...] | None:
     return tuple(str(value) for value in values)
 
 
-def _shared_lineararg_iids(lineargs: tuple[LinearARG, ...]) -> tuple[str, ...] | None:
+def _shared_lineararg_iids(lineargs: Sequence[LinearARG | None]) -> tuple[str, ...] | None:
     if not lineargs:
         raise ValueError("at least one LinearARG block is required")
+    if any(linarg is None for linarg in lineargs):
+        raise ValueError("LinearARG sources must not be None")
     iids = tuple(_iid_tuple(getattr(linarg, "iids", None)) for linarg in lineargs)
     first = iids[0]
     if any(current != first for current in iids[1:]):
@@ -721,6 +809,26 @@ def _lineararg_block_arrays(linarg: LinearARG, *, dtype: Any = None) -> LinearAR
         allele_counts=_cached_allele_counts(linarg),
         n_variants=int(linarg.shape[1]),
         n_samples=int(linarg.shape[0]),
+    )
+
+
+def _lineararg_packing_summary(linarg: LinearARG, *, dtype: Any) -> _BlockPackingSummary:
+    """Derive packing facts from existing arrays without allocating transfer copies."""
+    graph = _as_csc(linarg.A)
+    return _block_packing_summary_from_arrays(
+        LinearARGBlockArrays(
+            indptr=graph.indptr,
+            indices=graph.indices,
+            data=graph.data,
+            variant_indices=linarg.variant_indices,
+            flip=linarg.flip,
+            sample_indices=linarg.sample_indices,
+            nonunique_indices=getattr(linarg, "nonunique_indices", None),
+            allele_counts=_cached_allele_counts(linarg),
+            n_variants=int(linarg.shape[1]),
+            n_samples=int(linarg.shape[0]),
+        ),
+        dtype=dtype,
     )
 
 
@@ -1189,6 +1297,7 @@ def _block_arrays_kwargs(arrays: LinearARGBlockArrays) -> dict[str, Any]:
         "allele_counts": arrays.allele_counts,
         "n_variants": arrays.n_variants,
         "n_samples": arrays.n_samples,
+        "n_nonunique_indices": arrays.n_nonunique_indices,
     }
 
 
