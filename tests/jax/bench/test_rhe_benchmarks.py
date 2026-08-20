@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import statistics
 import time
 
@@ -44,6 +45,17 @@ _SEED = 20260522
 _WARMUP_ITERATIONS = 1
 _TIMED_ITERATIONS = 3
 _CYTHON_MAX_NUM_TRAITS = 8
+
+
+def _promotion_device_platform() -> str:
+    platform = os.environ.get("LINEAR_DAG_PROMOTION_DEVICE_PLATFORM", "cpu")
+    if platform not in {"cpu", "gpu"}:
+        raise ValueError(f"LINEAR_DAG_PROMOTION_DEVICE_PLATFORM must be 'cpu' or 'gpu'; observed {platform!r}")
+    return platform
+
+
+def _promotion_devices(device_platform: str) -> tuple[jax.Device, ...]:
+    return tuple(jax.devices(device_platform))
 
 
 @dataclass(frozen=True)
@@ -263,9 +275,10 @@ def _time_jax_rhe(
     data: pl.DataFrame,
     requested_devices: int,
     num_matvecs_values: tuple[int, ...],
+    device_platform: str = "cpu",
     backend: Backend = Backend.AUTO,
 ) -> tuple[list[_RheBenchmarkResult], dict[int, pl.DataFrame]]:
-    devices = tuple(jax.devices())
+    devices = _promotion_devices(device_platform)
     if not devices:
         pytest.skip("RHE JAX benchmark requires at least one JAX device")
     device_count = max(1, min(requested_devices, len(devices), block_metadata.height))
@@ -393,10 +406,11 @@ def _time_packed_rhe(
     data: pl.DataFrame,
     requested_devices: int,
     num_matvecs_values: tuple[int, ...],
+    device_platform: str,
 ) -> tuple[list[_RheBenchmarkResult], dict[int, pl.DataFrame]]:
-    devices = tuple(jax.devices("cpu"))
+    devices = _promotion_devices(device_platform)
     if not devices:
-        pytest.skip("packed RHE benchmark requires a CPU JAX device")
+        pytest.skip(f"packed RHE benchmark requires a {device_platform} JAX device")
     device_count = max(1, min(requested_devices, len(devices), block_metadata.height))
     mesh = Mesh(np.asarray(devices[:device_count]), ("graph",))
     max_padding_ratio = None if path.parent.name == "testdata" else 1.25
@@ -452,6 +466,7 @@ def _run_promotion_rhe_child(
     output_path = request.config.getoption("--jax-promotion-output")
     if output_path is None:
         pytest.fail("promotion child requires --jax-promotion-output PATH")
+    device_platform = _promotion_device_platform()
 
     data = _benchmark_data(path)
     _validate_probe_counts(num_matvecs_values, data.height)
@@ -472,6 +487,7 @@ def _run_promotion_rhe_child(
             data=data,
             requested_devices=parallel_processes,
             num_matvecs_values=num_matvecs_values,
+            device_platform=device_platform,
             backend=Backend.PURE_JAX,
         )
         requested_backend = Backend.PURE_JAX.value
@@ -483,6 +499,7 @@ def _run_promotion_rhe_child(
             data=data,
             requested_devices=parallel_processes,
             num_matvecs_values=num_matvecs_values,
+            device_platform=device_platform,
         )
         requested_backend = Backend.PURE_JAX.value
         resolved_backend = Backend.PURE_JAX.value

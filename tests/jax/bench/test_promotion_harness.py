@@ -460,20 +460,21 @@ def test_aggregate_child_fragments_validates_schema_and_context(tmp_path: Path) 
 
     packed = _row(candidate_commit="candidate", representation=Representation.PACKED_CANDIDATE.value)
     exact = _row(candidate_commit="candidate", representation=Representation.RETAINED_EXACT_RAGGED.value)
-    common = dict(
-        schema_version="2026-08-13+2",
-        candidate_commit="candidate",
-        dirty_worktree=False,
-        behavioral_reference_commit="b68e7da",
-        dataset=_dataset(),
-        produced_at_utc="2026-08-19T12:00:00+00:00",
-        cache_label=CachePolicy.FRESH.value,
-        environment=_metadata_env(),
-    )
     paths = []
     for name, record in (("packed", packed), ("exact", exact)):
         path = tmp_path / f"{name}.json"
-        path.write_text(PromotionEvidence(records=(record,), **common).to_json(), encoding="utf-8")
+        evidence = PromotionEvidence(
+            schema_version="2026-08-13+2",
+            candidate_commit="candidate",
+            dirty_worktree=False,
+            behavioral_reference_commit="b68e7da",
+            dataset=_dataset(),
+            produced_at_utc="2026-08-19T12:00:00+00:00",
+            cache_label=CachePolicy.FRESH.value,
+            environment=_metadata_env(),
+            records=(record,),
+        )
+        path.write_text(evidence.to_json(), encoding="utf-8")
         paths.append(path)
 
     combined = aggregate_child_fragments(tuple(paths), platform_label="local-platform")
@@ -499,13 +500,11 @@ def test_aggregate_child_fragments_rejects_mismatched_dataset(tmp_path: Path) ->
         n_samples=10,
         n_variants=20,
     )
-    second = BenchmarkRecord(
-        **{
-            **first.__dict__,
-            "record_id": "mismatched-dataset",
-            "dataset": other_dataset,
-            "representation": Representation.RETAINED_EXACT_RAGGED.value,
-        }
+    second = replace(
+        first,
+        record_id="mismatched-dataset",
+        dataset=other_dataset,
+        representation=Representation.RETAINED_EXACT_RAGGED.value,
     )
     paths = []
     for index, record in enumerate((first, second)):
@@ -702,3 +701,292 @@ def test_xla_summary_json_mode_parses_small_fixture(tmp_path: Path) -> None:
     assert payload["modules"][0]["large_allocations"] == [4096]
     assert payload["modules"][0]["alias_count"] == 2
     assert payload["modules"][0]["custom_call_count"] == 1
+
+
+def _init_runner_repo(path: Path) -> Path:
+    path.mkdir()
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "tests@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Tests"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "commit.gpgsign", "false"], check=True)
+    tracked = path / "tracked.txt"
+    tracked.write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "fixture"], check=True)
+    return path
+
+
+def _run_promotion_runner(
+    *,
+    repo_root: Path,
+    h5_path: Path,
+    output_dir: Path,
+    platform_label: str,
+    device_count: int,
+    extra_args: tuple[str, ...] = (),
+    process_env: dict[str, str] | None = None,
+    dry_run: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    script = Path(__file__).resolve().parents[3] / "scripts" / "run_jax_promotion.sh"
+    command = [
+        "bash",
+        str(script),
+        "--repo-root",
+        str(repo_root),
+        "--hdf5-path",
+        str(h5_path),
+        "--output-dir",
+        str(output_dir),
+        "--platform-label",
+        platform_label,
+        "--device-count",
+        str(device_count),
+    ]
+    if dry_run:
+        command.append("--dry-run")
+    command.extend(extra_args)
+    return subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=process_env,
+    )
+
+
+@pytest.mark.parametrize(
+    ("platform_label", "device_count", "backend_marker", "excluded_marker"),
+    [
+        ("forced-two-device-cpu", 2, "test_operator_ffi_cpu.py", "JAX_PLATFORMS=gpu"),
+        ("gpu", 1, "backend_mode=pure_jax", "test_operator_ffi_cpu.py"),
+    ],
+)
+def test_runner_builds_cpu_ffi_and_gpu_pure_jax_commands(
+    tmp_path: Path,
+    platform_label: str,
+    device_count: int,
+    backend_marker: str,
+    excluded_marker: str,
+) -> None:
+    repo_root = _init_runner_repo(tmp_path / "repo")
+    h5_path = repo_root / "representative.h5"
+    h5_path.write_bytes(b"fixture")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    completed = _run_promotion_runner(
+        repo_root=repo_root,
+        h5_path=h5_path,
+        output_dir=output_dir,
+        platform_label=platform_label,
+        device_count=device_count,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    logs = "\n".join(path.read_text(encoding="utf-8") for path in sorted(output_dir.glob("*.log")))
+    assert backend_marker in logs
+    assert excluded_marker not in logs
+    pytest_commands = [line for line in logs.splitlines() if "pytest" in line and line.startswith("command=")]
+    assert pytest_commands
+    assert all("pytest -p no:capture" in command for command in pytest_commands)
+
+
+def test_product_promotion_gpu_selection_uses_gpu_devices_and_pure_jax_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.jax.bench import test_parallel_benchmarks as product_benchmarks
+
+    requested_platforms = []
+
+    def devices_for_backend(platform: str) -> list[object]:
+        requested_platforms.append(platform)
+        return [object(), object()]
+
+    monkeypatch.setattr(product_benchmarks, "_devices_for_backend", devices_for_backend)
+    metadata = pl.DataFrame({"block_name": ["one", "two"]})
+
+    backends = product_benchmarks._promotion_backends(Representation.PACKED_CANDIDATE, "gpu")
+    counts = product_benchmarks._promotion_device_counts(metadata, "gpu")
+
+    assert backends == (product_benchmarks.Backend.PURE_JAX,)
+    assert counts == (1, 2)
+    assert requested_platforms == ["gpu"]
+
+
+def test_rhe_promotion_gpu_selection_requests_gpu_devices(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.jax.bench import test_rhe_benchmarks as rhe_benchmarks
+
+    requested_platforms = []
+    gpu_devices = (object(), object())
+
+    def devices(platform: str) -> tuple[object, ...]:
+        requested_platforms.append(platform)
+        return gpu_devices
+
+    monkeypatch.setattr(rhe_benchmarks.jax, "devices", devices)
+
+    assert rhe_benchmarks._promotion_devices("gpu") == gpu_devices
+    assert requested_platforms == ["gpu"]
+
+
+def test_runner_uses_one_cache_for_distinct_fresh_and_reused_processes(tmp_path: Path) -> None:
+    repo_root = _init_runner_repo(tmp_path / "repo")
+    h5_path = repo_root / "representative.h5"
+    h5_path.write_bytes(b"fixture")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    completed = _run_promotion_runner(
+        repo_root=repo_root,
+        h5_path=h5_path,
+        output_dir=output_dir,
+        platform_label="arm64-cpu",
+        device_count=1,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    fresh = (output_dir / "arm64-cpu.fresh.environment.log").read_text(encoding="utf-8")
+    reused = (output_dir / "arm64-cpu.reused.environment.log").read_text(encoding="utf-8")
+    assert "cache_policy=fresh" in fresh
+    assert "cache_policy=reused" in reused
+    assert "cache_directory_id=shared-persistent-cache" in fresh
+    assert "cache_directory_id=shared-persistent-cache" in reused
+    assert "process_id=benchmark-fresh" in fresh
+    assert "process_id=benchmark-reused" in reused
+    assert (output_dir / "checksums.sha256").is_file()
+
+
+@pytest.mark.parametrize("unsafe_output", ["repo", "ancestor", "root"])
+def test_runner_rejects_unsafe_broad_output_paths(tmp_path: Path, unsafe_output: str) -> None:
+    repo_root = _init_runner_repo(tmp_path / "repo")
+    h5_path = repo_root / "representative.h5"
+    h5_path.write_bytes(b"fixture")
+    output_dir = {
+        "repo": repo_root,
+        "ancestor": tmp_path,
+        "root": Path("/"),
+    }[unsafe_output]
+
+    completed = _run_promotion_runner(
+        repo_root=repo_root,
+        h5_path=h5_path,
+        output_dir=output_dir,
+        platform_label="arm64-cpu",
+        device_count=1,
+    )
+
+    assert completed.returncode != 0
+    assert "unsafe output directory" in completed.stderr
+
+
+def test_runner_rejects_dirty_commit_unless_explicitly_nonpromotable(tmp_path: Path) -> None:
+    repo_root = _init_runner_repo(tmp_path / "repo")
+    h5_path = repo_root / "representative.h5"
+    h5_path.write_bytes(b"fixture")
+    (repo_root / "dirty.py").write_text("pass\n", encoding="utf-8")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    rejected = _run_promotion_runner(
+        repo_root=repo_root,
+        h5_path=h5_path,
+        output_dir=output_dir,
+        platform_label="arm64-cpu",
+        device_count=1,
+    )
+    assert rejected.returncode != 0
+    assert "clean candidate commit" in rejected.stderr
+
+    allowed = _run_promotion_runner(
+        repo_root=repo_root,
+        h5_path=h5_path,
+        output_dir=output_dir,
+        platform_label="arm64-cpu",
+        device_count=1,
+        extra_args=("--allow-dirty", "--no-enforce-gates"),
+    )
+    assert allowed.returncode == 0, allowed.stderr
+    environment = (output_dir / "arm64-cpu.fresh.environment.log").read_text(encoding="utf-8")
+    assert "candidate_clean=false" in environment
+    assert "promotable=false" in environment
+
+
+def test_runner_redacts_absolute_paths_from_logs(tmp_path: Path) -> None:
+    repo_root = _init_runner_repo(tmp_path / "repo")
+    h5_path = repo_root / "representative.h5"
+    h5_path.write_bytes(b"fixture")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    completed = _run_promotion_runner(
+        repo_root=repo_root,
+        h5_path=h5_path,
+        output_dir=output_dir,
+        platform_label="x86_64-cpu",
+        device_count=1,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    logs = "\n".join(path.read_text(encoding="utf-8") for path in sorted(output_dir.glob("*.log")))
+    assert str(repo_root) not in logs
+    assert str(h5_path) not in logs
+    assert str(output_dir) not in logs
+    assert "<repo>" in logs
+    assert "<dataset>" in logs
+    assert "<output>" in logs
+
+
+def test_runner_execution_log_retains_every_setup_command_result(tmp_path: Path) -> None:
+    repo_root = _init_runner_repo(tmp_path / "repo")
+    h5_path = repo_root / "representative.h5"
+    h5_path.write_bytes(b"fixture")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        """#!/bin/sh
+if [ "$1" = "build" ]; then
+    printf 'fake-build\\n'
+    exit 0
+fi
+printf 'fake-pytest-x64=%s\\n' "${JAX_ENABLE_X64:-unset}"
+printf 'fake-host=%s\\n' "${HOSTNAME:-unset}"
+printf 'fake-token=%s\\n' "${PROMOTION_TEST_TOKEN:-unset}"
+previous=''
+for argument in "$@"; do
+    if [ "$previous" = "--jax-promotion-output" ]; then
+        printf '{}\\n' > "$argument"
+    fi
+    previous=$argument
+done
+""",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+    process_env = os.environ.copy()
+    process_env["PATH"] = f"{fake_bin}{os.pathsep}{process_env['PATH']}"
+    process_env["HOSTNAME"] = "private-runner-host.example.invalid"
+    process_env["PROMOTION_TEST_TOKEN"] = "private-promotion-token"
+
+    completed = _run_promotion_runner(
+        repo_root=repo_root,
+        h5_path=h5_path,
+        output_dir=output_dir,
+        platform_label="arm64-cpu",
+        device_count=1,
+        extra_args=("--no-enforce-gates",),
+        process_env=process_env,
+        dry_run=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    execution = (output_dir / "arm64-cpu.setup.execution.log").read_text(encoding="utf-8")
+    assert "fake-build" in execution
+    assert "fake-pytest-x64=0" in execution
+    assert "fake-pytest-x64=1" in execution
+    assert "private-runner-host.example.invalid" not in execution
+    assert "fake-host=<host>" in execution
+    assert "private-promotion-token" not in execution
+    assert "fake-token=<redacted-secret>" in execution

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import statistics
 import time
 
@@ -561,8 +562,17 @@ def _time_jax_parallel_operator(
     return results
 
 
-def _promotion_backends(representation: Representation) -> tuple[Backend, ...]:
+def _promotion_device_platform() -> str:
+    platform = os.environ.get("LINEAR_DAG_PROMOTION_DEVICE_PLATFORM", "cpu")
+    if platform not in {"cpu", "gpu"}:
+        raise ValueError(f"LINEAR_DAG_PROMOTION_DEVICE_PLATFORM must be 'cpu' or 'gpu'; observed {platform!r}")
+    return platform
+
+
+def _promotion_backends(representation: Representation, device_platform: str) -> tuple[Backend, ...]:
     backends = [Backend.PURE_JAX]
+    if device_platform != "cpu":
+        return tuple(backends)
     if representation is Representation.PACKED_CANDIDATE:
         ffi_available = ffi_cpu.is_ffi_cpu_packed_available()
     else:
@@ -572,10 +582,10 @@ def _promotion_backends(representation: Representation) -> tuple[Backend, ...]:
     return tuple(backends)
 
 
-def _promotion_device_counts(block_metadata: pl.DataFrame) -> tuple[int, ...]:
-    maximum = min(len(_devices_for_backend("cpu")), block_metadata.height)
+def _promotion_device_counts(block_metadata: pl.DataFrame, device_platform: str) -> tuple[int, ...]:
+    maximum = min(len(_devices_for_backend(device_platform)), block_metadata.height)
     if maximum < 1:
-        pytest.skip("promotion products require a CPU JAX device")
+        pytest.skip(f"promotion products require a {device_platform} JAX device")
     return (1, 2) if maximum >= 2 else (1,)
 
 
@@ -656,12 +666,13 @@ def _time_promotion_exact_products(
     block_metadata: pl.DataFrame,
     *,
     k_values: tuple[int, ...],
+    device_platform: str,
 ) -> list[_PromotionProductMeasurement]:
     measurements = []
-    cpu_devices = tuple(_devices_for_backend("cpu"))
-    for backend in _promotion_backends(Representation.RETAINED_EXACT_RAGGED):
-        for device_count in _promotion_device_counts(block_metadata):
-            devices = cpu_devices[:device_count]
+    platform_devices = tuple(_devices_for_backend(device_platform))
+    for backend in _promotion_backends(Representation.RETAINED_EXACT_RAGGED, device_platform):
+        for device_count in _promotion_device_counts(block_metadata, device_platform):
+            devices = platform_devices[:device_count]
             mesh = Mesh(np.asarray(devices), ("blocks",))
             with jax.default_device(devices[0]):
                 start = time.perf_counter()
@@ -745,14 +756,15 @@ def _time_promotion_packed_products(
     block_metadata: pl.DataFrame,
     *,
     k_values: tuple[int, ...],
+    device_platform: str,
 ) -> list[_PromotionProductMeasurement]:
     measurements = []
-    cpu_devices = tuple(_devices_for_backend("cpu"))
+    platform_devices = tuple(_devices_for_backend(device_platform))
     block_names = tuple(block_metadata.get_column("block_name").to_list())
     max_padding_ratio = None if path.parent.name == "testdata" else 1.25
-    for backend in _promotion_backends(Representation.PACKED_CANDIDATE):
-        for device_count in _promotion_device_counts(block_metadata):
-            devices = cpu_devices[:device_count]
+    for backend in _promotion_backends(Representation.PACKED_CANDIDATE, device_platform):
+        for device_count in _promotion_device_counts(block_metadata, device_platform):
+            devices = platform_devices[:device_count]
             mesh = Mesh(np.asarray(devices), ("graph",))
             start = time.perf_counter()
             packed = _packed_from_hdf5(
@@ -866,6 +878,7 @@ def _run_promotion_product_child(
     output_path = request.config.getoption("--jax-promotion-output")
     if output_path is None:
         pytest.fail("promotion child requires --jax-promotion-output PATH")
+    device_platform = _promotion_device_platform()
     if representation is Representation.NUMPY_CYTHON:
         measurements = _time_promotion_numpy_products(
             path,
@@ -874,9 +887,19 @@ def _run_promotion_product_child(
             num_processes=min(parallel_processes, block_metadata.height),
         )
     elif representation is Representation.RETAINED_EXACT_RAGGED:
-        measurements = _time_promotion_exact_products(path, block_metadata, k_values=k_values)
+        measurements = _time_promotion_exact_products(
+            path,
+            block_metadata,
+            k_values=k_values,
+            device_platform=device_platform,
+        )
     else:
-        measurements = _time_promotion_packed_products(path, block_metadata, k_values=k_values)
+        measurements = _time_promotion_packed_products(
+            path,
+            block_metadata,
+            k_values=k_values,
+            device_platform=device_platform,
+        )
 
     fingerprint = compute_dataset_fingerprint(path)
     candidate = git_commit()
