@@ -49,6 +49,30 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=(4, 20),
         help="probe-vector counts to use for RHE benchmarks",
     )
+    parser.addoption(
+        "--jax-promotion-output",
+        type=Path,
+        default=None,
+        help="write phase-level benchmark evidence rows to this JSON path",
+    )
+    parser.addoption(
+        "--jax-enforce-promotion-gates",
+        action="store_true",
+        default=False,
+        help="fail run if promotion gates evaluate as non-promotable",
+    )
+    parser.addoption(
+        "--cache-policy",
+        choices=["fresh", "reused"],
+        default="fresh",
+        help="internal cache-policy label for promotion evidence collection",
+    )
+    parser.addoption(
+        "--platform-label",
+        type=str,
+        default="local",
+        help="platform label recorded in promotion evidence",
+    )
 
 
 @pytest.fixture(scope="session")

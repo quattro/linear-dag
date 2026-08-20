@@ -279,6 +279,14 @@ class _PackedJaxLinearARG(eqx.Module):
         return _packed_graph_component(self.graph, 6)
 
     @property
+    def n_nonunique_indices(self) -> int:
+        """Return the packed compressed-node count."""
+        indices = self.nonunique_indices
+        if indices.size == 0:
+            return 0
+        return int(jnp.max(indices)) + 1
+
+    @property
     def allele_counts(self) -> Array:
         return _packed_graph_component(self.graph, 7)
 
