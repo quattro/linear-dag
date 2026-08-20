@@ -112,12 +112,18 @@ def git_commit(repo_root: Path | str | None = None) -> str:
 def is_git_dirty(repo_root: Path | str | None = None) -> bool:
     root = _repo_root(Path(repo_root) if repo_root is not None else None)
     status = subprocess.run(
-        ["git", "-C", str(root), "status", "--porcelain"],
+        ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"],
         text=True,
         capture_output=True,
         check=True,
     ).stdout.strip()
-    return bool(status)
+    relevant = []
+    for line in status.splitlines():
+        path = line[3:].strip().strip('"')
+        if line.startswith("?? ") and Path(path).suffix.lower() in {".h5", ".hdf5"}:
+            continue
+        relevant.append(line)
+    return bool(relevant)
 
 
 @dataclass(frozen=True)
@@ -309,6 +315,7 @@ class PerformanceMetrics:
     pytree_leaf_count: int | None = None
     graph_constant_bytes: int | None = None
     graph_operand_count: int | None = None
+    stablehlo_bytes: int | None = None
     stablehlo_operation_count: int | None = None
     xla_buffer_assignment_total_bytes: int | None = None
     logical_collective_bytes: int | None = None
@@ -334,6 +341,7 @@ class PerformanceMetrics:
             "pytree_leaf_count": self.pytree_leaf_count,
             "graph_constant_bytes": self.graph_constant_bytes,
             "graph_operand_count": self.graph_operand_count,
+            "stablehlo_bytes": self.stablehlo_bytes,
             "stablehlo_operation_count": self.stablehlo_operation_count,
             "xla_buffer_assignment_total_bytes": self.xla_buffer_assignment_total_bytes,
             "logical_collective_bytes": self.logical_collective_bytes,
@@ -356,6 +364,7 @@ class PerformanceMetrics:
             pytree_leaf_count=none_or_int(payload, "pytree_leaf_count"),
             graph_constant_bytes=none_or_int(payload, "graph_constant_bytes"),
             graph_operand_count=none_or_int(payload, "graph_operand_count"),
+            stablehlo_bytes=none_or_int(payload, "stablehlo_bytes"),
             stablehlo_operation_count=none_or_int(payload, "stablehlo_operation_count"),
             xla_buffer_assignment_total_bytes=none_or_int(payload, "xla_buffer_assignment_total_bytes"),
             logical_collective_bytes=none_or_int(payload, "logical_collective_bytes"),
@@ -1090,6 +1099,12 @@ def load_evidences(raw_outputs: Path | str) -> list[PromotionEvidence]:
     return [PromotionEvidence.from_dict(item, allow_repo_mismatch=True) for item in payloads]
 
 
+def write_evidence_fragment(path: Path, evidence: PromotionEvidence) -> None:
+    path = _normalize_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(evidence.to_json(), encoding="utf-8")
+
+
 def build_promotion_pytest_command(
     *,
     module: str,
@@ -1101,6 +1116,8 @@ def build_promotion_pytest_command(
     linarg_benchmark_k: tuple[int, ...],
     rhe_benchmark_num_matvecs: tuple[int, ...],
     enforce_gates: bool = False,
+    pytest_args: tuple[str, ...] | None = None,
+    linarg_parallel_processes: int = 2,
 ) -> list[str]:
     if not module:
         raise ValueError("module must be non-empty")
@@ -1122,8 +1139,10 @@ def build_promotion_pytest_command(
         raise ValueError("rhe_benchmark_num_matvecs must be non-empty")
     if any(value < 1 for value in rhe_benchmark_num_matvecs):
         raise ValueError("rhe_benchmark_num_matvecs values must be positive")
+    if linarg_parallel_processes < 1:
+        raise ValueError("linarg_parallel_processes must be positive")
 
-    return [
+    args = [
         "uv",
         "run",
         "pytest",
@@ -1133,7 +1152,7 @@ def build_promotion_pytest_command(
         "--linarg-h5-path",
         str(h5_path),
         "--linarg-parallel-processes",
-        str(2),
+        str(linarg_parallel_processes),
         "--linarg-benchmark-k",
         *[str(item) for item in linarg_benchmark_k],
         "--rhe-benchmark-num-matvecs",
@@ -1145,7 +1164,12 @@ def build_promotion_pytest_command(
         "--platform-label",
         platform_label,
         module,
-    ] + (["--jax-enforce-promotion-gates"] if enforce_gates else [])
+    ]
+    if enforce_gates:
+        args.append("--jax-enforce-promotion-gates")
+    if pytest_args:
+        args.extend(pytest_args)
+    return args
 
 
 def normalize_command(path: Path | str) -> str:

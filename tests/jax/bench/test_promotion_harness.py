@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 
+from dataclasses import replace
 from pathlib import Path
 
 import polars as pl
@@ -23,6 +25,7 @@ from tests.jax.bench._promotion import (
     evaluate_ratio_gates,
     GateFailureReason,
     GateStatus,
+    is_git_dirty,
     load_evidences,
     PerformanceMetrics,
     PromotionEvidence,
@@ -134,6 +137,26 @@ def test_dataset_fingerprint_rejects_invalid_inputs(tmp_path: Path, monkeypatch:
         compute_dataset_fingerprint(h5_path)
 
 
+def test_git_dirty_ignores_untracked_benchmark_data_but_detects_tracked_edits(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "tests@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Tests"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "commit.gpgsign", "false"], check=True)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("clean\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "-m", "fixture"], check=True)
+
+    (tmp_path / "benchmark-data.h5").write_bytes(b"local data")
+    assert is_git_dirty(tmp_path) is False
+
+    (tmp_path / "untracked.py").write_text("pass\n", encoding="utf-8")
+    assert is_git_dirty(tmp_path) is True
+
+    tracked.write_text("modified\n", encoding="utf-8")
+    assert is_git_dirty(tmp_path) is True
+
+
 def test_schema_round_trip_and_unknown_schema_rejected() -> None:
     fp = _dataset()
     evidence = PromotionEvidence(
@@ -165,6 +188,12 @@ def test_schema_round_trip_and_unknown_schema_rejected() -> None:
     payload["schema_version"] = "2030-01-01"
     with pytest.raises(ValueError, match="unknown schema"):
         PromotionEvidence.from_dict(payload, allow_repo_mismatch=True)
+
+
+def test_performance_metrics_round_trip_stablehlo_bytes() -> None:
+    metrics = PerformanceMetrics(stablehlo_bytes=1234, stablehlo_operation_count=8)
+    restored = PerformanceMetrics.from_dict(metrics.to_dict())
+    assert restored.stablehlo_bytes == 1234
 
 
 def test_duplicate_record_id_is_rejected() -> None:
@@ -388,3 +417,288 @@ def test_build_promotion_pytest_command_includes_required_flags(tmp_path: Path) 
     assert "--platform-label" in command
     assert "--linarg-benchmark-k" in command
     assert "--rhe-benchmark-num-matvecs" in command
+
+
+def test_child_matrix_is_isolated_and_preserves_benchmark_context(tmp_path: Path) -> None:
+    from tests.jax.bench.test_promotion_benchmarks import build_child_runs
+
+    h5_path = tmp_path / "data.h5"
+    h5_path.write_bytes(b"abc")
+    runs = build_child_runs(
+        repo_root=tmp_path,
+        h5_path=h5_path,
+        fragment_dir=tmp_path / "fragments",
+        platform_label="forced-two-device-cpu",
+        cache_policy=CachePolicy.REUSED.value,
+        linarg_benchmark_k=(4, 20),
+        rhe_benchmark_num_matvecs=(4, 20),
+        parallel_processes=2,
+    )
+
+    assert [run.name for run in runs] == [
+        "product-packed",
+        "product-exact",
+        "product-numpy-cython",
+        "rhe-packed",
+        "rhe-exact",
+        "rhe-numpy-cython",
+    ]
+    assert len({run.output_path for run in runs}) == len(runs)
+    for run in runs:
+        command = run.command
+        assert command[:3] == ("uv", "run", "pytest")
+        assert command[3:5] == ("-p", "no:capture")
+        assert command.count("--jax-promotion-output") == 1
+        assert command[command.index("--platform-label") + 1] == "forced-two-device-cpu"
+        assert command[command.index("--cache-policy") + 1] == CachePolicy.REUSED.value
+        assert command[command.index("--linarg-parallel-processes") + 1] == "2"
+        assert "4" in command and "20" in command
+
+
+def test_aggregate_child_fragments_validates_schema_and_context(tmp_path: Path) -> None:
+    from tests.jax.bench.test_promotion_benchmarks import aggregate_child_fragments
+
+    packed = _row(candidate_commit="candidate", representation=Representation.PACKED_CANDIDATE.value)
+    exact = _row(candidate_commit="candidate", representation=Representation.RETAINED_EXACT_RAGGED.value)
+    common = dict(
+        schema_version="2026-08-13+2",
+        candidate_commit="candidate",
+        dirty_worktree=False,
+        behavioral_reference_commit="b68e7da",
+        dataset=_dataset(),
+        produced_at_utc="2026-08-19T12:00:00+00:00",
+        cache_label=CachePolicy.FRESH.value,
+        environment=_metadata_env(),
+    )
+    paths = []
+    for name, record in (("packed", packed), ("exact", exact)):
+        path = tmp_path / f"{name}.json"
+        path.write_text(PromotionEvidence(records=(record,), **common).to_json(), encoding="utf-8")
+        paths.append(path)
+
+    combined = aggregate_child_fragments(tuple(paths), platform_label="local-platform")
+    assert {record.representation for record in combined.records} == {
+        Representation.PACKED_CANDIDATE.value,
+        Representation.RETAINED_EXACT_RAGGED.value,
+    }
+
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text('{"schema_version":"invalid"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="child fragment malformed.json"):
+        aggregate_child_fragments((malformed,), platform_label="local-platform")
+
+
+def test_aggregate_child_fragments_rejects_mismatched_dataset(tmp_path: Path) -> None:
+    from tests.jax.bench.test_promotion_benchmarks import aggregate_child_fragments
+
+    first = _row(candidate_commit="candidate")
+    other_dataset = DatasetFingerprint(
+        sha256="b" * 64,
+        size_bytes=12,
+        block_count=3,
+        n_samples=10,
+        n_variants=20,
+    )
+    second = BenchmarkRecord(
+        **{
+            **first.__dict__,
+            "record_id": "mismatched-dataset",
+            "dataset": other_dataset,
+            "representation": Representation.RETAINED_EXACT_RAGGED.value,
+        }
+    )
+    paths = []
+    for index, record in enumerate((first, second)):
+        evidence = PromotionEvidence(
+            schema_version="2026-08-13+2",
+            candidate_commit="candidate",
+            dirty_worktree=False,
+            behavioral_reference_commit="b68e7da",
+            dataset=record.dataset,
+            produced_at_utc="2026-08-19T12:00:00+00:00",
+            cache_label=CachePolicy.FRESH.value,
+            environment=_metadata_env(),
+            records=(record,),
+        )
+        path = tmp_path / f"fragment-{index}.json"
+        path.write_text(evidence.to_json(), encoding="utf-8")
+        paths.append(path)
+
+    with pytest.raises(ValueError, match="dataset fingerprint mismatch"):
+        aggregate_child_fragments(tuple(paths), platform_label="local-platform")
+
+
+def test_aggregate_child_fragments_marks_rhe_parity_failure(tmp_path: Path) -> None:
+    from tests.jax.bench.test_promotion_benchmarks import aggregate_child_fragments
+
+    numpy_row = replace(
+        _row(candidate_commit="candidate", representation=Representation.NUMPY_CYTHON.value),
+        operation="rhe",
+        notes=json.dumps({"estimate": [[1.0, 2.0, 0.5]]}),
+    )
+    packed_row = replace(
+        _row(candidate_commit="candidate", representation=Representation.PACKED_CANDIDATE.value),
+        operation="rhe",
+        notes=json.dumps({"estimate": [[1.0, 2.0, 0.8]]}),
+    )
+    paths = []
+    for name, record in (("numpy", numpy_row), ("packed", packed_row)):
+        evidence = PromotionEvidence(
+            schema_version="2026-08-13+2",
+            candidate_commit="candidate",
+            dirty_worktree=False,
+            behavioral_reference_commit="b68e7da",
+            dataset=_dataset(),
+            produced_at_utc="2026-08-19T12:00:00+00:00",
+            cache_label=CachePolicy.FRESH.value,
+            environment=_metadata_env(),
+            records=(record,),
+        )
+        path = tmp_path / f"{name}.json"
+        path.write_text(evidence.to_json(), encoding="utf-8")
+        paths.append(path)
+
+    combined = aggregate_child_fragments(tuple(paths), platform_label="local-platform")
+    packed = next(record for record in combined.records if record.representation == "packed_candidate")
+    assert packed.numeric_passed is False
+    assert "RHE estimate parity failed" in packed.notes
+
+
+def test_run_child_propagates_failure_and_missing_fragment(tmp_path: Path) -> None:
+    from tests.jax.bench.test_promotion_benchmarks import ChildRun, run_child
+
+    failed = ChildRun(
+        name="failed",
+        command=("sh", "-c", "printf 'child diagnostic' >&2; exit 7"),
+        output_path=tmp_path / "failed.json",
+    )
+    with pytest.raises(RuntimeError, match="failed.*exit code 7.*child diagnostic"):
+        run_child(failed, cwd=tmp_path)
+
+    missing = ChildRun(
+        name="missing",
+        command=("sh", "-c", "exit 0"),
+        output_path=tmp_path / "missing.json",
+    )
+    with pytest.raises(RuntimeError, match="did not write"):
+        run_child(missing, cwd=tmp_path)
+
+
+def test_synchronize_tree_blocks_all_jax_like_leaves() -> None:
+    from tests.jax.bench.test_promotion_benchmarks import synchronize_tree
+
+    class Pending:
+        def __init__(self) -> None:
+            self.ready = False
+
+        def block_until_ready(self):
+            self.ready = True
+            return self
+
+    first = Pending()
+    second = Pending()
+    result = synchronize_tree({"a": first, "b": (second,)})
+    assert result["a"] is first
+    assert first.ready and second.ready
+
+
+def test_render_promotion_markdown_keeps_phases_separate() -> None:
+    from tests.jax.bench.test_promotion_benchmarks import render_promotion_markdown
+
+    records = (
+        _row(candidate_commit="x", phase=TimingPhase.CONSTRUCTION.value),
+        _row(candidate_commit="x", phase=TimingPhase.FIRST_EXECUTION.value),
+        _row(candidate_commit="x", phase=TimingPhase.WARM_EXECUTION.value),
+    )
+    evidence = PromotionEvidence(
+        schema_version="2026-08-13+2",
+        candidate_commit="x",
+        dirty_worktree=False,
+        behavioral_reference_commit="b68e7da",
+        dataset=_dataset(),
+        produced_at_utc="2026-08-19T12:00:00+00:00",
+        cache_label=CachePolicy.FRESH.value,
+        environment=_metadata_env(),
+        records=records,
+    )
+    markdown = render_promotion_markdown(evidence)
+    assert "| construction |" in markdown
+    assert "| first_execution |" in markdown
+    assert "| warm_execution |" in markdown
+    assert "cold_total" not in markdown
+
+
+def test_local_benchmark_gates_name_memory_ir_and_numerical_failures() -> None:
+    from tests.jax.bench.test_promotion_benchmarks import local_benchmark_gates
+
+    healthy_metric = PerformanceMetrics(
+        canonical_graph_bytes=100,
+        padded_graph_bytes=120,
+        max_device_graph_bytes=60,
+        graph_constant_bytes=0,
+        graph_operand_count=10,
+        stablehlo_operation_count=8,
+        logical_collective_bytes=32,
+    )
+    packed = replace(_row(candidate_commit="x", device_count=2), metric=healthy_metric)
+    exact = _row(
+        candidate_commit="x",
+        device_count=2,
+        representation=Representation.RETAINED_EXACT_RAGGED.value,
+    )
+    evidence = PromotionEvidence(
+        schema_version="2026-08-13+2",
+        candidate_commit="x",
+        dirty_worktree=False,
+        behavioral_reference_commit="b68e7da",
+        dataset=_dataset(),
+        produced_at_utc="2026-08-19T12:00:00+00:00",
+        cache_label=CachePolicy.FRESH.value,
+        environment=_metadata_env(),
+        records=(packed, exact),
+    )
+    assert all(gate.status is GateStatus.PASS for gate in local_benchmark_gates(evidence, production=True))
+
+    failed_metric = replace(
+        healthy_metric,
+        padded_graph_bytes=126,
+        max_device_graph_bytes=66,
+        graph_constant_bytes=1,
+        logical_collective_bytes=0,
+    )
+    failed = replace(packed, metric=failed_metric, numeric_passed=False)
+    failed_evidence = replace(evidence, records=(failed, exact))
+    gates = local_benchmark_gates(failed_evidence, production=True)
+    failed_names = {gate.gate for gate in gates if gate.status is GateStatus.FAIL}
+    assert {"padding", "residency", "graph_constants", "dense_communication", "numerical"} <= failed_names
+
+
+def test_xla_summary_json_mode_parses_small_fixture(tmp_path: Path) -> None:
+    dump_dir = tmp_path / "dump"
+    dump_dir.mkdir()
+    hlo = dump_dir / "module.cpu_after_optimizations.txt"
+    hlo.write_text(
+        'ENTRY main {\n  ROOT out = f32[2] custom-call(p0), custom_call_target="linear_dag"\n}\n',
+        encoding="utf-8",
+    )
+    assignment = dump_dir / "module.cpu_after_optimizations-buffer-assignment.txt"
+    assignment.write_text(
+        "allocation 0: size 4096, maybe-live-out:\n  value: <0 main @0> (alias)\nTotal bytes used: 4096 (4.0KiB)\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "summary.json"
+    script = Path(__file__).resolve().parents[3] / "scripts" / "summarize_xla_memory_dump.sh"
+
+    completed = subprocess.run(
+        ["bash", str(script), "--json-output", str(output), str(dump_dir)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["total_buffer_assignment_bytes"] == 4096
+    assert payload["modules"][0]["large_allocations"] == [4096]
+    assert payload["modules"][0]["alias_count"] == 2
+    assert payload["modules"][0]["custom_call_count"] == 1

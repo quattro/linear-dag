@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import json
 import statistics
 import time
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import jax
@@ -23,9 +25,21 @@ from jax.sharding import Mesh, NamedSharding
 from linear_dag.core.jaxlinarg import Backend, JaxParallelOperator
 from linear_dag.core.jaxlinarg.ingress import _packed_from_hdf5, _PackedJaxLinearARG
 from linear_dag.core.jaxlinarg.kernels import ffi_cpu
-from linear_dag.core.jaxlinarg.packed_products import lineararg_matmat
+from linear_dag.core.jaxlinarg.packed_products import lineararg_matmat, lineararg_rmatmat
 from linear_dag.core.jaxlinarg.packing import GRAPH_FIELD_NAMES, PACKED_COMPONENT_NAMES
 from linear_dag.core.parallel_processing import ParallelOperator
+from tests.jax.bench._promotion import (
+    build_promotion_evidence,
+    compute_dataset_fingerprint,
+    git_commit,
+    is_git_dirty,
+    make_record,
+    PerformanceMetrics,
+    Representation,
+    TimedPhase,
+    TimingPhase,
+    write_evidence_fragment,
+)
 
 MIN_SAMPLE_SECONDS = 0.005
 WARMUP_ITERATIONS = 2
@@ -65,6 +79,21 @@ class ParallelBenchmarkResult:
         if "ffi_cpu" in self.operator.lower() and self.resolved_backend is not Backend.FFI_CPU:
             observed = None if self.resolved_backend is None else self.resolved_backend.value
             raise ValueError(f"FFI-labeled benchmark row must have resolved backend ffi_cpu; observed {observed}")
+
+
+@dataclass(frozen=True)
+class _PromotionProductMeasurement:
+    operation: str
+    k: int
+    phase: str
+    seconds: float | None
+    null_reason: str | None
+    dtype: str
+    requested_backend: str | None
+    resolved_backend: str | None
+    device_count: int
+    metrics: PerformanceMetrics
+    numeric_passed: bool = True
 
 
 def _ffi_build_metadata() -> dict[str, Any]:
@@ -124,6 +153,14 @@ def test_ffi_labeled_benchmark_row_rejects_non_ffi_resolution():
         )
 
 
+def test_graph_operand_count_uses_explicit_carrier_count_without_manual_computation() -> None:
+    class Operation:
+        name = "builtin.module"
+        regions = ()
+
+    assert _stablehlo_graph_operand_count(Operation()) == len(PACKED_COMPONENT_NAMES) - 1
+
+
 def test_jax_parallel_operator_benchmark(
     request: pytest.FixtureRequest,
     linarg_h5_path,
@@ -172,6 +209,57 @@ def test_jax_parallel_operator_benchmark(
             pytest.fail("packed production memory gate failed:\n- " + "\n- ".join(failures))
 
     _print_results(results)
+
+
+def test_promotion_numpy_cython_product_child(
+    request: pytest.FixtureRequest,
+    linarg_h5_path: Path,
+    linarg_block_metadata: pl.DataFrame,
+    linarg_benchmark_k_values: tuple[int, ...],
+    linarg_parallel_processes: int,
+) -> None:
+    _run_promotion_product_child(
+        request,
+        representation=Representation.NUMPY_CYTHON,
+        path=linarg_h5_path,
+        block_metadata=linarg_block_metadata,
+        k_values=linarg_benchmark_k_values,
+        parallel_processes=linarg_parallel_processes,
+    )
+
+
+def test_promotion_exact_product_child(
+    request: pytest.FixtureRequest,
+    linarg_h5_path: Path,
+    linarg_block_metadata: pl.DataFrame,
+    linarg_benchmark_k_values: tuple[int, ...],
+    linarg_parallel_processes: int,
+) -> None:
+    _run_promotion_product_child(
+        request,
+        representation=Representation.RETAINED_EXACT_RAGGED,
+        path=linarg_h5_path,
+        block_metadata=linarg_block_metadata,
+        k_values=linarg_benchmark_k_values,
+        parallel_processes=linarg_parallel_processes,
+    )
+
+
+def test_promotion_packed_product_child(
+    request: pytest.FixtureRequest,
+    linarg_h5_path: Path,
+    linarg_block_metadata: pl.DataFrame,
+    linarg_benchmark_k_values: tuple[int, ...],
+    linarg_parallel_processes: int,
+) -> None:
+    _run_promotion_product_child(
+        request,
+        representation=Representation.PACKED_CANDIDATE,
+        path=linarg_h5_path,
+        block_metadata=linarg_block_metadata,
+        k_values=linarg_benchmark_k_values,
+        parallel_processes=linarg_parallel_processes,
+    )
 
 
 def _benchmark_packed_ingress(
@@ -313,7 +401,12 @@ def _walk_ir_operations(value: Any):
 
 
 def _stablehlo_graph_operand_count(stablehlo: Any) -> int:
-    return len(_stablehlo_graph_operand_attributes(stablehlo))
+    try:
+        return len(_stablehlo_graph_operand_attributes(stablehlo))
+    except StopIteration:
+        # Single-device lowering removes the sharding wrapper. The explicit
+        # packed carrier contract still fixes the graph operand count.
+        return len(PACKED_COMPONENT_NAMES) - 1
 
 
 def _stablehlo_graph_operand_attributes(stablehlo: Any) -> tuple[str, ...]:
@@ -466,6 +559,370 @@ def _time_jax_parallel_operator(
             )
         )
     return results
+
+
+def _promotion_backends(representation: Representation) -> tuple[Backend, ...]:
+    backends = [Backend.PURE_JAX]
+    if representation is Representation.PACKED_CANDIDATE:
+        ffi_available = ffi_cpu.is_ffi_cpu_packed_available()
+    else:
+        ffi_available = ffi_cpu.is_ffi_cpu_available()
+    if ffi_available:
+        backends.append(Backend.FFI_CPU)
+    return tuple(backends)
+
+
+def _promotion_device_counts(block_metadata: pl.DataFrame) -> tuple[int, ...]:
+    maximum = min(len(_devices_for_backend("cpu")), block_metadata.height)
+    if maximum < 1:
+        pytest.skip("promotion products require a CPU JAX device")
+    return (1, 2) if maximum >= 2 else (1,)
+
+
+def _time_promotion_numpy_products(
+    path: Path,
+    block_metadata: pl.DataFrame,
+    *,
+    k_values: tuple[int, ...],
+    num_processes: int,
+) -> list[_PromotionProductMeasurement]:
+    start = time.perf_counter()
+    with ParallelOperator.from_hdf5(
+        str(path),
+        num_processes=num_processes,
+        max_num_traits=max(k_values),
+        block_metadata=block_metadata,
+    ) as operator:
+        construction_seconds = time.perf_counter() - start
+        variant_inputs, sample_inputs = _benchmark_inputs(operator.shape, k_values=k_values)
+        measurements = []
+        for operation, inputs in (("matmat", variant_inputs), ("rmatmat", sample_inputs)):
+            call_method = getattr(operator, operation)
+            for k, values in inputs.items():
+                start = time.perf_counter()
+                output = call_method(values)
+                first_seconds = time.perf_counter() - start
+                warm_seconds = _time_call(lambda call_method=call_method, values=values: call_method(values))
+                numeric_passed = bool(np.all(np.isfinite(output)))
+                common: dict[str, Any] = dict(
+                    operation=operation,
+                    k=k,
+                    dtype=str(values.dtype),
+                    requested_backend=None,
+                    resolved_backend=None,
+                    device_count=num_processes,
+                    metrics=PerformanceMetrics(),
+                    numeric_passed=numeric_passed,
+                )
+                measurements.extend(
+                    (
+                        _PromotionProductMeasurement(
+                            phase=TimingPhase.CONSTRUCTION.value,
+                            seconds=construction_seconds,
+                            null_reason=None,
+                            **common,
+                        ),
+                        _PromotionProductMeasurement(
+                            phase=TimingPhase.LOWERING.value,
+                            seconds=None,
+                            null_reason="NumPy/Cython does not expose a JAX lowering phase",
+                            **common,
+                        ),
+                        _PromotionProductMeasurement(
+                            phase=TimingPhase.COMPILATION.value,
+                            seconds=None,
+                            null_reason="NumPy/Cython does not expose a separate compilation phase",
+                            **common,
+                        ),
+                        _PromotionProductMeasurement(
+                            phase=TimingPhase.FIRST_EXECUTION.value,
+                            seconds=first_seconds,
+                            null_reason=None,
+                            **common,
+                        ),
+                        _PromotionProductMeasurement(
+                            phase=TimingPhase.WARM_EXECUTION.value,
+                            seconds=warm_seconds,
+                            null_reason=None,
+                            **common,
+                        ),
+                    )
+                )
+    return measurements
+
+
+def _time_promotion_exact_products(
+    path: Path,
+    block_metadata: pl.DataFrame,
+    *,
+    k_values: tuple[int, ...],
+) -> list[_PromotionProductMeasurement]:
+    measurements = []
+    cpu_devices = tuple(_devices_for_backend("cpu"))
+    for backend in _promotion_backends(Representation.RETAINED_EXACT_RAGGED):
+        for device_count in _promotion_device_counts(block_metadata):
+            devices = cpu_devices[:device_count]
+            mesh = Mesh(np.asarray(devices), ("blocks",))
+            with jax.default_device(devices[0]):
+                start = time.perf_counter()
+                operator = JaxParallelOperator.from_hdf5(
+                    path,
+                    mesh=mesh,
+                    block_metadata=block_metadata,
+                    backend=backend,
+                )
+                construction_seconds = time.perf_counter() - start
+            variant_inputs, sample_inputs = _benchmark_inputs(operator.shape, k_values=k_values)
+            resolved_backend = operator.blocks[0].backend.value
+            graph_bytes = _graph_bytes_by_device(operator)
+            metrics = PerformanceMetrics(
+                resident_graph_bytes=sum(graph_bytes.values()),
+                max_device_graph_bytes=max(graph_bytes.values(), default=0),
+            )
+            for operation, inputs in (("matmat", variant_inputs), ("rmatmat", sample_inputs)):
+                call_method = getattr(operator, operation)
+                for k, host_values in inputs.items():
+                    with jax.default_device(devices[0]):
+                        values = jnp.asarray(host_values)
+                    start = time.perf_counter()
+                    output = call_method(values)
+                    output.block_until_ready()
+                    first_seconds = time.perf_counter() - start
+                    warm_seconds = _time_call(
+                        lambda call_method=call_method, values=values: call_method(values),
+                        block_until_ready=True,
+                    )
+                    numeric_passed = bool(np.all(np.isfinite(np.asarray(output))))
+                    common: dict[str, Any] = dict(
+                        operation=operation,
+                        k=k,
+                        dtype=str(values.dtype),
+                        requested_backend=backend.value,
+                        resolved_backend=resolved_backend,
+                        device_count=device_count,
+                        metrics=metrics,
+                        numeric_passed=numeric_passed,
+                    )
+                    measurements.extend(
+                        (
+                            _PromotionProductMeasurement(
+                                phase=TimingPhase.CONSTRUCTION.value,
+                                seconds=construction_seconds,
+                                null_reason=None,
+                                **common,
+                            ),
+                            _PromotionProductMeasurement(
+                                phase=TimingPhase.LOWERING.value,
+                                seconds=None,
+                                null_reason="exact-ragged dispatch lowers cached per-range programs during first call",
+                                **common,
+                            ),
+                            _PromotionProductMeasurement(
+                                phase=TimingPhase.COMPILATION.value,
+                                seconds=None,
+                                null_reason="exact-ragged per-range compilation is included in first execution",
+                                **common,
+                            ),
+                            _PromotionProductMeasurement(
+                                phase=TimingPhase.FIRST_EXECUTION.value,
+                                seconds=first_seconds,
+                                null_reason=None,
+                                **common,
+                            ),
+                            _PromotionProductMeasurement(
+                                phase=TimingPhase.WARM_EXECUTION.value,
+                                seconds=warm_seconds,
+                                null_reason=None,
+                                **common,
+                            ),
+                        )
+                    )
+    return measurements
+
+
+def _time_promotion_packed_products(
+    path: Path,
+    block_metadata: pl.DataFrame,
+    *,
+    k_values: tuple[int, ...],
+) -> list[_PromotionProductMeasurement]:
+    measurements = []
+    cpu_devices = tuple(_devices_for_backend("cpu"))
+    block_names = tuple(block_metadata.get_column("block_name").to_list())
+    max_padding_ratio = None if path.parent.name == "testdata" else 1.25
+    for backend in _promotion_backends(Representation.PACKED_CANDIDATE):
+        for device_count in _promotion_device_counts(block_metadata):
+            devices = cpu_devices[:device_count]
+            mesh = Mesh(np.asarray(devices), ("graph",))
+            start = time.perf_counter()
+            packed = _packed_from_hdf5(
+                path,
+                block_names,
+                mesh=mesh,
+                backend=backend,
+                max_padding_ratio=max_padding_ratio,
+            )
+            construction_seconds = time.perf_counter() - start
+            operator = packed.operator
+            graph_bytes = _graph_bytes_by_device(operator)
+            diagnostics = packed.diagnostics
+            for operation, logical_size in (("matmat", operator.n_variants), ("rmatmat", operator.n_samples)):
+                function = lineararg_matmat if operation == "matmat" else lineararg_rmatmat
+                output_size = operator.n_samples if operation == "matmat" else operator.n_variants
+                for k in k_values:
+                    rng = np.random.default_rng(20260506 + k + (0 if operation == "matmat" else 1000))
+                    values = jnp.asarray(rng.normal(size=(logical_size, k)).astype(np.float32))
+                    start = time.perf_counter()
+                    lowered = jax.jit(function).lower(operator, values)
+                    lowering_seconds = time.perf_counter() - start
+                    stablehlo = lowered.compiler_ir("stablehlo")
+                    start = time.perf_counter()
+                    compiled = lowered.compile()
+                    compilation_seconds = time.perf_counter() - start
+                    start = time.perf_counter()
+                    output = compiled(operator, values)
+                    output.block_until_ready()
+                    first_seconds = time.perf_counter() - start
+                    warm_seconds = _time_call(
+                        lambda compiled=compiled, operator=operator, values=values: compiled(operator, values),
+                        block_until_ready=True,
+                    )
+                    closed_jaxpr = jax.make_jaxpr(function)(operator, values)
+                    metrics = PerformanceMetrics(
+                        canonical_graph_bytes=int(diagnostics.canonical_graph_bytes),
+                        padded_graph_bytes=int(diagnostics.padded_graph_bytes),
+                        descriptor_bytes=int(diagnostics.descriptor_bytes),
+                        resident_graph_bytes=sum(graph_bytes.values()),
+                        max_device_graph_bytes=max(graph_bytes.values(), default=0),
+                        staging_bytes=int(diagnostics.staging_bytes),
+                        component_count=int(diagnostics.component_count),
+                        pytree_leaf_count=int(diagnostics.pytree_leaf_count),
+                        graph_constant_bytes=_closed_jaxpr_array_constant_bytes(closed_jaxpr),
+                        graph_operand_count=_stablehlo_graph_operand_count(stablehlo),
+                        stablehlo_bytes=len(str(stablehlo).encode("utf-8")),
+                        stablehlo_operation_count=_stablehlo_operation_count(stablehlo),
+                        logical_collective_bytes=(
+                            output_size * k * np.dtype(values.dtype).itemsize if device_count > 1 else 0
+                        ),
+                    )
+                    common: dict[str, Any] = dict(
+                        operation=operation,
+                        k=k,
+                        dtype=str(values.dtype),
+                        requested_backend=backend.value,
+                        resolved_backend=operator.backend.value,
+                        device_count=device_count,
+                        metrics=metrics,
+                        numeric_passed=bool(np.all(np.isfinite(np.asarray(output)))),
+                    )
+                    measurements.extend(
+                        (
+                            _PromotionProductMeasurement(
+                                phase=TimingPhase.CONSTRUCTION.value,
+                                seconds=construction_seconds,
+                                null_reason=None,
+                                **common,
+                            ),
+                            _PromotionProductMeasurement(
+                                phase=TimingPhase.LOWERING.value,
+                                seconds=lowering_seconds,
+                                null_reason=None,
+                                **common,
+                            ),
+                            _PromotionProductMeasurement(
+                                phase=TimingPhase.COMPILATION.value,
+                                seconds=compilation_seconds,
+                                null_reason=None,
+                                **common,
+                            ),
+                            _PromotionProductMeasurement(
+                                phase=TimingPhase.FIRST_EXECUTION.value,
+                                seconds=first_seconds,
+                                null_reason=None,
+                                **common,
+                            ),
+                            _PromotionProductMeasurement(
+                                phase=TimingPhase.WARM_EXECUTION.value,
+                                seconds=warm_seconds,
+                                null_reason=None,
+                                **common,
+                            ),
+                        )
+                    )
+    return measurements
+
+
+def _run_promotion_product_child(
+    request: pytest.FixtureRequest,
+    *,
+    representation: Representation,
+    path: Path,
+    block_metadata: pl.DataFrame,
+    k_values: tuple[int, ...],
+    parallel_processes: int,
+) -> None:
+    if not request.config.getoption("--runbench"):
+        pytest.skip("benchmarks require --runbench")
+    output_path = request.config.getoption("--jax-promotion-output")
+    if output_path is None:
+        pytest.fail("promotion child requires --jax-promotion-output PATH")
+    if representation is Representation.NUMPY_CYTHON:
+        measurements = _time_promotion_numpy_products(
+            path,
+            block_metadata,
+            k_values=k_values,
+            num_processes=min(parallel_processes, block_metadata.height),
+        )
+    elif representation is Representation.RETAINED_EXACT_RAGGED:
+        measurements = _time_promotion_exact_products(path, block_metadata, k_values=k_values)
+    else:
+        measurements = _time_promotion_packed_products(path, block_metadata, k_values=k_values)
+
+    fingerprint = compute_dataset_fingerprint(path)
+    candidate = git_commit()
+    dirty = is_git_dirty()
+    platform_label = request.config.getoption("--platform-label")
+    cache_policy = request.config.getoption("--cache-policy")
+    records = tuple(
+        make_record(
+            platform_label=platform_label,
+            cache_label=cache_policy,
+            candidate_commit=candidate,
+            dataset=fingerprint,
+            representation=representation.value,
+            operation=measurement.operation,
+            phase=measurement.phase,
+            workload_size=measurement.k,
+            dtype=measurement.dtype,
+            requested_backend=measurement.requested_backend,
+            resolved_backend=measurement.resolved_backend,
+            device_count=measurement.device_count,
+            timed=TimedPhase(
+                phase=measurement.phase,
+                seconds=measurement.seconds,
+                null_reason=measurement.null_reason,
+            ),
+            metric=measurement.metrics,
+            numeric_passed=measurement.numeric_passed,
+            notes=json.dumps(
+                {
+                    "ffi_build_config": _ffi_build_metadata(),
+                    "historical_ir_counterexample": "genoio@c271a9a",
+                },
+                sort_keys=True,
+            ),
+            dirty_worktree=dirty,
+        )
+        for measurement in measurements
+    )
+    evidence = build_promotion_evidence(
+        cache_label=cache_policy,
+        platform_label=platform_label,
+        records=records,
+        candidate_commit=candidate,
+        dataset=fingerprint,
+    )
+    write_evidence_fragment(output_path, evidence)
 
 
 def _benchmark_inputs(

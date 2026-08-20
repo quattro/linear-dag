@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+json_output=""
+if [[ "${1:-}" == "--json-output" ]]; then
+    if [[ $# -lt 2 ]]; then
+        echo "usage: $0 --json-output PATH [DUMP_DIR]" >&2
+        exit 2
+    fi
+    json_output="$2"
+    shift 2
+fi
+
 dump_dir="${1:-./xla_dump_mem}"
 out_file="${2:-xla_memory_summary.md}"
 
@@ -18,6 +28,62 @@ find "${dump_dir}" -name "*cpu_after_optimizations-buffer-assignment.txt" | sort
 
 hlo_count="$(wc -l < "${hlo_list}" | tr -d ' ')"
 buffer_count="$(wc -l < "${buffer_list}" | tr -d ' ')"
+
+if [[ -n "${json_output}" ]]; then
+    python3 - "${dump_dir}" "${json_output}" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+dump_dir = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+hlo_suffix = ".cpu_after_optimizations.txt"
+buffer_suffix = ".cpu_after_optimizations-buffer-assignment.txt"
+hlo_paths = sorted(dump_dir.glob(f"*{hlo_suffix}"))
+buffer_paths = sorted(dump_dir.glob(f"*{buffer_suffix}"))
+modules = {}
+
+for path in hlo_paths:
+    name = path.name.removesuffix(hlo_suffix)
+    text = path.read_text(encoding="utf-8", errors="replace")
+    custom_calls = [line.strip() for line in text.splitlines() if "custom-call" in line or "custom_call_target" in line]
+    modules.setdefault(name, {"module": name, "buffer_assignment_bytes": 0, "large_allocations": [], "aliases": [], "custom_calls": []})
+    modules[name]["custom_calls"] = custom_calls
+
+total_bytes = 0
+for path in buffer_paths:
+    name = path.name.removesuffix(buffer_suffix)
+    text = path.read_text(encoding="utf-8", errors="replace")
+    total_match = re.search(r"Total bytes used:\s*([0-9,]+)", text)
+    module_bytes = int(total_match.group(1).replace(",", "")) if total_match else 0
+    allocations = [int(value.replace(",", "")) for value in re.findall(r"allocation\s+\d+:\s+size\s+([0-9,]+)", text)]
+    aliases = [line.strip() for line in text.splitlines() if re.search(r"alias|live-out", line, re.IGNORECASE)]
+    module = modules.setdefault(name, {"module": name, "buffer_assignment_bytes": 0, "large_allocations": [], "aliases": [], "custom_calls": []})
+    module["buffer_assignment_bytes"] = module_bytes
+    module["large_allocations"] = sorted(allocations, reverse=True)
+    module["aliases"] = aliases
+    total_bytes += module_bytes
+
+normalized = []
+for module in sorted(modules.values(), key=lambda item: item["module"]):
+    module["alias_count"] = sum(len(re.findall(r"alias|live-out", line, re.IGNORECASE)) for line in module["aliases"])
+    module["custom_call_count"] = len(module["custom_calls"])
+    normalized.append(module)
+
+payload = {
+    "schema_version": "2026-08-13+1",
+    "hlo_module_count": len(hlo_paths),
+    "buffer_assignment_module_count": len(buffer_paths),
+    "total_buffer_assignment_bytes": total_bytes,
+    "modules": normalized,
+}
+output_path.parent.mkdir(parents=True, exist_ok=True)
+output_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+PY
+    echo "Wrote ${json_output}"
+    exit 0
+fi
 
 {
     echo "# XLA Memory Dump Summary"
