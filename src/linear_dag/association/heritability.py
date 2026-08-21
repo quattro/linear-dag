@@ -18,8 +18,6 @@ from ..core.operators import get_inner_merge_operators
 from ..core.parallel_processing import GRMOperator
 from .util import impute_missing_with_mean, residualize_phenotypes
 
-_RHE_MAX_CONDITION_NUMBER = 1e7
-
 
 def randomized_haseman_elston(
     grm: GRMOperator,
@@ -175,10 +173,11 @@ def randomized_haseman_elston(
         var_s2e=var_s2e,
         var_h2g=var_h2g,
     )
-    if np.any(var_s2g < 0) or np.any(var_s2e < 0) or np.any(var_h2g < 0):
-        raise ValueError(
-            "RHE variance estimates must be non-negative; increase num_matvecs or check that the GRM is informative"
-        )
+    # Finite stochastic covariance estimates can be negative at low probe
+    # counts. Project them onto the valid variance boundary before sqrt.
+    var_s2g = np.maximum(var_s2g, 0.0)
+    var_s2e = np.maximum(var_s2e, 0.0)
+    var_h2g = np.maximum(var_h2g, 0.0)
 
     df_result = pl.DataFrame(
         {
@@ -324,7 +323,11 @@ def _orthonormal_covariate_basis(covariates: np.ndarray) -> np.ndarray:
     return basis[:, :rank]
 
 
-def _validate_rhe_moment_system(grm_trace: float, grm_sq_trace: float, identity_trace: float) -> None:
+def _validate_rhe_moment_system(
+    grm_trace: float,
+    grm_sq_trace: float,
+    identity_trace: float,
+) -> None:
     traces = np.asarray([grm_trace, grm_sq_trace, identity_trace], dtype=np.float64)
     if not np.all(np.isfinite(traces)):
         raise ValueError("RHE moment system is not identifiable because its trace estimates are not finite")
@@ -333,12 +336,18 @@ def _validate_rhe_moment_system(grm_trace: float, grm_sq_trace: float, identity_
             "RHE moment system is not identifiable because covariates leave no residual degrees of freedom"
         )
 
-    lhs = np.asarray([[grm_sq_trace, grm_trace], [grm_trace, identity_trace]], dtype=np.float64)
-    condition_number = float(np.linalg.cond(lhs))
-    if not np.isfinite(condition_number) or condition_number > _RHE_MAX_CONDITION_NUMBER:
+    if grm_sq_trace <= 0:
+        raise ValueError("RHE moment system is not identifiable because the squared-GRM trace is not positive")
+
+    correlation = grm_trace / np.sqrt(grm_sq_trace * identity_trace)
+    standardized_lhs = np.asarray([[1.0, correlation], [correlation, 1.0]], dtype=np.float64)
+    condition_number = float(np.linalg.cond(standardized_lhs))
+    max_resolvable_condition = 1.0 / np.sqrt(np.finfo(standardized_lhs.dtype).eps)
+    if not np.isfinite(condition_number) or condition_number > max_resolvable_condition:
         raise ValueError(
             "RHE moment system is not identifiable or is too ill-conditioned "
-            f"(condition number {condition_number:.3g}); check that the GRM varies independently "
+            f"after trace scaling (condition number {condition_number:.3g}); "
+            "check that the GRM varies independently "
             "of the residual identity"
         )
 

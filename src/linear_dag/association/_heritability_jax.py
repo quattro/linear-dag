@@ -78,7 +78,11 @@ def randomized_haseman_elston(
     identity_trace = jnp.asarray(operator.residual_rank, dtype=yresid.dtype)
     lhs = jnp.array([[grm_sq_trace, grm_trace], [grm_trace, identity_trace]], dtype=yresid.dtype)
     rhs = jnp.vstack([C, N_j])
-    _validate_rhe_moment_system(float(grm_trace), float(grm_sq_trace), float(identity_trace))
+    _validate_rhe_moment_system(
+        float(grm_trace),
+        float(grm_sq_trace),
+        float(identity_trace),
+    )
     solution = jnp.linalg.solve(lhs, rhs)
     _validate_finite_rhe_arrays(solution=np.asarray(solution))
 
@@ -112,10 +116,10 @@ def randomized_haseman_elston(
         "var_h2g": np.asarray(var_h2g),
     }
     _validate_finite_rhe_arrays(**result_arrays)
-    if any(np.any(result_arrays[name] < 0) for name in ("var_s2g", "var_s2e", "var_h2g")):
-        raise ValueError(
-            "RHE variance estimates must be non-negative; increase num_matvecs or check that the GRM is informative"
-        )
+    # Match the NumPy policy for finite negative Monte Carlo variances.
+    var_s2g = jnp.maximum(var_s2g, 0.0)
+    var_s2e = jnp.maximum(var_s2e, 0.0)
+    var_h2g = jnp.maximum(var_h2g, 0.0)
 
     return pl.DataFrame(
         {

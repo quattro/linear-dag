@@ -175,6 +175,12 @@ def test_rhe_result_validation_rejects_nonfinite_arrays() -> None:
         _validate_finite_rhe_arrays(solution=np.array([np.nan]))
 
 
+def test_rhe_moment_validation_accepts_resolvable_noisy_system() -> None:
+    # Condition number is approximately 1.25e7, whose reciprocal remains
+    # above the square-root-epsilon resolution threshold for float64.
+    _validate_rhe_moment_system(1.0, 1.0 + 3.2e-7, 1.0)
+
+
 def _build_rhe_fixture(
     hdf5_path: Path,
     heritability: float,
@@ -242,6 +248,7 @@ def _run_randomized_replicates(
                 sampler,
                 seed=seed,
             )
+            assert np.all(np.isfinite(observed.select(pl.exclude("phenotype")).to_numpy()))
             draws.append(observed.get_column("h2g").to_numpy())
     return np.vstack(draws)
 
