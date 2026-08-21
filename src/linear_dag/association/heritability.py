@@ -18,6 +18,8 @@ from ..core.operators import get_inner_merge_operators
 from ..core.parallel_processing import GRMOperator
 from .util import impute_missing_with_mean, residualize_phenotypes
 
+_RHE_MAX_CONDITION_NUMBER = 1e7
+
 
 def randomized_haseman_elston(
     grm: GRMOperator,
@@ -139,8 +141,10 @@ def randomized_haseman_elston(
     # construct linear equations to solve
     LHS = np.array([[grm_sq_trace, grm_trace], [grm_trace, identity_trace]])
     RHS = np.vstack([C, N_j])
+    _validate_rhe_moment_system(grm_trace, grm_sq_trace, identity_trace)
     _info("randomized_haseman_elston: solving moment equations for %d phenotypes", RHS.shape[1])
     solution = np.linalg.solve(LHS, RHS)
+    _validate_finite_rhe_arrays(solution=solution)
 
     # compute the (co)variance of our estimates
     _info("randomized_haseman_elston: estimating std err")
@@ -162,6 +166,19 @@ def randomized_haseman_elston(
     numer = (s2e**2) * var_s2g + (s2g**2) * var_s2e - 2 * s2g * s2e * covariances
     denom = (s2g + s2e) ** 4
     var_h2g = numer / denom
+
+    _validate_finite_rhe_arrays(
+        s2g=s2g,
+        s2e=s2e,
+        h2g=heritability,
+        var_s2g=var_s2g,
+        var_s2e=var_s2e,
+        var_h2g=var_h2g,
+    )
+    if np.any(var_s2g < 0) or np.any(var_s2e < 0) or np.any(var_h2g < 0):
+        raise ValueError(
+            "RHE variance estimates must be non-negative; increase num_matvecs or check that the GRM is informative"
+        )
 
     df_result = pl.DataFrame(
         {
@@ -299,13 +316,40 @@ class _ResidualizedLinearOperator(LinearOperator):
 
 def _orthonormal_covariate_basis(covariates: np.ndarray) -> np.ndarray:
     covariates = np.asarray(covariates, dtype=np.float64)
-    q, r = np.linalg.qr(covariates, mode="reduced")
-    diag = np.abs(np.diag(r))
-    if diag.size == 0:
-        return q[:, :0]
-    tol = np.finfo(r.dtype).eps * max(covariates.shape) * float(diag.max())
-    rank = int(np.sum(diag > tol))
-    return q[:, :rank]
+    basis, singular_values, _ = np.linalg.svd(covariates, full_matrices=False)
+    if singular_values.size == 0:
+        return basis[:, :0]
+    tol = np.finfo(singular_values.dtype).eps * max(covariates.shape) * float(singular_values[0])
+    rank = int(np.sum(singular_values > tol))
+    return basis[:, :rank]
+
+
+def _validate_rhe_moment_system(grm_trace: float, grm_sq_trace: float, identity_trace: float) -> None:
+    traces = np.asarray([grm_trace, grm_sq_trace, identity_trace], dtype=np.float64)
+    if not np.all(np.isfinite(traces)):
+        raise ValueError("RHE moment system is not identifiable because its trace estimates are not finite")
+    if identity_trace <= 0:
+        raise ValueError(
+            "RHE moment system is not identifiable because covariates leave no residual degrees of freedom"
+        )
+
+    lhs = np.asarray([[grm_sq_trace, grm_trace], [grm_trace, identity_trace]], dtype=np.float64)
+    condition_number = float(np.linalg.cond(lhs))
+    if not np.isfinite(condition_number) or condition_number > _RHE_MAX_CONDITION_NUMBER:
+        raise ValueError(
+            "RHE moment system is not identifiable or is too ill-conditioned "
+            f"(condition number {condition_number:.3g}); check that the GRM varies independently "
+            "of the residual identity"
+        )
+
+
+def _validate_finite_rhe_arrays(**arrays: np.ndarray) -> None:
+    nonfinite = [name for name, values in arrays.items() if not np.all(np.isfinite(np.asarray(values)))]
+    if nonfinite:
+        names = ", ".join(nonfinite)
+        raise ValueError(
+            f"RHE produced non-finite {names}; increase num_matvecs or check that the GRM and phenotype are informative"
+        )
 
 
 def _validate_num_matvecs(num_matvecs: int, sample_count: int, trace_est: str) -> None:

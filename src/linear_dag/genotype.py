@@ -382,24 +382,25 @@ def binarize(genotypes: csc_matrix, r2_threshold: float = 0.0) -> tuple[csc_matr
       original variant column positions retained after thresholding.
     """
 
-    n, p = genotypes.shape
-    discretized_genotypes = csc_matrix(
-        (
-            np.rint(genotypes.data).astype(int),
-            genotypes.indices.copy(),
-            genotypes.indptr.copy(),
-        ),
-        shape=genotypes.shape,
-    )
+    _, p = genotypes.shape
+    canonical_genotypes = csc_matrix(genotypes, copy=True)
+    canonical_genotypes.sum_duplicates()
+    canonical_genotypes.eliminate_zeros()
+    canonical_genotypes.sort_indices()
+
+    discretized_genotypes = canonical_genotypes.copy()
+    discretized_genotypes.data = np.rint(discretized_genotypes.data).astype(int)
     discretized_genotypes.eliminate_zeros()
-    discretized_genotypes.sum_duplicates()
     discretized_genotypes.sort_indices()
 
     # TODO: vectorize
     # Correlations between dosages + calls
     correlations = []
     for i in range(p):
-        corr_coef = np.corrcoef(genotypes[:, i].todense().T, discretized_genotypes[:, i].todense().T)[0, 1]
+        corr_coef = np.corrcoef(
+            canonical_genotypes[:, i].todense().T,
+            discretized_genotypes[:, i].todense().T,
+        )[0, 1]
         correlations.append(corr_coef)
 
     # Thresholding

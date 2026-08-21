@@ -19,12 +19,16 @@ from scipy.sparse.linalg import LinearOperator
 
 from linear_dag.association._heritability_jax import (
     _build_residualized_operator,
+    _orthonormal_covariate_basis,
     _prepare_jax_rhe_inputs,
     _ResidualizedJaxGRM,
     _should_use_blockwise_grm,
     randomized_haseman_elston as randomized_haseman_elston_jax,
 )
-from linear_dag.association.heritability import randomized_haseman_elston
+from linear_dag.association.heritability import (
+    _orthonormal_covariate_basis as _orthonormal_covariate_basis_numpy,
+    randomized_haseman_elston,
+)
 from linear_dag.core.jaxlinarg import Backend, JaxGRMOperator, JaxParallelOperator
 from linear_dag.core.jaxlinarg._hijax import _PackedGraphType
 from linear_dag.core.jaxlinarg.ingress import _packed_from_hdf5
@@ -150,6 +154,53 @@ def test_jax_randomized_haseman_elston_matches_cython_hutchinson(linarg_h5_path:
         rtol=2e-5,
         atol=2e-5,
     )
+
+
+@pytest.mark.parametrize(
+    "covariates",
+    (
+        np.column_stack([np.ones(6), np.ones(6), np.arange(6)]),
+        np.column_stack([np.ones(6), np.arange(6), np.ones(6), np.arange(6) ** 2]),
+    ),
+    ids=("duplicate-intercept", "nonterminal-dependent-column"),
+)
+def test_jax_covariate_basis_spans_full_column_space_and_matches_numpy(covariates: np.ndarray) -> None:
+    jax_basis = np.asarray(_orthonormal_covariate_basis(jnp.asarray(covariates, dtype=jnp.float32)))
+    numpy_basis = _orthonormal_covariate_basis_numpy(covariates)
+
+    assert jax_basis.shape == numpy_basis.shape
+    np.testing.assert_allclose(jax_basis.T @ jax_basis, np.eye(jax_basis.shape[1]), atol=1e-6)
+    np.testing.assert_allclose(covariates - jax_basis @ (jax_basis.T @ covariates), 0.0, atol=1e-5)
+    np.testing.assert_allclose(jax_basis @ jax_basis.T, numpy_basis @ numpy_basis.T, atol=1e-6)
+
+
+def test_jax_rhe_rejects_unidentified_zero_grm() -> None:
+    class ZeroGRM:
+        shape = (8, 8)
+        dtype = jnp.float32
+        iids = pl.Series("iids", ["a", "a", "b", "b", "c", "c", "d", "d"])
+
+        def matmat(self, values: jax.Array) -> jax.Array:
+            return jnp.zeros_like(values)
+
+    data = pl.DataFrame(
+        {
+            "iid": ["a", "b", "c", "d"],
+            "trait": [0.25, -0.5, 1.0, -0.75],
+            "intercept": [1.0] * 4,
+        }
+    )
+
+    with pytest.raises(ValueError, match="moment system.*not identifiable"):
+        randomized_haseman_elston_jax(
+            cast(JaxGRMOperator, ZeroGRM()),
+            data.lazy(),
+            ["trait"],
+            ["intercept"],
+            num_matvecs=4,
+            sampler="rademacher",
+            seed=1,
+        )
 
 
 @pytest.mark.parametrize(

@@ -22,6 +22,7 @@ from jax.scipy.linalg import solve_triangular
 from jaxtyping import Array
 from numpy.random import Generator
 
+from linear_dag.association.heritability import _validate_finite_rhe_arrays, _validate_rhe_moment_system
 from linear_dag.core.alignment import get_iid_alignment, IidAlignment
 from linear_dag.core.jaxlinarg import JaxGRMOperator, JaxParallelOperator
 from linear_dag.core.jaxlinarg.grm import _is_packed_operator
@@ -77,7 +78,9 @@ def randomized_haseman_elston(
     identity_trace = jnp.asarray(operator.residual_rank, dtype=yresid.dtype)
     lhs = jnp.array([[grm_sq_trace, grm_trace], [grm_trace, identity_trace]], dtype=yresid.dtype)
     rhs = jnp.vstack([C, N_j])
+    _validate_rhe_moment_system(float(grm_trace), float(grm_sq_trace), float(identity_trace))
     solution = jnp.linalg.solve(lhs, rhs)
+    _validate_finite_rhe_arrays(solution=np.asarray(solution))
 
     var_s2g, var_s2e, covariances = _compute_err_variance_vectorized(
         operator.matmat,
@@ -99,6 +102,20 @@ def randomized_haseman_elston(
     numer = (s2e**2) * var_s2g + (s2g**2) * var_s2e - 2 * s2g * s2e * covariances
     denom = (s2g + s2e) ** 4
     var_h2g = numer / denom
+
+    result_arrays = {
+        "s2g": np.asarray(s2g),
+        "s2e": np.asarray(s2e),
+        "h2g": np.asarray(heritability),
+        "var_s2g": np.asarray(var_s2g),
+        "var_s2e": np.asarray(var_s2e),
+        "var_h2g": np.asarray(var_h2g),
+    }
+    _validate_finite_rhe_arrays(**result_arrays)
+    if any(np.any(result_arrays[name] < 0) for name in ("var_s2g", "var_s2e", "var_h2g")):
+        raise ValueError(
+            "RHE variance estimates must be non-negative; increase num_matvecs or check that the GRM is informative"
+        )
 
     return pl.DataFrame(
         {
@@ -340,13 +357,12 @@ def _backslash_jax(A: Array, b: Array, lam: float = 1e-5) -> Array:
 
 
 def _orthonormal_covariate_basis(covariates: Array) -> Array:
-    q, r = jnp.linalg.qr(covariates, mode="reduced")
-    diag = jnp.abs(jnp.diag(r))
-    if diag.size == 0:
-        return q[:, :0]
-    tol = jnp.finfo(r.dtype).eps * max(covariates.shape) * jnp.max(diag)
-    rank = int(jnp.sum(diag > tol))
-    return q[:, :rank]
+    basis, singular_values, _ = jnp.linalg.svd(covariates, full_matrices=False)
+    if singular_values.size == 0:
+        return basis[:, :0]
+    tol = jnp.finfo(singular_values.dtype).eps * max(covariates.shape) * singular_values[0]
+    rank = int(jnp.sum(singular_values > tol))
+    return basis[:, :rank]
 
 
 def _build_residualized_operator(

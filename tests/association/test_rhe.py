@@ -9,7 +9,10 @@ from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 from linear_dag.association.heritability import (
     _hutchinson_estimator,
+    _orthonormal_covariate_basis,
     _ResidualizedLinearOperator,
+    _validate_finite_rhe_arrays,
+    _validate_rhe_moment_system,
     randomized_haseman_elston,
 )
 from linear_dag.association.simulation import simulate_phenotype
@@ -104,6 +107,72 @@ def test_residualized_operator_hutchinson_targets_projected_kernel_traces():
 
     np.testing.assert_allclose(trace, np.trace(projected_grm), atol=1e-10)
     np.testing.assert_allclose(square_trace, np.trace(projected_grm @ projected_grm), atol=1e-10)
+
+
+@pytest.mark.parametrize(
+    "covariates",
+    (
+        np.column_stack([np.ones(6), np.ones(6), np.arange(6)]),
+        np.column_stack([np.ones(6), np.arange(6), np.ones(6), np.arange(6) ** 2]),
+    ),
+    ids=("duplicate-intercept", "nonterminal-dependent-column"),
+)
+def test_numpy_covariate_basis_spans_full_column_space(covariates: np.ndarray) -> None:
+    basis = _orthonormal_covariate_basis(covariates)
+
+    assert basis.shape == (covariates.shape[0], np.linalg.matrix_rank(covariates))
+    np.testing.assert_allclose(basis.T @ basis, np.eye(basis.shape[1]), atol=1e-12)
+    np.testing.assert_allclose(covariates - basis @ (basis.T @ covariates), 0.0, atol=1e-12)
+
+
+def test_numpy_rhe_rejects_unidentified_zero_grm() -> None:
+    class ZeroGRM(LinearOperator):
+        iids = pl.Series("iids", ["a", "a", "b", "b", "c", "c", "d", "d"])
+
+        def __init__(self) -> None:
+            super().__init__(dtype=np.dtype(np.float64), shape=(8, 8))
+
+        def _matmat(self, values: np.ndarray) -> np.ndarray:
+            return np.zeros_like(values)
+
+    data = pl.DataFrame(
+        {
+            "iid": ["a", "b", "c", "d"],
+            "trait": [0.25, -0.5, 1.0, -0.75],
+            "intercept": [1.0] * 4,
+        }
+    )
+
+    with pytest.raises(ValueError, match="moment system.*not identifiable"):
+        randomized_haseman_elston(
+            cast(GRMOperator, ZeroGRM()),
+            data.lazy(),
+            ["trait"],
+            ["intercept"],
+            num_matvecs=4,
+            sampler="rademacher",
+            seed=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("traces", "message"),
+    (
+        ((np.nan, 1.0, 3.0), "trace estimates are not finite"),
+        ((1.0, 1.0 + 1e-8, 1.0), "too ill-conditioned"),
+    ),
+)
+def test_rhe_moment_validation_rejects_nonfinite_or_ill_conditioned_systems(
+    traces: tuple[float, float, float],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _validate_rhe_moment_system(*traces)
+
+
+def test_rhe_result_validation_rejects_nonfinite_arrays() -> None:
+    with pytest.raises(ValueError, match="non-finite solution"):
+        _validate_finite_rhe_arrays(solution=np.array([np.nan]))
 
 
 def _build_rhe_fixture(

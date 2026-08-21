@@ -93,6 +93,27 @@ def test_binarize_removes_rounded_zero_carriers_from_retained_column() -> None:
     np.testing.assert_array_equal(observed.data, np.array([1, 2]))
 
 
+def test_binarize_canonicalizes_duplicate_csc_entries_before_rounding() -> None:
+    genotypes = csc_matrix(
+        (
+            np.array([0.3, 0.3, 1.0, 0.2, 0.2]),
+            np.array([0, 0, 1, 2, 2]),
+            np.array([0, 3, 5]),
+        ),
+        shape=(3, 2),
+    )
+    original_data = genotypes.data.copy()
+
+    observed, retained_indices = binarize(genotypes, r2_threshold=0.0)
+
+    np.testing.assert_array_equal(retained_indices, np.array([0]))
+    assert observed.has_canonical_format
+    assert observed.nnz == 2
+    np.testing.assert_array_equal(observed.indices, np.array([0, 1]))
+    np.testing.assert_array_equal(observed.data, np.array([1, 1]))
+    np.testing.assert_array_equal(genotypes.data, original_data)
+
+
 def test_read_vcf(test_data_dir):
     """Test reading a VCF file."""
     vcf_path = test_data_dir / "1kg_small.vcf"
