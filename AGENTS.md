@@ -27,6 +27,7 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
   - CPU FFI compilation is optional and falls back to pure JAX when unavailable; set `LINEAR_DAG_REQUIRE_FFI_CPU=1` to make build failure fatal.
   - `LinearARG.write()` / `LinearARG.read()` persist and restore HDF5-backed graph state and metadata.
   - Association and heritability paths align phenotype/covariate rows to genotype IDs using merge operators.
+  - RHE uses rank-revealing covariate projection and rejects unidentified, ill-conditioned, or non-finite moment systems instead of returning invalid estimates.
   - `ParallelOperator.from_hdf5` and `GRMOperator.from_hdf5` use a unified constructor keyword contract; `alpha` is operational only for GRM weighting and a no-op for `ParallelOperator`.
 - **Expects**:
   - IID columns in phenotype/covariate inputs (`iid`, `IID`, `#iid`, etc.).
