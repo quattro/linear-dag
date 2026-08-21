@@ -72,7 +72,7 @@ The exact-ragged and NumPy/Cython rows intentionally report unsupported standalo
 
 ## Matched packed/exact rows
 
-The schema evaluator recomputes `continue_coexistence` with 36 failed packed/exact warm ratios: 32 product failures and four RHE diagnostic failures. AC8.3 applies the fixed 1.20 hard threshold to the product rows. RHE ratios remain visible but do not weaken or replace that product gate.
+The corrected schema evaluator recomputes `continue_coexistence` with 56 blocking product gates: 32 collected product ratios fail the fixed 1.20 threshold, while 24 explicit x86_64 CPU and GPU matrix keys are missing. The four observed RHE ratio failures remain nonblocking diagnostics because AC8.3 defines the hard threshold only for `matmat` and `rmatmat` at $K\in\{4,20\}$. Legacy `2026-08-13+2` evidence is read without altering its recorded timings or provenance; new collection uses the stricter `2026-08-13+3` schema with full JAX device descriptions and platform fields.
 
 ```text
 cache=fresh operation=matmat k=4 backend=pure_jax devices=1 packed_s=7.500494 exact_s=0.868575 ratio=8.635397 gate=hard-fail

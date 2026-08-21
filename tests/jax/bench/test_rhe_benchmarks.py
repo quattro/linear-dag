@@ -27,15 +27,17 @@ from linear_dag.core.jaxlinarg.ingress import _PackedJaxLinearARG
 from linear_dag.core.lineararg import list_iids
 from linear_dag.core.parallel_processing import GRMOperator
 from tests.jax.bench._promotion import (
-    build_promotion_evidence,
-    compute_dataset_fingerprint,
-    git_commit,
-    is_git_dirty,
     make_record,
     PerformanceMetrics,
     Representation,
     TimedPhase,
     TimingPhase,
+)
+from tests.jax.bench._promotion_io import (
+    build_promotion_evidence,
+    compute_dataset_fingerprint,
+    git_commit,
+    is_git_dirty,
     write_evidence_fragment,
 )
 

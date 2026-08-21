@@ -462,9 +462,9 @@ def _packed_from_block_arrays(
     iids: Any = None,
 ) -> _PackedIngressResult:
     """Construct the private packed carrier from canonical host blocks."""
+    backend = _resolve_packed_backend(backend)
     if not isinstance(blocks, Sequence):
         raise TypeError("packed block arrays must be provided as a replayable sequence")
-    backend = _resolve_packed_backend(backend)
     normalized_dtype = _normalize_dtype(dtype)
     plan = _plan_packing_from_summaries(
         (_block_packing_summary_from_arrays(block, dtype=normalized_dtype) for block in blocks),

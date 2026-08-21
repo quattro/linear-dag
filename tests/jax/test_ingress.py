@@ -158,6 +158,22 @@ def test_private_packed_constructor_preserves_fixed_components_from_canonical_ar
         assert array.sharding.mesh.axis_names == ("graph",)
 
 
+def test_packed_block_arrays_resolves_explicit_backend_before_source_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(_backend: Backend) -> Backend:
+        raise RuntimeError("explicit FFI backend unavailable")
+
+    monkeypatch.setattr(ingress_module, "_resolve_packed_backend", unavailable)
+
+    with pytest.raises(RuntimeError, match="explicit FFI backend unavailable"):
+        _packed_from_block_arrays(
+            (block for block in ()),
+            mesh=_graph_mesh(),
+            backend=Backend.FFI_CPU,
+        )
+
+
 def test_private_packed_hdf5_and_generic_group_reader_match_host_packing(
     linarg_h5_path,
     linarg_block_metadata,

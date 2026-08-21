@@ -2,32 +2,21 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
-import platform
-import shlex
-import subprocess
-import sys
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
-from pathlib import Path
-from typing import Any
+from typing import Any, Literal, overload
 
-import jax
-import jaxlib
-import numpy as np
-
-from linear_dag.core.lineararg import list_blocks
-
-SCHEMA_VERSION = "2026-08-13+2"
+SCHEMA_VERSION = "2026-08-13+3"
+LEGACY_SCHEMA_VERSION = "2026-08-13+2"
 CURRENT_REFERENCE_COMMIT = "b68e7da"
 REQUIRED_PRODUCT_KS = (4, 20)
 REQUIRED_PRODUCT_OPERATIONS = ("matmat", "rmatmat")
-KNOWN_SCHEMA_VERSIONS = {SCHEMA_VERSION}
+REQUIRED_PLATFORM_LABELS = ("arm64-cpu", "x86_64-cpu", "forced-two-device-cpu", "gpu")
+KNOWN_SCHEMA_VERSIONS = {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}
 KNOWN_DTYPES = {"float16", "bfloat16", "float32", "float64"}
 KNOWN_PHASES = {item.value for item in []}
 
@@ -76,54 +65,32 @@ class GateFailureReason(str, Enum):
 KNOWN_PHASES = {item.value for item in TimingPhase}
 
 
+def _require_bool(payload: dict[str, Any], key: str, *, context: str) -> bool:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"{context}.{key} must be a bool")
+    return value
+
+
+@overload
+def _require_int(value: Any, *, field: str, allow_none: Literal[False] = False) -> int: ...
+
+
+@overload
+def _require_int(value: Any, *, field: str, allow_none: Literal[True]) -> int | None: ...
+
+
+def _require_int(value: Any, *, field: str, allow_none: bool = False) -> int | None:
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must be an int")
+    return value
+
+
 def none_or_int(payload: dict[str, Any], key: str) -> int | None:
     value = payload.get(key)
-    if value is None:
-        return None
-    return int(value)
-
-
-def _normalize_path(path: Path | str) -> Path:
-    return Path(path).expanduser().resolve()
-
-
-def _repo_root(path: Path | None = None) -> Path:
-    base = path if path is not None else Path(__file__).resolve().parents[3]
-    return Path(
-        subprocess.run(
-            ["git", "-C", str(base), "rev-parse", "--show-toplevel"],
-            text=True,
-            capture_output=True,
-            check=True,
-        ).stdout.strip()
-    )
-
-
-def git_commit(repo_root: Path | str | None = None) -> str:
-    root = _repo_root(Path(repo_root) if repo_root is not None else None)
-    return subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        text=True,
-        capture_output=True,
-        check=True,
-    ).stdout.strip()
-
-
-def is_git_dirty(repo_root: Path | str | None = None) -> bool:
-    root = _repo_root(Path(repo_root) if repo_root is not None else None)
-    status = subprocess.run(
-        ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"],
-        text=True,
-        capture_output=True,
-        check=True,
-    ).stdout.strip()
-    relevant = []
-    for line in status.splitlines():
-        path = line[3:].strip().strip('"')
-        if line.startswith("?? ") and Path(path).suffix.lower() in {".h5", ".hdf5"}:
-            continue
-        relevant.append(line)
-    return bool(relevant)
+    return _require_int(value, field=key, allow_none=True)
 
 
 @dataclass(frozen=True)
@@ -137,13 +104,17 @@ class DatasetFingerprint:
     def __post_init__(self) -> None:
         if not isinstance(self.sha256, str) or len(self.sha256) != 64:
             raise ValueError(f"sha256 must be a 64-character hex digest, observed {self.sha256!r}")
+        try:
+            int(self.sha256, 16)
+        except ValueError as error:
+            raise ValueError("sha256 must contain only hexadecimal characters") from error
         for field_name, value in (
             ("size_bytes", self.size_bytes),
             ("block_count", self.block_count),
             ("n_samples", self.n_samples),
             ("n_variants", self.n_variants),
         ):
-            if not isinstance(value, int) or value < 0:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{field_name} must be a non-negative int, observed {value!r}")
 
     @property
@@ -167,10 +138,10 @@ class DatasetFingerprint:
             raise ValueError(f"dataset fingerprint missing required fields: {sorted(missing)}")
         return cls(
             sha256=str(payload["sha256"]),
-            size_bytes=int(payload["size_bytes"]),
-            block_count=int(payload["block_count"]),
-            n_samples=int(payload["n_samples"]),
-            n_variants=int(payload["n_variants"]),
+            size_bytes=_require_int(payload["size_bytes"], field="size_bytes"),
+            block_count=_require_int(payload["block_count"], field="block_count"),
+            n_samples=_require_int(payload["n_samples"], field="n_samples"),
+            n_variants=_require_int(payload["n_variants"], field="n_variants"),
         )
 
 
@@ -189,6 +160,8 @@ class EnvironmentState:
     xla_cache_dir: str | None
     command: str
     dirty_worktree: bool
+    device_platforms: tuple[str, ...] = ()
+    cache_policy: str | None = None
 
     def __post_init__(self) -> None:
         if not self.platform_label:
@@ -197,6 +170,18 @@ class EnvironmentState:
             raise ValueError("python_version must be non-empty")
         if not self.command:
             raise ValueError("command must be non-empty")
+        if not isinstance(self.dirty_worktree, bool):
+            raise ValueError("environment.dirty_worktree must be a bool")
+        if self.cache_policy is not None and self.cache_policy not in {item.value for item in CachePolicy}:
+            raise ValueError("environment.cache_policy must be fresh, reused, or null")
+        if not self.device_platforms:
+            inferred = tuple(device.lower() for device in self.devices if device.lower() in {"cpu", "gpu", "tpu"})
+            object.__setattr__(self, "device_platforms", inferred)
+        if len(self.device_platforms) != len(self.devices):
+            raise ValueError("environment device_platforms and devices must have equal length")
+        if any(item not in {"cpu", "gpu", "tpu"} for item in self.device_platforms):
+            raise ValueError("environment.device_platforms contains an unsupported JAX platform")
+        _validate_platform_attestation(self)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -210,6 +195,8 @@ class EnvironmentState:
             "architecture": self.architecture,
             "xla_flags": self.xla_flags,
             "devices": list(self.devices),
+            "device_platforms": list(self.device_platforms),
+            "cache_policy": self.cache_policy,
             "xla_cache_dir": self.xla_cache_dir,
             "command": self.command,
             "dirty_worktree": self.dirty_worktree,
@@ -238,6 +225,9 @@ class EnvironmentState:
         devices = payload.get("devices")
         if not isinstance(devices, list):
             raise ValueError("environment.devices must be a list")
+        device_platforms = payload.get("device_platforms")
+        if device_platforms is not None and not isinstance(device_platforms, list):
+            raise ValueError("environment.device_platforms must be a list")
         return cls(
             platform_label=str(payload["platform_label"]),
             python_version=str(payload["python_version"]),
@@ -249,10 +239,74 @@ class EnvironmentState:
             architecture=str(payload["architecture"]),
             xla_flags=str(payload["xla_flags"]),
             devices=tuple(str(item) for item in devices),
+            device_platforms=tuple(str(item) for item in device_platforms or ()),
+            cache_policy=None if payload.get("cache_policy") is None else str(payload["cache_policy"]),
             xla_cache_dir=None if payload["xla_cache_dir"] is None else str(payload["xla_cache_dir"]),
             command=str(payload["command"]),
-            dirty_worktree=bool(payload["dirty_worktree"]),
+            dirty_worktree=_require_bool(payload, "dirty_worktree", context="environment"),
         )
+
+
+def normalize_machine(machine: str) -> str:
+    normalized = machine.strip().lower().replace("-", "_")
+    if normalized in {"arm64", "aarch64"}:
+        return "arm64"
+    if normalized in {"x86_64", "amd64", "x64"}:
+        return "x86_64"
+    return normalized
+
+
+def _validate_platform_attestation(environment: EnvironmentState) -> None:
+    label = environment.platform_label
+    machine = normalize_machine(environment.machine)
+    platforms = environment.device_platforms
+    if label == "arm64-cpu" and machine != "arm64":
+        raise ValueError(f"platform label arm64-cpu does not match normalized machine {machine!r}")
+    if label == "x86_64-cpu" and machine != "x86_64":
+        raise ValueError(f"platform label x86_64-cpu does not match normalized machine {machine!r}")
+    if label in {"arm64-cpu", "x86_64-cpu", "forced-two-device-cpu"}:
+        if not platforms or any(item != "cpu" for item in platforms):
+            raise ValueError(f"platform label {label} requires actual JAX CPU devices")
+    if label == "forced-two-device-cpu" and len(platforms) < 2:
+        raise ValueError("platform label forced-two-device-cpu requires at least 2 actual JAX CPU devices")
+    if label == "gpu" and "gpu" not in platforms:
+        raise ValueError("platform label gpu requires an actual JAX GPU device")
+
+
+def attested_platforms(environment: EnvironmentState) -> tuple[str, ...]:
+    """Return required platform roles proven by normalized architecture/devices."""
+    roles: list[str] = []
+    machine = normalize_machine(environment.machine)
+    if environment.device_platforms and all(item == "cpu" for item in environment.device_platforms):
+        if machine == "arm64":
+            roles.append("arm64-cpu")
+        elif machine == "x86_64":
+            roles.append("x86_64-cpu")
+        if len(environment.device_platforms) >= 2:
+            roles.append("forced-two-device-cpu")
+    if "gpu" in environment.device_platforms:
+        roles.append("gpu")
+    return tuple(roles)
+
+
+def environment_comparison_key(environment: EnvironmentState) -> tuple[Any, ...]:
+    """Return normalized child context, excluding only process command text."""
+    return (
+        environment.platform_label,
+        environment.python_version,
+        environment.jax_version,
+        environment.jaxlib_version,
+        environment.numpy_version,
+        environment.os_name,
+        normalize_machine(environment.machine),
+        environment.architecture,
+        environment.xla_flags,
+        environment.xla_cache_dir,
+        environment.devices,
+        environment.device_platforms,
+        environment.cache_policy,
+        environment.dirty_worktree,
+    )
 
 
 @dataclass(frozen=True)
@@ -270,7 +324,7 @@ class TimedPhase:
             return
         if self.null_reason is not None:
             raise ValueError(f"timed phase {self.phase!r} cannot include null_reason when timing is present")
-        if not isinstance(self.seconds, (int, float)):
+        if isinstance(self.seconds, bool) or not isinstance(self.seconds, (int, float)):
             raise ValueError(f"timed phase {self.phase!r} seconds must be numeric")
         if self.seconds <= 0:
             raise ValueError(f"timed phase {self.phase!r} seconds must be positive")
@@ -296,9 +350,12 @@ class TimedPhase:
         for key in ("phase", "seconds"):
             if key not in payload:
                 raise ValueError(f"timed phase missing {key!r}")
+        seconds = payload["seconds"]
+        if seconds is not None and (isinstance(seconds, bool) or not isinstance(seconds, (int, float))):
+            raise ValueError("timed phase seconds must be numeric or null")
         return cls(
             phase=str(payload["phase"]),
-            seconds=None if payload["seconds"] is None else float(payload["seconds"]),
+            seconds=None if seconds is None else float(seconds),
             null_reason=None if payload.get("null_reason") is None else str(payload["null_reason"]),
         )
 
@@ -326,7 +383,7 @@ class PerformanceMetrics:
         for key, value in self.__dict__.items():
             if value is None:
                 continue
-            if not isinstance(value, int) or value < 0:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"metric {key} must be a non-negative int, observed {value!r}")
 
     def to_dict(self) -> dict[str, Any]:
@@ -412,9 +469,13 @@ class BenchmarkRecord:
             raise ValueError(f"unknown representation {self.representation!r}")
         if self.phase not in KNOWN_PHASES:
             raise ValueError(f"unknown phase {self.phase!r}")
+        if not isinstance(self.dirty_worktree, bool):
+            raise ValueError("record.dirty_worktree must be a bool")
+        if isinstance(self.workload_size, bool):
+            raise ValueError("workload_size must be an int or null")
         if self.workload_size is not None and self.workload_size < 1:
             raise ValueError("workload_size must be >= 1")
-        if self.device_count < 1:
+        if isinstance(self.device_count, bool) or not isinstance(self.device_count, int) or self.device_count < 1:
             raise ValueError("device_count must be >= 1")
         if self.dtype not in KNOWN_DTYPES:
             raise ValueError(f"unsupported dtype label {self.dtype!r}")
@@ -422,6 +483,8 @@ class BenchmarkRecord:
             raise ValueError("status must be one of pass/fail/skip")
         if not isinstance(self.numeric_passed, bool):
             raise ValueError("numeric_passed must be a bool")
+        if self.timed.phase != self.phase:
+            raise ValueError(f"timed phase {self.timed.phase!r} must equal record phase {self.phase!r}")
         if self.behavioral_reference_commit != CURRENT_REFERENCE_COMMIT:
             raise ValueError("behavioral_reference_commit mismatch")
 
@@ -531,19 +594,21 @@ class BenchmarkRecord:
             cache_policy=str(payload["cache_policy"]),
             candidate_commit=str(payload["candidate_commit"]),
             behavioral_reference_commit=str(payload["behavioral_reference_commit"]),
-            dirty_worktree=bool(payload["dirty_worktree"]),
+            dirty_worktree=_require_bool(payload, "dirty_worktree", context="record"),
             dataset=DatasetFingerprint.from_dict(payload["dataset"]),
             representation=str(payload["representation"]),
             operation=str(payload["operation"]),
             phase=str(payload["phase"]),
-            workload_size=None if payload["workload_size"] is None else int(payload["workload_size"]),
+            workload_size=_require_int(payload["workload_size"], field="workload_size", allow_none=True),
             dtype=str(payload["dtype"]),
             requested_backend=None if payload.get("requested_backend") is None else str(payload["requested_backend"]),
             resolved_backend=None if payload.get("resolved_backend") is None else str(payload["resolved_backend"]),
-            device_count=int(payload["device_count"]),
+            device_count=_require_int(payload["device_count"], field="device_count"),
             timed=TimedPhase.from_dict(payload["timed"]),
             metric=PerformanceMetrics.from_dict(payload["metric"]),
-            numeric_passed=bool(payload.get("numeric_passed", True)),
+            numeric_passed=(
+                True if "numeric_passed" not in payload else _require_bool(payload, "numeric_passed", context="record")
+            ),
             status=str(payload.get("status", "pass")),
             notes=str(payload.get("notes", "")),
         )
@@ -568,7 +633,13 @@ class PromotionEvidence:
             raise ValueError("behavioral_reference_commit mismatch")
         if self.cache_label not in {item.value for item in CachePolicy}:
             raise ValueError("cache_label must be one of 'fresh' or 'reused'")
+        if not isinstance(self.dirty_worktree, bool):
+            raise ValueError("evidence.dirty_worktree must be a bool")
         datetime.fromisoformat(self.produced_at_utc)
+        if self.environment.dirty_worktree != self.dirty_worktree:
+            raise ValueError("environment dirty_worktree mismatch")
+        if self.environment.cache_policy is not None and self.environment.cache_policy != self.cache_label:
+            raise ValueError("environment cache_policy mismatch")
         seen: set[str] = set()
         for record in self.records:
             if record.candidate_commit != self.candidate_commit:
@@ -577,6 +648,10 @@ class PromotionEvidence:
                 raise ValueError("row dataset mismatch")
             if record.dirty_worktree != self.dirty_worktree:
                 raise ValueError("row dirty_worktree mismatch")
+            if record.cache_policy != self.cache_label:
+                raise ValueError("row cache_policy mismatch")
+            if record.platform_label != self.environment.platform_label:
+                raise ValueError("row platform_label mismatch")
             if record.record_id in seen:
                 raise ValueError(f"duplicate record_id {record.record_id!r}")
             seen.add(record.record_id)
@@ -606,9 +681,6 @@ class PromotionEvidence:
     def from_dict(
         cls,
         payload: dict[str, Any],
-        *,
-        allow_repo_mismatch: bool = False,
-        repo_root: Path | None = None,
     ) -> "PromotionEvidence":
         required = {
             "schema_version",
@@ -626,12 +698,16 @@ class PromotionEvidence:
             raise ValueError(f"evidence missing required fields: {sorted(missing)}")
         if not isinstance(payload.get("records"), list):
             raise ValueError("records must be a list")
+        if payload["schema_version"] == SCHEMA_VERSION:
+            missing_environment = {"device_platforms", "cache_policy"} - set(payload["environment"])
+            if missing_environment:
+                raise ValueError(f"environment missing required fields: {sorted(missing_environment)}")
 
         records = tuple(BenchmarkRecord.from_dict(item) for item in payload["records"])
         evidence = cls(
             schema_version=str(payload["schema_version"]),
             candidate_commit=str(payload["candidate_commit"]),
-            dirty_worktree=bool(payload["dirty_worktree"]),
+            dirty_worktree=_require_bool(payload, "dirty_worktree", context="evidence"),
             behavioral_reference_commit=str(payload["behavioral_reference_commit"]),
             dataset=DatasetFingerprint.from_dict(payload["dataset"]),
             produced_at_utc=str(payload["produced_at_utc"]),
@@ -639,14 +715,6 @@ class PromotionEvidence:
             environment=EnvironmentState.from_dict(payload["environment"]),
             records=records,
         )
-        if allow_repo_mismatch:
-            return evidence
-
-        root = _repo_root(repo_root)
-        if evidence.candidate_commit != git_commit(root):
-            raise ValueError("candidate_commit mismatch for local evidence")
-        if evidence.dirty_worktree != is_git_dirty(root):
-            raise ValueError("dirty_worktree mismatch for local evidence")
         return evidence
 
     def to_json(self) -> str:
@@ -655,17 +723,12 @@ class PromotionEvidence:
     @classmethod
     def from_json(
         cls,
-        payload: str | Path,
-        *,
-        allow_repo_mismatch: bool = False,
-        repo_root: Path | None = None,
+        payload: str,
     ) -> "PromotionEvidence":
-        if isinstance(payload, Path):
-            payload = payload.read_text(encoding="utf-8")
         data = json.loads(payload)
         if not isinstance(data, dict):
             raise ValueError("evidence JSON must contain an object")
-        return cls.from_dict(data, allow_repo_mismatch=allow_repo_mismatch, repo_root=repo_root)
+        return cls.from_dict(data)
 
 
 @dataclass(frozen=True)
@@ -673,6 +736,7 @@ class GateResult:
     gate: str
     status: GateStatus
     reason: str
+    blocking: bool = True
 
 
 @dataclass(frozen=True)
@@ -680,69 +744,6 @@ class PromotionDecision:
     decision: Decision
     gates: tuple[GateResult, ...]
     blocker_count: int
-
-
-def compute_dataset_fingerprint(h5_path: Path | str) -> DatasetFingerprint:
-    h5_path = _normalize_path(h5_path)
-    if not h5_path.is_file():
-        raise ValueError(f"missing h5 file: {h5_path}")
-
-    hasher = hashlib.sha256()
-    with h5_path.open("rb") as handle:
-        while True:
-            chunk = handle.read(1 << 20)
-            if not chunk:
-                break
-            hasher.update(chunk)
-
-    metadata = list_blocks(h5_path)
-    if metadata is None:
-        raise ValueError(f"could not read block metadata from {h5_path}")
-    if metadata.height == 0:
-        raise ValueError(f"h5 metadata has no blocks: {h5_path}")
-
-    if "n_samples" in metadata.columns:
-        n_samples = int(metadata.get_column("n_samples")[0])
-    elif "num_samples" in metadata.columns:
-        n_samples = int(metadata.get_column("num_samples")[0])
-    else:
-        raise ValueError(f"missing sample-count metadata column in {h5_path}")
-
-    if "n_variants" in metadata.columns:
-        n_variants = int(metadata.get_column("n_variants").sum())
-    elif "num_variants" in metadata.columns:
-        n_variants = int(metadata.get_column("num_variants").sum())
-    else:
-        raise ValueError(f"missing variant-count metadata column in {h5_path}")
-
-    if n_samples <= 0 or n_variants <= 0:
-        raise ValueError(f"metadata has non-positive dimensions for {h5_path}")
-
-    return DatasetFingerprint(
-        sha256=hasher.hexdigest(),
-        size_bytes=int(h5_path.stat().st_size),
-        block_count=int(metadata.height),
-        n_samples=n_samples,
-        n_variants=n_variants,
-    )
-
-
-def gather_environment(platform_label: str) -> EnvironmentState:
-    return EnvironmentState(
-        platform_label=platform_label,
-        python_version=sys.version.split()[0],
-        numpy_version=np.__version__,
-        jax_version=jax.__version__,
-        jaxlib_version=jaxlib.__version__,
-        os_name=os.name,
-        machine=platform.machine(),
-        architecture=platform.platform(),
-        xla_flags=os.environ.get("XLA_FLAGS", ""),
-        devices=tuple(str(device.platform) for device in jax.devices()),
-        xla_cache_dir=os.environ.get("XLA_CACHE_DIR"),
-        command=" ".join(shlex.quote(item) for item in sys.argv),
-        dirty_worktree=is_git_dirty(),
-    )
 
 
 def _build_record_id(
@@ -795,10 +796,8 @@ def make_record(
     numeric_passed: bool = True,
     status: str = "pass",
     notes: str = "",
-    dirty_worktree: bool | None = None,
+    dirty_worktree: bool = False,
 ) -> BenchmarkRecord:
-    if dirty_worktree is None:
-        dirty_worktree = is_git_dirty()
     return BenchmarkRecord(
         record_id=_build_record_id(
             platform_label=platform_label,
@@ -835,43 +834,6 @@ def make_record(
     )
 
 
-def build_promotion_evidence(
-    *,
-    cache_label: str,
-    platform_label: str,
-    records: tuple[BenchmarkRecord, ...],
-    candidate_commit: str | None = None,
-    dataset: DatasetFingerprint | None = None,
-    produced_at_utc: str | None = None,
-) -> PromotionEvidence:
-    if cache_label not in {item.value for item in CachePolicy}:
-        raise ValueError(f"unknown cache policy {cache_label!r}")
-    if not records:
-        raise ValueError("promotion evidence requires at least one row")
-    if dataset is None:
-        first = records[0].dataset
-        if any(record.dataset != first for record in records):
-            raise ValueError("records must share the same dataset fingerprint")
-        dataset = first
-    candidate = candidate_commit or records[0].candidate_commit
-    if any(record.candidate_commit != candidate for record in records):
-        raise ValueError("records must share one candidate commit")
-    produced = produced_at_utc or datetime.now(timezone.utc).isoformat()
-    if dataset is None:
-        raise ValueError("dataset must be provided")
-    return PromotionEvidence(
-        schema_version=SCHEMA_VERSION,
-        candidate_commit=candidate,
-        dirty_worktree=records[0].dirty_worktree,
-        behavioral_reference_commit=CURRENT_REFERENCE_COMMIT,
-        dataset=dataset,
-        produced_at_utc=produced,
-        cache_label=cache_label,
-        environment=gather_environment(platform_label),
-        records=tuple(records),
-    )
-
-
 def _exact_warm_lookup(rows: Iterable[BenchmarkRecord], *, row: BenchmarkRecord) -> BenchmarkRecord | None:
     for candidate in rows:
         if candidate.phase != TimingPhase.WARM_EXECUTION.value:
@@ -903,16 +865,158 @@ def _exact_warm_lookup(rows: Iterable[BenchmarkRecord], *, row: BenchmarkRecord)
     return None
 
 
+@dataclass(frozen=True)
+class ProductGateKey:
+    platform: str
+    cache_policy: str
+    operation: str
+    workload_size: int
+    backend: str
+    dtype: str
+    device_count: int
+
+    @property
+    def gate_name(self) -> str:
+        return (
+            "product_ratio["
+            f"platform={self.platform},cache={self.cache_policy},operation={self.operation},"
+            f"k={self.workload_size},backend={self.backend},dtype={self.dtype},devices={self.device_count}]"
+        )
+
+
+def required_product_gate_keys() -> tuple[ProductGateKey, ...]:
+    """Return the explicit AC8.3 promotion matrix."""
+    platform_configs = (
+        ("arm64-cpu", 1, ("pure_jax", "ffi_cpu")),
+        ("x86_64-cpu", 1, ("pure_jax", "ffi_cpu")),
+        ("forced-two-device-cpu", 2, ("pure_jax", "ffi_cpu")),
+        ("gpu", 1, ("pure_jax",)),
+    )
+    return tuple(
+        ProductGateKey(platform, cache.value, operation, k, backend, "float32", device_count)
+        for platform, device_count, backends in platform_configs
+        for cache in CachePolicy
+        for operation in REQUIRED_PRODUCT_OPERATIONS
+        for k in REQUIRED_PRODUCT_KS
+        for backend in backends
+    )
+
+
+def _record_matches_product_key(record: BenchmarkRecord, key: ProductGateKey, *, representation: str) -> bool:
+    return (
+        record.representation == representation
+        and record.operation == key.operation
+        and record.phase == TimingPhase.WARM_EXECUTION.value
+        and record.workload_size == key.workload_size
+        and record.dtype == key.dtype
+        and record.requested_backend == key.backend
+        and record.resolved_backend == key.backend
+        and record.device_count == key.device_count
+        and record.cache_policy == key.cache_policy
+        and record.status == "pass"
+        and record.timed.seconds is not None
+        and record.timed.seconds > 0
+    )
+
+
+def _evaluate_product_key(
+    rows: tuple[BenchmarkRecord, ...],
+    key: ProductGateKey,
+    *,
+    required_ratio: float,
+) -> GateResult:
+    packed = tuple(
+        row
+        for row in rows
+        if _record_matches_product_key(row, key, representation=Representation.PACKED_CANDIDATE.value)
+    )
+    exact = tuple(
+        row
+        for row in rows
+        if _record_matches_product_key(row, key, representation=Representation.RETAINED_EXACT_RAGGED.value)
+    )
+    if not packed or not exact:
+        missing = []
+        if not packed:
+            missing.append("packed candidate")
+        if not exact:
+            missing.append("retained exact baseline")
+        return GateResult(
+            gate=key.gate_name,
+            status=GateStatus.MISSING,
+            reason=f"{GateFailureReason.MISSING_EVIDENCE.value}: missing {' and '.join(missing)}",
+        )
+    if len(packed) != 1 or len(exact) != 1:
+        return GateResult(
+            gate=key.gate_name,
+            status=GateStatus.FAIL,
+            reason=f"ambiguous evidence: packed={len(packed)}, retained_exact={len(exact)}",
+        )
+    packed_row, exact_row = packed[0], exact[0]
+    if not packed_row.numeric_passed or not exact_row.numeric_passed:
+        return GateResult(
+            gate=key.gate_name,
+            status=GateStatus.FAIL,
+            reason="product numerical parity failed",
+        )
+    assert packed_row.timed.seconds is not None and exact_row.timed.seconds is not None
+    ratio = packed_row.timed.seconds / exact_row.timed.seconds
+    status = GateStatus.PASS if ratio <= required_ratio else GateStatus.FAIL
+    return GateResult(
+        gate=key.gate_name,
+        status=status,
+        reason=(
+            f"packed warm / retained-exact warm ratio={ratio:.6f}, threshold={required_ratio:.2f}"
+            if status is GateStatus.PASS
+            else f"packed warm / retained-exact warm ratio {ratio:.6f} exceeds {required_ratio:.2f}"
+        ),
+    )
+
+
+def _rhe_diagnostic_gates(rows: tuple[BenchmarkRecord, ...], *, required_ratio: float) -> tuple[GateResult, ...]:
+    gates = []
+    for packed in rows:
+        if (
+            packed.representation != Representation.PACKED_CANDIDATE.value
+            or packed.operation != "rhe"
+            or not packed.is_warm
+            or packed.status != "pass"
+        ):
+            continue
+        exact = _exact_warm_lookup(rows, row=packed)
+        gate_name = (
+            "rhe_diagnostic["
+            f"platform={packed.platform_label},cache={packed.cache_policy},k={packed.workload_size},"
+            f"backend={packed.resolved_backend},dtype={packed.dtype},devices={packed.device_count}]"
+        )
+        if exact is None:
+            gates.append(
+                GateResult(
+                    gate=gate_name,
+                    status=GateStatus.MISSING,
+                    reason=GateFailureReason.MISSING_EXACT.value,
+                    blocking=False,
+                )
+            )
+            continue
+        assert packed.timed.seconds is not None and exact.timed.seconds is not None
+        ratio = packed.timed.seconds / exact.timed.seconds
+        gates.append(
+            GateResult(
+                gate=gate_name,
+                status=GateStatus.PASS if ratio <= required_ratio else GateStatus.FAIL,
+                reason=f"diagnostic packed warm / retained-exact warm ratio={ratio:.6f}; no AC8.3 RHE threshold",
+                blocking=False,
+            )
+        )
+    return tuple(gates)
+
+
 def evaluate_ratio_gates(
     evidence: PromotionEvidence,
     *,
     required_ratio: float = 1.20,
 ) -> tuple[Decision, tuple[GateResult, ...], int]:
-    rows = evidence.records
-    packed_rows = [row for row in rows if row.representation == Representation.PACKED_CANDIDATE.value]
-    gate_results: list[GateResult] = []
-    blocker_count = 0
-
     if evidence.dirty_worktree:
         return (
             Decision.REJECT,
@@ -926,86 +1030,53 @@ def evaluate_ratio_gates(
             1,
         )
 
-    for packed in packed_rows:
-        if packed.status != "pass":
-            continue
-        if not packed.is_warm:
-            continue
-        exact = _exact_warm_lookup(rows, row=packed)
-        if exact is None:
-            gate_results.append(
-                GateResult(
-                    gate=f"ratio_{packed.operation}_k{packed.workload_size}",
-                    status=GateStatus.MISSING,
-                    reason=f"{GateFailureReason.MISSING_EXACT.value} for packed warm measurement",
-                )
-            )
-            blocker_count = max(1, blocker_count)
-            continue
-        if not packed.numeric_passed:
-            gate_results.append(
-                GateResult(
-                    gate=f"ratio_{packed.operation}_k{packed.workload_size}",
-                    status=GateStatus.FAIL,
-                    reason="packed numerical checks failed for this workload",
-                )
-            )
-            blocker_count += 1
-            continue
-        assert packed.timed.seconds is not None and exact.timed.seconds is not None
-        ratio = packed.timed.seconds / exact.timed.seconds
-        status = GateStatus.PASS if ratio <= required_ratio else GateStatus.FAIL
-        gate_results.append(
-            GateResult(
-                gate=f"ratio_{packed.operation}_k{packed.workload_size}",
-                status=status,
-                reason=(
-                    f"packed warm / retained-exact warm ratio={ratio:.6f}, threshold={required_ratio:.2f}"
-                    if status == GateStatus.PASS
-                    else f"packed warm / retained-exact warm ratio {ratio:.6f} exceeds {required_ratio:.2f}"
-                ),
-            )
+    platform_roles = attested_platforms(evidence.environment)
+    if platform_roles:
+        keys = tuple(
+            key
+            for key in required_product_gate_keys()
+            if key.platform in platform_roles and key.cache_policy == evidence.cache_label
         )
-        if status == GateStatus.FAIL:
-            blocker_count += 1
-
-    for operation in REQUIRED_PRODUCT_OPERATIONS:
-        for k in REQUIRED_PRODUCT_KS:
-            has_packed = any(
-                row.representation == Representation.PACKED_CANDIDATE.value
-                and row.operation == operation
-                and row.phase == TimingPhase.WARM_EXECUTION.value
-                and row.workload_size == k
-                and row.status == "pass"
-                and row.timed.seconds is not None
-                and row.timed.seconds > 0
-                for row in rows
+    else:
+        packed_configs = {
+            (row.requested_backend, row.resolved_backend, row.dtype, row.device_count)
+            for row in evidence.records
+            if row.representation == Representation.PACKED_CANDIDATE.value
+            and row.operation in REQUIRED_PRODUCT_OPERATIONS
+            and row.phase == TimingPhase.WARM_EXECUTION.value
+        }
+        keys = tuple(
+            ProductGateKey(
+                evidence.environment.platform_label,
+                evidence.cache_label,
+                operation,
+                k,
+                str(resolved_backend),
+                dtype,
+                device_count,
             )
-            if not has_packed:
-                continue
-            has_exact = any(
-                row.representation == Representation.RETAINED_EXACT_RAGGED.value
-                and row.operation == operation
-                and row.phase == TimingPhase.WARM_EXECUTION.value
-                and row.workload_size == k
-                and row.status == "pass"
-                and row.timed.seconds is not None
-                and row.timed.seconds > 0
-                for row in rows
-            )
-            if not has_exact:
-                gate_results.append(
-                    GateResult(
-                        gate=f"ratio_{operation}_k{k}",
-                        status=GateStatus.MISSING,
-                        reason=GateFailureReason.MISSING_EXACT.value,
-                    )
-                )
-                blocker_count = max(1, blocker_count)
-
-    if blocker_count:
-        return Decision.CONTINUE_COEXISTENCE, tuple(gate_results), blocker_count
-    return Decision.PROMOTE, tuple(gate_results), 0
+            for requested_backend, resolved_backend, dtype, device_count in sorted(packed_configs, key=str)
+            if requested_backend == resolved_backend and resolved_backend is not None
+            for operation in REQUIRED_PRODUCT_OPERATIONS
+            for k in REQUIRED_PRODUCT_KS
+        )
+    if not keys:
+        product_gates = (
+            GateResult(
+                gate="product_ratio_matrix",
+                status=GateStatus.MISSING,
+                reason=GateFailureReason.MISSING_EVIDENCE.value,
+            ),
+        )
+    else:
+        product_gates = tuple(
+            _evaluate_product_key(evidence.records, key, required_ratio=required_ratio) for key in keys
+        )
+    diagnostics = _rhe_diagnostic_gates(evidence.records, required_ratio=required_ratio)
+    gates = (*product_gates, *diagnostics)
+    blocker_count = sum(gate.blocking and gate.status is not GateStatus.PASS for gate in gates)
+    decision = Decision.PROMOTE if blocker_count == 0 else Decision.CONTINUE_COEXISTENCE
+    return decision, gates, blocker_count
 
 
 def evaluate_evidence_set(
@@ -1040,29 +1111,46 @@ def evaluate_evidence_set(
             blocker_count=1,
         )
 
-    all_gates: list[GateResult] = []
-    blocker_count = 0
-    for evidence in evidences:
-        decision, gates, local_blockers = evaluate_ratio_gates(evidence, required_ratio=required_ratio)
-        all_gates.extend(gates)
-        blocker_count += local_blockers
-        if decision == Decision.REJECT:
-            return PromotionDecision(
-                decision=Decision.REJECT,
-                gates=tuple(all_gates),
-                blocker_count=max(1, blocker_count),
-            )
-
-    if blocker_count > 0:
+    datasets = {ev.dataset for ev in evidences}
+    if len(datasets) != 1:
         return PromotionDecision(
-            decision=Decision.CONTINUE_COEXISTENCE,
-            gates=tuple(all_gates),
-            blocker_count=blocker_count,
+            decision=Decision.REJECT,
+            gates=(GateResult(gate="dataset", status=GateStatus.FAIL, reason="dataset fingerprint mismatch"),),
+            blocker_count=1,
         )
+    if any(ev.dirty_worktree for ev in evidences):
+        return PromotionDecision(
+            decision=Decision.REJECT,
+            gates=(
+                GateResult(
+                    gate="clean_checkout",
+                    status=GateStatus.FAIL,
+                    reason=GateFailureReason.DIRTY_WORKTREE.value,
+                ),
+            ),
+            blocker_count=1,
+        )
+
+    product_gates = []
+    for key in required_product_gate_keys():
+        rows = tuple(
+            row
+            for evidence in evidences
+            if key.platform in attested_platforms(evidence.environment) and evidence.cache_label == key.cache_policy
+            for row in evidence.records
+        )
+        product_gates.append(_evaluate_product_key(rows, key, required_ratio=required_ratio))
+    diagnostics = tuple(
+        gate
+        for evidence in evidences
+        for gate in _rhe_diagnostic_gates(evidence.records, required_ratio=required_ratio)
+    )
+    gates = (*product_gates, *diagnostics)
+    blocker_count = sum(gate.blocking and gate.status is not GateStatus.PASS for gate in gates)
     return PromotionDecision(
-        decision=Decision.PROMOTE,
-        gates=tuple(all_gates),
-        blocker_count=0,
+        decision=Decision.PROMOTE if blocker_count == 0 else Decision.CONTINUE_COEXISTENCE,
+        gates=gates,
+        blocker_count=blocker_count,
     )
 
 
@@ -1073,105 +1161,7 @@ def format_markdown_decision(decision: PromotionDecision) -> str:
     ]
     for gate in decision.gates:
         rows.append(f"| {gate.gate} | {gate.status.value} | {gate.reason} |")
-    header = f"Decision: {decision.decision.value}\\nBlockers: {decision.blocker_count}"
+    header = f"Decision: {decision.decision.value}\nBlockers: {decision.blocker_count}"
     if not rows:
-        return f"{header}\\n\\n(no gates)"
-    return f"{header}\\n\\n" + "\\n".join(rows)
-
-
-def _read_table_rows(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    paths = [path] if path.is_file() else sorted(path.glob("*.json"))
-    for entry in paths:
-        payload = json.loads(entry.read_text(encoding="utf-8"))
-        if isinstance(payload, list):
-            rows.extend(payload)
-        elif isinstance(payload, dict):
-            rows.append(payload)
-        else:
-            raise ValueError(f"unsupported json payload in {entry}")
-    return rows
-
-
-def load_evidences(raw_outputs: Path | str) -> list[PromotionEvidence]:
-    path = _normalize_path(raw_outputs)
-    payloads = _read_table_rows(path)
-    return [PromotionEvidence.from_dict(item, allow_repo_mismatch=True) for item in payloads]
-
-
-def write_evidence_fragment(path: Path, evidence: PromotionEvidence) -> None:
-    path = _normalize_path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(evidence.to_json(), encoding="utf-8")
-
-
-def build_promotion_pytest_command(
-    *,
-    module: str,
-    repo_root: Path,
-    h5_path: Path,
-    output_path: Path,
-    platform_label: str,
-    cache_policy: str,
-    linarg_benchmark_k: tuple[int, ...],
-    rhe_benchmark_num_matvecs: tuple[int, ...],
-    enforce_gates: bool = False,
-    pytest_args: tuple[str, ...] | None = None,
-    linarg_parallel_processes: int = 2,
-) -> list[str]:
-    if not module:
-        raise ValueError("module must be non-empty")
-    if not isinstance(repo_root, Path):
-        repo_root = _normalize_path(repo_root)
-    if not repo_root.is_dir():
-        raise ValueError(f"repo_root must exist: {repo_root}")
-    if not h5_path.is_file():
-        raise ValueError(f"h5 path must exist: {h5_path}")
-    if platform_label is None or not platform_label:
-        raise ValueError("platform_label must be non-empty")
-    if cache_policy not in {item.value for item in CachePolicy}:
-        raise ValueError(f"unknown cache policy {cache_policy!r}")
-    if not linarg_benchmark_k:
-        raise ValueError("linarg_benchmark_k must be non-empty")
-    if any(value < 1 for value in linarg_benchmark_k):
-        raise ValueError("linarg_benchmark_k values must be positive")
-    if not rhe_benchmark_num_matvecs:
-        raise ValueError("rhe_benchmark_num_matvecs must be non-empty")
-    if any(value < 1 for value in rhe_benchmark_num_matvecs):
-        raise ValueError("rhe_benchmark_num_matvecs values must be positive")
-    if linarg_parallel_processes < 1:
-        raise ValueError("linarg_parallel_processes must be positive")
-
-    args = [
-        "uv",
-        "run",
-        "pytest",
-        "-p",
-        "no:capture",
-        "--runbench",
-        "--linarg-h5-path",
-        str(h5_path),
-        "--linarg-parallel-processes",
-        str(linarg_parallel_processes),
-        "--linarg-benchmark-k",
-        *[str(item) for item in linarg_benchmark_k],
-        "--rhe-benchmark-num-matvecs",
-        *[str(item) for item in rhe_benchmark_num_matvecs],
-        "--jax-promotion-output",
-        str(output_path),
-        "--cache-policy",
-        cache_policy,
-        "--platform-label",
-        platform_label,
-        module,
-    ]
-    if enforce_gates:
-        args.append("--jax-enforce-promotion-gates")
-    if pytest_args:
-        args.extend(pytest_args)
-    return args
-
-
-def normalize_command(path: Path | str) -> str:
-    path = _normalize_path(path)
-    return f"pytest {path}"
+        return f"{header}\n\n(no gates)"
+    return f"{header}\n\n" + "\n".join(rows)

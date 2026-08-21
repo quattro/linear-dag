@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import statistics
@@ -28,17 +29,20 @@ from linear_dag.core.jaxlinarg.ingress import _packed_from_hdf5, _PackedJaxLinea
 from linear_dag.core.jaxlinarg.kernels import ffi_cpu
 from linear_dag.core.jaxlinarg.packed_products import lineararg_matmat, lineararg_rmatmat
 from linear_dag.core.jaxlinarg.packing import GRAPH_FIELD_NAMES, PACKED_COMPONENT_NAMES
+from linear_dag.core.lineararg import LinearARG
 from linear_dag.core.parallel_processing import ParallelOperator
 from tests.jax.bench._promotion import (
-    build_promotion_evidence,
-    compute_dataset_fingerprint,
-    git_commit,
-    is_git_dirty,
     make_record,
     PerformanceMetrics,
     Representation,
     TimedPhase,
     TimingPhase,
+)
+from tests.jax.bench._promotion_io import (
+    build_promotion_evidence,
+    compute_dataset_fingerprint,
+    git_commit,
+    is_git_dirty,
     write_evidence_fragment,
 )
 
@@ -95,6 +99,7 @@ class _PromotionProductMeasurement:
     device_count: int
     metrics: PerformanceMetrics
     numeric_passed: bool = True
+    input_sha256: str = ""
 
 
 def _ffi_build_metadata() -> dict[str, Any]:
@@ -613,7 +618,13 @@ def _time_promotion_numpy_products(
                 output = call_method(values)
                 first_seconds = time.perf_counter() - start
                 warm_seconds = _time_call(lambda call_method=call_method, values=values: call_method(values))
-                numeric_passed = bool(np.all(np.isfinite(output)))
+                numeric_passed = _product_parity_from_hdf5(
+                    path,
+                    block_metadata,
+                    operation=operation,
+                    values=values,
+                    observed=output,
+                )
                 common: dict[str, Any] = dict(
                     operation=operation,
                     k=k,
@@ -623,6 +634,7 @@ def _time_promotion_numpy_products(
                     device_count=num_processes,
                     metrics=PerformanceMetrics(),
                     numeric_passed=numeric_passed,
+                    input_sha256=_array_sha256(values),
                 )
                 measurements.extend(
                     (
@@ -703,7 +715,13 @@ def _time_promotion_exact_products(
                         lambda call_method=call_method, values=values: call_method(values),
                         block_until_ready=True,
                     )
-                    numeric_passed = bool(np.all(np.isfinite(np.asarray(output))))
+                    numeric_passed = _product_parity_from_hdf5(
+                        path,
+                        block_metadata,
+                        operation=operation,
+                        values=host_values,
+                        observed=np.asarray(output),
+                    )
                     common: dict[str, Any] = dict(
                         operation=operation,
                         k=k,
@@ -713,6 +731,7 @@ def _time_promotion_exact_products(
                         device_count=device_count,
                         metrics=metrics,
                         numeric_passed=numeric_passed,
+                        input_sha256=_array_sha256(host_values),
                     )
                     measurements.extend(
                         (
@@ -782,8 +801,8 @@ def _time_promotion_packed_products(
                 function = lineararg_matmat if operation == "matmat" else lineararg_rmatmat
                 output_size = operator.n_samples if operation == "matmat" else operator.n_variants
                 for k in k_values:
-                    rng = np.random.default_rng(20260506 + k + (0 if operation == "matmat" else 1000))
-                    values = jnp.asarray(rng.normal(size=(logical_size, k)).astype(np.float32))
+                    host_values = _benchmark_input(operator.shape, operation=operation, k=k)
+                    values = jnp.asarray(host_values)
                     start = time.perf_counter()
                     lowered = jax.jit(function).lower(operator, values)
                     lowering_seconds = time.perf_counter() - start
@@ -825,7 +844,14 @@ def _time_promotion_packed_products(
                         resolved_backend=operator.backend.value,
                         device_count=device_count,
                         metrics=metrics,
-                        numeric_passed=bool(np.all(np.isfinite(np.asarray(output)))),
+                        numeric_passed=_product_parity_from_hdf5(
+                            path,
+                            block_metadata,
+                            operation=operation,
+                            values=host_values,
+                            observed=np.asarray(output),
+                        ),
+                        input_sha256=_array_sha256(host_values),
                     )
                     measurements.extend(
                         (
@@ -931,6 +957,7 @@ def _run_promotion_product_child(
                 {
                     "ffi_build_config": _ffi_build_metadata(),
                     "historical_ir_counterexample": "genoio@c271a9a",
+                    "input_sha256": measurement.input_sha256,
                 },
                 sort_keys=True,
             ),
@@ -953,11 +980,67 @@ def _benchmark_inputs(
     *,
     k_values: tuple[int, ...],
 ) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
-    rng = np.random.default_rng(20260506)
-    n_samples, n_variants = shape
-    variant_inputs = {k: rng.normal(size=(n_variants, k)).astype(np.float32) for k in k_values}
-    sample_inputs = {k: rng.normal(size=(n_samples, k)).astype(np.float32) for k in k_values}
+    variant_inputs = {k: _benchmark_input(shape, operation="matmat", k=k) for k in k_values}
+    sample_inputs = {k: _benchmark_input(shape, operation="rmatmat", k=k) for k in k_values}
     return variant_inputs, sample_inputs
+
+
+def _benchmark_input(shape: tuple[int, int], *, operation: str, k: int) -> np.ndarray:
+    if operation not in {"matmat", "rmatmat"}:
+        raise ValueError(f"unsupported product operation {operation!r}")
+    if k < 1:
+        raise ValueError("k must be positive")
+    n_samples, n_variants = shape
+    rows = n_variants if operation == "matmat" else n_samples
+    seed = 20260506 + k + (0 if operation == "matmat" else 1000)
+    return np.random.default_rng(seed).normal(size=(rows, k)).astype(np.float32)
+
+
+def _array_sha256(values: np.ndarray) -> str:
+    contiguous = np.ascontiguousarray(values)
+    hasher = hashlib.sha256()
+    hasher.update(str(contiguous.shape).encode("ascii"))
+    hasher.update(contiguous.dtype.str.encode("ascii"))
+    hasher.update(contiguous.view(np.uint8))
+    return hasher.hexdigest()
+
+
+def _product_numeric_parity(observed: np.ndarray, expected: np.ndarray) -> bool:
+    return observed.shape == expected.shape and bool(
+        np.allclose(observed, expected, rtol=2e-5, atol=2e-5, equal_nan=False)
+    )
+
+
+def _product_parity_from_hdf5(
+    path: Path,
+    block_metadata: pl.DataFrame,
+    *,
+    operation: str,
+    values: np.ndarray,
+    observed: np.ndarray,
+) -> bool:
+    """Compare a product with a sequential exact block oracle outside timed regions."""
+    block_names = tuple(block_metadata.get_column("block_name").to_list())
+    if operation == "matmat":
+        expected = np.zeros_like(observed)
+        offset = 0
+        for block_name in block_names:
+            block = LinearARG.read(path, block=block_name)
+            next_offset = offset + block.shape[1]
+            expected += np.asarray(block @ values[offset:next_offset])
+            offset = next_offset
+        return offset == values.shape[0] and _product_numeric_parity(observed, expected)
+    if operation == "rmatmat":
+        offset = 0
+        for block_name in block_names:
+            block = LinearARG.read(path, block=block_name)
+            expected = np.asarray(block.T @ values)
+            next_offset = offset + block.shape[1]
+            if not _product_numeric_parity(observed[offset:next_offset], expected):
+                return False
+            offset = next_offset
+        return offset == observed.shape[0]
+    raise ValueError(f"unsupported product operation {operation!r}")
 
 
 def _graph_bytes_by_device(op: JaxParallelOperator | _PackedJaxLinearARG) -> dict[str, int]:

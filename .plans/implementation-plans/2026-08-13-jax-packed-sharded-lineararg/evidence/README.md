@@ -15,11 +15,20 @@ commit and representative dataset for each required label:
 - `gpu` with the number of GPU devices being evaluated
 
 The JSON environment and benchmark records must prove the architecture, concrete
-devices, backend, device count, commit, and dataset fingerprint. A label alone
+devices, backend, device count, commit, and dataset fingerprint. New evidence
+uses schema `2026-08-13+3`, which records each full JAX device description plus
+its normalized JAX platform. A label alone
 does not satisfy a platform gate. CPU runs build with
 `LINEAR_DAG_REQUIRE_FFI_CPU=1` and exercise pure JAX plus CPU FFI. GPU runs set
 the private benchmark platform to `gpu`, exercise pure JAX, and record that no
 accelerator-specific LinearARG backend exists.
+
+The evaluator expands these attestations into an explicit matrix over both
+cache states, `matmat` and `rmatmat`, $K\in\{4,20\}$, concrete backend,
+`float32`, and required device count. Every matrix key needs one packed row and
+one retained exact-ragged row. Missing or ambiguous rows block promotion. RHE
+ratios remain phase-matched diagnostics and do not use the AC8.3 product
+threshold.
 
 ## Invocation
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -10,14 +11,13 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 
 from tests.jax.bench._promotion import (
     BenchmarkRecord,
-    build_promotion_pytest_command,
     CachePolicy,
-    compute_dataset_fingerprint,
     DatasetFingerprint,
     Decision,
     EnvironmentState,
@@ -25,13 +25,18 @@ from tests.jax.bench._promotion import (
     evaluate_ratio_gates,
     GateFailureReason,
     GateStatus,
-    is_git_dirty,
-    load_evidences,
     PerformanceMetrics,
     PromotionEvidence,
     Representation,
+    required_product_gate_keys,
     TimedPhase,
     TimingPhase,
+)
+from tests.jax.bench._promotion_io import (
+    build_promotion_pytest_command,
+    compute_dataset_fingerprint,
+    is_git_dirty,
+    load_evidences,
 )
 
 
@@ -97,6 +102,7 @@ def _row(
         metric=PerformanceMetrics(),
         numeric_passed=True,
         status=status,
+        notes=json.dumps({"input_sha256": "f" * 64}),
     )
 
 
@@ -111,7 +117,7 @@ def test_dataset_fingerprint_does_not_load_full_payload(tmp_path: Path, monkeypa
             "n_variants": [6, 7, 8],
         }
     )
-    monkeypatch.setattr("tests.jax.bench._promotion.list_blocks", lambda *_: metadata)
+    monkeypatch.setattr("tests.jax.bench._promotion_io.list_blocks", lambda *_: metadata)
 
     first = compute_dataset_fingerprint(h5_path)
     second = compute_dataset_fingerprint(h5_path)
@@ -126,12 +132,12 @@ def test_dataset_fingerprint_does_not_load_full_payload(tmp_path: Path, monkeypa
 def test_dataset_fingerprint_rejects_invalid_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     h5_path = tmp_path / "fixture.h5"
     h5_path.write_bytes(b"abc")
-    monkeypatch.setattr("tests.jax.bench._promotion.list_blocks", lambda *_: pl.DataFrame({"block_name": ["blk0"]}))
+    monkeypatch.setattr("tests.jax.bench._promotion_io.list_blocks", lambda *_: pl.DataFrame({"block_name": ["blk0"]}))
     with pytest.raises(ValueError, match="missing sample-count"):
         compute_dataset_fingerprint(h5_path)
 
     monkeypatch.setattr(
-        "tests.jax.bench._promotion.list_blocks", lambda *_: pl.DataFrame({"n_samples": [1], "block_name": ["blk0"]})
+        "tests.jax.bench._promotion_io.list_blocks", lambda *_: pl.DataFrame({"n_samples": [1], "block_name": ["blk0"]})
     )
     with pytest.raises(ValueError, match="missing variant-count"):
         compute_dataset_fingerprint(h5_path)
@@ -181,13 +187,152 @@ def test_schema_round_trip_and_unknown_schema_rejected() -> None:
             ),
         ),
     )
-    restored = PromotionEvidence.from_json(evidence.to_json(), allow_repo_mismatch=True)
+    restored = PromotionEvidence.from_json(evidence.to_json())
     assert restored.schema_version == evidence.schema_version
 
     payload = evidence.to_dict()
     payload["schema_version"] = "2030-01-01"
     with pytest.raises(ValueError, match="unknown schema"):
-        PromotionEvidence.from_dict(payload, allow_repo_mismatch=True)
+        PromotionEvidence.from_dict(payload)
+
+
+def test_schema_rejects_outer_and_timed_phase_disagreement() -> None:
+    payload = _row(candidate_commit="test").to_dict()
+    payload["timed"]["phase"] = TimingPhase.FIRST_EXECUTION.value
+
+    with pytest.raises(ValueError, match="timed phase.*must equal.*record phase"):
+        BenchmarkRecord.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [
+        ("evidence", "dirty_worktree"),
+        ("environment", "dirty_worktree"),
+        ("record", "dirty_worktree"),
+        ("record", "numeric_passed"),
+    ],
+)
+def test_schema_rejects_non_boolean_fields(section: str, field: str) -> None:
+    evidence = PromotionEvidence(
+        schema_version="2026-08-13+2",
+        candidate_commit="test",
+        dirty_worktree=False,
+        behavioral_reference_commit="b68e7da",
+        dataset=_dataset(),
+        produced_at_utc="2026-08-19T12:00:00+00:00",
+        cache_label=CachePolicy.FRESH.value,
+        environment=_metadata_env(),
+        records=(_row(candidate_commit="test"),),
+    )
+    payload = evidence.to_dict()
+    target = payload if section == "evidence" else payload["records"][0] if section == "record" else payload[section]
+    target[field] = 1
+
+    with pytest.raises(ValueError, match=f"{field}.*bool"):
+        PromotionEvidence.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("cache_policy", CachePolicy.REUSED.value, "row cache_policy mismatch"),
+        ("platform_label", "other-platform", "row platform_label mismatch"),
+        ("dirty_worktree", True, "row dirty_worktree mismatch"),
+    ],
+)
+def test_evidence_rejects_outer_record_context_disagreement(field: str, value: object, message: str) -> None:
+    row = replace(_row(candidate_commit="test"), **{field: value})
+
+    with pytest.raises(ValueError, match=message):
+        PromotionEvidence(
+            schema_version="2026-08-13+2",
+            candidate_commit="test",
+            dirty_worktree=False,
+            behavioral_reference_commit="b68e7da",
+            dataset=_dataset(),
+            produced_at_utc="2026-08-19T12:00:00+00:00",
+            cache_label=CachePolicy.FRESH.value,
+            environment=_metadata_env(),
+            records=(row,),
+        )
+
+
+def test_evidence_rejects_environment_context_disagreement() -> None:
+    environment = replace(_metadata_env(), dirty_worktree=True)
+
+    with pytest.raises(ValueError, match="environment dirty_worktree mismatch"):
+        PromotionEvidence(
+            schema_version="2026-08-13+2",
+            candidate_commit="test",
+            dirty_worktree=False,
+            behavioral_reference_commit="b68e7da",
+            dataset=_dataset(),
+            produced_at_utc="2026-08-19T12:00:00+00:00",
+            cache_label=CachePolicy.FRESH.value,
+            environment=environment,
+            records=(_row(candidate_commit="test"),),
+        )
+
+    with pytest.raises(ValueError, match="environment cache_policy mismatch"):
+        PromotionEvidence(
+            schema_version="2026-08-13+2",
+            candidate_commit="test",
+            dirty_worktree=False,
+            behavioral_reference_commit="b68e7da",
+            dataset=_dataset(),
+            produced_at_utc="2026-08-19T12:00:00+00:00",
+            cache_label=CachePolicy.FRESH.value,
+            environment=replace(_metadata_env(), cache_policy=CachePolicy.REUSED.value),
+            records=(_row(candidate_commit="test"),),
+        )
+
+
+def test_environment_rejects_architecture_and_device_mislabels() -> None:
+    with pytest.raises(ValueError, match="arm64-cpu.*x86_64"):
+        EnvironmentState(
+            platform_label="arm64-cpu",
+            python_version="3.12",
+            numpy_version="2.1",
+            jax_version="0.11",
+            jaxlib_version="0.11",
+            os_name="posix",
+            machine="x86_64",
+            architecture="Linux-x86_64",
+            xla_flags="",
+            devices=("TFRT_CPU_0",),
+            device_platforms=("cpu",),
+            xla_cache_dir=None,
+            command="pytest",
+            dirty_worktree=False,
+        )
+
+    with pytest.raises(ValueError, match="forced-two-device-cpu.*at least 2"):
+        EnvironmentState(
+            platform_label="forced-two-device-cpu",
+            python_version="3.12",
+            numpy_version="2.1",
+            jax_version="0.11",
+            jaxlib_version="0.11",
+            os_name="posix",
+            machine="arm64",
+            architecture="macOS-arm64",
+            xla_flags="--xla_force_host_platform_device_count=2",
+            devices=("TFRT_CPU_0",),
+            device_platforms=("cpu",),
+            xla_cache_dir=None,
+            command="pytest",
+            dirty_worktree=False,
+        )
+
+
+def test_promotion_functional_core_has_no_imperative_dependencies() -> None:
+    core_path = Path(__file__).with_name("_promotion.py")
+    source = core_path.read_text(encoding="utf-8")
+
+    assert importlib.util.find_spec("tests.jax.bench._promotion_io") is not None
+    for forbidden in ("import os", "import platform", "import subprocess", "import jax", "list_blocks", "write_text("):
+        assert forbidden not in source
 
 
 def test_performance_metrics_round_trip_stablehlo_bytes() -> None:
@@ -272,9 +417,10 @@ def test_ratio_gate_pass_boundaries_and_missing_baseline() -> None:
         records=(exact, packed_ok),
     )
     decision, gates, blockers = evaluate_ratio_gates(evidence, required_ratio=1.20)
-    assert decision == Decision.PROMOTE
-    assert blockers == 0
-    assert gates and all(gate.status == GateStatus.PASS for gate in gates)
+    assert decision == Decision.CONTINUE_COEXISTENCE
+    boundary_gate = next(gate for gate in gates if "operation=matmat" in gate.gate and "k=4" in gate.gate)
+    assert boundary_gate.status is GateStatus.PASS
+    assert blockers == 3
 
     evidence_fail = PromotionEvidence(
         schema_version="2026-08-13+2",
@@ -289,8 +435,11 @@ def test_ratio_gate_pass_boundaries_and_missing_baseline() -> None:
     )
     decision_bad, gates_bad, blockers_bad = evaluate_ratio_gates(evidence_fail, required_ratio=1.20)
     assert decision_bad == Decision.CONTINUE_COEXISTENCE
-    assert blockers_bad == 1
-    assert gates_bad[0].status == GateStatus.FAIL
+    assert blockers_bad == 4
+    assert (
+        next(gate for gate in gates_bad if "operation=matmat" in gate.gate and "k=4" in gate.gate).status
+        == GateStatus.FAIL
+    )
 
     missing = PromotionEvidence(
         schema_version="2026-08-13+2",
@@ -305,9 +454,77 @@ def test_ratio_gate_pass_boundaries_and_missing_baseline() -> None:
     )
     decision_missing, gates_missing, blockers_missing = evaluate_ratio_gates(missing)
     assert decision_missing == Decision.CONTINUE_COEXISTENCE
-    assert blockers_missing == 1
-    assert gates_missing[0].status == GateStatus.MISSING
-    assert gates_missing[0].reason == f"{GateFailureReason.MISSING_EXACT.value} for packed warm measurement"
+    assert blockers_missing == 4
+    assert all(gate.status == GateStatus.MISSING for gate in gates_missing)
+    assert GateFailureReason.MISSING_EVIDENCE.value in gates_missing[0].reason
+
+
+def test_ratio_gate_marks_incomplete_product_workload_matrix_missing() -> None:
+    evidence = PromotionEvidence(
+        schema_version="2026-08-13+2",
+        candidate_commit="test",
+        dirty_worktree=False,
+        behavioral_reference_commit="b68e7da",
+        dataset=_dataset(),
+        produced_at_utc="2026-08-19T12:00:00+00:00",
+        cache_label=CachePolicy.FRESH.value,
+        environment=_metadata_env(),
+        records=(
+            _row(candidate_commit="test", representation=Representation.PACKED_CANDIDATE.value),
+            _row(candidate_commit="test", representation=Representation.RETAINED_EXACT_RAGGED.value),
+        ),
+    )
+
+    decision, gates, blockers = evaluate_ratio_gates(evidence)
+
+    assert decision is Decision.CONTINUE_COEXISTENCE
+    assert blockers > 0
+    assert any(gate.status is GateStatus.MISSING and "rmatmat" in gate.gate for gate in gates)
+    assert any(gate.status is GateStatus.MISSING and "k=20" in gate.gate for gate in gates)
+
+
+def test_rhe_ratio_failure_is_diagnostic_and_nonblocking() -> None:
+    product_exact = _row(
+        candidate_commit="test",
+        representation=Representation.RETAINED_EXACT_RAGGED.value,
+        seconds=1.0,
+    )
+    product_packed = _row(
+        candidate_commit="test",
+        representation=Representation.PACKED_CANDIDATE.value,
+        seconds=1.0,
+    )
+    rhe_exact = replace(
+        product_exact,
+        record_id="rhe-exact",
+        operation="rhe",
+        workload_size=4,
+    )
+    rhe_packed = replace(
+        product_packed,
+        record_id="rhe-packed",
+        operation="rhe",
+        workload_size=4,
+        timed=TimedPhase(phase=TimingPhase.WARM_EXECUTION.value, seconds=10.0),
+    )
+    evidence = PromotionEvidence(
+        schema_version="2026-08-13+2",
+        candidate_commit="test",
+        dirty_worktree=False,
+        behavioral_reference_commit="b68e7da",
+        dataset=_dataset(),
+        produced_at_utc="2026-08-19T12:00:00+00:00",
+        cache_label=CachePolicy.FRESH.value,
+        environment=_metadata_env(),
+        records=(product_exact, product_packed, rhe_exact, rhe_packed),
+    )
+
+    _, gates, blockers = evaluate_ratio_gates(evidence)
+    rhe_gate = next(gate for gate in gates if "rhe" in gate.gate)
+
+    assert rhe_gate.status is GateStatus.FAIL
+    assert rhe_gate.blocking is False
+    assert blockers == sum(gate.blocking and gate.status is not GateStatus.PASS for gate in gates)
 
 
 def test_evidence_set_require_single_commit_and_collects_gate_failures() -> None:
@@ -369,6 +586,138 @@ def test_evidence_set_require_single_commit_and_collects_gate_failures() -> None
     decision_empty = evaluate_evidence_set(())
     assert decision_empty.decision == Decision.REJECT
     assert decision_empty.blocker_count == 1
+
+
+def test_evidence_set_requires_all_platform_cache_workload_keys() -> None:
+    evidence = PromotionEvidence(
+        schema_version="2026-08-13+2",
+        candidate_commit="abc",
+        dirty_worktree=False,
+        behavioral_reference_commit="b68e7da",
+        dataset=_dataset(),
+        produced_at_utc="2026-08-19T12:00:00+00:00",
+        cache_label=CachePolicy.FRESH.value,
+        environment=EnvironmentState(
+            platform_label="arm64-cpu",
+            python_version="3.12",
+            numpy_version="2.1",
+            jax_version="0.11",
+            jaxlib_version="0.11",
+            os_name="posix",
+            machine="arm64",
+            architecture="macOS-arm64",
+            xla_flags="",
+            devices=("TFRT_CPU_0",),
+            device_platforms=("cpu",),
+            xla_cache_dir="<cache>",
+            command="pytest",
+            dirty_worktree=False,
+        ),
+        records=(
+            replace(_row(candidate_commit="abc", device_count=1), platform_label="arm64-cpu"),
+            replace(
+                _row(
+                    candidate_commit="abc",
+                    representation=Representation.RETAINED_EXACT_RAGGED.value,
+                    device_count=1,
+                ),
+                platform_label="arm64-cpu",
+            ),
+        ),
+    )
+
+    decision = evaluate_evidence_set((evidence,))
+
+    assert decision.decision is Decision.CONTINUE_COEXISTENCE
+    missing = {gate.gate for gate in decision.gates if gate.status is GateStatus.MISSING}
+    assert any("cache=reused" in gate for gate in missing)
+    assert any("platform=x86_64-cpu" in gate for gate in missing)
+    assert any("platform=gpu" in gate for gate in missing)
+    assert any("operation=rmatmat" in gate for gate in missing)
+    assert any("k=20" in gate for gate in missing)
+    assert any("backend=ffi_cpu" in gate for gate in missing)
+    assert any("dtype=float32" in gate for gate in missing)
+    assert any("devices=2" in gate for gate in missing)
+
+
+def test_evidence_set_promotes_only_when_every_required_product_key_passes() -> None:
+    environment_specs = {
+        "arm64-cpu": ("arm64", ("TFRT_CPU_0",), ("cpu",)),
+        "x86_64-cpu": ("x86_64", ("TFRT_CPU_0",), ("cpu",)),
+        "forced-two-device-cpu": ("arm64", ("TFRT_CPU_0", "TFRT_CPU_1"), ("cpu", "cpu")),
+        "gpu": ("x86_64", ("cuda:0",), ("gpu",)),
+    }
+    evidences = []
+    for platform_label, (machine, devices, device_platforms) in environment_specs.items():
+        for cache_policy in CachePolicy:
+            records = []
+            keys = tuple(
+                key
+                for key in required_product_gate_keys()
+                if key.platform == platform_label and key.cache_policy == cache_policy.value
+            )
+            for key in keys:
+                for representation, seconds in (
+                    (Representation.PACKED_CANDIDATE.value, 1.2),
+                    (Representation.RETAINED_EXACT_RAGGED.value, 1.0),
+                ):
+                    records.append(
+                        replace(
+                            _row(
+                                candidate_commit="candidate",
+                                representation=representation,
+                                operation=key.operation,
+                                workload_size=key.workload_size,
+                                requested_backend=key.backend,
+                                resolved_backend=key.backend,
+                                device_count=key.device_count,
+                                seconds=seconds,
+                            ),
+                            record_id=f"{platform_label}|{cache_policy.value}|{representation}|{key.gate_name}",
+                            platform_label=platform_label,
+                            cache_policy=cache_policy.value,
+                        )
+                    )
+            evidences.append(
+                PromotionEvidence(
+                    schema_version="2026-08-13+2",
+                    candidate_commit="candidate",
+                    dirty_worktree=False,
+                    behavioral_reference_commit="b68e7da",
+                    dataset=_dataset(),
+                    produced_at_utc="2026-08-19T12:00:00+00:00",
+                    cache_label=cache_policy.value,
+                    environment=EnvironmentState(
+                        platform_label=platform_label,
+                        python_version="3.12",
+                        numpy_version="2.1",
+                        jax_version="0.11",
+                        jaxlib_version="0.11",
+                        os_name="posix",
+                        machine=machine,
+                        architecture=f"test-{machine}",
+                        xla_flags=(
+                            "--xla_force_host_platform_device_count=2"
+                            if platform_label == "forced-two-device-cpu"
+                            else ""
+                        ),
+                        devices=devices,
+                        device_platforms=device_platforms,
+                        xla_cache_dir="<cache>",
+                        command="pytest",
+                        dirty_worktree=False,
+                        cache_policy=cache_policy.value,
+                    ),
+                    records=tuple(records),
+                )
+            )
+
+    decision = evaluate_evidence_set(tuple(evidences))
+
+    assert decision.decision is Decision.PROMOTE
+    assert decision.blocker_count == 0
+    assert len(tuple(gate for gate in decision.gates if gate.blocking)) == 56
+    assert all(gate.status is GateStatus.PASS for gate in decision.gates)
 
 
 def test_load_evidences_round_trip(tmp_path: Path) -> None:
@@ -527,6 +876,38 @@ def test_aggregate_child_fragments_rejects_mismatched_dataset(tmp_path: Path) ->
         aggregate_child_fragments(tuple(paths), platform_label="local-platform")
 
 
+def test_aggregate_child_fragments_rejects_numeric_stack_or_device_mismatch(tmp_path: Path) -> None:
+    from tests.jax.bench.test_promotion_benchmarks import aggregate_child_fragments
+
+    records = (
+        _row(candidate_commit="candidate"),
+        _row(candidate_commit="candidate", representation=Representation.RETAINED_EXACT_RAGGED.value),
+    )
+    environments = (
+        _metadata_env(),
+        replace(_metadata_env(), numpy_version="9.9.9", devices=("different-device",)),
+    )
+    paths = []
+    for index, (record, environment) in enumerate(zip(records, environments, strict=True)):
+        evidence = PromotionEvidence(
+            schema_version="2026-08-13+2",
+            candidate_commit="candidate",
+            dirty_worktree=False,
+            behavioral_reference_commit="b68e7da",
+            dataset=_dataset(),
+            produced_at_utc="2026-08-19T12:00:00+00:00",
+            cache_label=CachePolicy.FRESH.value,
+            environment=environment,
+            records=(record,),
+        )
+        path = tmp_path / f"environment-{index}.json"
+        path.write_text(evidence.to_json(), encoding="utf-8")
+        paths.append(path)
+
+    with pytest.raises(ValueError, match="child environment mismatch.*numpy_version"):
+        aggregate_child_fragments(tuple(paths), platform_label="local-platform")
+
+
 def test_aggregate_child_fragments_marks_rhe_parity_failure(tmp_path: Path) -> None:
     from tests.jax.bench.test_promotion_benchmarks import aggregate_child_fragments
 
@@ -625,6 +1006,42 @@ def test_render_promotion_markdown_keeps_phases_separate() -> None:
     assert "| first_execution |" in markdown
     assert "| warm_execution |" in markdown
     assert "cold_total" not in markdown
+
+
+def test_format_markdown_decision_uses_actual_newlines() -> None:
+    from tests.jax.bench._promotion import format_markdown_decision, GateResult, PromotionDecision
+
+    markdown = format_markdown_decision(
+        PromotionDecision(
+            decision=Decision.CONTINUE_COEXISTENCE,
+            gates=(GateResult(gate="ratio", status=GateStatus.FAIL, reason="too slow"),),
+            blocker_count=1,
+        )
+    )
+
+    assert "\\n" not in markdown
+    assert markdown.splitlines()[:2] == ["Decision: continue_coexistence", "Blockers: 1"]
+
+
+def test_product_inputs_are_keyed_only_by_shape_operation_and_k() -> None:
+    from tests.jax.bench import test_parallel_benchmarks as benchmarks
+
+    shape = (7, 11)
+    variant_inputs, sample_inputs = benchmarks._benchmark_inputs(shape, k_values=(4, 20))
+
+    np.testing.assert_array_equal(variant_inputs[4], benchmarks._benchmark_input(shape, operation="matmat", k=4))
+    np.testing.assert_array_equal(variant_inputs[20], benchmarks._benchmark_input(shape, operation="matmat", k=20))
+    np.testing.assert_array_equal(sample_inputs[4], benchmarks._benchmark_input(shape, operation="rmatmat", k=4))
+    np.testing.assert_array_equal(sample_inputs[20], benchmarks._benchmark_input(shape, operation="rmatmat", k=20))
+
+
+def test_product_numeric_parity_rejects_finite_but_wrong_output() -> None:
+    from tests.jax.bench import test_parallel_benchmarks as benchmarks
+
+    expected = np.asarray([[1.0, 2.0]], dtype=np.float32)
+    observed = np.asarray([[1.0, 3.0]], dtype=np.float32)
+
+    assert benchmarks._product_numeric_parity(observed, expected) is False
 
 
 def test_local_benchmark_gates_name_memory_ir_and_numerical_failures() -> None:
@@ -1039,9 +1456,15 @@ def test_committed_promotion_decision_matches_normalized_evidence() -> None:
         expected_decision = Decision.PROMOTE
 
     assert expected_decision is Decision.CONTINUE_COEXISTENCE
-    assert local_decision.blocker_count == 36
+    assert local_decision.blocker_count == 56
     assert local_decision.gates
-    assert all(gate.status is GateStatus.FAIL for gate in local_decision.gates)
+    blocking_gates = tuple(gate for gate in local_decision.gates if gate.blocking)
+    diagnostic_gates = tuple(gate for gate in local_decision.gates if not gate.blocking)
+    assert len(blocking_gates) == 56
+    assert sum(gate.status is GateStatus.FAIL for gate in blocking_gates) == 32
+    assert sum(gate.status is GateStatus.MISSING for gate in blocking_gates) == 24
+    assert len(diagnostic_gates) == 4
+    assert all(gate.status is GateStatus.FAIL for gate in diagnostic_gates)
     assert f"Decision: `{expected_decision.value}`" in markdown
     assert "promotable=false" in markdown
     for evidence_path in evidence_paths:

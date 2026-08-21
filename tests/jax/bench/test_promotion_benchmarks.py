@@ -19,16 +19,16 @@ import pytest
 
 from linear_dag.core.jaxlinarg.packing import PACKED_COMPONENT_NAMES
 from tests.jax.bench._promotion import (
-    build_promotion_pytest_command,
     Decision,
+    environment_comparison_key,
     evaluate_ratio_gates,
     GateResult,
     GateStatus,
     PromotionEvidence,
     Representation,
     TimingPhase,
-    write_evidence_fragment,
 )
+from tests.jax.bench._promotion_io import build_promotion_pytest_command, load_evidence, write_evidence_fragment
 
 
 @dataclass(frozen=True)
@@ -113,7 +113,7 @@ def aggregate_child_fragments(
     evidences = []
     for path in paths:
         try:
-            evidences.append(PromotionEvidence.from_json(path, allow_repo_mismatch=True))
+            evidences.append(load_evidence(path))
         except (OSError, ValueError) as error:
             raise ValueError(f"child fragment {path.name} is invalid: {error}") from error
 
@@ -129,8 +129,31 @@ def aggregate_child_fragments(
             raise ValueError("child dirty-worktree status mismatch")
         if evidence.environment.platform_label != platform_label:
             raise ValueError("child platform label mismatch")
+        if environment_comparison_key(evidence.environment) != environment_comparison_key(first.environment):
+            fields = (
+                "platform_label",
+                "python_version",
+                "jax_version",
+                "jaxlib_version",
+                "numpy_version",
+                "os_name",
+                "machine",
+                "architecture",
+                "xla_flags",
+                "xla_cache_dir",
+                "devices",
+                "device_platforms",
+                "cache_policy",
+                "dirty_worktree",
+            )
+            mismatches = [
+                field for field in fields if getattr(evidence.environment, field) != getattr(first.environment, field)
+            ]
+            raise ValueError(f"child environment mismatch: {', '.join(mismatches)}")
 
-    records = _apply_rhe_parity(tuple(record for evidence in evidences for record in evidence.records))
+    records = tuple(record for evidence in evidences for record in evidence.records)
+    _validate_product_input_parity(records)
+    records = _apply_rhe_parity(records)
     return PromotionEvidence(
         schema_version=first.schema_version,
         candidate_commit=first.candidate_commit,
@@ -142,6 +165,22 @@ def aggregate_child_fragments(
         environment=first.environment,
         records=records,
     )
+
+
+def _validate_product_input_parity(records: tuple[Any, ...]) -> None:
+    hashes: dict[tuple[str, int | None, str], set[str]] = {}
+    for record in records:
+        if record.operation not in {"matmat", "rmatmat"}:
+            continue
+        try:
+            input_sha256 = str(json.loads(record.notes)["input_sha256"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"product record {record.record_id!r} lacks input_sha256") from error
+        key = (record.operation, record.workload_size, record.dtype)
+        hashes.setdefault(key, set()).add(input_sha256)
+    for key, observed_hashes in hashes.items():
+        if len(observed_hashes) != 1:
+            raise ValueError(f"product input parity mismatch for {key}: {sorted(observed_hashes)}")
 
 
 def _apply_rhe_parity(records: tuple[Any, ...]) -> tuple[Any, ...]:
