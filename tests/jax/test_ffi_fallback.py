@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import warnings
 
+from collections.abc import Sequence
+from typing import cast
+
 import jax
 import numpy as np
 import pytest
@@ -18,6 +21,7 @@ from linear_dag.core.jaxlinarg.ingress import (
     from_block_arrays,
     read_hdf5_block_arrays,
 )
+from linear_dag.core.jaxlinarg.packing import LinearARGBlockArrays
 
 
 def _minimal_operator_kwargs() -> dict:
@@ -83,7 +87,7 @@ def test_packed_explicit_ffi_fails_before_consuming_source_blocks(monkeypatch):
     mesh = Mesh(np.asarray(jax.devices()[:1]), ("graph",))
     with pytest.raises(RuntimeError, match="packed.*packed targets are missing"):
         _packed_from_block_arrays(
-            FailOnIteration(),
+            cast(Sequence[LinearARGBlockArrays], FailOnIteration()),
             mesh=mesh,
             backend=Backend.FFI_CPU,
         )

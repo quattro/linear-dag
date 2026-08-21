@@ -1,6 +1,6 @@
 # pattern: Functional Core
 
-from .brick_graph import BrickGraph as BrickGraph
+from .brick_graph import BrickGraph as BrickGraph  # ty: ignore[unresolved-import]  # Cython extension
 from .jaxlinarg import (
     Backend as Backend,
     JaxGRMOperator as JaxGRMOperator,
@@ -14,8 +14,8 @@ from .parallel_processing import (
     GRMOperator as GRMOperator,
     ParallelOperator as ParallelOperator,
 )
-from .recombination import Recombination as Recombination
-from .solve import (
+from .recombination import Recombination as Recombination  # ty: ignore[unresolved-import]  # Cython extension
+from .solve import (  # ty: ignore[unresolved-import]  # Cython extension
     spinv_triangular as spinv_triangular,
     spsolve_backward_triangular as spsolve_backward_triangular,
     spsolve_forward_triangular as spsolve_forward_triangular,

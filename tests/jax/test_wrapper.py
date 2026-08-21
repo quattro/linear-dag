@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -79,7 +80,7 @@ def _lineararg_with_graph_shape(*, n_nodes: int, n_edges: int) -> LinearARG:
         sparse.csc_matrix((np.ones(n_edges, dtype=np.float32), (rows, cols)), shape=(n_nodes, n_nodes)),
         variant_indices=np.array([0], dtype=np.int32),
         flip=np.array([False]),
-        n_samples=np.int32(1),
+        n_samples=1,
         nonunique_indices=np.arange(n_nodes, dtype=np.int32),
     )
 
@@ -126,7 +127,7 @@ def test_jax_parallel_operator_construction_rejects_fake_mesh():
         JaxParallelOperator(
             blocks=(block,),
             variant_offsets=(0, 1),
-            mesh=fake_mesh,
+            mesh=cast(Mesh, fake_mesh),
             backend=Backend.PURE_JAX,
             block_ranges=((0, 1),),
         )

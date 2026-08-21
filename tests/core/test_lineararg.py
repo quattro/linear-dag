@@ -1,15 +1,29 @@
+import shutil
+import subprocess
+
+from os import PathLike
+from typing import cast
+
 import h5py
 import numpy as np
 import polars as pl
 import pytest
-import shutil
-import subprocess
 
 from scipy.sparse import csc_matrix
+from scipy.sparse.linalg import aslinearoperator
 
 from linear_dag.core.lineararg import LinearARG, list_blocks
 from linear_dag.core.operators import get_diploid_operator
 from linear_dag.genotype import read_vcf
+
+
+def _from_vcf_with_genotypes(path: str | PathLike[str]) -> tuple[LinearARG, csc_matrix]:
+    result = LinearARG.from_vcf(path, return_genotypes=True)
+    assert isinstance(result, tuple)
+    linarg, genotypes = result
+    assert isinstance(linarg, LinearARG)
+    assert isinstance(genotypes, csc_matrix)
+    return linarg, genotypes
 
 
 def test_lineararg(linarg_h5_path):
@@ -88,7 +102,7 @@ def test_read_vcf_rejects_multiallelic_bcf_by_default(test_data_dir, tmp_path):
 def test_from_vcf(test_data_dir):
     """Test creating a LinearARG from a VCF file."""
     vcf_path = test_data_dir / "1kg_small.vcf"
-    linarg, genotypes = LinearARG.from_vcf(vcf_path, return_genotypes=True)
+    linarg, genotypes = _from_vcf_with_genotypes(vcf_path)
 
     assert isinstance(linarg, LinearARG)
     assert isinstance(genotypes, csc_matrix)
@@ -137,7 +151,7 @@ def test_read_write_matmul(tmp_path, test_data_dir):
     Also tests all matrix multiplication variants.
     """
     vcf_path = test_data_dir / "1kg_small.vcf"
-    linarg, genotypes = LinearARG.from_vcf(vcf_path, return_genotypes=True)
+    linarg, genotypes = _from_vcf_with_genotypes(vcf_path)
 
     # 1. Save the linear arg to a temporary file
     temp_h5_path = str(tmp_path / "test_linarg")
@@ -152,6 +166,8 @@ def test_read_write_matmul(tmp_path, test_data_dir):
     assert loaded_linarg.shape == linarg.shape
     print(loaded_linarg.iids)
     print(linarg.iids)
+    assert loaded_linarg.iids is not None
+    assert linarg.iids is not None
     assert loaded_linarg.iids.len() == linarg.iids.len()
 
     # 3. Test multiplications
@@ -191,7 +207,7 @@ def test_read_write_matmul(tmp_path, test_data_dir):
     np.testing.assert_allclose(res_mat_loaded_T, res_mat_genotypes_T, rtol=1e-6)
 
     # Number of carriers
-    diploid_genotypes = get_diploid_operator(genotypes) @ np.eye(genotypes.shape[1])
+    diploid_genotypes = get_diploid_operator(aslinearoperator(genotypes)) @ np.eye(genotypes.shape[1])
     num_carriers = np.sum(diploid_genotypes > 0, axis=0)
     assert np.all(num_carriers == loaded_linarg.number_of_carriers())
 
@@ -199,7 +215,7 @@ def test_read_write_matmul(tmp_path, test_data_dir):
 def test_get_carriers_subset(test_data_dir):
     """Test get_carriers_subset method against linarg @ indicator."""
     vcf_path = test_data_dir / "1kg_small.vcf"
-    linarg, genotypes = LinearARG.from_vcf(vcf_path, return_genotypes=True)
+    linarg, genotypes = _from_vcf_with_genotypes(vcf_path)
 
     # Test with a subset of variant indices
     np.random.seed(42)
@@ -237,7 +253,7 @@ def test_get_carriers_subset(test_data_dir):
 
 def test_lineararg_copy_independent_arrays(test_data_dir):
     vcf_path = test_data_dir / "1kg_small.vcf"
-    linarg = LinearARG.from_vcf(vcf_path)
+    linarg = cast(LinearARG, LinearARG.from_vcf(vcf_path))
     linarg_copy = linarg.copy()
 
     assert isinstance(linarg_copy, LinearARG)
@@ -257,9 +273,9 @@ def test_lineararg_copy_independent_arrays(test_data_dir):
 
 def test_add_individual_nodes_propagates_explicit_sex(test_data_dir):
     vcf_path = test_data_dir / "1kg_small.vcf"
-    linarg = LinearARG.from_vcf(vcf_path)
+    linarg = cast(LinearARG, LinearARG.from_vcf(vcf_path))
     n_individuals = linarg.shape[0] // 2
-    sex = np.zeros(n_individuals, dtype=np.uint)
+    sex = np.zeros(n_individuals, dtype=np.int32)
     sex[::3] = 1  # include a subset of males to exercise haplotype count logic
 
     linarg_with_individuals = linarg.add_individual_nodes(sex=sex)

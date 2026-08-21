@@ -1,3 +1,6 @@
+# pattern: Mixed (unavoidable)
+# Reason: PRS effect-file ingress and operator execution share one established
+# public workflow module.
 import logging
 
 from typing import Optional
@@ -98,7 +101,7 @@ def run_prs(
     beta_path: str,
     block_metadata: pl.DataFrame,
     score_cols: list[str],
-    num_processes: int,
+    num_processes: int | None,
     logger: Optional[logging.Logger] = None,
 ) -> pl.DataFrame:
     """Compute polygenic risk scores for selected traits/effect columns.

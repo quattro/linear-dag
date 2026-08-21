@@ -1,3 +1,4 @@
+# pattern: Functional Core
 from typing import Optional, Tuple
 
 import numpy as np
@@ -94,7 +95,7 @@ def get_row_filter_operator(merge_operator: LinearOperator):
     return aslinearoperator(eye(num_matches > 0))
 
 
-def get_pairing_matrix(two_n: int) -> LinearOperator:
+def get_pairing_matrix(two_n: int) -> csr_matrix:
     """Build the pairing matrix that sums adjacent haplotype rows.
 
     Let $2n$ be the number of haplotype rows. The returned matrix

@@ -1,11 +1,12 @@
+# pattern: Functional Core
 import itertools
 import random
 
 from collections import defaultdict
 from dataclasses import dataclass
 
-import matplotlib.pyplot as plt
-import networkx as nx
+import matplotlib.pyplot as plt  # ty: ignore[unresolved-import]  # Optional visualization dependency
+import networkx as nx  # ty: ignore[unresolved-import]  # Optional experimental dependency
 import numpy as np
 
 from scipy.sparse import coo_matrix, eye
@@ -193,8 +194,11 @@ class linarg_add_sample:
                     nodes_to_search.append(child)
                     interval[child] = child_interval
         candidates = [node for node in interval.keys() if (interval[node] is not None) and (interval[node] != ())]
-        left_bound = np.array([interval[c][0] for c in candidates])
-        right_bound = np.array([interval[c][1] for c in candidates])
+        candidate_bounds = [interval[c] for c in candidates]
+        assert all(bound is not None for bound in candidate_bounds)
+        concrete_bounds = [bound for bound in candidate_bounds if bound is not None]
+        left_bound = np.array([bound[0] for bound in concrete_bounds])
+        right_bound = np.array([bound[1] for bound in concrete_bounds])
         candidate_intervals = Intervals(
             left_bound=left_bound, right_bound=right_bound, identifiers=np.array(candidates)
         )
@@ -229,11 +233,11 @@ class linarg_add_sample:
         """
         if visited is None:
             visited = set()
-        predecessors = set(self.predecessors(node))
+        predecessors = set(self.G.predecessors(node))
         for predecessor in predecessors:
             if predecessor not in visited:
                 visited.add(predecessor)
-                visited.update(get_all_predecessors(self, predecessor, visited))
+                visited.update(self.get_predecessors(predecessor, visited))
         return visited
 
     def correct_path_sum(self, mdc):

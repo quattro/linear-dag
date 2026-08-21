@@ -1,4 +1,4 @@
-# linear_arg_inference.py
+# pattern: Functional Core
 import logging
 import time
 import warnings
@@ -8,10 +8,10 @@ import polars as pl
 
 from scipy.sparse import csc_matrix, csr_matrix, eye
 
-from .brick_graph import BrickGraph
-from .one_summed_cy import linearize_brick_graph
-from .recombination import Recombination
-from .solve import spinv_make_triangular
+from .brick_graph import BrickGraph  # ty: ignore[unresolved-import]  # Cython extension
+from .one_summed_cy import linearize_brick_graph  # ty: ignore[unresolved-import]  # Cython extension
+from .recombination import Recombination  # ty: ignore[unresolved-import]  # Cython extension
+from .solve import spinv_make_triangular  # ty: ignore[unresolved-import]  # Cython extension
 
 
 def linear_arg_from_genotypes(

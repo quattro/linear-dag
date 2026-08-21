@@ -6,6 +6,8 @@ import shlex
 from argparse import Namespace
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import polars as pl
@@ -744,8 +746,6 @@ def test_estimate_h2g_jax_backend_uses_jax_grm_operator(tmp_path: Path, monkeypa
 
 
 def test_open_jax_grm_operator_keeps_exact_ragged_cli_route(monkeypatch):
-    from types import SimpleNamespace
-
     from linear_dag.core import jaxlinarg as jaxlinarg_module
     from linear_dag.core.jaxlinarg import Backend, JaxParallelOperator
     from linear_dag.core.jaxlinarg.ingress import _PackedJaxLinearARG
@@ -1241,7 +1241,7 @@ def test_assoc_parser_shape_via_main_with_monkeypatched_dispatch(monkeypatch):
     )
 
     assert rc == 0
-    parsed = captured["args"]
+    parsed = cast(argparse.Namespace, captured["args"])
     assert parsed.linarg_path == "linarg.h5"
     assert parsed.pheno == "pheno.tsv"
     assert parsed.pheno_name == ["iid", "height"]
@@ -1252,7 +1252,7 @@ def test_assoc_parser_shape_via_main_with_monkeypatched_dispatch(monkeypatch):
     assert parsed.recompute_ac is True
     assert parsed.out == "assoc_out"
     assert parsed.func is _fake_assoc_scan
-    assert captured["logger"].name == "cli-test"
+    assert cast(logging.Logger, captured["logger"]).name == "cli-test"
 
 
 def test_rhe_parser_shape_via_main_with_monkeypatched_dispatch(monkeypatch):
@@ -1295,7 +1295,7 @@ def test_rhe_parser_shape_via_main_with_monkeypatched_dispatch(monkeypatch):
     )
 
     assert rc == 0
-    parsed = captured["args"]
+    parsed = cast(argparse.Namespace, captured["args"])
     assert parsed.linarg_path == "linarg.h5"
     assert parsed.pheno == "pheno.tsv"
     assert parsed.pheno_col_nums == [0, 1]
@@ -1309,7 +1309,7 @@ def test_rhe_parser_shape_via_main_with_monkeypatched_dispatch(monkeypatch):
     assert parsed.bed_maf_log10_threshold == -4
     assert parsed.out == "rhe_out"
     assert parsed.func is _fake_estimate_h2g
-    assert captured["logger"].name == "cli-test"
+    assert cast(logging.Logger, captured["logger"]).name == "cli-test"
 
 
 def test_main_rejects_pheno_name_with_pheno_col_nums():

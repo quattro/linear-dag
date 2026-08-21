@@ -7,6 +7,7 @@ import io
 import zipfile
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -27,7 +28,7 @@ def test_custom_build_hook_warns_and_continues_when_optional_native_build_fails(
 
     with pytest.warns(RuntimeWarning, match="Could not build optional CPU FFI extension"):
         hatch_build.CustomBuildHook.initialize(
-            SimpleNamespace(target_name="wheel", root=str(tmp_path)),
+            cast(hatch_build.CustomBuildHook, SimpleNamespace(target_name="wheel", root=str(tmp_path))),
             "0.0.0",
             build_data,
         )
@@ -56,7 +57,7 @@ def test_custom_build_hook_does_not_include_stale_artifact_when_optional_build_f
 
     with pytest.warns(RuntimeWarning, match="Could not build optional CPU FFI extension"):
         hatch_build.CustomBuildHook.initialize(
-            SimpleNamespace(target_name="wheel", root=str(tmp_path)),
+            cast(hatch_build.CustomBuildHook, SimpleNamespace(target_name="wheel", root=str(tmp_path))),
             "0.0.0",
             build_data,
         )
@@ -79,7 +80,7 @@ def test_custom_build_hook_reraises_native_build_failure_when_required(
 
     with pytest.raises(RuntimeError, match="cannot compile extension"):
         hatch_build.CustomBuildHook.initialize(
-            SimpleNamespace(target_name="wheel", root=str(tmp_path)),
+            cast(hatch_build.CustomBuildHook, SimpleNamespace(target_name="wheel", root=str(tmp_path))),
             "0.0.0",
             build_data,
         )

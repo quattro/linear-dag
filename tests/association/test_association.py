@@ -2,12 +2,14 @@
 # Reason: Pure association assertions exercise real HDF5-backed parallel
 # operators and their process/shared-memory lifecycle.
 
+from typing import cast
+
 import numpy as np
 import polars as pl
 import pytest
 
 from scipy.sparse import csr_matrix
-from scipy.sparse.linalg import aslinearoperator
+from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 from linear_dag.association.blup import triangular_solver
 from linear_dag.association.gwas import get_gwas_beta_se, run_gwas, simple_gwas
@@ -406,7 +408,7 @@ def test_run_gwas_non_hwe_requires_heterozygote_counter():
         match="If assume_hwe is False, genotypes must expose n_individuals, iids, and number_of_heterozygotes\\(\\).",
     ):
         run_gwas(
-            genotypes=_InvalidNonHWEGenotypes(),
+            genotypes=cast(LinearOperator, _InvalidNonHWEGenotypes()),
             data=data.lazy(),
             pheno_cols=["phenotype1"],
             covar_cols=["intercept"],

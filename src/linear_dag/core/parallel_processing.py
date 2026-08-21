@@ -10,7 +10,9 @@ import warnings
 from dataclasses import dataclass, field
 from functools import cached_property
 from multiprocessing import cpu_count, Lock, Process, shared_memory, Value
-from typing import Callable, Dict, List, Optional, Tuple, Type
+from multiprocessing.synchronize import Lock as LockType
+from os import PathLike
+from typing import Callable, Dict, List, Mapping, Optional, Protocol, Tuple, Type
 
 import numpy as np
 import polars as pl
@@ -25,7 +27,7 @@ from .lineararg import (
     list_blocks,
     list_iids,
 )
-from .solve import spsolve_backward_triangular_matmat
+from .solve import spsolve_backward_triangular_matmat  # ty: ignore[unresolved-import]  # Cython extension
 
 FLAGS = {
     "wait": 0,
@@ -38,6 +40,12 @@ FLAGS = {
     "weighted_heterozygotes": 5,
 }
 assert len(np.unique([val for val in FLAGS.values()])) == len(FLAGS)
+
+
+class _SharedValue(Protocol):
+    """Structural type for synchronized multiprocessing scalar values."""
+
+    value: int | float
 
 
 @dataclass(frozen=True)
@@ -57,7 +65,7 @@ def _validate_num_processes(num_processes: Optional[int]) -> None:
 
 
 def _prepare_from_hdf5_context(
-    hdf5_file: str,
+    hdf5_file: str | PathLike,
     num_processes: Optional[int],
     maf_log10_threshold: Optional[int],
     block_metadata: Optional[pl.DataFrame],
@@ -91,15 +99,15 @@ def _prepare_from_hdf5_context(
         bed_regions=bed_regions,
         maf_log10_threshold=maf_log10_threshold,
         bed_maf_log10_threshold=bed_maf_log10_threshold,
-        num_samples=num_samples,
-        num_variants=num_variants,
+        num_samples=int(num_samples),
+        num_variants=int(num_variants),
         iids=list_iids(hdf5_file),
     )
 
 
 def _compute_filtered_variant_counts(
     block_metadata: pl.DataFrame,
-    hdf5_file: str,
+    hdf5_file: str | PathLike,
     maf_log10_threshold: Optional[float] = None,
     bed_regions: Optional[pl.DataFrame] = None,
     bed_maf_log10_threshold: Optional[float] = None,
@@ -140,12 +148,12 @@ class _SharedArrayHandle:
     """Encapsulates info needed to access a shared memory NumPy array."""
 
     name: str
-    lock: Lock
+    lock: LockType
     shape: Tuple[int, ...]
-    dtype: Type[np.generic]
+    dtype: np.dtype
     _np_args: dict  # extra args when accessing as an array
-    _shm: shared_memory.SharedMemory = None  # Backing SHM object (only in creator)
-    _opened_shm: shared_memory.SharedMemory = None  # Handle in current process
+    _shm: shared_memory.SharedMemory | None = None  # Backing SHM object (only in creator)
+    _opened_shm: shared_memory.SharedMemory | None = None  # Handle in current process
 
     def access_as_array(self) -> np.ndarray:
         """Attach to the shared memory and return a NumPy array view."""
@@ -185,7 +193,7 @@ class _SharedArrayHandle:
 class _ParallelManager:
     """Manager for coordinating parallel worker processes using shared memory."""
 
-    def __init__(self, num_processes: int, object_specification: Dict[str, Tuple[Tuple[int, ...], Type[np.generic]]]):
+    def __init__(self, num_processes: int, object_specification: Mapping[str, Tuple[Tuple[int, ...], np.dtype]]):
         self.num_processes = num_processes
         self.flags = [Value("i", 0) for _ in range(num_processes)]
         self.processes: List[Process] = []
@@ -193,7 +201,7 @@ class _ParallelManager:
         self.num_traits = Value("i", 0, lock=False)
 
         for name, (shape, dtype) in object_specification.items():
-            size = np.prod(shape) * np.dtype(dtype).itemsize
+            size = int(np.prod(shape)) * dtype.itemsize
             # Create the raw SHM object
             shm = shared_memory.SharedMemory(create=True, size=size)
             lock = Lock()
@@ -208,7 +216,7 @@ class _ParallelManager:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
-    def start_workers(self, flag: int = None) -> None:
+    def start_workers(self, flag: int) -> None:
         """Signal workers to do something."""
         for f in self.flags:
             f.value = flag
@@ -297,7 +305,7 @@ class ParallelOperator(LinearOperator):
     _manager: _ParallelManager
     _sample_data_handle: _SharedArrayHandle
     _variant_data_handle: _SharedArrayHandle
-    _num_traits: Value
+    _num_traits: _SharedValue
     _max_num_traits: int
     shape: tuple[int, int]
     dtype: np.dtype = np.dtype(np.float32)
@@ -552,9 +560,9 @@ class ParallelOperator(LinearOperator):
     def _worker(
         cls,
         handles: Dict[str, _SharedArrayHandle],
-        num_traits: Value,
-        flag: Value,
-        hdf5_file: str,
+        num_traits: _SharedValue,
+        flag: _SharedValue,
+        hdf5_file: str | PathLike,
         blocks: list,
         variant_offsets: list,
         maf_log10_threshold: Optional[float] = None,
@@ -617,7 +625,7 @@ class ParallelOperator(LinearOperator):
         linarg: LinearARG,
         sample_data: np.ndarray,
         variant_data: np.ndarray,
-        sample_lock: Lock,
+        sample_lock: LockType,
     ) -> None:
         result = linarg @ variant_data
         with sample_lock:
@@ -629,7 +637,7 @@ class ParallelOperator(LinearOperator):
         linarg: LinearARG,
         sample_data: np.ndarray,
         variant_data: np.ndarray,
-        sample_lock: Lock,
+        sample_lock: LockType,
     ) -> None:
         variant_data[:] = linarg.T @ sample_data
 
@@ -639,7 +647,7 @@ class ParallelOperator(LinearOperator):
         linarg: LinearARG,
         sample_data: np.ndarray,
         variant_data: np.ndarray,
-        sample_lock: Lock,
+        sample_lock: LockType,
     ) -> None:
         if linarg.n_individuals is None:
             raise ValueError(
@@ -658,7 +666,7 @@ class ParallelOperator(LinearOperator):
         linarg: LinearARG,
         sample_data: np.ndarray,
         variant_data: np.ndarray,
-        sample_lock: Lock,
+        sample_lock: LockType,
     ) -> None:
         if linarg.n_individuals is None:
             raise ValueError(
@@ -668,6 +676,8 @@ class ParallelOperator(LinearOperator):
 
         weights = sample_data[: linarg.n_individuals, :]
         linarg.calculate_nonunique_indices()
+        assert linarg.num_nonunique_indices is not None
+        assert linarg.nonunique_indices is not None
         work = np.zeros(
             (weights.shape[1], linarg.num_nonunique_indices),
             dtype=variant_data.dtype,
@@ -691,7 +701,7 @@ class ParallelOperator(LinearOperator):
     @classmethod
     def from_hdf5(
         cls,
-        hdf5_file: str,
+        hdf5_file: str | PathLike,
         num_processes: Optional[int] = None,
         max_num_traits: int = 8,
         maf_log10_threshold: Optional[int] = None,
@@ -744,8 +754,8 @@ class ParallelOperator(LinearOperator):
         )
 
         shm_specification = {
-            "sample_data": ((max_num_traits, context.num_samples), dtype.type),
-            "variant_data": ((context.num_variants, max_num_traits), dtype.type),
+            "sample_data": ((max_num_traits, context.num_samples), dtype),
+            "variant_data": ((context.num_variants, max_num_traits), dtype),
         }
 
         manager = _ManagerFactory.create_manager(
@@ -806,11 +816,11 @@ class GRMOperator(LinearOperator):
     _manager: _ParallelManager
     _input_data_handle: _SharedArrayHandle
     _output_data_handle: _SharedArrayHandle
-    _num_traits: Value
-    _alpha: Value
+    _num_traits: _SharedValue
+    _alpha: _SharedValue
     _max_num_traits: int
     shape: tuple[int, int]
-    dtype: np.dtype = np.float32
+    dtype: np.dtype = np.dtype(np.float32)
     iids: Optional[pl.Series] = None
 
     def __post_init__(self) -> None:
@@ -886,9 +896,9 @@ class GRMOperator(LinearOperator):
     def _worker(
         cls,
         handles: Dict[str, _SharedArrayHandle],
-        num_traits: Value,
-        flag: Value,
-        hdf5_file: str,
+        num_traits: _SharedValue,
+        flag: _SharedValue,
+        hdf5_file: str | PathLike,
         blocks: list,
         variant_offsets: list,
         alpha_value: float,
@@ -942,10 +952,10 @@ class GRMOperator(LinearOperator):
     @classmethod
     def _worker_matmat(
         cls,
-        linarg: GRMOperator,
+        linarg: LinearARG,
         input_arr: np.ndarray,
         output_arr: np.ndarray,
-        output_lock: Lock,
+        output_lock: LockType,
         alpha: float,
     ) -> None:
         pq = linarg.allele_frequencies * (1 - linarg.allele_frequencies)
@@ -957,7 +967,7 @@ class GRMOperator(LinearOperator):
     @classmethod
     def from_hdf5(
         cls,
-        hdf5_file: str,
+        hdf5_file: str | PathLike,
         num_processes: Optional[int] = None,
         max_num_traits: int = 8,
         maf_log10_threshold: Optional[int] = None,
@@ -1022,8 +1032,8 @@ class GRMOperator(LinearOperator):
         )
 
         shm_specification = {
-            "input_data": ((max_num_traits, context.num_samples), dtype.type),
-            "output_data": ((max_num_traits, context.num_samples), dtype.type),
+            "input_data": ((max_num_traits, context.num_samples), dtype),
+            "output_data": ((max_num_traits, context.num_samples), dtype),
         }
 
         alpha_value = Value("d", alpha)
@@ -1060,9 +1070,7 @@ class GRMOperator(LinearOperator):
 
 class _ManagerFactory:
     @classmethod
-    def _split_blocks(
-        cls, metadata: pl.DataFrame, num_processes: int
-    ) -> tuple[list[tuple[int, int]], list[int], list[int]]:
+    def _split_blocks(cls, metadata: pl.DataFrame, num_processes: int) -> list[tuple[int, int]]:
         # Use numIndices consistently for both splitting and offsets
         size_array = metadata.get_column("n_entries").to_numpy()
         size_cumsum = np.insert(np.cumsum(size_array), 0, 0)
@@ -1079,14 +1087,16 @@ class _ManagerFactory:
         # Insert start index
         block_indices = np.array([0] + block_indices)
 
-        block_ranges = [(start, end) for start, end in zip(block_indices[:-1], block_indices[1:], strict=False)]
+        block_ranges = [
+            (int(start), int(end)) for start, end in zip(block_indices[:-1], block_indices[1:], strict=False)
+        ]
         return block_ranges
 
     @classmethod
     def create_manager(
         cls,
         worker: Callable,
-        hdf5_file: str,
+        hdf5_file: str | PathLike,
         num_processes: Optional[int],
         block_metadata: pl.DataFrame,
         shm_specification: dict[str, tuple[tuple[int, int], np.dtype]],

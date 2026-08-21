@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
+from jax.typing import ArrayLike
 
 import linear_dag.core.jaxlinarg.operator as jaxlinarg_operator
 
@@ -41,7 +45,7 @@ def _operator_from_case(oracle_case, *, nonunique_indices=_USE_CASE_NONUNIQUE) -
         variant_indices=linarg.variant_indices,
         flip=linarg.flip,
         sample_indices=linarg.sample_indices,
-        nonunique_indices=nonunique_indices,
+        nonunique_indices=cast(ArrayLike | None, nonunique_indices),
         n_variants=linarg.shape[1],
         n_samples=linarg.shape[0],
         backend=Backend.PURE_JAX,

@@ -85,10 +85,8 @@ def test_pca_returns_sorted_real_eigenpairs():
 )
 def test_structure_rank_validation(routine, k, error_type, message):
     linarg, matrix = _build_dummy_linarg()
-    fn = svd if routine == "svd" else pca
-    if routine == "svd":
-        arg = linarg
-    else:
-        arg = _build_dummy_grm(matrix)
     with pytest.raises(error_type, match=message):
-        fn(arg, k=k)
+        if routine == "svd":
+            svd(linarg, k=k)
+        else:
+            pca(_build_dummy_grm(matrix), k=k)

@@ -30,17 +30,17 @@ class triangular_solver(LinearOperator):
     def __post_init__(self) -> None:
         LinearOperator.__init__(self, dtype=self.A.dtype, shape=self.A.shape)
 
-    def _matvec(self, other):
-        if other.ndim == 1:
-            other = other.reshape(-1, 1)
+    def _matvec(self, x):
+        if x.ndim == 1:
+            x = x.reshape(-1, 1)
 
-        return spsolve_triangular(eye(self.A.shape[0]) - self.A, other)
+        return spsolve_triangular(eye(self.A.shape[0]) - self.A, x)
 
-    def _rmatvec(self, other):
-        if other.ndim == 1:
-            other = other.reshape(1, -1)
+    def _rmatvec(self, x):
+        if x.ndim == 1:
+            x = x.reshape(1, -1)
 
-        return spsolve_triangular(eye(self.A.shape[1]) - self.A.T, other.T, lower=False).T
+        return spsolve_triangular(eye(self.A.shape[1]) - self.A.T, x.T, lower=False).T
 
 
 def blup(linarg: LinearARG, heritability: float, y: np.ndarray):

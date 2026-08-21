@@ -1,6 +1,13 @@
+# pattern: Functional Core
+from typing import cast, Protocol
+
 import numpy as np
 
 from scipy.sparse.linalg import LinearOperator
+
+
+class _CarrierCountingOperator(Protocol):
+    def number_of_carriers(self, individuals_to_include: np.ndarray) -> np.ndarray: ...
 
 
 def _backslash(A: np.ndarray, b: np.ndarray, lam: float = 1e-5) -> np.ndarray:
@@ -138,6 +145,8 @@ def get_genotype_variance_explained_recompute_AC(
     - Tuple `(denominator, total_allele_counts)` aligned to variant order.
     """
     n, num_covar = C.shape
+    if num_nonmissing is None:
+        raise ValueError("num_nonmissing is required when recomputing allele counts")
     if num_covar + len(num_nonmissing) != XtCD.shape[1]:
         raise ValueError("XtCD must have the same number of columns as C and D")
 
@@ -215,7 +224,8 @@ def _get_genotype_variance(
 
     - Tuple `(var_genotypes, carrier_counts)` for each variant.
     """
-    carrier_counts = genotypes.number_of_carriers(individuals_to_include).reshape(-1, 1)
+    carrier_operator = cast(_CarrierCountingOperator, genotypes)
+    carrier_counts = carrier_operator.number_of_carriers(individuals_to_include).reshape(-1, 1)
     assert np.all(allele_counts - carrier_counts >= 0)
     var_genotypes = 3 * allele_counts - 2 * carrier_counts  # 4 * num_homozygotes + num_heterozygotes
     return var_genotypes, carrier_counts

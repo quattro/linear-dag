@@ -1,3 +1,4 @@
+# pattern: Imperative Shell
 import gzip
 import logging
 import os
@@ -5,17 +6,21 @@ import subprocess
 import time
 
 from os import PathLike
-from typing import Optional, Union
+from typing import cast, Optional, Union
 
 import h5py
 import numpy as np
 import polars as pl
 import scipy.sparse as sp
 
-from .core.brick_graph import BrickGraph, merge_brick_graphs, read_graph_from_disk
+from .core.brick_graph import (  # ty: ignore[unresolved-import]  # Cython
+    BrickGraph,
+    merge_brick_graphs,
+    read_graph_from_disk,
+)
 from .core.lineararg import LinearARG, make_triangular, remove_degree_zero_nodes
-from .core.one_summed_cy import linearize_brick_graph
-from .core.recombination import Recombination
+from .core.one_summed_cy import linearize_brick_graph  # ty: ignore[unresolved-import]  # Cython extension
+from .core.recombination import Recombination  # ty: ignore[unresolved-import]  # Cython extension
 from .genotype import read_vcf
 from .memory_logger import MemoryLogger
 
@@ -29,7 +34,7 @@ def _coerce_logger(
         return logger.logger
     if logger is not None:
         return logger
-    return MemoryLogger(__name__, log_file=log_file).logger
+    return MemoryLogger(__name__, log_file=None if log_file is None else os.fspath(log_file)).logger
 
 
 def compress_vcf(
@@ -80,15 +85,18 @@ def compress_vcf(
     else:
         include_samples = None
 
-    linarg = LinearARG.from_vcf(
-        path=input_vcf,
-        region=region,
-        include_samples=include_samples,
-        flip_minor_alleles=flip_minor_alleles,
-        logger=logger,
-        maf_filter=maf_filter,
-        snps_only=remove_indels,
-        remove_multiallelics=remove_multiallelics,
+    linarg = cast(
+        LinearARG,
+        LinearARG.from_vcf(
+            path=input_vcf,
+            region=region,
+            include_samples=include_samples,
+            flip_minor_alleles=flip_minor_alleles,
+            logger=logger,
+            maf_filter=maf_filter,
+            snps_only=remove_indels,
+            remove_multiallelics=remove_multiallelics,
+        ),
     )
     logger.info(f"Number of variants: {linarg.shape[1]}")
     logger.info(f"Number of samples: {linarg.shape[0]}")
@@ -163,7 +171,7 @@ def msc_step0(
     logger = _coerce_logger(logger)
     os.makedirs(out, exist_ok=True)
 
-    vcf_meta = pl.read_csv(vcf_metadata, separator=" ")
+    vcf_meta = pl.read_csv(os.fspath(vcf_metadata), separator=" ")
     # Initialize with proper dtypes
     job_meta = pl.DataFrame(
         {
@@ -264,13 +272,13 @@ def msc_step1(
     """
 
     logger = _coerce_logger(logger)
-    job_meta = pl.read_parquet(jobs_metadata)
+    job_meta = pl.read_parquet(os.fspath(jobs_metadata))
     job = job_meta.filter(pl.col("small_job_id") == small_job_id)
     vcf_path = job["vcf_path"].item()
     region = job["small_region"].item()
 
-    params = pl.read_parquet_metadata(jobs_metadata)
-    flip_minor_alleles = params["flip_minor_alleles"]
+    params = pl.read_parquet_metadata(os.fspath(jobs_metadata))
+    flip_minor_alleles = params["flip_minor_alleles"] == "True"
     keep = None if params["keep"] == "None" else params["keep"]
     maf = None if params["maf"] == "None" else float(params["maf"])
     remove_indels = params["remove_indels"] == "True"
@@ -336,11 +344,11 @@ def msc_step2(
     """
 
     logger = _coerce_logger(logger)
-    job_meta = pl.read_parquet(jobs_metadata)
+    job_meta = pl.read_parquet(os.fspath(jobs_metadata))
     job = job_meta.filter(pl.col("small_job_id") == small_job_id)
     region = job["small_region"].item()
 
-    params = pl.read_parquet_metadata(jobs_metadata)
+    params = pl.read_parquet_metadata(os.fspath(jobs_metadata))
     mount_point = params["mount_point"]
     out = params["out"]
 
@@ -387,11 +395,11 @@ def msc_step3(
     """
 
     logger = _coerce_logger(logger)
-    job_meta = pl.read_parquet(jobs_metadata)
+    job_meta = pl.read_parquet(os.fspath(jobs_metadata))
     jobs = job_meta.filter(pl.col("large_job_id") == large_job_id)
     large_region = jobs["large_region"].to_list()[0]
 
-    params = pl.read_parquet_metadata(jobs_metadata)
+    params = pl.read_parquet_metadata(os.fspath(jobs_metadata))
     mount_point = params["mount_point"]
     out = params["out"]
 
@@ -457,12 +465,12 @@ def msc_step4(
     """
 
     logger = _coerce_logger(logger)
-    job_meta = pl.read_parquet(jobs_metadata)
+    job_meta = pl.read_parquet(os.fspath(jobs_metadata))
     jobs = job_meta.filter(pl.col("large_job_id") == large_job_id)
     large_region = jobs["large_region"].to_list()[0]
     large_partition_identifier = f"{large_job_id}_{large_region}"
 
-    params = pl.read_parquet_metadata(jobs_metadata)
+    params = pl.read_parquet_metadata(os.fspath(jobs_metadata))
     mount_point = params["mount_point"]
     out = params["out"]
 
@@ -514,7 +522,7 @@ def msc_step5(
 
     - `None`.
     """
-    params = pl.read_parquet_metadata(jobs_metadata)
+    params = pl.read_parquet_metadata(os.fspath(jobs_metadata))
     mount_point = params["mount_point"]
     out = params["out"]
 
@@ -522,13 +530,13 @@ def msc_step5(
     logger = _coerce_logger(logger, log_file=f"{out}/logs/msc_step5.log")
     logger.info("Starting merge of LinearARG partitions")
 
-    job_meta = pl.read_parquet(jobs_metadata)
+    job_meta = pl.read_parquet(os.fspath(jobs_metadata))
 
     partition_identifiers = set(
         f"{i}_{region}" for i, region in zip(job_meta["large_job_id"].to_list(), job_meta["large_region"].to_list())
     )
 
-    params = pl.read_parquet_metadata(jobs_metadata)
+    params = pl.read_parquet_metadata(os.fspath(jobs_metadata))
     mount_point = params["mount_point"]
     out = params["out"]
 

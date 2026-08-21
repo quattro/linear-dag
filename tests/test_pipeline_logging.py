@@ -87,7 +87,7 @@ def test_msc_step0_records_remove_multiallelics_metadata(monkeypatch, tmp_path: 
     assert metadata["remove_multiallelics"] == "True"
 
 
-def test_msc_step1_reads_remove_multiallelics_metadata(monkeypatch, tmp_path: Path):
+def test_msc_step1_parses_boolean_metadata(monkeypatch, tmp_path: Path):
     out_dir = tmp_path / "kodama"
     jobs_metadata = tmp_path / "job_metadata.parquet"
     pl.DataFrame(
@@ -126,6 +126,7 @@ def test_msc_step1_reads_remove_multiallelics_metadata(monkeypatch, tmp_path: Pa
 
     assert captured["vcf_path"] == "input.vcf.gz"
     assert captured["region"] == "chr1:100-150"
+    assert captured["flip_minor_alleles"] is False
     assert captured["remove_multiallelics"] is True
 
 

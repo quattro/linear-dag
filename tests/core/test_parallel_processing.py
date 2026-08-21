@@ -8,6 +8,7 @@ import tempfile
 from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -29,17 +30,17 @@ class _FakeManager:
 def test_parallel_operators_support_scipy_linear_operator_protocol():
     manager = SimpleNamespace()
     parallel = ParallelOperator(
-        manager,
-        _sample_data_handle=object(),
-        _variant_data_handle=object(),
+        cast(Any, manager),
+        _sample_data_handle=cast(Any, object()),
+        _variant_data_handle=cast(Any, object()),
         _num_traits=SimpleNamespace(value=0),
         _max_num_traits=1,
         shape=(2, 3),
     )
     grm = GRMOperator(
-        manager,
-        _input_data_handle=object(),
-        _output_data_handle=object(),
+        cast(Any, manager),
+        _input_data_handle=cast(Any, object()),
+        _output_data_handle=cast(Any, object()),
         _num_traits=SimpleNamespace(value=0),
         _alpha=SimpleNamespace(value=-1.0),
         _max_num_traits=1,
@@ -47,9 +48,13 @@ def test_parallel_operators_support_scipy_linear_operator_protocol():
     )
 
     for operator in (parallel, grm):
-        operator._matmat = lambda values, operator=operator: np.zeros(
-            (operator.shape[0], values.shape[1]),
-            dtype=operator.dtype,
+        setattr(
+            operator,
+            "_matmat",
+            lambda values, operator=operator: np.zeros(
+                (operator.shape[0], values.shape[1]),
+                dtype=operator.dtype,
+            ),
         )
         observed = operator @ np.ones((operator.shape[1], 1), dtype=operator.dtype)
 
@@ -398,7 +403,7 @@ def test_worker_error_path_raises_runtime_error_and_cleans_up_shared_memory():
 
     manager = parallel_processing._ParallelManager(
         num_processes=1,
-        object_specification={"tmp": ((1, 1), np.float32)},
+        object_specification={"tmp": ((1, 1), np.dtype(np.float32))},
     )
     cleanup_called = False
     original_close = manager.close
@@ -408,7 +413,7 @@ def test_worker_error_path_raises_runtime_error_and_cleans_up_shared_memory():
         cleanup_called = True
         original_close()
 
-    manager.close = wrapped_close
+    setattr(manager, "close", wrapped_close)
 
     try:
         manager.flags[0].value = parallel_processing.FLAGS["error"]
@@ -625,14 +630,14 @@ def test_maf_threshold_filtering(linarg_h5_path: Path):
             result_serial += result
 
         # Check shapes match
-        assert (
-            linarg_op.shape[1] == total_filtered_variants
-        ), f"Shape mismatch: operator has {linarg_op.shape[1]} variants, expected {total_filtered_variants}"
+        assert linarg_op.shape[1] == total_filtered_variants, (
+            f"Shape mismatch: operator has {linarg_op.shape[1]} variants, expected {total_filtered_variants}"
+        )
 
         # Check that parallel and serial results match
-        assert np.allclose(
-            result_parallel, result_serial, rtol=1e-2, atol=1e-2
-        ), "MAF filtered multiplication results do not match"
+        assert np.allclose(result_parallel, result_serial, rtol=1e-2, atol=1e-2), (
+            "MAF filtered multiplication results do not match"
+        )
 
         # Test that filtering actually reduces variant count
         with ParallelOperator.from_hdf5(tmp_path, max_num_traits=2, num_processes=1) as linarg_op_unfiltered:

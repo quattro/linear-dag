@@ -77,7 +77,7 @@ def _lineararg_from_block(block: LinearARGBlockArrays) -> LinearARG:
         ),
         variant_indices=np.asarray(block.variant_indices, dtype=np.int32),
         flip=np.asarray(block.flip, dtype=np.bool_),
-        n_samples=np.int32(block.n_samples),
+        n_samples=int(block.n_samples),
         nonunique_indices=np.asarray(block.nonunique_indices, dtype=np.int32),
     )
     if block.allele_counts is not None:

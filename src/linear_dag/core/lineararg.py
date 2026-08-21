@@ -1,4 +1,6 @@
-# lineararg.py
+# pattern: Mixed (unavoidable)
+# Reason: The LinearARG operator couples numerical kernels to HDF5 persistence
+# and Cython-backed graph construction as one established public abstraction.
 import logging
 import os
 
@@ -18,13 +20,13 @@ from scipy.sparse import csc_matrix, csr_matrix, diags, eye
 from scipy.sparse.linalg import aslinearoperator, LinearOperator, spsolve_triangular
 
 from linear_dag.core.operators import get_pairing_matrix
-from linear_dag.core.solve import get_carriers, get_nonunique_indices_csc
+from linear_dag.core.solve import get_carriers, get_nonunique_indices_csc  # ty: ignore[unresolved-import]  # Cython
 from linear_dag.genotype import read_vcf
 
-from .digraph import DiGraph
+from .digraph import DiGraph  # ty: ignore[unresolved-import]  # Cython extension
 from .linear_arg_inference import linear_arg_from_genotypes
-from .one_summed_cy import linearize_brick_graph
-from .solve import (
+from .one_summed_cy import linearize_brick_graph  # ty: ignore[unresolved-import]  # Cython extension
+from .solve import (  # ty: ignore[unresolved-import]  # Cython extension
     add_at,
     spsolve_backward_triangular,
     spsolve_backward_triangular_matmat,
@@ -66,8 +68,8 @@ class LinearARG(LinearOperator):
     A: csc_matrix  # samples must be in descending order starting from the final row/col
     variant_indices: npt.NDArray[np.int32]
     flip: npt.NDArray[np.bool_]
-    n_samples: np.int32
-    n_individuals: Optional[np.int32] = None
+    n_samples: int
+    n_individuals: int | None = None
     variants: Optional[pl.LazyFrame] = None
     iids: Optional[pl.Series] = None
     nonunique_indices: Optional[npt.NDArray[np.int32]] = None
@@ -174,7 +176,7 @@ class LinearARG(LinearOperator):
     def from_genotypes(
         genotypes: csc_matrix,
         flip: npt.NDArray[np.bool_],
-        variant_info: pl.DataFrame = None,
+        variant_info: pl.DataFrame | None = None,
         iids: Optional[list] = None,
         find_recombinations: bool = True,
         sex: Optional[npt.NDArray[np.int32]] = None,
@@ -262,7 +264,7 @@ class LinearARG(LinearOperator):
         flip_minor_alleles: bool = False,
         return_genotypes: bool = False,
         logger: Optional[logging.Logger] = None,
-        maf_filter: float = None,
+        maf_filter: float | None = None,
         snps_only: bool = False,
         remove_multiallelics: bool = False,
     ) -> Union[tuple, "LinearARG"]:
@@ -550,6 +552,8 @@ class LinearARG(LinearOperator):
 
         - New [`linear_dag.LinearARG`][] with updated adjacency and metadata.
         """
+        if self.iids is None:
+            raise ValueError("Cannot remove samples from a LinearARG without IIDs")
         sample_mask = np.isin(self.iids, iids_to_remove)
         sample_indices_to_remove = np.where(sample_mask)[0]
         iids_to_keep = np.array(self.iids)[~sample_mask]
@@ -585,6 +589,7 @@ class LinearARG(LinearOperator):
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
 
     def _matmat_scipy(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+        other = np.asarray(other)
         if other.ndim == 1:
             other = other.reshape(-1, 1)
         if other.shape[0] != self.shape[1]:
@@ -599,6 +604,7 @@ class LinearARG(LinearOperator):
         return x[self.sample_indices] + np.sum(other[self.flip], axis=0)
 
     def _matmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+        other = np.asarray(other)
         if other.ndim == 1:
             other = other.reshape(-1, 1)
         if other.shape[0] != self.shape[1]:
@@ -607,6 +613,8 @@ class LinearARG(LinearOperator):
             )
 
         self.calculate_nonunique_indices()
+        assert self.nonunique_indices is not None
+        assert self.num_nonunique_indices is not None
         v = np.zeros((other.shape[1], self.num_nonunique_indices), dtype=other.dtype, order="F")
 
         if any(self.flip):
@@ -621,6 +629,7 @@ class LinearARG(LinearOperator):
         return v[:, sample_nonunique_indices].T + np.sum(other[self.flip], axis=0)
 
     def _rmatmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+        other = np.asarray(other)
         if other.ndim == 1:
             other = other.reshape(1, -1)
         if other.shape[0] != self.shape[0]:
@@ -629,6 +638,8 @@ class LinearARG(LinearOperator):
             )
 
         self.calculate_nonunique_indices()
+        assert self.nonunique_indices is not None
+        assert self.num_nonunique_indices is not None
         v = np.zeros((other.shape[1], self.num_nonunique_indices), dtype=other.dtype, order="F")
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
         v[:, sample_nonunique_indices] = other.T
@@ -640,6 +651,7 @@ class LinearARG(LinearOperator):
         return v.T
 
     def _rmatmat_scipy(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+        other = np.asarray(other)
         if other.ndim == 1:
             other = other.reshape(1, -1)
         if other.shape[1] != self.shape[0]:
@@ -657,7 +669,8 @@ class LinearARG(LinearOperator):
             # x[self.flip] = np.sum(other, axis=0) - x[self.flip]  # TODO
         return x
 
-    def _matvec(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+    def _matvec(self, x: npt.ArrayLike) -> npt.NDArray[np.number]:
+        other = np.asarray(x)
         if other.shape != (self.shape[1],) and other.shape != (self.shape[1], 1):
             raise ValueError(
                 (
@@ -673,7 +686,8 @@ class LinearARG(LinearOperator):
         result = np.asarray(v[self.sample_indices]) + np.sum(other[self.flip])
         return result if other.ndim == 1 else result.reshape(-1, 1)
 
-    def _rmatvec(self, other: npt.ArrayLike, individual=False) -> npt.NDArray[np.number]:
+    def _rmatvec(self, x: npt.ArrayLike) -> npt.NDArray[np.number]:
+        other = np.asarray(x)
         if other.shape != (self.shape[0],) and other.shape != (self.shape[0], 1):
             raise ValueError(
                 (
@@ -700,8 +714,8 @@ class LinearARG(LinearOperator):
             A=self.A.copy(),
             variant_indices=self.variant_indices.copy(),
             flip=self.flip.copy(),
-            n_samples=np.int32(self.n_samples),
-            n_individuals=None if self.n_individuals is None else np.int32(self.n_individuals),
+            n_samples=self.n_samples,
+            n_individuals=self.n_individuals,
             variants=self.variants.clone() if self.variants is not None else None,
             iids=self.iids.clone() if self.iids is not None else None,
             nonunique_indices=None if self.nonunique_indices is None else self.nonunique_indices.copy(),
@@ -854,7 +868,7 @@ class LinearARG(LinearOperator):
         - `FileExistsError`: If writing a non-block file and the output already exists.
         """
         try:
-            import hdf5plugin
+            import hdf5plugin  # ty: ignore[unresolved-import]  # Optional compression plugin
         except ImportError:
             raise ImportError("hdf5plugin is required for Blosc compression. ")
 
@@ -1019,7 +1033,7 @@ class LinearARG(LinearOperator):
 
             warnings.warn("hdf5plugin is required for blosc compression; this may impact reading")
         else:
-            import hdf5plugin  # noqa: F401
+            import hdf5plugin  # noqa: F401  # ty: ignore[unresolved-import]  # Optional compression plugin
 
         fname = h5_fname if str(h5_fname).endswith(".h5") else str(h5_fname) + ".h5"
         with h5py.File(fname, "r") as file:
@@ -1173,9 +1187,9 @@ class LinearARG(LinearOperator):
         """
         if self.nonunique_indices is None:
             return None
-        return np.max(self.nonunique_indices) + 1
+        return int(np.max(self.nonunique_indices)) + 1
 
-    def add_individual_nodes(self, sex: npt.NDArray[np.uint] = None) -> "LinearARG":
+    def add_individual_nodes(self, sex: npt.NDArray[np.int32] | None = None) -> "LinearARG":
         """Return a copy with explicit individual nodes appended to the graph.
 
         !!! info
@@ -1257,7 +1271,7 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
         block_names = sorted(block_names, key=parse_block_name)
 
         if not block_names:
-            return None
+            return pl.DataFrame()
         else:
             for block_name in block_names:
                 group = f[block_name]
@@ -1329,7 +1343,7 @@ def variants_in_bed_regions(
 
 
 def compute_variant_filter_mask(
-    hdf5_file: str,
+    hdf5_file: str | PathLike,
     block_name: str,
     maf_threshold: float = 0.0,
     bed_regions: Optional[pl.DataFrame] = None,
@@ -1378,7 +1392,7 @@ def compute_variant_filter_mask(
 
 
 def compute_filtered_variant_count(
-    hdf5_file: str,
+    hdf5_file: str | PathLike,
     block_name: str,
     maf_threshold: float = 0.0,
     bed_regions: Optional[pl.DataFrame] = None,
@@ -1489,8 +1503,8 @@ def load_variant_info(
 
 def add_individuals_to_graph(
     A: csc_matrix,
-    samples_idx: npt.NDArray[np.uint],
-    sex: npt.NDArray[np.uint] = None,
+    samples_idx: npt.NDArray[np.int32],
+    sex: npt.NDArray[np.int32] | None = None,
 ) -> tuple:
     """Add individual nodes that connect to their constituent sample haplotypes.
 

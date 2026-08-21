@@ -1,3 +1,4 @@
+# pattern: Imperative Shell
 import argparse
 import difflib
 import logging
@@ -11,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from importlib import metadata
 from os import PathLike
-from typing import Optional, Union
+from typing import Optional, TypedDict, TypeVar, Union
 
 import numpy as np
 import polars as pl
@@ -85,7 +86,10 @@ title = """                            @@@@
 @@@@@                @@@@                                                          @@@@"""
 
 
-def _dedupe_preserve_order(values: list[str]) -> list[str]:
+_T = TypeVar("_T")
+
+
+def _dedupe_preserve_order(values: list[_T]) -> list[_T]:
     seen = set()
     deduped = []
     for value in values:
@@ -144,7 +148,7 @@ def _format_suggestion_fragment_for_missing_values(requested: list[str], availab
 
 
 def _validate_integer_column_selection_bounds(path_or_filename: Union[str, PathLike], columns: list[int]) -> None:
-    available_columns = pl.read_csv(path_or_filename, separator="\t", n_rows=0).columns
+    available_columns = pl.read_csv(os.fspath(path_or_filename), separator="\t", n_rows=0).columns
     num_columns = len(available_columns)
     invalid = [x for x in _dedupe_preserve_order(columns) if x >= num_columns]
     if not invalid:
@@ -326,14 +330,16 @@ def _read_pheno_or_covar(
         all_int = all(isinstance(x, int) for x in columns)
         if not (all_str or all_int):
             raise ValueError("Columns supplied to read_pheno/read_covar must be all 'str' or all 'int'. Not mixture.")
-        if all_int and any([x < 0 for x in columns]):
+        integer_columns = [x for x in columns if isinstance(x, int)]
+        string_columns = [x for x in columns if isinstance(x, str)]
+        if all_int and any(x < 0 for x in integer_columns):
             raise ValueError("Must supply valid column indices to read_pheno/read_covar")
         if all_int:
-            _validate_integer_column_selection_bounds(path_or_filename, columns)
+            _validate_integer_column_selection_bounds(path_or_filename, integer_columns)
         if all_str:
-            available_columns = pl.read_csv(path_or_filename, separator="\t", n_rows=0).columns
+            available_columns = pl.read_csv(os.fspath(path_or_filename), separator="\t", n_rows=0).columns
             available_set = set(available_columns)
-            missing = [str(x) for x in columns if str(x) not in available_set]
+            missing = [x for x in string_columns if x not in available_set]
             if missing:
                 missing_str = ", ".join(_dedupe_preserve_order(missing))
                 available_str = _format_available_values(available_columns, max_values=20)
@@ -346,7 +352,7 @@ def _read_pheno_or_covar(
                 )
 
     df = pl.read_csv(
-        path_or_filename,
+        os.fspath(path_or_filename),
         columns=columns,
         separator="\t",
         null_values=["NA", "", "NULL", "NaN"],
@@ -770,11 +776,24 @@ def _load_required_block_metadata(
     return _require_block_metadata(block_metadata, linarg_path, command_name=command_name)
 
 
+class _ParallelOperatorKwargs(TypedDict):
+    num_processes: int | None
+    block_metadata: pl.DataFrame
+    max_num_traits: int
+    maf_log10_threshold: int | None
+    bed_file: str | None
+    bed_maf_log10_threshold: int | None
+
+
+class _GRMOperatorKwargs(_ParallelOperatorKwargs):
+    alpha: float
+
+
 def _build_parallel_operator_kwargs(
     args: argparse.Namespace,
     block_metadata: pl.DataFrame,
     max_num_traits: int,
-) -> dict[str, Union[int, float, str, pl.DataFrame, None]]:
+) -> _ParallelOperatorKwargs:
     return {
         "num_processes": _validate_num_processes(args.num_processes),
         "block_metadata": block_metadata,
@@ -788,7 +807,7 @@ def _build_parallel_operator_kwargs(
 def _build_grm_operator_kwargs(
     args: argparse.Namespace,
     block_metadata: pl.DataFrame,
-) -> dict[str, Union[int, float, str, pl.DataFrame, None]]:
+) -> _GRMOperatorKwargs:
     return {
         "num_processes": _validate_num_processes(args.num_processes),
         "max_num_traits": 8,
@@ -1400,7 +1419,7 @@ def _create_cli_logger_context(
 
     log.setLevel(logging.DEBUG if args.verbose else logging.INFO)
     _remove_cli_handlers(log)
-    log._linear_dag_previous_propagate = log.propagate
+    setattr(log, "_linear_dag_previous_propagate", log.propagate)
     log.propagate = False
     ensure_memory_usage_filter(log)
 
@@ -1411,7 +1430,7 @@ def _create_cli_logger_context(
         sys.stdout.write("Starting log..." + os.linesep)
         stdout_handler = logging.StreamHandler(sys.stdout)
         stdout_handler.setFormatter(fmt)
-        stdout_handler._linear_dag_cli_handler = True
+        setattr(stdout_handler, "_linear_dag_cli_handler", True)
         log.addHandler(stdout_handler)
 
     # setup log file, but write PLINK-style command first
@@ -1423,8 +1442,8 @@ def _create_cli_logger_context(
 
         disk_handler = logging.StreamHandler(disk_log_stream)
         disk_handler.setFormatter(fmt)
-        disk_handler._linear_dag_cli_handler = True
-        disk_handler._linear_dag_cli_stream = disk_log_stream
+        setattr(disk_handler, "_linear_dag_cli_handler", True)
+        setattr(disk_handler, "_linear_dag_cli_stream", disk_log_stream)
         log.addHandler(disk_handler)
     return log
 

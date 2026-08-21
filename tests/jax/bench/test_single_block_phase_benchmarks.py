@@ -17,7 +17,7 @@ import pytest
 from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 from linear_dag.core.jaxlinarg.kernels import ffi_cpu
 from linear_dag.core.lineararg import LinearARG
-from linear_dag.core.solve import (
+from linear_dag.core.solve import (  # ty: ignore[unresolved-import]  # Cython extension
     add_at,
     spsolve_backward_triangular_matmat,
     spsolve_forward_triangular_matmat,
@@ -81,6 +81,8 @@ def _time_cython_phases(
     operation: str,
     inputs: dict[int, np.ndarray],
 ) -> dict[tuple[str, int], float]:
+    assert linarg.nonunique_indices is not None
+    assert linarg.num_nonunique_indices is not None
     results = {}
     min_index_to_keep = int(linarg.sample_indices[-1])
     solve = spsolve_forward_triangular_matmat if operation == "matmat" else spsolve_backward_triangular_matmat
@@ -128,6 +130,8 @@ def _time_cython_phases(
 
 
 def _cython_matmat_input_state(linarg: LinearARG, matrix: np.ndarray) -> np.ndarray:
+    assert linarg.nonunique_indices is not None
+    assert linarg.num_nonunique_indices is not None
     state = np.zeros((matrix.shape[1], int(linarg.num_nonunique_indices)), dtype=matrix.dtype, order="F")
     if np.any(linarg.flip):
         values = (matrix.T * (-1) ** linarg.flip.reshape(1, -1)).astype(matrix.dtype)
@@ -138,17 +142,21 @@ def _cython_matmat_input_state(linarg: LinearARG, matrix: np.ndarray) -> np.ndar
 
 
 def _cython_rmatmat_input_state(linarg: LinearARG, matrix: np.ndarray) -> np.ndarray:
+    assert linarg.nonunique_indices is not None
+    assert linarg.num_nonunique_indices is not None
     state = np.zeros((matrix.shape[1], int(linarg.num_nonunique_indices)), dtype=matrix.dtype, order="F")
     state[:, linarg.nonunique_indices[linarg.sample_indices]] = matrix.T
     return state
 
 
 def _cython_matmat_output(linarg: LinearARG, solved_state: np.ndarray, matrix: np.ndarray) -> np.ndarray:
+    assert linarg.nonunique_indices is not None
     sample_nonunique_indices = linarg.nonunique_indices[linarg.sample_indices]
     return solved_state[:, sample_nonunique_indices].T + np.sum(matrix[linarg.flip], axis=0)
 
 
 def _cython_rmatmat_output(linarg: LinearARG, solved_state: np.ndarray, matrix: np.ndarray) -> np.ndarray:
+    assert linarg.nonunique_indices is not None
     variant_nonunique_indices = linarg.nonunique_indices[linarg.variant_indices]
     values = solved_state[:, variant_nonunique_indices]
     if np.any(linarg.flip):

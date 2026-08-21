@@ -1,12 +1,17 @@
+# pattern: Functional Core
+from typing import Protocol
+
 import numpy as np
 
 from scipy.sparse.linalg import (
     eigsh,
+    LinearOperator,
     svds,
 )
 
-from ..core.lineararg import LinearARG
-from ..core.parallel_processing import GRMOperator, ParallelOperator
+
+class _NormalizedOperator(Protocol):
+    normalized: LinearOperator
 
 
 def _validate_rank(k: int, upper_bound: int, routine_name: str) -> None:
@@ -18,7 +23,7 @@ def _validate_rank(k: int, upper_bound: int, routine_name: str) -> None:
         raise ValueError(f"{routine_name}: k must be < {upper_bound}, got {k}.")
 
 
-def svd(linarg: LinearARG | ParallelOperator, k: int = 20) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def svd(linarg: _NormalizedOperator, k: int = 20) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compute the top-$k$ singular triplets of a normalized genotype operator.
 
     Let $X$ denote `linarg.normalized`, where rows index samples and columns
@@ -54,7 +59,7 @@ def svd(linarg: LinearARG | ParallelOperator, k: int = 20) -> tuple[np.ndarray, 
     return eigvecs[:, order], svals[order], loadings[order, :]
 
 
-def pca(grm: GRMOperator, k: int = 20) -> tuple[np.ndarray, np.ndarray]:
+def pca(grm: LinearOperator, k: int = 20) -> tuple[np.ndarray, np.ndarray]:
     """Compute the top-$k$ principal components from a GRM-like operator.
 
     Let $K$ denote `grm`, where $K$ is a sample-by-sample symmetric operator

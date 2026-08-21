@@ -5,7 +5,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from scipy.sparse.linalg import LinearOperator
+from scipy.sparse.linalg import aslinearoperator, LinearOperator
 
 from linear_dag.association.heritability import (
     _hutchinson_estimator,
@@ -91,7 +91,7 @@ def test_residualized_operator_hutchinson_targets_projected_kernel_traces():
     projection = np.eye(n) - q @ q.T
     projected_grm = projection @ grm @ projection
 
-    operator = _ResidualizedLinearOperator(grm, covariates)
+    operator = _ResidualizedLinearOperator(aslinearoperator(grm), covariates)
 
     assert operator.residual_rank == n - rank
     np.testing.assert_allclose(operator.matmat(np.eye(n)), projected_grm, atol=1e-10)

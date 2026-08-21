@@ -89,6 +89,8 @@ def randomized_haseman_elston(
 
     # align and residualize
     _debug("randomized_haseman_elston: aligning phenotype rows to GRM identifiers")
+    if grm.iids is None:
+        raise ValueError("GRM operator must expose IIDs for phenotype alignment")
     left_op, right_op = get_inner_merge_operators(data.select("iid").cast(pl.Utf8).collect().to_series(), grm.iids)
     if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
@@ -102,17 +104,17 @@ def randomized_haseman_elston(
     )
 
     sample_count = len(yresid)
-    grm = right_op @ grm @ right_op.T
-    grm = 0.5 * (left_op @ grm @ left_op.T)  # assumes diploid; comes from the normalization term being pq, not 2pq
-    grm = _ResidualizedLinearOperator(grm, covariates)
-    identity_trace = grm.residual_rank
+    aligned_grm = right_op @ grm @ right_op.T
+    aligned_grm = 0.5 * (left_op @ aligned_grm @ left_op.T)  # diploid pq normalization
+    residualized_grm = _ResidualizedLinearOperator(aligned_grm, covariates)
+    identity_trace = residualized_grm.residual_rank
 
     _validate_num_matvecs(num_matvecs, sample_count, trace_est)
 
     # set up for randomized estimator
     generator = np.random.default_rng(seed=seed)
     estimator = _construct_estimator(trace_est)
-    sampler = _construct_sampler(sampler, generator)
+    sample_probes = _construct_sampler(sampler, generator)
     _info(
         "randomized_haseman_elston: estimating traces with estimator=%s using %d probe vectors",
         trace_est,
@@ -120,7 +122,7 @@ def randomized_haseman_elston(
     )
 
     # se not used atm, but for some trace estimators (eg xtrace, xnystrace) we can compute it
-    grm_trace, grm_sq_trace, se = estimator(grm, num_matvecs, sampler)
+    grm_trace, grm_sq_trace, se = estimator(residualized_grm, num_matvecs, sample_probes)
     _debug(
         "randomized_haseman_elston: estimated traces tr(K)=%.6g tr(K^2)=%.6g",
         grm_trace,
@@ -128,7 +130,7 @@ def randomized_haseman_elston(
     )
 
     # compute y_j' K y_j for each y_j \in y
-    C = np.sum(grm.matmat(yresid) * yresid, axis=0)
+    C = np.sum(residualized_grm.matmat(yresid) * yresid, axis=0)
 
     # compute N_j := y_j' y_j for each y_j \in Y
     N_j = np.sum(yresid * yresid, axis=0)
@@ -142,7 +144,7 @@ def randomized_haseman_elston(
     # compute the (co)variance of our estimates
     _info("randomized_haseman_elston: estimating std err")
     var_s2g, var_s2e, covariances = _compute_err_variance_vectorized(
-        grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs, identity_trace
+        residualized_grm, yresid, solution, grm_sq_trace, grm_trace, num_matvecs, identity_trace
     )
 
     # we define h2g: = a * Tr(K) / (a * Tr(K) + b * Tr(I)), where a = solution[0] and b = solution[1]

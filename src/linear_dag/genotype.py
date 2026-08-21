@@ -1,3 +1,6 @@
+# pattern: Mixed (unavoidable)
+# Reason: Genotype format ingress and sparse allele transformations share one
+# established public module and are tightly coupled by the read contract.
 import logging
 import os
 
@@ -20,10 +23,10 @@ def read_vcf(
     region: Optional[str] = None,
     flip_minor_alleles: bool = False,
     samples: Optional[list[str]] = None,
-    maf_filter: float = None,
+    maf_filter: float | None = None,
     remove_indels: bool = False,
     remove_multiallelics: bool = False,
-    sex: np.array = None,
+    sex: NDArray[np.int32] | None = None,
 ):
     """Load genotype calls from a VCF/BCF file into sparse CSC format.
 
@@ -113,9 +116,9 @@ def read_vcf(
         gts = read_gt(var)
         if sex is not None:
             gts = gts[indices_to_keep]
-            assert np.all(
-                (gts == 0) | (gts == 1)
-            ), "Haplotype vector contains non 0 or 1 values. Check genotype data or sex vector."
+            assert np.all((gts == 0) | (gts == 1)), (
+                "Haplotype vector contains non 0 or 1 values. Check genotype data or sex vector."
+            )
 
         if not flip_minor_alleles:
             return gts, False
@@ -193,7 +196,7 @@ def load_genotypes(
     maf_threshold: Optional[float] = None,
     rsq_threshold: Optional[float] = None,
     skiprows: int = 0,
-) -> tuple[csc_matrix, NDArray, NDArray]:
+) -> tuple[csc_matrix, NDArray[np.intp], NDArray[np.intp] | None]:
     """Load genotype data from Matrix Market or text files and apply basic QC.
 
     !!! info
@@ -236,16 +239,16 @@ def load_genotypes(
     if input_type == "mtx":
         genotypes = csc_matrix(mmread(genotype_file))
     else:
-        genotypes = np.loadtxt(genotype_file, skiprows=skiprows)
+        genotypes = csc_matrix(np.loadtxt(genotype_file, skiprows=skiprows))
 
     if rsq_threshold is None:
-        well_imputed_variants = np.arange(genotypes.shape[1])
+        well_imputed_variants = np.arange(genotypes.shape[1], dtype=np.intp)
     else:
         genotypes, well_imputed_variants = binarize(genotypes, rsq_threshold)
 
-    ploidy = np.max(genotypes).astype(int)
+    ploidy = int(genotypes.max())
     if maf_threshold is None:
-        common_variants = np.arange(genotypes.shape[1])
+        common_variants = np.arange(genotypes.shape[1], dtype=np.intp)
     else:
         genotypes, common_variants = apply_maf_threshold(genotypes, ploidy, maf_threshold)
 
@@ -255,7 +258,7 @@ def load_genotypes(
     if flip_minor_alleles:
         genotypes, flipped_variants = flip_alleles(genotypes, ploidy)
     else:
-        flipped_variants = None
+        flipped_variants: NDArray[np.intp] | None = None
 
     return genotypes, kept_variants, flipped_variants
 
@@ -380,7 +383,14 @@ def binarize(genotypes: csc_matrix, r2_threshold: float = 0.0) -> tuple[csc_matr
     """
 
     n, p = genotypes.shape
-    discretized_genotypes = np.rint(genotypes).astype(int)
+    discretized_genotypes = csc_matrix(
+        (
+            np.rint(genotypes.data).astype(int),
+            genotypes.indices.copy(),
+            genotypes.indptr.copy(),
+        ),
+        shape=genotypes.shape,
+    )
 
     # TODO: vectorize
     # Correlations between dosages + calls

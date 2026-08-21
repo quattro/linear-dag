@@ -17,7 +17,10 @@ import pytest
 from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 from linear_dag.core.jaxlinarg.kernels import ffi_cpu
 from linear_dag.core.lineararg import LinearARG
-from linear_dag.core.solve import spsolve_backward_triangular_matmat, spsolve_forward_triangular_matmat
+from linear_dag.core.solve import (  # ty: ignore[unresolved-import]  # Cython extension
+    spsolve_backward_triangular_matmat,
+    spsolve_forward_triangular_matmat,
+)
 
 MIN_SAMPLE_SECONDS = 0.005
 WARMUP_ITERATIONS = 2
@@ -72,6 +75,8 @@ def _time_cython_solves(
     direction: str,
     k_values: tuple[int, ...],
 ) -> dict[int, float]:
+    assert linarg.nonunique_indices is not None
+    assert linarg.num_nonunique_indices is not None
     solve = _cython_solve(direction)
     min_index_to_keep = int(linarg.sample_indices[-1])
     results = {}
@@ -183,4 +188,4 @@ def _print_results(results: list[SolveBenchmarkResult]) -> None:
     print("|---|---|---:|---:|---:|")
     for result in sorted(results, key=lambda item: (item.direction, item.backend, item.k)):
         ratio = "" if result.ratio_to_cython is None else f"{result.ratio_to_cython:.3f}"
-        print(f"| {result.backend} | {result.direction} | {result.k} | " f"{result.median_seconds:.6f} | {ratio} |")
+        print(f"| {result.backend} | {result.direction} | {result.k} | {result.median_seconds:.6f} | {ratio} |")

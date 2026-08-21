@@ -114,7 +114,8 @@ def test_forward_gradient_matches_adjoint_oracle_case_under_jit(
     op = _operator_from_case(case)
     target = jnp.zeros_like(jnp.asarray(case.Xw, dtype=jnp.float32))
 
-    assert int(np.max(case.linarg.nonunique_indices)) + 1 < case.linarg.A.shape[0]
+    assert case.linarg.nonunique_indices is not None
+    assert int(np.max(np.asarray(case.linarg.nonunique_indices))) + 1 < case.linarg.A.shape[0]
     if case_name == "flipped_k3":
         assert case.flip_prob > 0
 
@@ -141,7 +142,8 @@ def test_reverse_gradient_matches_adjoint_oracle_case_under_jit(
     op = _operator_from_case(case)
     target = jnp.zeros_like(jnp.asarray(case.XTy, dtype=jnp.float32))
 
-    assert int(np.max(case.linarg.nonunique_indices)) + 1 < case.linarg.A.shape[0]
+    assert case.linarg.nonunique_indices is not None
+    assert int(np.max(np.asarray(case.linarg.nonunique_indices))) + 1 < case.linarg.A.shape[0]
     if case_name == "flipped_k3":
         assert case.flip_prob > 0
 

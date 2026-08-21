@@ -29,21 +29,13 @@ uv run mkdocs serve
 uv run mkdocs build --strict
 ```
 
-## Type-checking baseline
+## Type checking
 
-Run `uv run ty check src tests` to inspect the complete type-check output. The
-repository currently has 323 diagnostics inherited from the pre-Phase 7 base
-commit `948f6bf`, so that command does not yet exit successfully. Until those
-diagnostics are retired, every change must also run:
+Run the complete type-check gate before submitting changes:
 
 ```bash
-uv run python scripts/check_ty_no_regression.py
+uv run ty check src tests
 ```
-
-The regression check runs the same `ty` rules against the current checkout and
-the fixed base commit, normalizes only line and column movement, and fails when
-a new diagnostic or an additional copy of an existing diagnostic appears. It
-does not disable type-check rules or convert diagnostics to warnings.
 
 If `uv sync --extra docs` fails because `uv.lock` is not present, install docs dependencies with:
 

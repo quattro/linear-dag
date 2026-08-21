@@ -1,7 +1,10 @@
+# pattern: Mixed (unavoidable)
+# Reason: The public GWAS workflow aligns tabular inputs and dispatches the
+# numerical operator core in one established API module.
 import logging
 import time
 
-from typing import Optional
+from typing import cast, Optional, Protocol
 
 import numpy as np
 import polars as pl
@@ -17,6 +20,12 @@ from .util import (
     impute_missing_with_mean,
     residualize_phenotypes,
 )
+
+
+class _NonHWEGenotype(Protocol):
+    iids: pl.Series
+
+    def number_of_heterozygotes(self, individuals_to_include: np.ndarray) -> np.ndarray: ...
 
 
 def _validate_non_hwe_genotypes(genotypes: LinearOperator) -> None:
@@ -166,7 +175,7 @@ def _format_sumstats(
     beta: np.ndarray,
     var_numerator: np.ndarray,
     var_denominator: np.ndarray,
-    variant_info: pl.DataFrame,
+    variant_info: pl.LazyFrame,
     pheno_cols: list[str],
     *,
     detach_arrays: bool = False,
@@ -288,8 +297,11 @@ def run_gwas(
     if not np.allclose(selected_data.select(covar_cols[0]).to_numpy(), 1.0):
         raise ValueError("First column of covar_cols should be '1'")
 
+    genotype_iids = getattr(genotypes, "iids", None)
+    if genotype_iids is None:
+        raise ValueError("Genotype operator must expose IIDs for phenotype alignment")
     left_op, right_op = get_inner_merge_operators(
-        data_iids, genotypes.iids
+        data_iids, genotype_iids
     )  # data iids to shared iids, shared iids to genotypes iids
     if left_op.shape[1] == 0:
         raise ValueError("Merge failed between genotype and phenotype data")
@@ -298,10 +310,11 @@ def run_gwas(
         num_heterozygotes = None
     else:
         # assumes diploid
+        non_hwe_genotypes = cast(_NonHWEGenotype, genotypes)
         data_iid_array = data_iids.to_numpy().astype(str, copy=False)
-        genotype_iids = np.asarray(genotypes.iids[::2]).astype(str, copy=False)
-        individuals_to_include = np.isin(genotype_iids, data_iid_array)
-        num_heterozygotes = genotypes.number_of_heterozygotes(individuals_to_include)
+        diploid_iids = np.asarray(non_hwe_genotypes.iids[::2]).astype(str, copy=False)
+        individuals_to_include = np.isin(diploid_iids, data_iid_array)
+        num_heterozygotes = non_hwe_genotypes.number_of_heterozygotes(individuals_to_include)
     if logger:
         logger.info(f"carrier handling: {'HWE assumed' if assume_hwe else 'using explicit num_heterozygotes'}")
 
