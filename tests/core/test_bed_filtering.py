@@ -112,6 +112,7 @@ def test_filter_variants_by_bed(linarg_h5_path):
 
     hdf5_path = linarg_h5_path
     blocks = list_blocks(hdf5_path)
+    assert blocks is not None
     block_name = blocks["block_name"][0]
 
     linarg = LinearARG.read(hdf5_path, block=block_name, load_metadata=True)
@@ -142,6 +143,7 @@ def test_compute_filtered_variant_count_maf_only(linarg_h5_path):
 
     hdf5_path = linarg_h5_path
     blocks = list_blocks(hdf5_path)
+    assert blocks is not None
     block_name = blocks["block_name"][0]
 
     # Count with no filter
@@ -169,6 +171,7 @@ def test_compute_filtered_variant_count_bed_with_strict_outside(linarg_h5_path):
 
     hdf5_path = linarg_h5_path
     blocks = list_blocks(hdf5_path)
+    assert blocks is not None
     block_name = blocks["block_name"][0]
 
     # Create a BED file covering part of the first block
@@ -205,6 +208,7 @@ def test_compute_filtered_variant_count_dual_threshold(linarg_h5_path):
 
     hdf5_path = linarg_h5_path
     blocks = list_blocks(hdf5_path)
+    assert blocks is not None
     block_name = blocks["block_name"][0]
 
     # Create a BED file covering part of the first block
@@ -294,6 +298,7 @@ def test_parallel_operator_bed_matmul_matches_serial(linarg_h5_path):
 
         # Serial version
         blocks = list_blocks(hdf5_path)
+        assert blocks is not None
         Z_parts = []
         for block_name in blocks["block_name"]:
             linarg = LinearARG.read(hdf5_path, block=block_name, load_metadata=True)
@@ -390,7 +395,9 @@ def test_grm_operator_bed_filtering_matches_serial_and_filtered_counts(linarg_h5
         y_ser = np.zeros_like(y_par)
         observed_filtered_variants = 0
         expected_filtered_variants = 0
-        for block_name in list_blocks(hdf5_path)["block_name"]:
+        blocks = list_blocks(hdf5_path)
+        assert blocks is not None
+        for block_name in blocks["block_name"]:
             expected_filtered_variants += compute_filtered_variant_count(
                 hdf5_path,
                 block_name,

@@ -25,6 +25,7 @@ from tests.jax.bench._promotion import (
     environment_comparison_key,
     evaluate_ratio_gates,
     EvidenceGateOutcome,
+    expected_logical_collective_bytes,
     GateResult,
     GateStatus,
     PromotionEvidence,
@@ -148,6 +149,10 @@ def aggregate_child_fragments(
                 "device_platforms",
                 "cache_policy",
                 "dirty_worktree",
+                "build_configuration",
+                "requested_device_count",
+                "selected_devices",
+                "selected_device_platforms",
             )
             mismatches = [
                 field for field in fields if getattr(evidence.environment, field) != getattr(first.environment, field)
@@ -210,11 +215,16 @@ def _apply_rhe_parity(records: tuple[Any, ...]) -> tuple[Any, ...]:
         if parity:
             normalized.append(record)
         else:
+            try:
+                notes = json.loads(record.notes)
+            except (json.JSONDecodeError, TypeError):
+                notes = {"original_notes": record.notes}
+            notes["parity_error"] = "RHE estimate parity failed against fixed-probe NumPy/Cython baseline"
             normalized.append(
                 replace(
                     record,
                     numeric_passed=False,
-                    notes=f"{record.notes}; RHE estimate parity failed against fixed-probe NumPy/Cython baseline",
+                    notes=json.dumps(notes, sort_keys=True),
                 )
             )
     return tuple(normalized)
@@ -267,15 +277,28 @@ def local_benchmark_gates(evidence: PromotionEvidence, *, production: bool) -> t
     )
     gates = []
 
-    numerical_passed = bool(packed_warm) and all(record.numeric_passed for record in packed_warm)
+    rhe_jax_warm = tuple(
+        record
+        for record in evidence.records
+        if record.operation == "rhe"
+        and record.phase == TimingPhase.WARM_EXECUTION.value
+        and record.representation in {Representation.PACKED_CANDIDATE.value, Representation.RETAINED_EXACT_RAGGED.value}
+    )
+    rhe_representations = {record.representation for record in rhe_jax_warm}
+    rhe_complete = rhe_representations == {
+        Representation.PACKED_CANDIDATE.value,
+        Representation.RETAINED_EXACT_RAGGED.value,
+    }
+    numerical_rows = (*packed_warm, *rhe_jax_warm)
+    numerical_passed = bool(packed_warm) and rhe_complete and all(record.numeric_passed for record in numerical_rows)
     gates.append(
         GateResult(
             gate="numerical",
             status=GateStatus.PASS if numerical_passed else GateStatus.FAIL,
             reason=(
-                "all packed warm rows passed finite/numerical checks"
+                "packed product and both JAX RHE representations passed numerical checks"
                 if numerical_passed
-                else "packed numerical check failed"
+                else "packed product plus exact and packed JAX RHE numerical checks are required"
             ),
         )
     )
@@ -371,7 +394,7 @@ def local_benchmark_gates(evidence: PromotionEvidence, *, production: bool) -> t
         )
     )
     communication_passed = all(
-        record.metric.logical_collective_bytes is not None and record.metric.logical_collective_bytes > 0
+        record.metric.logical_collective_bytes == expected_logical_collective_bytes(record, evidence.dataset)
         for record in two_device
     )
     gates.append(

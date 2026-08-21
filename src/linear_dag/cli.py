@@ -772,6 +772,7 @@ def _load_required_block_metadata(
     if logger is not None:
         logger.info("Getting blocks")
     block_metadata = list_blocks(linarg_path)
+    block_metadata = _require_block_metadata(block_metadata, linarg_path, command_name=command_name)
     block_metadata = _filter_blocks(block_metadata, chromosomes=chromosomes, block_names=block_names)
     return _require_block_metadata(block_metadata, linarg_path, command_name=command_name)
 

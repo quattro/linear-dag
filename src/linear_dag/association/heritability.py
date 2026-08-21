@@ -89,6 +89,7 @@ def randomized_haseman_elston(
 
     # align and residualize
     _debug("randomized_haseman_elston: aligning phenotype rows to GRM identifiers")
+    _validate_rhe_columns(data, pheno_cols, covar_cols)
     if grm.iids is None:
         raise ValueError("GRM operator must expose IIDs for phenotype alignment")
     left_op, right_op = get_inner_merge_operators(data.select("iid").cast(pl.Utf8).collect().to_series(), grm.iids)
@@ -181,6 +182,18 @@ def randomized_haseman_elston(
     )
 
     return df_result
+
+
+def _validate_rhe_columns(data: pl.LazyFrame, pheno_cols: list[str], covar_cols: list[str]) -> None:
+    if not pheno_cols:
+        raise ValueError("pheno_cols must contain at least one phenotype column")
+    if not covar_cols:
+        raise ValueError("covar_cols must contain at least one covariate column")
+    schema_names = set(data.collect_schema().names())
+    missing = [name for name in ("iid", *pheno_cols, *covar_cols) if name not in schema_names]
+    if missing:
+        missing_names = ", ".join(dict.fromkeys(missing))
+        raise ValueError(f"RHE data is missing required column(s): {missing_names}")
 
 
 def _prep_for_h2_estimation(

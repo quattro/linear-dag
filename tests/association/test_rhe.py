@@ -383,3 +383,45 @@ def test_numpy_rhe_rejects_grm_without_iids() -> None:
             ["intercept"],
             num_matvecs=1,
         )
+
+
+@pytest.mark.parametrize(
+    ("data", "pheno_cols", "covar_cols", "message"),
+    (
+        (
+            pl.DataFrame({"trait": [0.25], "intercept": [0.0]}),
+            ["trait"],
+            ["intercept"],
+            "missing required column.*iid",
+        ),
+        (
+            pl.DataFrame({"iid": ["missing"], "intercept": [0.0]}),
+            ["trait"],
+            ["intercept"],
+            "missing required column.*trait",
+        ),
+        (
+            pl.DataFrame({"iid": ["missing"], "trait": [0.25]}),
+            ["trait"],
+            ["intercept"],
+            "missing required column.*intercept",
+        ),
+    ),
+)
+def test_numpy_rhe_preflights_required_columns_before_alignment_and_intercept(
+    data: pl.DataFrame,
+    pheno_cols: list[str],
+    covar_cols: list[str],
+    message: str,
+) -> None:
+    grm = aslinearoperator(np.eye(2, dtype=np.float64))
+    grm.iids = pl.Series("iids", ["a", "a"])
+
+    with pytest.raises(ValueError, match=message):
+        randomized_haseman_elston(
+            cast(GRMOperator, grm),
+            data.lazy(),
+            pheno_cols,
+            covar_cols,
+            num_matvecs=1,
+        )

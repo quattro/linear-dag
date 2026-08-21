@@ -230,6 +230,7 @@ def test_format_suggestion_fragment_has_expected_forms():
 
 def test_filter_blocks_rejects_block_names_and_chromosomes_together():
     block_metadata = cli.list_blocks(str(TEST_DATA_DIR / "test_chr21_50.h5"))
+    assert block_metadata is not None
     with pytest.raises(ValueError, match="Specify either block_names or chromosomes"):
         cli._filter_blocks(block_metadata, chromosomes=["21"], block_names=["21_10000001.0_10200000.0"])
 

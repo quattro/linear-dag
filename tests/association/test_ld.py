@@ -20,6 +20,7 @@ def test_write_ld_files(linarg_h5_path):
 
     # Get first block
     blocks_df = list_blocks(hdf5_path)
+    assert blocks_df is not None
     block_name = blocks_df["block_name"][0]
 
     linarg = LinearARG.read(hdf5_path, block=block_name)
@@ -79,6 +80,7 @@ def test_get_ldm(linarg_h5_path):
 
     # Get first block
     blocks_df = list_blocks(hdf5_path)
+    assert blocks_df is not None
     block_name = blocks_df["block_name"][0]
 
     linarg = LinearARG.read(hdf5_path, block=block_name)

@@ -75,6 +75,8 @@ def _prepare_from_hdf5_context(
     _validate_num_processes(num_processes)
     if block_metadata is None:
         block_metadata = list_blocks(hdf5_file)
+    if block_metadata is None:
+        raise ValueError(f"LinearARG HDF5 file contains no block groups: {hdf5_file}")
 
     bed_regions = None
     if bed_file is not None:

@@ -391,6 +391,9 @@ def binarize(genotypes: csc_matrix, r2_threshold: float = 0.0) -> tuple[csc_matr
         ),
         shape=genotypes.shape,
     )
+    discretized_genotypes.eliminate_zeros()
+    discretized_genotypes.sum_duplicates()
+    discretized_genotypes.sort_indices()
 
     # TODO: vectorize
     # Correlations between dosages + calls

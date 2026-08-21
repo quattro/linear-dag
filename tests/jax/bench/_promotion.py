@@ -10,8 +10,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, overload
 
-SCHEMA_VERSION = "2026-08-13+4"
-LEGACY_SCHEMA_VERSIONS = {"2026-08-13+2", "2026-08-13+3"}
+SCHEMA_VERSION = "2026-08-13+5"
+LEGACY_SCHEMA_VERSIONS = {"2026-08-13+2", "2026-08-13+3", "2026-08-13+4"}
 CURRENT_REFERENCE_COMMIT = "b68e7da"
 REQUIRED_PRODUCT_KS = (4, 20)
 REQUIRED_PRODUCT_OPERATIONS = ("matmat", "rmatmat")
@@ -146,6 +146,93 @@ class DatasetFingerprint:
 
 
 @dataclass(frozen=True)
+class BuildConfiguration:
+    """Frozen native-extension configuration attached to benchmark evidence."""
+
+    backend: str
+    ffi_cpu_built: bool
+    ffi_cpu_available: bool
+    ffi_cpu_exact_available: bool
+    ffi_cpu_packed_available: bool
+    ffi_cpu_blas_enabled: bool
+    ffi_cpu_blas_backend: str | None
+    ffi_cpu_native_tuning: bool
+    ffi_cpu_error: str | None
+    ffi_cpu_exact_error: str | None
+    ffi_cpu_packed_error: str | None
+
+    def __post_init__(self) -> None:
+        if not self.backend:
+            raise ValueError("build_configuration.backend must be non-empty")
+        for name in (
+            "ffi_cpu_built",
+            "ffi_cpu_available",
+            "ffi_cpu_exact_available",
+            "ffi_cpu_packed_available",
+            "ffi_cpu_blas_enabled",
+            "ffi_cpu_native_tuning",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"build_configuration.{name} must be a bool")
+        if self.ffi_cpu_blas_enabled and not self.ffi_cpu_blas_backend:
+            raise ValueError("build_configuration.ffi_cpu_blas_backend is required when BLAS is enabled")
+        if (self.ffi_cpu_exact_available or self.ffi_cpu_packed_available) and not self.ffi_cpu_available:
+            raise ValueError("available FFI targets require build_configuration.ffi_cpu_available")
+        if self.ffi_cpu_available and self.ffi_cpu_error is not None:
+            raise ValueError("available CPU FFI cannot have an error")
+        if self.ffi_cpu_exact_available and self.ffi_cpu_exact_error is not None:
+            raise ValueError("available exact FFI targets cannot have an error")
+        if self.ffi_cpu_packed_available and self.ffi_cpu_packed_error is not None:
+            raise ValueError("available packed FFI targets cannot have an error")
+
+    @classmethod
+    def unavailable_legacy(cls) -> "BuildConfiguration":
+        """Represent build provenance absent from a legacy evidence schema."""
+        reason = "legacy evidence did not record native build configuration"
+        return cls(
+            backend="legacy-unrecorded",
+            ffi_cpu_built=False,
+            ffi_cpu_available=False,
+            ffi_cpu_exact_available=False,
+            ffi_cpu_packed_available=False,
+            ffi_cpu_blas_enabled=False,
+            ffi_cpu_blas_backend=None,
+            ffi_cpu_native_tuning=False,
+            ffi_cpu_error=reason,
+            ffi_cpu_exact_error=reason,
+            ffi_cpu_packed_error=reason,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.__dict__)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "BuildConfiguration":
+        required = set(cls.__dataclass_fields__)
+        missing = required - set(payload)
+        if missing:
+            raise ValueError(f"build configuration missing required fields: {sorted(missing)}")
+        if not isinstance(payload["backend"], str):
+            raise ValueError("build_configuration.backend must be a string")
+        for name in ("ffi_cpu_blas_backend", "ffi_cpu_error", "ffi_cpu_exact_error", "ffi_cpu_packed_error"):
+            if payload[name] is not None and not isinstance(payload[name], str):
+                raise ValueError(f"build_configuration.{name} must be a string or null")
+        return cls(
+            backend=payload["backend"],
+            ffi_cpu_built=_require_bool(payload, "ffi_cpu_built", context="build_configuration"),
+            ffi_cpu_available=_require_bool(payload, "ffi_cpu_available", context="build_configuration"),
+            ffi_cpu_exact_available=_require_bool(payload, "ffi_cpu_exact_available", context="build_configuration"),
+            ffi_cpu_packed_available=_require_bool(payload, "ffi_cpu_packed_available", context="build_configuration"),
+            ffi_cpu_blas_enabled=_require_bool(payload, "ffi_cpu_blas_enabled", context="build_configuration"),
+            ffi_cpu_blas_backend=payload["ffi_cpu_blas_backend"],
+            ffi_cpu_native_tuning=_require_bool(payload, "ffi_cpu_native_tuning", context="build_configuration"),
+            ffi_cpu_error=payload["ffi_cpu_error"],
+            ffi_cpu_exact_error=payload["ffi_cpu_exact_error"],
+            ffi_cpu_packed_error=payload["ffi_cpu_packed_error"],
+        )
+
+
+@dataclass(frozen=True)
 class EnvironmentState:
     platform_label: str
     python_version: str
@@ -162,6 +249,10 @@ class EnvironmentState:
     dirty_worktree: bool
     device_platforms: tuple[str, ...] = ()
     cache_policy: str | None = None
+    build_configuration: BuildConfiguration = BuildConfiguration.unavailable_legacy()
+    requested_device_count: int | None = None
+    selected_devices: tuple[str, ...] = ()
+    selected_device_platforms: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.platform_label:
@@ -181,6 +272,21 @@ class EnvironmentState:
             raise ValueError("environment device_platforms and devices must have equal length")
         if any(item not in {"cpu", "gpu", "tpu"} for item in self.device_platforms):
             raise ValueError("environment.device_platforms contains an unsupported JAX platform")
+        if self.requested_device_count is not None:
+            if (
+                isinstance(self.requested_device_count, bool)
+                or not isinstance(self.requested_device_count, int)
+                or self.requested_device_count < 1
+            ):
+                raise ValueError("environment.requested_device_count must be a positive int or null")
+            if len(self.selected_devices) != self.requested_device_count:
+                raise ValueError("environment selected topology must match requested_device_count")
+        if len(self.selected_devices) != len(self.selected_device_platforms):
+            raise ValueError("environment selected devices and platforms must have equal length")
+        if any(item not in {"cpu", "gpu", "tpu"} for item in self.selected_device_platforms):
+            raise ValueError("environment.selected_device_platforms contains an unsupported JAX platform")
+        if any(device not in self.devices for device in self.selected_devices):
+            raise ValueError("environment selected devices must be visible JAX devices")
         _validate_platform_attestation(self)
 
     def to_dict(self) -> dict[str, Any]:
@@ -200,6 +306,10 @@ class EnvironmentState:
             "xla_cache_dir": self.xla_cache_dir,
             "command": self.command,
             "dirty_worktree": self.dirty_worktree,
+            "build_configuration": self.build_configuration.to_dict(),
+            "requested_device_count": self.requested_device_count,
+            "selected_devices": list(self.selected_devices),
+            "selected_device_platforms": list(self.selected_device_platforms),
         }
 
     @classmethod
@@ -228,6 +338,13 @@ class EnvironmentState:
         device_platforms = payload.get("device_platforms")
         if device_platforms is not None and not isinstance(device_platforms, list):
             raise ValueError("environment.device_platforms must be a list")
+        selected_devices = payload.get("selected_devices", [])
+        selected_device_platforms = payload.get("selected_device_platforms", [])
+        if not isinstance(selected_devices, list) or not isinstance(selected_device_platforms, list):
+            raise ValueError("environment selected topology fields must be lists")
+        build_payload = payload.get("build_configuration")
+        if build_payload is not None and not isinstance(build_payload, dict):
+            raise ValueError("environment.build_configuration must be an object")
         return cls(
             platform_label=str(payload["platform_label"]),
             python_version=str(payload["python_version"]),
@@ -244,6 +361,16 @@ class EnvironmentState:
             xla_cache_dir=None if payload["xla_cache_dir"] is None else str(payload["xla_cache_dir"]),
             command=str(payload["command"]),
             dirty_worktree=_require_bool(payload, "dirty_worktree", context="environment"),
+            build_configuration=(
+                BuildConfiguration.unavailable_legacy()
+                if build_payload is None
+                else BuildConfiguration.from_dict(build_payload)
+            ),
+            requested_device_count=_require_int(
+                payload.get("requested_device_count"), field="requested_device_count", allow_none=True
+            ),
+            selected_devices=tuple(str(item) for item in selected_devices),
+            selected_device_platforms=tuple(str(item) for item in selected_device_platforms),
         )
 
 
@@ -259,7 +386,7 @@ def normalize_machine(machine: str) -> str:
 def _validate_platform_attestation(environment: EnvironmentState) -> None:
     label = environment.platform_label
     machine = normalize_machine(environment.machine)
-    platforms = environment.device_platforms
+    platforms = environment.selected_device_platforms or environment.device_platforms
     if label == "arm64-cpu" and machine != "arm64":
         raise ValueError(f"platform label arm64-cpu does not match normalized machine {machine!r}")
     if label == "x86_64-cpu" and machine != "x86_64":
@@ -277,14 +404,15 @@ def attested_platforms(environment: EnvironmentState) -> tuple[str, ...]:
     """Return required platform roles proven by normalized architecture/devices."""
     roles: list[str] = []
     machine = normalize_machine(environment.machine)
-    if environment.device_platforms and all(item == "cpu" for item in environment.device_platforms):
+    platforms = environment.selected_device_platforms or environment.device_platforms
+    if platforms and all(item == "cpu" for item in platforms):
         if machine == "arm64":
             roles.append("arm64-cpu")
         elif machine == "x86_64":
             roles.append("x86_64-cpu")
-        if len(environment.device_platforms) >= 2:
+        if len(platforms) >= 2:
             roles.append("forced-two-device-cpu")
-    if "gpu" in environment.device_platforms:
+    if "gpu" in platforms:
         roles.append("gpu")
     return tuple(roles)
 
@@ -306,6 +434,10 @@ def environment_comparison_key(environment: EnvironmentState) -> tuple[Any, ...]
         environment.device_platforms,
         environment.cache_policy,
         environment.dirty_worktree,
+        environment.build_configuration,
+        environment.requested_device_count,
+        environment.selected_devices,
+        environment.selected_device_platforms,
     )
 
 
@@ -378,6 +510,7 @@ class PerformanceMetrics:
     logical_collective_bytes: int | None = None
     graph_bytes_by_device_count: int | None = None
     graph_bytes_by_device_max: int | None = None
+    final_total_bytes: int | None = None
 
     def __post_init__(self) -> None:
         for key, value in self.__dict__.items():
@@ -385,6 +518,31 @@ class PerformanceMetrics:
                 continue
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"metric {key} must be a non-negative int, observed {value!r}")
+        if (
+            self.canonical_graph_bytes is not None
+            and self.padded_graph_bytes is not None
+            and self.padded_graph_bytes < self.canonical_graph_bytes
+        ):
+            raise ValueError("metric padded_graph_bytes must be >= canonical_graph_bytes")
+        if (
+            self.padded_graph_bytes is not None
+            and self.resident_graph_bytes is not None
+            and self.resident_graph_bytes != self.padded_graph_bytes
+        ):
+            raise ValueError("metric resident_graph_bytes must equal padded_graph_bytes")
+        if (
+            self.max_device_graph_bytes is not None
+            and self.resident_graph_bytes is not None
+            and self.max_device_graph_bytes > self.resident_graph_bytes
+        ):
+            raise ValueError("metric max_device_graph_bytes must be <= resident_graph_bytes")
+        if (
+            self.final_total_bytes is not None
+            and self.padded_graph_bytes is not None
+            and self.descriptor_bytes is not None
+            and self.final_total_bytes != self.padded_graph_bytes + self.descriptor_bytes
+        ):
+            raise ValueError("metric final_total_bytes must equal padded_graph_bytes + descriptor_bytes")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -404,6 +562,7 @@ class PerformanceMetrics:
             "logical_collective_bytes": self.logical_collective_bytes,
             "graph_bytes_by_device_count": self.graph_bytes_by_device_count,
             "graph_bytes_by_device_max": self.graph_bytes_by_device_max,
+            "final_total_bytes": self.final_total_bytes,
         }
 
     @classmethod
@@ -427,6 +586,7 @@ class PerformanceMetrics:
             logical_collective_bytes=none_or_int(payload, "logical_collective_bytes"),
             graph_bytes_by_device_count=none_or_int(payload, "graph_bytes_by_device_count"),
             graph_bytes_by_device_max=none_or_int(payload, "graph_bytes_by_device_max"),
+            final_total_bytes=none_or_int(payload, "final_total_bytes"),
         )
 
 
@@ -614,6 +774,53 @@ class BenchmarkRecord:
         )
 
 
+_REQUIRED_PACKED_PRODUCT_METRICS = (
+    "canonical_graph_bytes",
+    "padded_graph_bytes",
+    "descriptor_bytes",
+    "resident_graph_bytes",
+    "max_device_graph_bytes",
+    "final_total_bytes",
+    "staging_bytes",
+    "component_count",
+    "pytree_leaf_count",
+    "graph_constant_bytes",
+    "graph_operand_count",
+    "stablehlo_bytes",
+    "stablehlo_operation_count",
+    "logical_collective_bytes",
+)
+
+
+def _dtype_itemsize(dtype: str) -> int:
+    return {"float16": 2, "bfloat16": 2, "float32": 4, "float64": 8}[dtype]
+
+
+def expected_logical_collective_bytes(record: BenchmarkRecord, dataset: DatasetFingerprint) -> int:
+    if record.operation not in REQUIRED_PRODUCT_OPERATIONS or record.workload_size is None:
+        raise ValueError("logical collective expectation requires a product record with workload_size")
+    logical_rows = dataset.n_samples if record.operation == "matmat" else dataset.n_variants
+    if record.device_count == 1:
+        return 0
+    return logical_rows * record.workload_size * _dtype_itemsize(record.dtype)
+
+
+def _validate_current_packed_record(record: BenchmarkRecord, *, dataset: DatasetFingerprint) -> None:
+    if record.representation != Representation.PACKED_CANDIDATE.value:
+        return
+    if record.operation not in REQUIRED_PRODUCT_OPERATIONS:
+        return
+    missing = [name for name in _REQUIRED_PACKED_PRODUCT_METRICS if getattr(record.metric, name) is None]
+    if missing:
+        raise ValueError(f"packed product metrics missing required fields: {missing}")
+    expected = expected_logical_collective_bytes(record, dataset)
+    if record.metric.logical_collective_bytes != expected:
+        raise ValueError(
+            f"logical_collective_bytes={record.metric.logical_collective_bytes} does not match expected {expected} "
+            f"for {record.operation}"
+        )
+
+
 @dataclass(frozen=True)
 class EvidenceGateOutcome:
     """Persisted validation or structural gate result with provenance."""
@@ -684,6 +891,8 @@ class PromotionEvidence:
             raise ValueError("environment dirty_worktree mismatch")
         if self.environment.cache_policy is not None and self.environment.cache_policy != self.cache_label:
             raise ValueError("environment cache_policy mismatch")
+        if self.schema_version == SCHEMA_VERSION and self.environment.requested_device_count is None:
+            raise ValueError("current evidence requires an explicitly selected device topology")
         seen: set[str] = set()
         for record in self.records:
             if record.candidate_commit != self.candidate_commit:
@@ -696,9 +905,13 @@ class PromotionEvidence:
                 raise ValueError("row cache_policy mismatch")
             if record.platform_label != self.environment.platform_label:
                 raise ValueError("row platform_label mismatch")
+            if self.schema_version == SCHEMA_VERSION and record.device_count != self.environment.requested_device_count:
+                raise ValueError("row device_count does not match selected environment topology")
             if record.record_id in seen:
                 raise ValueError(f"duplicate record_id {record.record_id!r}")
             seen.add(record.record_id)
+            if self.schema_version == SCHEMA_VERSION:
+                _validate_current_packed_record(record, dataset=self.dataset)
         gate_ids: set[str] = set()
         for outcome in self.gate_outcomes:
             if outcome.evidence_id in gate_ids:
@@ -725,7 +938,7 @@ class PromotionEvidence:
             "environment": self.environment.to_dict(),
             "records": [item.to_dict() for item in self.records],
         }
-        if self.schema_version == SCHEMA_VERSION:
+        if self.schema_version in {"2026-08-13+4", SCHEMA_VERSION}:
             payload["gate_outcomes"] = [item.to_dict() for item in self.gate_outcomes]
         return payload
 
@@ -751,7 +964,14 @@ class PromotionEvidence:
         if not isinstance(payload.get("records"), list):
             raise ValueError("records must be a list")
         if payload["schema_version"] == SCHEMA_VERSION:
-            missing_environment = {"device_platforms", "cache_policy"} - set(payload["environment"])
+            missing_environment = {
+                "device_platforms",
+                "cache_policy",
+                "build_configuration",
+                "requested_device_count",
+                "selected_devices",
+                "selected_device_platforms",
+            } - set(payload["environment"])
             if missing_environment:
                 raise ValueError(f"environment missing required fields: {sorted(missing_environment)}")
             if "gate_outcomes" not in payload:
@@ -1052,6 +1272,16 @@ def _rhe_diagnostic_gates(rows: tuple[BenchmarkRecord, ...], *, required_ratio: 
                     gate=gate_name,
                     status=GateStatus.MISSING,
                     reason=GateFailureReason.MISSING_EXACT.value,
+                    blocking=False,
+                )
+            )
+            continue
+        if not packed.numeric_passed or not exact.numeric_passed:
+            gates.append(
+                GateResult(
+                    gate=gate_name,
+                    status=GateStatus.MISSING,
+                    reason="RHE timing ratio omitted because a numerical operand is numerically invalid",
                     blocking=False,
                 )
             )

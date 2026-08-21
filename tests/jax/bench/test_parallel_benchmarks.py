@@ -43,6 +43,8 @@ from tests.jax.bench._promotion_io import (
     compute_dataset_fingerprint,
     git_commit,
     is_git_dirty,
+    resolve_requested_device_count,
+    time_synchronized_construction,
     write_evidence_fragment,
 )
 
@@ -587,11 +589,23 @@ def _promotion_backends(representation: Representation, device_platform: str) ->
     return tuple(backends)
 
 
-def _promotion_device_counts(block_metadata: pl.DataFrame, device_platform: str) -> tuple[int, ...]:
-    maximum = min(len(_devices_for_backend(device_platform)), block_metadata.height)
-    if maximum < 1:
+def _promotion_device_counts(
+    block_metadata: pl.DataFrame,
+    device_platform: str,
+    *,
+    requested_count: int,
+) -> tuple[int, ...]:
+    visible = len(_devices_for_backend(device_platform))
+    if visible < 1:
         pytest.skip(f"promotion products require a {device_platform} JAX device")
-    return (1, 2) if maximum >= 2 else (1,)
+    if requested_count > visible:
+        raise ValueError(f"requested {requested_count} {device_platform} device(s), but only {visible} visible")
+    if requested_count > block_metadata.height:
+        raise ValueError(
+            f"requested {requested_count} {device_platform} device(s), but dataset has only "
+            f"{block_metadata.height} block(s)"
+        )
+    return (requested_count,)
 
 
 def _time_promotion_numpy_products(
@@ -679,22 +693,25 @@ def _time_promotion_exact_products(
     *,
     k_values: tuple[int, ...],
     device_platform: str,
+    requested_devices: int,
 ) -> list[_PromotionProductMeasurement]:
     measurements = []
     platform_devices = tuple(_devices_for_backend(device_platform))
     for backend in _promotion_backends(Representation.RETAINED_EXACT_RAGGED, device_platform):
-        for device_count in _promotion_device_counts(block_metadata, device_platform):
+        for device_count in _promotion_device_counts(
+            block_metadata, device_platform, requested_count=requested_devices
+        ):
             devices = platform_devices[:device_count]
             mesh = Mesh(np.asarray(devices), ("blocks",))
             with jax.default_device(devices[0]):
-                start = time.perf_counter()
-                operator = JaxParallelOperator.from_hdf5(
-                    path,
-                    mesh=mesh,
-                    block_metadata=block_metadata,
-                    backend=backend,
+                operator, construction_seconds = time_synchronized_construction(
+                    lambda: JaxParallelOperator.from_hdf5(
+                        path,
+                        mesh=mesh,
+                        block_metadata=block_metadata,
+                        backend=backend,
+                    )
                 )
-                construction_seconds = time.perf_counter() - start
             variant_inputs, sample_inputs = _benchmark_inputs(operator.shape, k_values=k_values)
             resolved_backend = operator.blocks[0].backend.value
             graph_bytes = _graph_bytes_by_device(operator)
@@ -776,24 +793,27 @@ def _time_promotion_packed_products(
     *,
     k_values: tuple[int, ...],
     device_platform: str,
+    requested_devices: int,
 ) -> list[_PromotionProductMeasurement]:
     measurements = []
     platform_devices = tuple(_devices_for_backend(device_platform))
     block_names = tuple(block_metadata.get_column("block_name").to_list())
     max_padding_ratio = None if path.parent.name == "testdata" else 1.25
     for backend in _promotion_backends(Representation.PACKED_CANDIDATE, device_platform):
-        for device_count in _promotion_device_counts(block_metadata, device_platform):
+        for device_count in _promotion_device_counts(
+            block_metadata, device_platform, requested_count=requested_devices
+        ):
             devices = platform_devices[:device_count]
             mesh = Mesh(np.asarray(devices), ("graph",))
-            start = time.perf_counter()
-            packed = _packed_from_hdf5(
-                path,
-                block_names,
-                mesh=mesh,
-                backend=backend,
-                max_padding_ratio=max_padding_ratio,
+            packed, construction_seconds = time_synchronized_construction(
+                lambda: _packed_from_hdf5(
+                    path,
+                    block_names,
+                    mesh=mesh,
+                    backend=backend,
+                    max_padding_ratio=max_padding_ratio,
+                )
             )
-            construction_seconds = time.perf_counter() - start
             operator = packed.operator
             graph_bytes = _graph_bytes_by_device(operator)
             diagnostics = packed.diagnostics
@@ -835,6 +855,7 @@ def _time_promotion_packed_products(
                         logical_collective_bytes=(
                             output_size * k * np.dtype(values.dtype).itemsize if device_count > 1 else 0
                         ),
+                        final_total_bytes=int(diagnostics.padded_graph_bytes + diagnostics.descriptor_bytes),
                     )
                     common: dict[str, Any] = dict(
                         operation=operation,
@@ -905,12 +926,18 @@ def _run_promotion_product_child(
     if output_path is None:
         pytest.fail("promotion child requires --jax-promotion-output PATH")
     device_platform = _promotion_device_platform()
+    parallel_processes = resolve_requested_device_count(parallel_processes)
+    (selected_device_count,) = _promotion_device_counts(
+        block_metadata,
+        device_platform,
+        requested_count=parallel_processes,
+    )
     if representation is Representation.NUMPY_CYTHON:
         measurements = _time_promotion_numpy_products(
             path,
             block_metadata,
             k_values=k_values,
-            num_processes=min(parallel_processes, block_metadata.height),
+            num_processes=selected_device_count,
         )
     elif representation is Representation.RETAINED_EXACT_RAGGED:
         measurements = _time_promotion_exact_products(
@@ -918,6 +945,7 @@ def _run_promotion_product_child(
             block_metadata,
             k_values=k_values,
             device_platform=device_platform,
+            requested_devices=selected_device_count,
         )
     else:
         measurements = _time_promotion_packed_products(
@@ -925,6 +953,7 @@ def _run_promotion_product_child(
             block_metadata,
             k_values=k_values,
             device_platform=device_platform,
+            requested_devices=selected_device_count,
         )
 
     fingerprint = compute_dataset_fingerprint(path)

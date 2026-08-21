@@ -1225,7 +1225,7 @@ class LinearARG(LinearOperator):
         return linarg
 
 
-def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
+def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame | None:
     """List HDF5 block groups and their metadata attributes.
 
     **Arguments:**
@@ -1234,8 +1234,8 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
 
     **Returns:**
 
-    - Polars DataFrame with one row per block, sorted by chromosome/start.
-      Returns an empty DataFrame when no block groups are present.
+    - Polars DataFrame with one row per block, sorted by chromosome/start, or
+      `None` when no block groups are present.
     """
     if not str(h5_fname).endswith(".h5"):
         h5_fname = str(h5_fname) + ".h5"
@@ -1271,7 +1271,7 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
         block_names = sorted(block_names, key=parse_block_name)
 
         if not block_names:
-            return pl.DataFrame()
+            return None
         else:
             for block_name in block_names:
                 group = f[block_name]
@@ -1443,6 +1443,8 @@ def load_variant_info(
         h5_fname = str(h5_fname) + ".h5"
 
     blocks_df = list_blocks(h5_fname)
+    if blocks_df is None:
+        raise ValueError(f"LinearARG HDF5 file contains no block groups: {h5_fname}")
     blocks = block_names or blocks_df.get_column("block_name").to_list()
     if block_names is not None:
         blocks_df = blocks_df.filter(pl.col("block_name").is_in(block_names))

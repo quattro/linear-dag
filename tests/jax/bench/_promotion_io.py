@@ -11,24 +11,29 @@ import platform
 import shlex
 import subprocess
 import sys
+import time
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 import jax
 import jaxlib
 import numpy as np
 
+from linear_dag.core.jaxlinarg.build_config import show_build_config
 from linear_dag.core.lineararg import list_blocks
 from tests.jax.bench._promotion import (
     BenchmarkRecord,
+    BuildConfiguration,
     CachePolicy,
     DatasetFingerprint,
     EnvironmentState,
     PromotionEvidence,
     SCHEMA_VERSION,
 )
+
+_T = TypeVar("_T")
 
 
 def normalize_path(path: Path | str) -> Path:
@@ -115,8 +120,17 @@ def compute_dataset_fingerprint(h5_path: Path | str) -> DatasetFingerprint:
     )
 
 
-def gather_environment(platform_label: str, *, cache_policy: str) -> EnvironmentState:
+def gather_environment(
+    platform_label: str,
+    *,
+    cache_policy: str,
+    requested_device_count: int,
+) -> EnvironmentState:
     devices = tuple(jax.devices())
+    if requested_device_count > len(devices):
+        raise ValueError(f"requested {requested_device_count} JAX device(s), but only {len(devices)} are visible")
+    selected = devices[:requested_device_count]
+    native = show_build_config()
     return EnvironmentState(
         platform_label=platform_label,
         python_version=sys.version.split()[0],
@@ -133,6 +147,26 @@ def gather_environment(platform_label: str, *, cache_policy: str) -> Environment
         command=" ".join(shlex.quote(item) for item in sys.argv),
         dirty_worktree=is_git_dirty(),
         cache_policy=cache_policy,
+        build_configuration=BuildConfiguration(
+            backend=str(native["backend"]),
+            ffi_cpu_built=native["ffi_cpu_built"],
+            ffi_cpu_available=native["ffi_cpu_available"],
+            ffi_cpu_exact_available=native["ffi_cpu_exact_available"],
+            ffi_cpu_packed_available=native["ffi_cpu_packed_available"],
+            ffi_cpu_blas_enabled=native["ffi_cpu_blas_enabled"],
+            ffi_cpu_blas_backend=(
+                None if native["ffi_cpu_blas_backend"] is None else str(native["ffi_cpu_blas_backend"])
+            ),
+            ffi_cpu_native_tuning=native["ffi_cpu_native_tuning"],
+            ffi_cpu_error=(None if native["ffi_cpu_error"] is None else str(native["ffi_cpu_error"])),
+            ffi_cpu_exact_error=(None if native["ffi_cpu_exact_error"] is None else str(native["ffi_cpu_exact_error"])),
+            ffi_cpu_packed_error=(
+                None if native["ffi_cpu_packed_error"] is None else str(native["ffi_cpu_packed_error"])
+            ),
+        ),
+        requested_device_count=requested_device_count,
+        selected_devices=tuple(str(device) for device in selected),
+        selected_device_platforms=tuple(str(device.platform) for device in selected),
     )
 
 
@@ -157,6 +191,9 @@ def build_promotion_evidence(
     candidate = candidate_commit or records[0].candidate_commit
     if any(record.candidate_commit != candidate for record in records):
         raise ValueError("records must share one candidate commit")
+    device_counts = {record.device_count for record in records}
+    if len(device_counts) != 1:
+        raise ValueError(f"records must share one selected device count, observed {sorted(device_counts)}")
     return PromotionEvidence(
         schema_version=SCHEMA_VERSION,
         candidate_commit=candidate,
@@ -165,7 +202,11 @@ def build_promotion_evidence(
         dataset=dataset,
         produced_at_utc=produced_at_utc or datetime.now(timezone.utc).isoformat(),
         cache_label=cache_label,
-        environment=gather_environment(platform_label, cache_policy=cache_label),
+        environment=gather_environment(
+            platform_label,
+            cache_policy=cache_label,
+            requested_device_count=device_counts.pop(),
+        ),
         records=records,
     )
 
@@ -196,6 +237,41 @@ def write_evidence_fragment(path: Path | str, evidence: PromotionEvidence) -> No
     resolved = normalize_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_text(evidence.to_json(), encoding="utf-8")
+
+
+def resolve_requested_device_count(cli_count: int) -> int:
+    """Require runner topology metadata to agree with the pytest device count."""
+    raw = os.environ.get("LINEAR_DAG_PROMOTION_DEVICE_COUNT")
+    if raw is None:
+        return cli_count
+    try:
+        requested = int(raw)
+    except ValueError as error:
+        raise ValueError("LINEAR_DAG_PROMOTION_DEVICE_COUNT must be a positive integer") from error
+    if requested < 1:
+        raise ValueError("LINEAR_DAG_PROMOTION_DEVICE_COUNT must be a positive integer")
+    if requested != cli_count:
+        raise ValueError(
+            f"promotion topology mismatch: runner requested {requested} device(s), pytest requested {cli_count}"
+        )
+    return requested
+
+
+def time_synchronized_construction(
+    factory: Callable[[], _T],
+    *,
+    clock: Callable[[], float] = time.perf_counter,
+) -> tuple[_T, float]:
+    """Construct a JAX graph and synchronize every leaf inside its timing window."""
+    start = clock()
+    value = factory()
+
+    def synchronize_leaf(leaf: Any) -> Any:
+        block = getattr(leaf, "block_until_ready", None)
+        return block() if block is not None else leaf
+
+    value = jax.tree.map(synchronize_leaf, value)
+    return value, clock() - start
 
 
 def build_promotion_pytest_command(

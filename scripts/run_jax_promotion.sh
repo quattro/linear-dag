@@ -328,6 +328,7 @@ write_environment_log "$setup_environment" 'validation' 'setup-validation' 'vali
 
 runtime_env=(
     "LINEAR_DAG_PROMOTION_DEVICE_PLATFORM=$device_platform"
+    "LINEAR_DAG_PROMOTION_DEVICE_COUNT=$device_count"
     "JAX_COMPILATION_CACHE_DIR=$validation_cache"
     "XLA_CACHE_DIR=$validation_cache"
     "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0"
@@ -358,6 +359,13 @@ else
         tests/association/test_heritability_jax.py
     )
 fi
+
+topology_check='import jax,sys; platform=sys.argv[1]; requested=int(sys.argv[2]); devices=jax.devices(platform); visible=len(devices); visible >= requested or sys.exit(f"requested {requested} {platform} device(s), but only {visible} visible"); print("selected_devices=" + ",".join(map(str, devices[:requested])))'
+run_logged \
+    'topology-validation' \
+    "$setup_commands" \
+    "$setup_execution" \
+    env "${runtime_env[@]}" uv run python -c "$topology_check" "$device_platform" "$device_count"
 
 correctness_command=(uv run pytest -p no:capture "${correctness_tests[@]}")
 if [[ "$device_platform" == 'gpu' ]]; then
@@ -400,6 +408,7 @@ for cache_policy in fresh reused; do
 
     benchmark_env=(
         "LINEAR_DAG_PROMOTION_DEVICE_PLATFORM=$device_platform"
+        "LINEAR_DAG_PROMOTION_DEVICE_COUNT=$device_count"
         "JAX_COMPILATION_CACHE_DIR=$benchmark_cache"
         "XLA_CACHE_DIR=$benchmark_cache"
         "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0"

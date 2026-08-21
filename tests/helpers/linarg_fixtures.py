@@ -12,7 +12,10 @@ from linear_dag.core.parallel_processing import ParallelOperator
 
 def load_block_metadata(linarg_h5_path: Path) -> pl.DataFrame:
     """Load block metadata from a linear ARG HDF5 file."""
-    return list_blocks(linarg_h5_path)
+    metadata = list_blocks(linarg_h5_path)
+    if metadata is None:
+        raise ValueError(f"LinearARG HDF5 fixture contains no blocks: {linarg_h5_path}")
+    return metadata
 
 
 def get_first_block_name(linarg_h5_path: Path) -> str:

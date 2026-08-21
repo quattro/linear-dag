@@ -201,7 +201,9 @@ def test_parallel_operator(linarg_h5_path: Path):
         parallel_result = operator @ b
 
     # 3. Serial version
-    blocks = list_blocks(hdf5_path)["block_name"]
+    metadata = list_blocks(hdf5_path)
+    assert metadata is not None
+    blocks = metadata["block_name"]
 
     # Transpose multiplication
     serial_results_T = []
@@ -227,6 +229,7 @@ def test_parallel_operator(linarg_h5_path: Path):
 
 def _load_serial_blocks(hdf5_path: Path):
     blocks_df = list_blocks(hdf5_path)
+    assert blocks_df is not None
     block_names = blocks_df.get_column("block_name").to_list()
     n_variants = blocks_df.get_column("n_variants").to_list()
     linargs = [LinearARG.read(hdf5_path, block) for block in block_names]
@@ -493,7 +496,9 @@ def _compute_serial_filtered_grm(
     bed_maf_threshold = 10**bed_maf_log10_threshold if bed_maf_log10_threshold is not None else 0.0
 
     y = np.zeros_like(x, dtype=np.float32)
-    for block_name in list_blocks(hdf5_path)["block_name"]:
+    metadata = list_blocks(hdf5_path)
+    assert metadata is not None
+    for block_name in metadata["block_name"]:
         linarg = LinearARG.read(hdf5_path, block=block_name, load_metadata=True)
         if maf_log10_threshold is not None or bed_regions is not None:
             mask = compute_variant_filter_mask(
@@ -590,6 +595,7 @@ def test_maf_threshold_filtering(linarg_h5_path: Path):
     try:
         # Read blocks and rewrite with threshold data
         metadata = list_blocks(hdf5_path)
+        assert metadata is not None
         for block_info in metadata.iter_rows(named=True):
             linarg = LinearARG.read(hdf5_path, block_info["block_name"])
             block_dict = {
@@ -611,6 +617,7 @@ def test_maf_threshold_filtering(linarg_h5_path: Path):
 
         # Compute serial version with filtering
         metadata_filtered = list_blocks(tmp_path)
+        assert metadata_filtered is not None
         result_serial = 0
         variant_counter = 0
         total_filtered_variants = 0

@@ -17,9 +17,11 @@ import pytest
 
 from tests.jax.bench._promotion import (
     BenchmarkRecord,
+    BuildConfiguration,
     CachePolicy,
     DatasetFingerprint,
     Decision,
+    environment_comparison_key,
     EnvironmentState,
     evaluate_evidence_set,
     evaluate_ratio_gates,
@@ -39,6 +41,8 @@ from tests.jax.bench._promotion_io import (
     compute_dataset_fingerprint,
     is_git_dirty,
     load_evidences,
+    resolve_requested_device_count,
+    time_synchronized_construction,
 )
 
 
@@ -57,6 +61,19 @@ def _metadata_env() -> EnvironmentState:
         xla_cache_dir=None,
         command="pytest",
         dirty_worktree=False,
+        build_configuration=BuildConfiguration.unavailable_legacy(),
+    )
+
+
+def _current_metadata_env(device_count: int = 1) -> EnvironmentState:
+    devices = tuple(f"cpu:{index}" for index in range(device_count))
+    return replace(
+        _metadata_env(),
+        devices=devices,
+        device_platforms=("cpu",) * device_count,
+        requested_device_count=device_count,
+        selected_devices=devices,
+        selected_device_platforms=("cpu",) * device_count,
     )
 
 
@@ -343,6 +360,52 @@ def test_performance_metrics_round_trip_stablehlo_bytes() -> None:
     assert restored.stablehlo_bytes == 1234
 
 
+def test_build_configuration_round_trip_and_environment_comparison() -> None:
+    configuration = BuildConfiguration(
+        backend="cpu",
+        ffi_cpu_built=True,
+        ffi_cpu_available=True,
+        ffi_cpu_exact_available=True,
+        ffi_cpu_packed_available=False,
+        ffi_cpu_blas_enabled=True,
+        ffi_cpu_blas_backend="openblas",
+        ffi_cpu_native_tuning=False,
+        ffi_cpu_error=None,
+        ffi_cpu_exact_error=None,
+        ffi_cpu_packed_error="missing packed target",
+    )
+    restored = BuildConfiguration.from_dict(configuration.to_dict())
+    assert restored == configuration
+    assert environment_comparison_key(replace(_metadata_env(), build_configuration=configuration)) != (
+        environment_comparison_key(_metadata_env())
+    )
+
+
+@pytest.mark.parametrize(
+    "payload,message",
+    (
+        ({"canonical_graph_bytes": 101, "padded_graph_bytes": 100}, "padded_graph_bytes"),
+        ({"padded_graph_bytes": 100, "resident_graph_bytes": 99}, "resident_graph_bytes"),
+        ({"resident_graph_bytes": 100, "max_device_graph_bytes": 101}, "max_device_graph_bytes"),
+        (
+            {
+                "padded_graph_bytes": 100,
+                "descriptor_bytes": 5,
+                "resident_graph_bytes": 100,
+                "final_total_bytes": 104,
+            },
+            "final_total_bytes",
+        ),
+    ),
+)
+def test_performance_metrics_reject_inconsistent_nonnegative_payloads(
+    payload: dict[str, int],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        PerformanceMetrics.from_dict(payload)
+
+
 def test_duplicate_record_id_is_rejected() -> None:
     duplicate = _row(candidate_commit="test")
     evidence_records = (
@@ -527,6 +590,37 @@ def test_rhe_ratio_failure_is_diagnostic_and_nonblocking() -> None:
     assert rhe_gate.status is GateStatus.FAIL
     assert rhe_gate.blocking is False
     assert blockers == sum(gate.blocking and gate.status is not GateStatus.PASS for gate in gates)
+
+
+def test_rhe_diagnostic_is_missing_when_either_numerical_operand_is_invalid() -> None:
+    exact = replace(
+        _row(candidate_commit="test", representation=Representation.RETAINED_EXACT_RAGGED.value),
+        record_id="rhe-exact-invalid",
+        operation="rhe",
+        numeric_passed=False,
+    )
+    packed = replace(
+        _row(candidate_commit="test", representation=Representation.PACKED_CANDIDATE.value),
+        record_id="rhe-packed-valid",
+        operation="rhe",
+    )
+    evidence = PromotionEvidence(
+        schema_version="2026-08-13+2",
+        candidate_commit="test",
+        dirty_worktree=False,
+        behavioral_reference_commit="b68e7da",
+        dataset=_dataset(),
+        produced_at_utc="2026-08-19T12:00:00+00:00",
+        cache_label=CachePolicy.FRESH.value,
+        environment=_metadata_env(),
+        records=(exact, packed),
+    )
+
+    _, gates, _ = evaluate_ratio_gates(evidence)
+    rhe_gate = next(gate for gate in gates if "rhe_diagnostic" in gate.gate)
+    assert rhe_gate.status is GateStatus.MISSING
+    assert rhe_gate.blocking is False
+    assert "numerically invalid" in rhe_gate.reason
 
 
 def test_evidence_set_require_single_commit_and_collects_gate_failures() -> None:
@@ -852,6 +946,12 @@ def test_build_promotion_pytest_command_includes_required_flags(tmp_path: Path) 
     assert "--rhe-benchmark-num-matvecs" in command
 
 
+def test_runner_and_pytest_device_count_mismatch_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_DAG_PROMOTION_DEVICE_COUNT", "2")
+    with pytest.raises(ValueError, match="topology mismatch.*2.*1"):
+        resolve_requested_device_count(1)
+
+
 def test_child_matrix_is_isolated_and_preserves_benchmark_context(tmp_path: Path) -> None:
     from tests.jax.bench.test_promotion_benchmarks import build_child_runs
 
@@ -904,7 +1004,7 @@ def test_aggregate_child_fragments_validates_schema_and_context(tmp_path: Path) 
             dataset=_dataset(),
             produced_at_utc="2026-08-19T12:00:00+00:00",
             cache_label=CachePolicy.FRESH.value,
-            environment=_metadata_env(),
+            environment=_current_metadata_env(2),
             records=(record,),
         )
         path.write_text(evidence.to_json(), encoding="utf-8")
@@ -949,7 +1049,7 @@ def test_aggregate_child_fragments_rejects_mismatched_dataset(tmp_path: Path) ->
             dataset=record.dataset,
             produced_at_utc="2026-08-19T12:00:00+00:00",
             cache_label=CachePolicy.FRESH.value,
-            environment=_metadata_env(),
+            environment=_current_metadata_env(2),
             records=(record,),
         )
         path = tmp_path / f"fragment-{index}.json"
@@ -1066,6 +1166,25 @@ def test_synchronize_tree_blocks_all_jax_like_leaves() -> None:
     assert first.ready and second.ready
 
 
+def test_construction_timer_synchronizes_all_graph_leaves_before_stopping() -> None:
+    events: list[str] = []
+
+    class Pending:
+        def block_until_ready(self):
+            events.append("ready")
+            return self
+
+    ticks = iter((1.0, 2.0))
+    result, seconds = time_synchronized_construction(
+        lambda: {"left": Pending(), "right": (Pending(),)},
+        clock=lambda: next(ticks),
+    )
+
+    assert len(result) == 2
+    assert events == ["ready", "ready"]
+    assert seconds == 1.0
+
+
 def test_render_promotion_markdown_keeps_phases_separate() -> None:
     from tests.jax.bench.test_promotion_benchmarks import render_promotion_markdown
 
@@ -1138,7 +1257,7 @@ def test_local_benchmark_gates_name_memory_ir_and_numerical_failures() -> None:
         graph_constant_bytes=0,
         graph_operand_count=10,
         stablehlo_operation_count=8,
-        logical_collective_bytes=32,
+        logical_collective_bytes=160,
     )
     packed = replace(
         _row(candidate_commit="x", device_count=2),
@@ -1153,6 +1272,8 @@ def test_local_benchmark_gates_name_memory_ir_and_numerical_failures() -> None:
         ),
         platform_label="forced-two-device-cpu",
     )
+    packed_rhe = replace(packed, record_id="packed-rhe", operation="rhe")
+    exact_rhe = replace(exact, record_id="exact-rhe", operation="rhe")
     environment = replace(
         _metadata_env(),
         platform_label="forced-two-device-cpu",
@@ -1169,7 +1290,7 @@ def test_local_benchmark_gates_name_memory_ir_and_numerical_failures() -> None:
         produced_at_utc="2026-08-19T12:00:00+00:00",
         cache_label=CachePolicy.FRESH.value,
         environment=environment,
-        records=(packed, exact),
+        records=(packed, exact, packed_rhe, exact_rhe),
     )
     assert all(gate.status is GateStatus.PASS for gate in local_benchmark_gates(evidence, production=True))
 
@@ -1181,10 +1302,120 @@ def test_local_benchmark_gates_name_memory_ir_and_numerical_failures() -> None:
         logical_collective_bytes=0,
     )
     failed = replace(packed, metric=failed_metric, numeric_passed=False)
-    failed_evidence = replace(evidence, records=(failed, exact))
+    failed_evidence = replace(evidence, records=(failed, exact, packed_rhe, exact_rhe))
     gates = local_benchmark_gates(failed_evidence, production=True)
     failed_names = {gate.gate for gate in gates if gate.status is GateStatus.FAIL}
     assert {"padding", "residency", "graph_constants", "dense_communication", "numerical"} <= failed_names
+
+
+@pytest.mark.parametrize("include_exact", [False, True])
+def test_local_numerical_gate_requires_exact_and_packed_rhe_parity(include_exact: bool) -> None:
+    from tests.jax.bench.test_promotion_benchmarks import local_benchmark_gates
+
+    metric = PerformanceMetrics(
+        canonical_graph_bytes=100,
+        padded_graph_bytes=100,
+        descriptor_bytes=10,
+        resident_graph_bytes=100,
+        max_device_graph_bytes=50,
+        final_total_bytes=110,
+        graph_constant_bytes=0,
+        graph_operand_count=10,
+        stablehlo_operation_count=8,
+        logical_collective_bytes=160,
+    )
+    packed_product = replace(
+        _row(candidate_commit="x", device_count=2),
+        platform_label="forced-two-device-cpu",
+        metric=metric,
+    )
+    packed_rhe = replace(packed_product, record_id="packed-rhe", operation="rhe")
+    records = [packed_product, packed_rhe]
+    if include_exact:
+        records.append(
+            replace(
+                packed_rhe,
+                record_id="exact-rhe",
+                representation=Representation.RETAINED_EXACT_RAGGED.value,
+                numeric_passed=False,
+                metric=PerformanceMetrics(),
+            )
+        )
+    evidence = PromotionEvidence(
+        schema_version="2026-08-13+2",
+        candidate_commit="x",
+        dirty_worktree=False,
+        behavioral_reference_commit="b68e7da",
+        dataset=_dataset(),
+        produced_at_utc="2026-08-19T12:00:00+00:00",
+        cache_label=CachePolicy.FRESH.value,
+        environment=replace(
+            _metadata_env(),
+            platform_label="forced-two-device-cpu",
+            machine="arm64",
+            devices=("cpu:0", "cpu:1"),
+            device_platforms=("cpu", "cpu"),
+        ),
+        records=tuple(records),
+    )
+
+    gate = next(item for item in local_benchmark_gates(evidence, production=True) if item.gate == "numerical")
+    assert gate.status is GateStatus.FAIL
+
+
+def test_current_schema_requires_complete_packed_memory_and_communication_metrics() -> None:
+    row = replace(
+        _row(candidate_commit="test", device_count=2),
+        metric=PerformanceMetrics(canonical_graph_bytes=100, padded_graph_bytes=100),
+    )
+    with pytest.raises(ValueError, match="packed product metrics missing"):
+        PromotionEvidence(
+            schema_version="2026-08-13+5",
+            candidate_commit="test",
+            dirty_worktree=False,
+            behavioral_reference_commit="b68e7da",
+            dataset=_dataset(),
+            produced_at_utc="2026-08-19T12:00:00+00:00",
+            cache_label=CachePolicy.FRESH.value,
+            environment=_current_metadata_env(2),
+            records=(row,),
+            gate_outcomes=(),
+        )
+
+
+def test_current_schema_rejects_operation_specific_collective_byte_mismatch() -> None:
+    row = replace(
+        _row(candidate_commit="test", device_count=2, workload_size=4),
+        metric=PerformanceMetrics(
+            canonical_graph_bytes=100,
+            padded_graph_bytes=100,
+            descriptor_bytes=10,
+            resident_graph_bytes=100,
+            max_device_graph_bytes=50,
+            final_total_bytes=110,
+            staging_bytes=20,
+            component_count=11,
+            pytree_leaf_count=1,
+            graph_constant_bytes=0,
+            graph_operand_count=10,
+            stablehlo_bytes=1000,
+            stablehlo_operation_count=8,
+            logical_collective_bytes=159,
+        ),
+    )
+    with pytest.raises(ValueError, match="logical_collective_bytes.*expected 160"):
+        PromotionEvidence(
+            schema_version="2026-08-13+5",
+            candidate_commit="test",
+            dirty_worktree=False,
+            behavioral_reference_commit="b68e7da",
+            dataset=_dataset(),
+            produced_at_utc="2026-08-19T12:00:00+00:00",
+            cache_label=CachePolicy.FRESH.value,
+            environment=_current_metadata_env(2),
+            records=(row,),
+            gate_outcomes=(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -1220,6 +1451,8 @@ def test_one_device_local_enforcement_applies_only_applicable_gates(
         ),
         platform_label=platform_label,
     )
+    packed_rhe = replace(packed, record_id="packed-rhe", operation="rhe")
+    exact_rhe = replace(exact, record_id="exact-rhe", operation="rhe")
     environment = replace(
         _metadata_env(),
         platform_label=platform_label,
@@ -1236,7 +1469,7 @@ def test_one_device_local_enforcement_applies_only_applicable_gates(
         produced_at_utc="2026-08-19T12:00:00+00:00",
         cache_label=CachePolicy.FRESH.value,
         environment=environment,
-        records=(packed, exact),
+        records=(packed, exact, packed_rhe, exact_rhe),
     )
 
     gates = local_benchmark_gates(evidence, production=True)
@@ -1410,11 +1643,14 @@ def test_product_promotion_gpu_selection_uses_gpu_devices_and_pure_jax_only(
     metadata = pl.DataFrame({"block_name": ["one", "two"]})
 
     backends = product_benchmarks._promotion_backends(Representation.PACKED_CANDIDATE, "gpu")
-    counts = product_benchmarks._promotion_device_counts(metadata, "gpu")
+    counts = product_benchmarks._promotion_device_counts(metadata, "gpu", requested_count=1)
 
     assert backends == (product_benchmarks.Backend.PURE_JAX,)
-    assert counts == (1, 2)
+    assert counts == (1,)
     assert requested_platforms == ["gpu"]
+
+    with pytest.raises(ValueError, match="requested 3 gpu device.*only 2 visible"):
+        product_benchmarks._promotion_device_counts(metadata, "gpu", requested_count=3)
 
 
 def test_rhe_promotion_gpu_selection_requests_gpu_devices(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1429,8 +1665,11 @@ def test_rhe_promotion_gpu_selection_requests_gpu_devices(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(rhe_benchmarks.jax, "devices", devices)
 
-    assert rhe_benchmarks._promotion_devices("gpu") == gpu_devices
+    assert rhe_benchmarks._promotion_devices("gpu", requested_count=2) == gpu_devices
     assert requested_platforms == ["gpu"]
+
+    with pytest.raises(ValueError, match="requested 3 gpu device.*only 2 visible"):
+        rhe_benchmarks._promotion_devices("gpu", requested_count=3)
 
 
 def test_runner_uses_one_cache_for_distinct_fresh_and_reused_processes(tmp_path: Path) -> None:
@@ -1661,9 +1900,9 @@ def test_committed_promotion_decision_matches_normalized_evidence() -> None:
         assert "/private/var/" not in serialized
         assert evidence_path.name in markdown
         assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() in markdown
-    for platform_label in sorted(required_platforms):
-        expected_status = "missing" if platform_label in missing_platforms else "collected"
-        assert f"| {platform_label} | {expected_status} |" in markdown
+        for platform_label in sorted(required_platforms):
+            expected_status = "missing" if platform_label in missing_platforms else "historical only"
+            assert f"| {platform_label} | {expected_status} |" in markdown
 
     for evidence in evidences:
         exact_rows = {

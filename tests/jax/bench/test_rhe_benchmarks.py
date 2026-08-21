@@ -38,6 +38,8 @@ from tests.jax.bench._promotion_io import (
     compute_dataset_fingerprint,
     git_commit,
     is_git_dirty,
+    resolve_requested_device_count,
+    time_synchronized_construction,
     write_evidence_fragment,
 )
 
@@ -56,8 +58,11 @@ def _promotion_device_platform() -> str:
     return platform
 
 
-def _promotion_devices(device_platform: str) -> tuple[jax.Device, ...]:
-    return tuple(jax.devices(device_platform))
+def _promotion_devices(device_platform: str, *, requested_count: int) -> tuple[jax.Device, ...]:
+    devices = tuple(jax.devices(device_platform))
+    if requested_count > len(devices):
+        raise ValueError(f"requested {requested_count} {device_platform} device(s), but only {len(devices)} visible")
+    return devices[:requested_count]
 
 
 @dataclass(frozen=True)
@@ -280,24 +285,31 @@ def _time_jax_rhe(
     device_platform: str = "cpu",
     backend: Backend = Backend.AUTO,
 ) -> tuple[list[_RheBenchmarkResult], dict[int, pl.DataFrame]]:
-    devices = _promotion_devices(device_platform)
+    devices = _promotion_devices(device_platform, requested_count=requested_devices)
     if not devices:
         pytest.skip("RHE JAX benchmark requires at least one JAX device")
-    device_count = max(1, min(requested_devices, len(devices), block_metadata.height))
+    if requested_devices > block_metadata.height:
+        raise ValueError(
+            f"requested {requested_devices} {device_platform} device(s), but dataset has only "
+            f"{block_metadata.height} block(s)"
+        )
+    device_count = requested_devices
     mesh = Mesh(np.asarray(devices[:device_count]), ("blocks",))
 
     results = []
     estimates = {}
     for num_matvecs in num_matvecs_values:
-        start = time.perf_counter()
-        operator = JaxParallelOperator.from_hdf5(
-            str(path),
-            mesh=mesh,
-            block_metadata=block_metadata,
-            backend=backend,
-        )
-        grm = JaxGRMOperator(operator, alpha=-1.0, iids=list_iids(path))
-        construction_seconds = time.perf_counter() - start
+
+        def construct_exact_grm() -> tuple[JaxParallelOperator, JaxGRMOperator]:
+            operator = JaxParallelOperator.from_hdf5(
+                str(path),
+                mesh=mesh,
+                block_metadata=block_metadata,
+                backend=backend,
+            )
+            return operator, JaxGRMOperator(operator, alpha=-1.0, iids=list_iids(path))
+
+        (operator, grm), construction_seconds = time_synchronized_construction(construct_exact_grm)
         start = time.perf_counter()
         estimate = _run_jax_rhe(grm, data=data, num_matvecs=num_matvecs)
         first_seconds = time.perf_counter() - start
@@ -410,25 +422,32 @@ def _time_packed_rhe(
     num_matvecs_values: tuple[int, ...],
     device_platform: str,
 ) -> tuple[list[_RheBenchmarkResult], dict[int, pl.DataFrame]]:
-    devices = _promotion_devices(device_platform)
+    devices = _promotion_devices(device_platform, requested_count=requested_devices)
     if not devices:
         pytest.skip(f"packed RHE benchmark requires a {device_platform} JAX device")
-    device_count = max(1, min(requested_devices, len(devices), block_metadata.height))
+    if requested_devices > block_metadata.height:
+        raise ValueError(
+            f"requested {requested_devices} {device_platform} device(s), but dataset has only "
+            f"{block_metadata.height} block(s)"
+        )
+    device_count = requested_devices
     mesh = Mesh(np.asarray(devices[:device_count]), ("graph",))
     max_padding_ratio = None if path.parent.name == "testdata" else 1.25
     results = []
     estimates = {}
     for num_matvecs in num_matvecs_values:
-        start = time.perf_counter()
-        operator = _PackedJaxLinearARG.from_hdf5(
-            path,
-            mesh=mesh,
-            block_metadata=block_metadata,
-            backend=Backend.PURE_JAX,
-            max_padding_ratio=max_padding_ratio,
-        )
-        grm = JaxGRMOperator(operator, alpha=-1.0, iids=list_iids(path))
-        construction_seconds = time.perf_counter() - start
+
+        def construct_packed_grm() -> tuple[_PackedJaxLinearARG, JaxGRMOperator]:
+            operator = _PackedJaxLinearARG.from_hdf5(
+                path,
+                mesh=mesh,
+                block_metadata=block_metadata,
+                backend=Backend.PURE_JAX,
+                max_padding_ratio=max_padding_ratio,
+            )
+            return operator, JaxGRMOperator(operator, alpha=-1.0, iids=list_iids(path))
+
+        (operator, grm), construction_seconds = time_synchronized_construction(construct_packed_grm)
         start = time.perf_counter()
         estimate = _run_jax_rhe(grm, data=data, num_matvecs=num_matvecs)
         first_seconds = time.perf_counter() - start
@@ -469,10 +488,17 @@ def _run_promotion_rhe_child(
     if output_path is None:
         pytest.fail("promotion child requires --jax-promotion-output PATH")
     device_platform = _promotion_device_platform()
+    parallel_processes = resolve_requested_device_count(parallel_processes)
+    _promotion_devices(device_platform, requested_count=parallel_processes)
+    if parallel_processes > block_metadata.height:
+        raise ValueError(
+            f"requested {parallel_processes} {device_platform} device(s), but dataset has only "
+            f"{block_metadata.height} block(s)"
+        )
 
     data = _benchmark_data(path)
     _validate_probe_counts(num_matvecs_values, data.height)
-    execution_units = min(parallel_processes, block_metadata.height)
+    execution_units = parallel_processes
     if representation is Representation.NUMPY_CYTHON:
         results, estimates = _time_numpy_cython_rhe(
             path,

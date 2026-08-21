@@ -209,6 +209,8 @@ class JaxParallelOperator(eqx.Module):
         """
         backend = resolve_backend(backend)
         metadata = list_blocks(path) if block_metadata is None else block_metadata
+        if metadata is None:
+            raise ValueError(f"LinearARG HDF5 file contains no block groups: {path}")
         block_names = metadata.get_column("block_name").to_list()
         block_ranges = split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh))
         block_devices = _devices_for_blocks(mesh, block_ranges, n_blocks=len(block_names))

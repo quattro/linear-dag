@@ -38,15 +38,12 @@ def test_lineararg(linarg_h5_path):
     assert "block_name" in blocks_df.columns
 
 
-def test_list_blocks_returns_empty_dataframe_when_file_has_no_blocks(tmp_path):
+def test_list_blocks_returns_none_when_file_has_no_blocks(tmp_path):
     h5_path = tmp_path / "empty.h5"
     with h5py.File(h5_path, "w"):
         pass
 
-    blocks_df = list_blocks(h5_path)
-
-    assert isinstance(blocks_df, pl.DataFrame)
-    assert blocks_df.is_empty()
+    assert list_blocks(h5_path) is None
 
 
 def test_binarize_preserves_sparse_type_and_original_variant_indices():
@@ -69,6 +66,9 @@ def test_binarize_preserves_sparse_type_and_original_variant_indices():
 
     assert isinstance(observed, csc_matrix)
     np.testing.assert_array_equal(retained_indices, np.array([0, 2]))
+    assert observed.nnz == 6
+    assert np.all(observed.data != 0)
+    np.testing.assert_array_equal(observed.indices, np.array([1, 2, 3, 1, 2, 3]))
     np.testing.assert_array_equal(
         observed.toarray(),
         np.array(
@@ -80,6 +80,17 @@ def test_binarize_preserves_sparse_type_and_original_variant_indices():
             ]
         ),
     )
+
+
+def test_binarize_removes_rounded_zero_carriers_from_retained_column() -> None:
+    genotypes = csc_matrix(np.array([[0.49], [1.0], [2.0]]))
+
+    observed, retained_indices = binarize(genotypes, r2_threshold=0.0)
+
+    np.testing.assert_array_equal(retained_indices, np.array([0]))
+    assert observed.nnz == 2
+    np.testing.assert_array_equal(observed.indices, np.array([1, 2]))
+    np.testing.assert_array_equal(observed.data, np.array([1, 2]))
 
 
 def test_read_vcf(test_data_dir):

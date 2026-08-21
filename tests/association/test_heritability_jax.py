@@ -36,10 +36,12 @@ COVAR_COLS = ["sex"]
 
 def _jax_grm_from_hdf5(path: Path) -> JaxGRMOperator:
     mesh = Mesh(np.asarray(jax.devices()[:1]), ("blocks",))
+    block_metadata = list_blocks(path)
+    assert block_metadata is not None
     operator = JaxParallelOperator.from_hdf5(
         str(path),
         mesh=mesh,
-        block_metadata=list_blocks(path),
+        block_metadata=block_metadata,
         backend=Backend.PURE_JAX,
     )
     return JaxGRMOperator(operator, alpha=-1.0, iids=list_iids(path))
@@ -49,7 +51,9 @@ def _packed_jax_grm_from_hdf5(path: Path) -> JaxGRMOperator:
     devices = jax.devices("cpu")
     num_devices = min(2, len(devices))
     mesh = Mesh(np.asarray(devices[:num_devices]), ("graph",))
-    block_names = tuple(list_blocks(path).get_column("block_name").to_list())
+    block_metadata = list_blocks(path)
+    assert block_metadata is not None
+    block_names = tuple(block_metadata.get_column("block_name").to_list())
     operator = _packed_from_hdf5(
         path,
         block_names,
