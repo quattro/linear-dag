@@ -416,6 +416,25 @@ def test_run_gwas_non_hwe_requires_heterozygote_counter():
         )
 
 
+def test_run_gwas_rejects_genotype_operator_without_iids():
+    genotypes = aslinearoperator(np.eye(2, dtype=np.float32))
+    data = pl.DataFrame(
+        {
+            "iid": ["id1", "id2"],
+            "phenotype1": [0.1, -0.2],
+            "intercept": [1.0, 1.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="Genotype operator must expose IIDs"):
+        run_gwas(
+            genotypes=cast(ParallelOperator, genotypes),
+            data=data.lazy(),
+            pheno_cols=["phenotype1"],
+            covar_cols=["intercept"],
+        )
+
+
 def test_get_gwas_beta_se_returns_four_arrays():
     genotypes = aslinearoperator(
         np.array(

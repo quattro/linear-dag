@@ -362,3 +362,24 @@ def test_numpy_rhe_rejects_zero_iid_overlap_before_graph_products() -> None:
         )
 
     assert grm.product_calls == 0
+
+
+def test_numpy_rhe_rejects_grm_without_iids() -> None:
+    grm = aslinearoperator(np.eye(2, dtype=np.float64))
+    grm.iids = None
+    data = pl.DataFrame(
+        {
+            "iid": ["id1", "id2"],
+            "trait": [0.25, -0.5],
+            "intercept": [1.0, 1.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="GRM operator must expose IIDs"):
+        randomized_haseman_elston(
+            cast(GRMOperator, grm),
+            data.lazy(),
+            ["trait"],
+            ["intercept"],
+            num_matvecs=1,
+        )

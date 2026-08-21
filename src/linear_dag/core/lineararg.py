@@ -1235,7 +1235,7 @@ def list_blocks(h5_fname: Union[str, PathLike]) -> pl.DataFrame:
     **Returns:**
 
     - Polars DataFrame with one row per block, sorted by chromosome/start.
-      Returns `None` when no block groups are present.
+      Returns an empty DataFrame when no block groups are present.
     """
     if not str(h5_fname).endswith(".h5"):
         h5_fname = str(h5_fname) + ".h5"

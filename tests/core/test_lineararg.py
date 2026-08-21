@@ -14,7 +14,7 @@ from scipy.sparse.linalg import aslinearoperator
 
 from linear_dag.core.lineararg import LinearARG, list_blocks
 from linear_dag.core.operators import get_diploid_operator
-from linear_dag.genotype import read_vcf
+from linear_dag.genotype import binarize, read_vcf
 
 
 def _from_vcf_with_genotypes(path: str | PathLike[str]) -> tuple[LinearARG, csc_matrix]:
@@ -36,6 +36,50 @@ def test_lineararg(linarg_h5_path):
     assert isinstance(blocks_df, pl.DataFrame)
     assert not blocks_df.is_empty()
     assert "block_name" in blocks_df.columns
+
+
+def test_list_blocks_returns_empty_dataframe_when_file_has_no_blocks(tmp_path):
+    h5_path = tmp_path / "empty.h5"
+    with h5py.File(h5_path, "w"):
+        pass
+
+    blocks_df = list_blocks(h5_path)
+
+    assert isinstance(blocks_df, pl.DataFrame)
+    assert blocks_df.is_empty()
+
+
+def test_binarize_preserves_sparse_type_and_original_variant_indices():
+    class SparseUfuncRejectingCsc(csc_matrix):
+        def __array_ufunc__(self, *_args, **_kwargs):
+            raise AssertionError("NumPy ufuncs must not receive the sparse container")
+
+    genotypes = SparseUfuncRejectingCsc(
+        np.array(
+            [
+                [0.0, 0.49, 0.0],
+                [1.0, 0.51, 1.0],
+                [1.0, 1.49, 2.0],
+                [2.0, 1.51, 2.0],
+            ]
+        )
+    )
+
+    observed, retained_indices = binarize(genotypes, r2_threshold=0.9)
+
+    assert isinstance(observed, csc_matrix)
+    np.testing.assert_array_equal(retained_indices, np.array([0, 2]))
+    np.testing.assert_array_equal(
+        observed.toarray(),
+        np.array(
+            [
+                [0, 0],
+                [1, 1],
+                [1, 2],
+                [2, 2],
+            ]
+        ),
+    )
 
 
 def test_read_vcf(test_data_dir):

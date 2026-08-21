@@ -1,4 +1,6 @@
-# pattern: Imperative Shell
+# pattern: Mixed
+# Reason: Established compression APIs combine filesystem/subprocess orchestration
+# with genotype metadata transformations in this public workflow module.
 import gzip
 import logging
 import os
