@@ -1,4 +1,4 @@
-# pattern: Mixed
+# pattern: Mixed (unavoidable)
 # Reason: Established compression APIs combine filesystem/subprocess orchestration
 # with genotype metadata transformations in this public workflow module.
 import gzip
