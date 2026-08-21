@@ -237,6 +237,8 @@ When `--jax-backend` is active, `--num-processes` limits the number of JAX
 devices used by the exact-ragged mesh. The current experimental route rejects
 `--maf-log10-threshold`, `--bed`, and `--bed-maf-log10-threshold` before operator
 construction. It doesn't change the HDF5 schema or enable packed serialization.
+The packed promotion decision remains `continue_coexistence`; benchmark evidence
+does not reroute this flag or change the default Cython execution path.
 
 ---
 

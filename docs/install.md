@@ -15,13 +15,31 @@ cd linear-dag
 uv sync
 ```
 
+The supported interpreter range is Python 3.12 through 3.14. The tracked
+environment pins JAX and JAXlib to 0.11.0 and requires NumPy 2.1 or newer and
+SciPy 1.15 or newer.
+
 ## Install with `pip`
 
 ```bash
 pip install .
 ```
 
-## Data Availability
+CPU FFI acceleration is optional. Normal builds keep the portable pure-JAX
+backend available if native FFI compilation is unavailable. Release and
+promotion builds can require the native targets explicitly:
+
+```bash
+LINEAR_DAG_REQUIRE_FFI_CPU=1 uv build
+```
+
+At runtime, `Backend.AUTO` uses the complete native CPU FFI target set when it
+is registered and otherwise uses pure JAX. An explicit `Backend.FFI_CPU`
+request is strict and raises if the targets or CPU platform are unavailable.
+Accelerator platforms currently use pure JAX; this release has no Pallas
+backend.
+
+## Data availability
 
 ### 1000 Genomes LinearARGs
 
@@ -43,7 +61,7 @@ kodama --help
 ```bash
 uv sync --extra docs
 uv run mkdocs serve
-uv run mkdocs build
+uv run mkdocs build --strict
 ```
 
 If `uv sync --extra docs` fails because `uv.lock` is not present, install docs dependencies with:

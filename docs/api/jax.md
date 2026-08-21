@@ -8,11 +8,12 @@ relatedness-matrix products.
 "Exact-ragged" means that each source block keeps its natural array shapes and
 runs through a cached program assigned to one device.
 
-An internal packed candidate is also under promotion testing. It concatenates
-ragged source blocks into fixed-shape device shards, but it isn't a public class
-or import path. Renaming or exporting it requires a separate approved promotion
-plan after the numerical, transform, memory, IR, platform, and performance gates
-have been evaluated.
+Cross-platform promotion review recorded `continue_coexistence`. An internal
+packed candidate concatenates ragged source blocks into fixed-shape device
+shards, but it remains private and experimental because every collected warm
+product ratio exceeded the promotion threshold and x86_64 CPU and GPU evidence
+is missing. It isn't a public class or import path. Renaming or exporting it
+requires a separate approved promotion plan after all gates pass.
 
 ## Current public exact-ragged API
 
@@ -120,6 +121,28 @@ A failed packed construction does not automatically fall back to the
 exact-ragged implementation. Choose `JaxParallelOperator` explicitly when the
 packing diagnostics show that exact-ragged execution is the appropriate
 fallback.
+
+## Reproduce promotion evidence
+
+Use the portable runner from a clean checkout with an explicit platform label,
+device count, representative HDF5 input, and output directory:
+
+```console
+mkdir -p /tmp/linear-dag-jax-promotion
+scripts/run_jax_promotion.sh \
+  --repo-root "$PWD" \
+  --hdf5-path "$PWD/1kg_chromosomes_n3202_blocks.h5" \
+  --output-dir /tmp/linear-dag-jax-promotion \
+  --platform-label forced-two-device-cpu \
+  --device-count 2
+```
+
+The runner builds the CPU FFI targets when collecting CPU evidence, runs the
+correctness and transform suites, then writes separate fresh-cache and
+reused-cache JSON evidence. The committed decision at
+`.plans/implementation-plans/2026-08-13-jax-packed-sharded-lineararg/promotion-decision.md`
+records the current blockers. Planning artifacts aren't part of the MkDocs
+site.
 
 ## API reference
 

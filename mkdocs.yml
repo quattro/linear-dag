@@ -98,8 +98,8 @@ plugins:
             show_signature_annotations: true
             separate_signature: false
 
-# Public site navigation intentionally excludes non-site planning artifacts.
-# Validated: nav entries resolve only to docs/site markdown pages.
+# Public site navigation intentionally excludes repository planning artifacts
+# under .plans/. All nav entries resolve relative to docs_dir.
 nav:
   - Home: index.md
   - Getting Started:

@@ -82,8 +82,9 @@ linarg = LinearARG.read(hdf5_path, block=block_to_load)
 
 The JAX operator API exposes `JaxLinearARG`, `JaxParallelOperator`, and `Backend`
 from the top-level package. The public exact-ragged path keeps one exact
-`JaxLinearARG` per source block; an internal packed candidate remains under
-promotion testing and has no public import path. See the
+`JaxLinearARG` per source block. Cross-platform promotion review recorded
+`continue_coexistence`: the internal packed candidate remains private and
+experimental and has no public import path. See the
 [JAX API guide](docs/api/jax.md) for the coexistence, compilation, and storage
 contracts.
 
@@ -137,6 +138,24 @@ Benchmark gates are opt-in so normal test runs stay fast:
 ```console
 pytest -p no:capture tests/jax/bench --runbench
 ```
+
+The portable promotion runner records fresh-cache and reused-cache evidence on
+an explicitly labelled machine. It requires a clean checkout and a
+representative HDF5 file:
+
+```console
+mkdir -p /tmp/linear-dag-jax-promotion
+scripts/run_jax_promotion.sh \
+  --repo-root "$PWD" \
+  --hdf5-path "$PWD/1kg_chromosomes_n3202_blocks.h5" \
+  --output-dir /tmp/linear-dag-jax-promotion \
+  --platform-label arm64-cpu \
+  --device-count 1
+```
+
+See the [promotion decision](.plans/implementation-plans/2026-08-13-jax-packed-sharded-lineararg/promotion-decision.md)
+for the collected evidence, failed warm-runtime gates, and missing platform
+evidence. Benchmark results don't change the public API automatically.
 
 The parallel benchmark reports total resident graph bytes and the maximum graph
 bytes on any one device, making accidental graph replication visible alongside

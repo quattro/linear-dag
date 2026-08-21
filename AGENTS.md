@@ -1,6 +1,6 @@
 # linear-dag
 
-Last verified: 2026-08-13
+Last verified: 2026-08-21
 
 ## Scope
 This context is intentionally scoped to `src/` only.
@@ -17,11 +17,12 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
   - Package API from `src/linear_dag/__init__.py`: `LinearARG`, `BrickGraph`, `ParallelOperator`, `GRMOperator`, `Backend`, `JaxLinearARG`, `JaxParallelOperator`, `JaxGRMOperator`, `show_build_config`, `linear_arg_from_genotypes`, `list_blocks`, `read_vcf`, `compute_af`, `flip_alleles`, `apply_maf_threshold`, `binarize`, `randomized_haseman_elston`, `run_gwas`, `get_gwas_beta_se`, `pca`, `svd`.
   - CLI from `src/linear_dag/cli.py`: `assoc`, `rhe`, `score`, `compress`, `multi-step-compress` (`step0`-`step5`).
 - **Guarantees**:
-  - Package metadata and build environments support CPython 3.11 through 3.14; Python 3.15 remains outside the tested range.
+  - Package metadata and build environments support CPython 3.12 through 3.14; Python 3.11 and 3.15 remain outside the tested range.
   - `LinearARG` behaves as a `scipy.sparse.linalg.LinearOperator` over sample-by-variant genotype space.
   - `JaxLinearARG` and `JaxParallelOperator` expose JAX-compatible LinearARG products over the same sample-by-variant genotype semantics.
   - `JaxParallelOperator` assigns each ragged block to one concrete mesh device, runs cached exact-shape programs over device-local block ranges, and assembles public dense results on the mesh's first device.
-  - `Backend.AUTO` selects FFI CPU when available on CPU and otherwise uses pure JAX; explicit unavailable FFI CPU requests warn and fall back to pure JAX.
+  - `Backend.AUTO` selects the complete native CPU FFI target set when available on CPU and otherwise uses pure JAX; explicit unavailable `Backend.FFI_CPU` requests fail during construction.
+  - The packed JAX candidate remains private and experimental under the recorded `continue_coexistence` decision; public exact-ragged `JaxLinearARG`/`JaxParallelOperator` and CLI routing remain unchanged.
   - `rhe --jax-backend` is an experimental opt-in path through `JaxGRMOperator`; the default RHE path remains `GRMOperator`-backed.
   - CPU FFI compilation is optional and falls back to pure JAX when unavailable; set `LINEAR_DAG_REQUIRE_FFI_CPU=1` to make build failure fatal.
   - `LinearARG.write()` / `LinearARG.read()` persist and restore HDF5-backed graph state and metadata.
@@ -43,6 +44,7 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
   - `hdf5plugin` is optional but required for Blosc-compressed HDF5 I/O.
 - **Boundary**:
   - Keep edits and assumptions in `src/` unless explicitly asked to expand scope.
+  - HDF5 remains the durable JAX reconstruction source on this branch. Generic group adapters do not establish real Zarr support; that claim remains gated on downstream `genoio` integration evidence.
 
 ## Key Decisions
 - Linear operators are used as the primary abstraction to avoid materializing dense genotype matrices.
@@ -50,6 +52,7 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 - HDF5 block structure is used to support blockwise and process-parallel operations.
 - GWAS/PRS pipelines favor memory-aware paths (shared memory + lazy/tabular processing) over eager full-matrix materialization.
 - JAX operators keep backend selection explicit through `Backend`, with pure JAX as the portable fallback and optional CPU FFI acceleration.
+- No Pallas backend is exposed on this branch; accelerator devices use the portable pure-JAX path.
 - Multi-block JAX execution passes graph state explicitly to device-local range programs instead of closing over every block in a `shard_map`; only the sample-space operand is copied to the devices that own contributing ranges.
 
 ## Invariants
