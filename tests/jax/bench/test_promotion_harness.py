@@ -23,7 +23,9 @@ from tests.jax.bench._promotion import (
     EnvironmentState,
     evaluate_evidence_set,
     evaluate_ratio_gates,
+    EvidenceGateOutcome,
     GateFailureReason,
+    GateResult,
     GateStatus,
     PerformanceMetrics,
     PromotionEvidence,
@@ -640,7 +642,7 @@ def test_evidence_set_requires_all_platform_cache_workload_keys() -> None:
     assert any("devices=2" in gate for gate in missing)
 
 
-def test_evidence_set_promotes_only_when_every_required_product_key_passes() -> None:
+def _complete_timing_evidence_set(*, include_gate_outcomes: bool = False) -> tuple[PromotionEvidence, ...]:
     environment_specs = {
         "arm64-cpu": ("arm64", ("TFRT_CPU_0",), ("cpu",)),
         "x86_64-cpu": ("x86_64", ("TFRT_CPU_0",), ("cpu",)),
@@ -678,9 +680,27 @@ def test_evidence_set_promotes_only_when_every_required_product_key_passes() -> 
                             cache_policy=cache_policy.value,
                         )
                     )
+            required_outcomes = (
+                "correctness_float32",
+                "correctness_float64",
+                "transform",
+                "numerical",
+                "ir",
+            )
+            if platform_label == "forced-two-device-cpu":
+                required_outcomes += ("padding", "residency", "communication")
+            gate_outcomes = tuple(
+                EvidenceGateOutcome(
+                    evidence_id=f"{platform_label}|{cache_policy.value}|{gate}|fixture",
+                    gate=gate,
+                    status=GateStatus.PASS,
+                    reason="fixture attestation",
+                )
+                for gate in required_outcomes
+            )
             evidences.append(
                 PromotionEvidence(
-                    schema_version="2026-08-13+2",
+                    schema_version="2026-08-13+4" if include_gate_outcomes else "2026-08-13+2",
                     candidate_commit="candidate",
                     dirty_worktree=False,
                     behavioral_reference_commit="b68e7da",
@@ -709,15 +729,79 @@ def test_evidence_set_promotes_only_when_every_required_product_key_passes() -> 
                         cache_policy=cache_policy.value,
                     ),
                     records=tuple(records),
+                    gate_outcomes=gate_outcomes if include_gate_outcomes else (),
                 )
             )
 
-    decision = evaluate_evidence_set(tuple(evidences))
+    return tuple(evidences)
+
+
+def test_evidence_set_promotes_only_when_every_required_product_and_validation_gate_passes() -> None:
+    evidences = _complete_timing_evidence_set(include_gate_outcomes=True)
+
+    decision = evaluate_evidence_set(evidences)
 
     assert decision.decision is Decision.PROMOTE
     assert decision.blocker_count == 0
-    assert len(tuple(gate for gate in decision.gates if gate.blocking)) == 56
+    assert len(tuple(gate for gate in decision.gates if gate.blocking)) == 90
     assert all(gate.status is GateStatus.PASS for gate in decision.gates)
+
+
+def test_timing_only_evidence_cannot_promote_without_validation_and_structural_gates() -> None:
+    """AC8 timing rows alone do not attest correctness or graph structure."""
+    evidences = _complete_timing_evidence_set()
+
+    decision = evaluate_evidence_set(evidences)
+
+    assert decision.decision is Decision.CONTINUE_COEXISTENCE
+    missing = {gate.gate for gate in decision.gates if gate.status is GateStatus.MISSING}
+    assert {
+        "correctness_float32[platform=arm64-cpu]",
+        "correctness_float64[platform=arm64-cpu]",
+        "transform[platform=arm64-cpu]",
+        "ir[platform=arm64-cpu,cache=fresh]",
+        "padding[platform=forced-two-device-cpu,cache=fresh]",
+        "residency[platform=forced-two-device-cpu,cache=fresh]",
+        "communication[platform=forced-two-device-cpu,cache=fresh]",
+    } <= missing
+
+
+def test_evidence_set_rejects_failed_validation_gate_with_evidence_id() -> None:
+    evidences = list(_complete_timing_evidence_set())
+    first = evidences[0]
+    outcomes = (
+        EvidenceGateOutcome(
+            evidence_id="validation-float32-log-sha256:abc",
+            gate="correctness_float32",
+            status=GateStatus.FAIL,
+            reason="pytest exited 1",
+        ),
+    )
+    evidences[0] = replace(first, gate_outcomes=outcomes)
+
+    decision = evaluate_evidence_set(tuple(evidences))
+
+    gate = next(item for item in decision.gates if item.gate == "correctness_float32[platform=arm64-cpu]")
+    assert gate.status is GateStatus.FAIL
+    assert "validation-float32-log-sha256:abc" in gate.reason
+
+
+def test_gate_outcome_round_trip_requires_unique_evidence_ids() -> None:
+    outcome = EvidenceGateOutcome(
+        evidence_id="suite-log-sha256:abc",
+        gate="transform",
+        status=GateStatus.PASS,
+        reason="transform suite passed",
+    )
+    evidence = replace(
+        _complete_timing_evidence_set()[0],
+        schema_version="2026-08-13+4",
+        gate_outcomes=(outcome,),
+    )
+
+    assert PromotionEvidence.from_json(evidence.to_json()).gate_outcomes == (outcome,)
+    with pytest.raises(ValueError, match="duplicate gate evidence_id"):
+        replace(evidence, gate_outcomes=(outcome, outcome))
 
 
 def test_load_evidences_round_trip(tmp_path: Path) -> None:
@@ -1056,11 +1140,25 @@ def test_local_benchmark_gates_name_memory_ir_and_numerical_failures() -> None:
         stablehlo_operation_count=8,
         logical_collective_bytes=32,
     )
-    packed = replace(_row(candidate_commit="x", device_count=2), metric=healthy_metric)
-    exact = _row(
-        candidate_commit="x",
-        device_count=2,
-        representation=Representation.RETAINED_EXACT_RAGGED.value,
+    packed = replace(
+        _row(candidate_commit="x", device_count=2),
+        platform_label="forced-two-device-cpu",
+        metric=healthy_metric,
+    )
+    exact = replace(
+        _row(
+            candidate_commit="x",
+            device_count=2,
+            representation=Representation.RETAINED_EXACT_RAGGED.value,
+        ),
+        platform_label="forced-two-device-cpu",
+    )
+    environment = replace(
+        _metadata_env(),
+        platform_label="forced-two-device-cpu",
+        machine="arm64",
+        devices=("cpu:0", "cpu:1"),
+        device_platforms=("cpu", "cpu"),
     )
     evidence = PromotionEvidence(
         schema_version="2026-08-13+2",
@@ -1070,7 +1168,7 @@ def test_local_benchmark_gates_name_memory_ir_and_numerical_failures() -> None:
         dataset=_dataset(),
         produced_at_utc="2026-08-19T12:00:00+00:00",
         cache_label=CachePolicy.FRESH.value,
-        environment=_metadata_env(),
+        environment=environment,
         records=(packed, exact),
     )
     assert all(gate.status is GateStatus.PASS for gate in local_benchmark_gates(evidence, production=True))
@@ -1087,6 +1185,92 @@ def test_local_benchmark_gates_name_memory_ir_and_numerical_failures() -> None:
     gates = local_benchmark_gates(failed_evidence, production=True)
     failed_names = {gate.gate for gate in gates if gate.status is GateStatus.FAIL}
     assert {"padding", "residency", "graph_constants", "dense_communication", "numerical"} <= failed_names
+
+
+@pytest.mark.parametrize(
+    "platform_label,machine,device_platform",
+    [
+        ("arm64-cpu", "arm64", "cpu"),
+        ("x86_64-cpu", "x86_64", "cpu"),
+        ("gpu", "x86_64", "gpu"),
+    ],
+)
+def test_one_device_local_enforcement_applies_only_applicable_gates(
+    platform_label: str,
+    machine: str,
+    device_platform: str,
+) -> None:
+    from tests.jax.bench.test_promotion_benchmarks import local_benchmark_gates
+
+    metric = PerformanceMetrics(
+        graph_constant_bytes=0,
+        graph_operand_count=10,
+        stablehlo_operation_count=8,
+    )
+    packed = replace(
+        _row(candidate_commit="x", device_count=1),
+        platform_label=platform_label,
+        metric=metric,
+    )
+    exact = replace(
+        _row(
+            candidate_commit="x",
+            device_count=1,
+            representation=Representation.RETAINED_EXACT_RAGGED.value,
+        ),
+        platform_label=platform_label,
+    )
+    environment = replace(
+        _metadata_env(),
+        platform_label=platform_label,
+        machine=machine,
+        devices=(f"{device_platform}:0",),
+        device_platforms=(device_platform,),
+    )
+    evidence = PromotionEvidence(
+        schema_version="2026-08-13+3",
+        candidate_commit="x",
+        dirty_worktree=False,
+        behavioral_reference_commit="b68e7da",
+        dataset=_dataset(),
+        produced_at_utc="2026-08-19T12:00:00+00:00",
+        cache_label=CachePolicy.FRESH.value,
+        environment=environment,
+        records=(packed, exact),
+    )
+
+    gates = local_benchmark_gates(evidence, production=True)
+
+    assert all(gate.status is GateStatus.PASS for gate in gates)
+    assert {gate.gate for gate in gates}.isdisjoint({"padding", "residency", "dense_communication"})
+
+
+def test_persisted_local_outcomes_include_validation_and_structural_provenance() -> None:
+    from tests.jax.bench.test_promotion_benchmarks import persisted_gate_outcomes
+
+    evidence = _complete_timing_evidence_set()[0]
+    local_gates = (
+        GateResult(gate="numerical", status=GateStatus.PASS, reason="numeric parity passed"),
+        GateResult(gate="graph_constants", status=GateStatus.PASS, reason="no constants"),
+        GateResult(gate="graph_operands", status=GateStatus.PASS, reason="operand count passed"),
+        GateResult(gate="stablehlo", status=GateStatus.PASS, reason="IR recorded"),
+    )
+
+    outcomes = persisted_gate_outcomes(
+        evidence,
+        local_gates,
+        validation_evidence_id="setup-log-sha256:abc",
+    )
+
+    assert {outcome.gate for outcome in outcomes} == {
+        "correctness_float32",
+        "correctness_float64",
+        "transform",
+        "numerical",
+        "ir",
+    }
+    assert all(outcome.evidence_id for outcome in outcomes)
+    assert all(outcome.status is GateStatus.PASS for outcome in outcomes)
 
 
 def test_xla_summary_json_mode_parses_small_fixture(tmp_path: Path) -> None:
@@ -1206,6 +1390,9 @@ def test_runner_builds_cpu_ffi_and_gpu_pure_jax_commands(
     pytest_commands = [line for line in logs.splitlines() if "pytest" in line and line.startswith("command=")]
     assert pytest_commands
     assert all("pytest -p no:capture" in command for command in pytest_commands)
+    benchmark_commands = [command for command in pytest_commands if "test_promotion_benchmarks.py" in command]
+    assert benchmark_commands
+    assert all("--jax-validation-evidence-id" in command for command in benchmark_commands)
 
 
 def test_product_promotion_gpu_selection_uses_gpu_devices_and_pure_jax_only(
@@ -1456,13 +1643,13 @@ def test_committed_promotion_decision_matches_normalized_evidence() -> None:
         expected_decision = Decision.PROMOTE
 
     assert expected_decision is Decision.CONTINUE_COEXISTENCE
-    assert local_decision.blocker_count == 56
+    assert local_decision.blocker_count == 90
     assert local_decision.gates
     blocking_gates = tuple(gate for gate in local_decision.gates if gate.blocking)
     diagnostic_gates = tuple(gate for gate in local_decision.gates if not gate.blocking)
-    assert len(blocking_gates) == 56
+    assert len(blocking_gates) == 90
     assert sum(gate.status is GateStatus.FAIL for gate in blocking_gates) == 32
-    assert sum(gate.status is GateStatus.MISSING for gate in blocking_gates) == 24
+    assert sum(gate.status is GateStatus.MISSING for gate in blocking_gates) == 58
     assert len(diagnostic_gates) == 4
     assert all(gate.status is GateStatus.FAIL for gate in diagnostic_gates)
     assert f"Decision: `{expected_decision.value}`" in markdown

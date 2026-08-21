@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -19,9 +20,11 @@ import pytest
 
 from linear_dag.core.jaxlinarg.packing import PACKED_COMPONENT_NAMES
 from tests.jax.bench._promotion import (
+    attested_platforms,
     Decision,
     environment_comparison_key,
     evaluate_ratio_gates,
+    EvidenceGateOutcome,
     GateResult,
     GateStatus,
     PromotionEvidence,
@@ -320,6 +323,9 @@ def local_benchmark_gates(evidence: PromotionEvidence, *, production: bool) -> t
     if not production:
         return tuple(gates)
 
+    if "forced-two-device-cpu" not in attested_platforms(evidence.environment):
+        return tuple(gates)
+
     two_device = tuple(record for record in product_rows if record.device_count == 2)
     if not two_device:
         for name in ("padding", "residency", "dense_communication"):
@@ -327,7 +333,7 @@ def local_benchmark_gates(evidence: PromotionEvidence, *, production: bool) -> t
                 GateResult(
                     gate=name,
                     status=GateStatus.MISSING,
-                    reason="production gate requires forced two-device packed evidence",
+                    reason="forced two-device run is missing two-device packed evidence",
                 )
             )
         return tuple(gates)
@@ -382,6 +388,67 @@ def local_benchmark_gates(evidence: PromotionEvidence, *, production: bool) -> t
     return tuple(gates)
 
 
+def persisted_gate_outcomes(
+    evidence: PromotionEvidence,
+    local_gates: tuple[GateResult, ...],
+    *,
+    validation_evidence_id: str | None,
+) -> tuple[EvidenceGateOutcome, ...]:
+    """Convert local checks and runner validation provenance to schema outcomes."""
+    record_digest = hashlib.sha256(
+        "\n".join(sorted(record.record_id for record in evidence.records)).encode()
+    ).hexdigest()
+    outcomes: list[EvidenceGateOutcome] = []
+    if validation_evidence_id:
+        for gate in ("correctness_float32", "correctness_float64", "transform"):
+            outcomes.append(
+                EvidenceGateOutcome(
+                    evidence_id=f"{validation_evidence_id}:{gate}",
+                    gate=gate,
+                    status=GateStatus.PASS,
+                    reason="portable runner validation suite completed successfully",
+                )
+            )
+
+    by_name = {gate.gate: gate for gate in local_gates}
+    direct_names = {
+        "numerical": "numerical",
+        "padding": "padding",
+        "residency": "residency",
+        "dense_communication": "communication",
+    }
+    for local_name, persisted_name in direct_names.items():
+        if local_name not in by_name:
+            continue
+        local = by_name[local_name]
+        outcomes.append(
+            EvidenceGateOutcome(
+                evidence_id=f"benchmark-records-sha256:{record_digest}:{persisted_name}",
+                gate=persisted_name,
+                status=local.status,
+                reason=local.reason,
+            )
+        )
+
+    ir_parts = tuple(by_name[name] for name in ("graph_constants", "graph_operands", "stablehlo") if name in by_name)
+    if ir_parts:
+        failed = tuple(gate for gate in ir_parts if gate.status is not GateStatus.PASS)
+        status = GateStatus.PASS
+        if any(gate.status is GateStatus.FAIL for gate in failed):
+            status = GateStatus.FAIL
+        elif failed:
+            status = GateStatus.MISSING
+        outcomes.append(
+            EvidenceGateOutcome(
+                evidence_id=f"benchmark-records-sha256:{record_digest}:ir",
+                gate="ir",
+                status=status,
+                reason="; ".join(f"{gate.gate}: {gate.reason}" for gate in ir_parts),
+            )
+        )
+    return tuple(outcomes)
+
+
 def test_promotion_benchmark_matrix(
     request: pytest.FixtureRequest,
     tmp_path: Path,
@@ -418,11 +485,19 @@ def test_promotion_benchmark_matrix(
         tuple(run.output_path for run in runs),
         platform_label=platform_label,
     )
+    local_gates = local_benchmark_gates(evidence, production=production)
+    evidence = replace(
+        evidence,
+        gate_outcomes=persisted_gate_outcomes(
+            evidence,
+            local_gates,
+            validation_evidence_id=request.config.getoption("--jax-validation-evidence-id"),
+        ),
+    )
     write_evidence_fragment(output_path, evidence)
     print("\n" + render_promotion_markdown(evidence))
 
     decision, ratio_gates, _ = evaluate_ratio_gates(evidence)
-    local_gates = local_benchmark_gates(evidence, production=production)
     failed_local = tuple(gate for gate in local_gates if gate.status is not GateStatus.PASS)
     if request.config.getoption("--jax-enforce-promotion-gates") and (decision is not Decision.PROMOTE or failed_local):
         gates = (*ratio_gates, *failed_local)

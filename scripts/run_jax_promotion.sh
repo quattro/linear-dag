@@ -378,6 +378,13 @@ run_logged \
     env "${runtime_env[@]}" JAX_ENABLE_X64=1 \
     "${correctness_command[@]}"
 
+if command -v sha256sum >/dev/null 2>&1; then
+    validation_digest=$(sha256sum "$setup_commands" "$setup_execution" | sha256sum | awk '{print $1}')
+else
+    validation_digest=$(shasum -a 256 "$setup_commands" "$setup_execution" | shasum -a 256 | awk '{print $1}')
+fi
+validation_evidence_id="setup-logs-sha256:$validation_digest"
+
 for cache_policy in fresh reused; do
     evidence_path="$output_dir/$platform_label.$cache_policy.evidence.json"
     command_log="$output_dir/$platform_label.$cache_policy.commands.log"
@@ -417,6 +424,7 @@ for cache_policy in fresh reused; do
         --rhe-benchmark-num-matvecs 4 20
         --cache-policy "$cache_policy"
         --platform-label "$platform_label"
+        --jax-validation-evidence-id "$validation_evidence_id"
     )
     if [[ "$enforce_gates" == true ]]; then
         benchmark_command+=(--jax-enforce-promotion-gates)

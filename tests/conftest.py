@@ -62,6 +62,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="fail run if promotion gates evaluate as non-promotable",
     )
     parser.addoption(
+        "--jax-validation-evidence-id",
+        type=str,
+        default=None,
+        help="runner-owned checksum identifier proving validation suites completed",
+    )
+    parser.addoption(
         "--cache-policy",
         choices=["fresh", "reused"],
         default="fresh",

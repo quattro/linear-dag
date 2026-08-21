@@ -7,6 +7,7 @@ import shutil
 import weakref
 
 from dataclasses import fields
+from typing import Any, cast
 
 import equinox as eqx
 import h5py
@@ -165,10 +166,11 @@ def test_packed_block_arrays_resolves_explicit_backend_before_source_validation(
         raise RuntimeError("explicit FFI backend unavailable")
 
     monkeypatch.setattr(ingress_module, "_resolve_packed_backend", unavailable)
+    invalid_blocks = cast(Any, (block for block in ()))  # Deliberately violates the runtime Sequence contract.
 
     with pytest.raises(RuntimeError, match="explicit FFI backend unavailable"):
         _packed_from_block_arrays(
-            (block for block in ()),
+            invalid_blocks,
             mesh=_graph_mesh(),
             backend=Backend.FFI_CPU,
         )

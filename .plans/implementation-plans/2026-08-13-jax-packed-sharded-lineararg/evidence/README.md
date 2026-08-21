@@ -16,8 +16,9 @@ commit and representative dataset for each required label:
 
 The JSON environment and benchmark records must prove the architecture, concrete
 devices, backend, device count, commit, and dataset fingerprint. New evidence
-uses schema `2026-08-13+3`, which records each full JAX device description plus
-its normalized JAX platform. A label alone
+uses schema `2026-08-13+4`, which records each full JAX device description plus
+its normalized JAX platform and persisted validation/structural gate outcomes
+with evidence identifiers. A label alone
 does not satisfy a platform gate. CPU runs build with
 `LINEAR_DAG_REQUIRE_FFI_CPU=1` and exercise pure JAX plus CPU FFI. GPU runs set
 the private benchmark platform to `gpu`, exercise pure JAX, and record that no
@@ -29,6 +30,14 @@ cache states, `matmat` and `rmatmat`, $K\in\{4,20\}$, concrete backend,
 one retained exact-ragged row. Missing or ambiguous rows block promotion. RHE
 ratios remain phase-matched diagnostics and do not use the AC8.3 product
 threshold.
+
+Legacy `2026-08-13+2` and `2026-08-13+3` artifacts remain readable without
+inventing gate attestations. Their absent `gate_outcomes` normalize to an empty
+set, so correctness, transform, IR, numerical, padding, residency, and
+communication gates remain explicitly missing. Only the forced-two-device role
+requires padding, residency, and communication outcomes; one-device arm64,
+x86_64, and GPU runs enforce their applicable numerical and IR gates locally,
+while the aggregator owns cross-platform completeness.
 
 ## Invocation
 

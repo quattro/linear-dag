@@ -10,13 +10,13 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, overload
 
-SCHEMA_VERSION = "2026-08-13+3"
-LEGACY_SCHEMA_VERSION = "2026-08-13+2"
+SCHEMA_VERSION = "2026-08-13+4"
+LEGACY_SCHEMA_VERSIONS = {"2026-08-13+2", "2026-08-13+3"}
 CURRENT_REFERENCE_COMMIT = "b68e7da"
 REQUIRED_PRODUCT_KS = (4, 20)
 REQUIRED_PRODUCT_OPERATIONS = ("matmat", "rmatmat")
 REQUIRED_PLATFORM_LABELS = ("arm64-cpu", "x86_64-cpu", "forced-two-device-cpu", "gpu")
-KNOWN_SCHEMA_VERSIONS = {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}
+KNOWN_SCHEMA_VERSIONS = {*LEGACY_SCHEMA_VERSIONS, SCHEMA_VERSION}
 KNOWN_DTYPES = {"float16", "bfloat16", "float32", "float64"}
 KNOWN_PHASES = {item.value for item in []}
 
@@ -615,6 +615,49 @@ class BenchmarkRecord:
 
 
 @dataclass(frozen=True)
+class EvidenceGateOutcome:
+    """Persisted validation or structural gate result with provenance."""
+
+    evidence_id: str
+    gate: str
+    status: GateStatus
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not self.evidence_id.strip():
+            raise ValueError("gate evidence_id must be non-empty")
+        if not self.gate.strip():
+            raise ValueError("gate name must be non-empty")
+        if not self.reason.strip():
+            raise ValueError("gate reason must be non-empty")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "evidence_id": self.evidence_id,
+            "gate": self.gate,
+            "status": self.status.value,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EvidenceGateOutcome":
+        required = {"evidence_id", "gate", "status", "reason"}
+        missing = required - set(payload)
+        if missing:
+            raise ValueError(f"gate outcome missing required fields: {sorted(missing)}")
+        try:
+            status = GateStatus(str(payload["status"]))
+        except ValueError as error:
+            raise ValueError(f"unknown gate status: {payload['status']!r}") from error
+        return cls(
+            evidence_id=str(payload["evidence_id"]),
+            gate=str(payload["gate"]),
+            status=status,
+            reason=str(payload["reason"]),
+        )
+
+
+@dataclass(frozen=True)
 class PromotionEvidence:
     schema_version: str
     candidate_commit: str
@@ -625,6 +668,7 @@ class PromotionEvidence:
     cache_label: str
     environment: EnvironmentState
     records: tuple[BenchmarkRecord, ...]
+    gate_outcomes: tuple[EvidenceGateOutcome, ...] = ()
 
     def __post_init__(self) -> None:
         if self.schema_version not in KNOWN_SCHEMA_VERSIONS:
@@ -655,6 +699,11 @@ class PromotionEvidence:
             if record.record_id in seen:
                 raise ValueError(f"duplicate record_id {record.record_id!r}")
             seen.add(record.record_id)
+        gate_ids: set[str] = set()
+        for outcome in self.gate_outcomes:
+            if outcome.evidence_id in gate_ids:
+                raise ValueError(f"duplicate gate evidence_id {outcome.evidence_id!r}")
+            gate_ids.add(outcome.evidence_id)
 
     @property
     def record_count(self) -> int:
@@ -665,7 +714,7 @@ class PromotionEvidence:
         return bool(self.records)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "candidate_commit": self.candidate_commit,
             "dirty_worktree": self.dirty_worktree,
@@ -676,6 +725,9 @@ class PromotionEvidence:
             "environment": self.environment.to_dict(),
             "records": [item.to_dict() for item in self.records],
         }
+        if self.schema_version == SCHEMA_VERSION:
+            payload["gate_outcomes"] = [item.to_dict() for item in self.gate_outcomes]
+        return payload
 
     @classmethod
     def from_dict(
@@ -702,6 +754,10 @@ class PromotionEvidence:
             missing_environment = {"device_platforms", "cache_policy"} - set(payload["environment"])
             if missing_environment:
                 raise ValueError(f"environment missing required fields: {sorted(missing_environment)}")
+            if "gate_outcomes" not in payload:
+                raise ValueError("evidence missing required fields: ['gate_outcomes']")
+            if not isinstance(payload["gate_outcomes"], list):
+                raise ValueError("gate_outcomes must be a list")
 
         records = tuple(BenchmarkRecord.from_dict(item) for item in payload["records"])
         evidence = cls(
@@ -714,6 +770,7 @@ class PromotionEvidence:
             cache_label=str(payload["cache_label"]),
             environment=EnvironmentState.from_dict(payload["environment"]),
             records=records,
+            gate_outcomes=tuple(EvidenceGateOutcome.from_dict(item) for item in payload.get("gate_outcomes", [])),
         )
         return evidence
 
@@ -1079,6 +1136,79 @@ def evaluate_ratio_gates(
     return decision, gates, blocker_count
 
 
+def _attested_gate_result(
+    evidences: tuple[PromotionEvidence, ...],
+    *,
+    platform: str,
+    gate: str,
+    cache_policy: str | None = None,
+) -> GateResult:
+    suffix = f"platform={platform}"
+    if cache_policy is not None:
+        suffix += f",cache={cache_policy}"
+    gate_name = f"{gate}[{suffix}]"
+    outcomes = tuple(
+        outcome
+        for evidence in evidences
+        if platform in attested_platforms(evidence.environment)
+        and (cache_policy is None or evidence.cache_label == cache_policy)
+        for outcome in evidence.gate_outcomes
+        if outcome.gate == gate
+    )
+    if not outcomes:
+        return GateResult(
+            gate=gate_name,
+            status=GateStatus.MISSING,
+            reason=f"{GateFailureReason.MISSING_EVIDENCE.value}: no persisted gate outcome",
+        )
+    failures = tuple(outcome for outcome in outcomes if outcome.status is not GateStatus.PASS)
+    selected = failures or outcomes
+    evidence_ids = ", ".join(sorted({outcome.evidence_id for outcome in selected}))
+    reasons = "; ".join(sorted({outcome.reason for outcome in selected}))
+    if failures:
+        status = GateStatus.FAIL if any(item.status is GateStatus.FAIL for item in failures) else GateStatus.MISSING
+        return GateResult(
+            gate=gate_name,
+            status=status,
+            reason=f"evidence_ids={evidence_ids}: {reasons}",
+        )
+    return GateResult(
+        gate=gate_name,
+        status=GateStatus.PASS,
+        reason=f"evidence_ids={evidence_ids}: {reasons}",
+    )
+
+
+def _required_attestation_gates(
+    evidences: tuple[PromotionEvidence, ...],
+) -> tuple[GateResult, ...]:
+    gates: list[GateResult] = []
+    for platform in REQUIRED_PLATFORM_LABELS:
+        for gate in ("correctness_float32", "correctness_float64", "transform"):
+            gates.append(_attested_gate_result(evidences, platform=platform, gate=gate))
+        for cache_policy in CachePolicy:
+            for gate in ("numerical", "ir"):
+                gates.append(
+                    _attested_gate_result(
+                        evidences,
+                        platform=platform,
+                        cache_policy=cache_policy.value,
+                        gate=gate,
+                    )
+                )
+    for cache_policy in CachePolicy:
+        for gate in ("padding", "residency", "communication"):
+            gates.append(
+                _attested_gate_result(
+                    evidences,
+                    platform="forced-two-device-cpu",
+                    cache_policy=cache_policy.value,
+                    gate=gate,
+                )
+            )
+    return tuple(gates)
+
+
 def evaluate_evidence_set(
     evidences: tuple[PromotionEvidence, ...],
     *,
@@ -1145,7 +1275,8 @@ def evaluate_evidence_set(
         for evidence in evidences
         for gate in _rhe_diagnostic_gates(evidence.records, required_ratio=required_ratio)
     )
-    gates = (*product_gates, *diagnostics)
+    attestation_gates = _required_attestation_gates(evidences)
+    gates = (*product_gates, *attestation_gates, *diagnostics)
     blocker_count = sum(gate.blocking and gate.status is not GateStatus.PASS for gate in gates)
     return PromotionDecision(
         decision=Decision.PROMOTE if blocker_count == 0 else Decision.CONTINUE_COEXISTENCE,
