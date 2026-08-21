@@ -990,3 +990,96 @@ done
     assert "fake-host=<host>" in execution
     assert "private-promotion-token" not in execution
     assert "fake-token=<redacted-secret>" in execution
+
+
+def test_committed_promotion_decision_matches_normalized_evidence() -> None:
+    plan_root = (
+        Path(__file__).resolve().parents[3]
+        / ".plans"
+        / "implementation-plans"
+        / "2026-08-13-jax-packed-sharded-lineararg"
+    )
+    evidence_dir = plan_root / "evidence"
+    decision_path = plan_root / "promotion-decision.md"
+
+    evidence_paths = sorted(evidence_dir.glob("*.json"))
+    assert evidence_paths, "Task 4 must commit normalized evidence JSON"
+    evidences = tuple(load_evidences(evidence_dir))
+    markdown = decision_path.read_text(encoding="utf-8")
+
+    commits = {evidence.candidate_commit for evidence in evidences}
+    fingerprints = {evidence.dataset.sha256 for evidence in evidences}
+    assert commits == {"764c3f8c29f63d75ba4e47d88e61d2019f129d01"}
+    assert len(fingerprints) == 1
+    assert all(not evidence.dirty_worktree for evidence in evidences)
+    assert "2b9165403c912a9d0a11502bebee0fad14b45e6e" in markdown
+    assert "historical" in markdown.lower()
+
+    required_platforms = {
+        "arm64-cpu",
+        "x86_64-cpu",
+        "forced-two-device-cpu",
+        "gpu",
+    }
+    available_platforms = {evidence.environment.platform_label for evidence in evidences}
+    if any(
+        evidence.environment.machine == "arm64"
+        and evidence.environment.devices
+        and set(evidence.environment.devices) == {"cpu"}
+        for evidence in evidences
+    ):
+        available_platforms.add("arm64-cpu")
+    missing_platforms = required_platforms - available_platforms
+    local_decision = evaluate_evidence_set(evidences)
+    if local_decision.decision is Decision.REJECT:
+        expected_decision = Decision.REJECT
+    elif missing_platforms or local_decision.decision is Decision.CONTINUE_COEXISTENCE:
+        expected_decision = Decision.CONTINUE_COEXISTENCE
+    else:
+        expected_decision = Decision.PROMOTE
+
+    assert expected_decision is Decision.CONTINUE_COEXISTENCE
+    assert local_decision.blocker_count == 36
+    assert local_decision.gates
+    assert all(gate.status is GateStatus.FAIL for gate in local_decision.gates)
+    assert f"Decision: `{expected_decision.value}`" in markdown
+    assert "promotable=false" in markdown
+    for evidence_path in evidence_paths:
+        serialized = evidence_path.read_text(encoding="utf-8")
+        assert "/Users/" not in serialized
+        assert "/private/tmp/" not in serialized
+        assert "/private/var/" not in serialized
+        assert evidence_path.name in markdown
+        assert hashlib.sha256(evidence_path.read_bytes()).hexdigest() in markdown
+    for platform_label in sorted(required_platforms):
+        expected_status = "missing" if platform_label in missing_platforms else "collected"
+        assert f"| {platform_label} | {expected_status} |" in markdown
+
+    for evidence in evidences:
+        exact_rows = {
+            row.warm_key: row
+            for row in evidence.records
+            if row.representation == Representation.RETAINED_EXACT_RAGGED.value
+            and row.phase == TimingPhase.WARM_EXECUTION.value
+            and row.status == "pass"
+            and row.timed.seconds is not None
+            and row.timed.seconds > 0
+        }
+        packed_rows = (
+            row
+            for row in evidence.records
+            if row.representation == Representation.PACKED_CANDIDATE.value
+            and row.phase == TimingPhase.WARM_EXECUTION.value
+            and row.status == "pass"
+            and row.timed.seconds is not None
+            and row.timed.seconds > 0
+        )
+        for packed in packed_rows:
+            exact = exact_rows.get(packed.warm_key)
+            assert exact is not None, f"missing exact row for {packed.record_id}"
+            assert packed.timed.seconds is not None
+            assert exact.timed.seconds is not None
+            ratio = packed.timed.seconds / exact.timed.seconds
+            assert packed.record_id in markdown
+            assert exact.record_id in markdown
+            assert f"ratio={ratio:.6f}" in markdown
