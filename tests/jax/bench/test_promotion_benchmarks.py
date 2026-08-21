@@ -30,6 +30,7 @@ from tests.jax.bench._promotion import (
     GateStatus,
     PromotionEvidence,
     Representation,
+    REQUIRED_PRODUCT_KS,
     TimingPhase,
 )
 from tests.jax.bench._promotion_io import build_promotion_pytest_command, load_evidence, write_evidence_fragment
@@ -267,7 +268,12 @@ def render_promotion_markdown(evidence: PromotionEvidence) -> str:
     return "\n".join(lines)
 
 
-def local_benchmark_gates(evidence: PromotionEvidence, *, production: bool) -> tuple[GateResult, ...]:
+def local_benchmark_gates(
+    evidence: PromotionEvidence,
+    *,
+    production: bool,
+    configured_rhe_ks: tuple[int, ...] | None = None,
+) -> tuple[GateResult, ...]:
     """Evaluate named local metric gates without weakening missing production data."""
     packed_warm = tuple(
         record
@@ -277,28 +283,52 @@ def local_benchmark_gates(evidence: PromotionEvidence, *, production: bool) -> t
     )
     gates = []
 
-    rhe_jax_warm = tuple(
+    rhe_warm = tuple(
         record
         for record in evidence.records
-        if record.operation == "rhe"
-        and record.phase == TimingPhase.WARM_EXECUTION.value
-        and record.representation in {Representation.PACKED_CANDIDATE.value, Representation.RETAINED_EXACT_RAGGED.value}
+        if record.operation == "rhe" and record.phase == TimingPhase.WARM_EXECUTION.value
     )
-    rhe_representations = {record.representation for record in rhe_jax_warm}
-    rhe_complete = rhe_representations == {
-        Representation.PACKED_CANDIDATE.value,
-        Representation.RETAINED_EXACT_RAGGED.value,
+    if configured_rhe_ks is None:
+        configured_rhe_ks = (
+            REQUIRED_PRODUCT_KS
+            if production
+            else tuple(sorted({record.workload_size for record in rhe_warm if record.workload_size is not None}))
+        )
+    required_rhe_ks = (
+        tuple(dict.fromkeys((*REQUIRED_PRODUCT_KS, *configured_rhe_ks))) if production else configured_rhe_ks
+    )
+    rhe_rows_by_key = {
+        (k, representation.value): tuple(
+            record for record in rhe_warm if record.workload_size == k and record.representation == representation.value
+        )
+        for k in required_rhe_ks
+        for representation in Representation
     }
-    numerical_rows = (*packed_warm, *rhe_jax_warm)
-    numerical_passed = bool(packed_warm) and rhe_complete and all(record.numeric_passed for record in numerical_rows)
+    rhe_complete = bool(required_rhe_ks) and all(
+        len(rows) == 1
+        and rows[0].status == "pass"
+        and rows[0].numeric_passed
+        and rows[0].timed.seconds is not None
+        and rows[0].timed.seconds > 0
+        for rows in rhe_rows_by_key.values()
+    )
+    product_numerical_rows = tuple(record for record in packed_warm if record.operation in {"matmat", "rmatmat"})
+    numerical_passed = (
+        bool(product_numerical_rows)
+        and all(record.numeric_passed for record in product_numerical_rows)
+        and rhe_complete
+    )
     gates.append(
         GateResult(
             gate="numerical",
             status=GateStatus.PASS if numerical_passed else GateStatus.FAIL,
             reason=(
-                "packed product and both JAX RHE representations passed numerical checks"
+                "packed products and exact, packed, and NumPy/Cython RHE rows passed for every required K"
                 if numerical_passed
-                else "packed product plus exact and packed JAX RHE numerical checks are required"
+                else (
+                    "packed product plus exactly one valid exact, packed, and NumPy/Cython "
+                    f"RHE warm row at K={','.join(str(k) for k in required_rhe_ks)} are required"
+                )
             ),
         )
     )
@@ -508,7 +538,11 @@ def test_promotion_benchmark_matrix(
         tuple(run.output_path for run in runs),
         platform_label=platform_label,
     )
-    local_gates = local_benchmark_gates(evidence, production=production)
+    local_gates = local_benchmark_gates(
+        evidence,
+        production=production,
+        configured_rhe_ks=rhe_benchmark_num_matvecs,
+    )
     evidence = replace(
         evidence,
         gate_outcomes=persisted_gate_outcomes(

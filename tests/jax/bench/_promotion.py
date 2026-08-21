@@ -176,8 +176,10 @@ class BuildConfiguration:
                 raise ValueError(f"build_configuration.{name} must be a bool")
         if self.ffi_cpu_blas_enabled and not self.ffi_cpu_blas_backend:
             raise ValueError("build_configuration.ffi_cpu_blas_backend is required when BLAS is enabled")
-        if (self.ffi_cpu_exact_available or self.ffi_cpu_packed_available) and not self.ffi_cpu_available:
-            raise ValueError("available FFI targets require build_configuration.ffi_cpu_available")
+        if self.ffi_cpu_available != self.ffi_cpu_exact_available:
+            raise ValueError("build_configuration exact availability aliases must match")
+        if self.ffi_cpu_error != self.ffi_cpu_exact_error:
+            raise ValueError("build_configuration exact error aliases must match")
         if self.ffi_cpu_available and self.ffi_cpu_error is not None:
             raise ValueError("available CPU FFI cannot have an error")
         if self.ffi_cpu_exact_available and self.ffi_cpu_exact_error is not None:

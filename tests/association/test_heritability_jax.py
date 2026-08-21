@@ -15,6 +15,7 @@ import pytest
 from jax.extend import core as jax_core
 from jax.sharding import Mesh
 from jax.tree_util import tree_leaves
+from scipy.sparse.linalg import LinearOperator
 
 from linear_dag.association._heritability_jax import (
     _build_residualized_operator,
@@ -500,3 +501,83 @@ def test_jax_rhe_rejects_invalid_alignment_before_graph_products(
 
     assert grm.default_calls == 0
     assert grm.blockwise_calls == 0
+
+
+@pytest.mark.parametrize("backend", ["numpy", "jax"])
+@pytest.mark.parametrize(
+    ("defect", "data", "grm_iids", "message"),
+    (
+        (
+            "missing-required",
+            pl.DataFrame({"iid": ["a", "b"], "intercept": [1.0, 1.0]}),
+            ["a", "a", "b", "b"],
+            "missing required column.*trait",
+        ),
+        (
+            "invalid-intercept",
+            pl.DataFrame({"iid": ["a", "b"], "trait": [0.25, -0.5], "intercept": [1.0, 0.0]}),
+            ["a", "a", "b", "b"],
+            "First column",
+        ),
+        (
+            "all-missing",
+            pl.DataFrame({"iid": ["a", "b"], "trait": [np.nan, np.nan], "intercept": [1.0, 1.0]}),
+            ["a", "a", "b", "b"],
+            "at least one non-missing",
+        ),
+        (
+            "invalid-multiplicity",
+            pl.DataFrame({"iid": ["a", "b"], "trait": [0.25, -0.5], "intercept": [1.0, 1.0]}),
+            ["a", "b"],
+            "zero or two",
+        ),
+    ),
+)
+def test_rhe_backends_validate_tabular_and_alignment_contracts_before_array_conversion(
+    backend: str,
+    defect: str,
+    data: pl.DataFrame,
+    grm_iids: list[str],
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_to_numpy(*args: object, **kwargs: object) -> np.ndarray:
+        raise AssertionError(f"{backend} converted phenotype/covariate data before rejecting {defect}")
+
+    monkeypatch.setattr(pl.DataFrame, "to_numpy", unexpected_to_numpy)
+    if backend == "jax":
+        grm = cast(JaxGRMOperator, _RecordingGRM(grm_iids))
+        with pytest.raises(ValueError, match=message):
+            randomized_haseman_elston_jax(
+                grm,
+                data.lazy(),
+                ["trait"],
+                ["intercept"],
+                num_matvecs=1,
+                trace_est="hutchinson",
+                sampler="normal",
+                seed=1,
+            )
+    else:
+
+        class RecordingNumpyGRM(LinearOperator):
+            iids = pl.Series("iids", grm_iids)
+
+            def __init__(self) -> None:
+                super().__init__(dtype=np.dtype(np.float64), shape=(len(grm_iids), len(grm_iids)))
+
+            def _matmat(self, values: np.ndarray) -> np.ndarray:
+                return values
+
+        grm = cast(GRMOperator, RecordingNumpyGRM())
+        with pytest.raises(ValueError, match=message):
+            randomized_haseman_elston(
+                grm,
+                data.lazy(),
+                ["trait"],
+                ["intercept"],
+                num_matvecs=1,
+                trace_est="hutchinson",
+                sampler="normal",
+                seed=1,
+            )

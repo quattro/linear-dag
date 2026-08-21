@@ -215,6 +215,95 @@ def test_schema_round_trip_and_unknown_schema_rejected() -> None:
         PromotionEvidence.from_dict(payload)
 
 
+def test_current_schema_round_trip_preserves_build_and_selected_topology() -> None:
+    configuration = BuildConfiguration(
+        backend="cpu",
+        ffi_cpu_built=True,
+        ffi_cpu_available=False,
+        ffi_cpu_exact_available=False,
+        ffi_cpu_packed_available=True,
+        ffi_cpu_blas_enabled=True,
+        ffi_cpu_blas_backend="accelerate",
+        ffi_cpu_native_tuning=True,
+        ffi_cpu_error="exact target unavailable",
+        ffi_cpu_exact_error="exact target unavailable",
+        ffi_cpu_packed_error=None,
+    )
+    environment = replace(
+        _current_metadata_env(2),
+        build_configuration=configuration,
+        cache_policy=CachePolicy.FRESH.value,
+    )
+    evidence = PromotionEvidence(
+        schema_version="2026-08-13+5",
+        candidate_commit="final-candidate",
+        dirty_worktree=False,
+        behavioral_reference_commit="b68e7da",
+        dataset=_dataset(),
+        produced_at_utc="2026-08-19T12:00:00+00:00",
+        cache_label=CachePolicy.FRESH.value,
+        environment=environment,
+        records=(),
+        gate_outcomes=(),
+    )
+
+    restored = PromotionEvidence.from_json(evidence.to_json())
+
+    assert restored == evidence
+    assert restored.environment.build_configuration == configuration
+    assert restored.environment.requested_device_count == 2
+    assert restored.environment.selected_devices == ("cpu:0", "cpu:1")
+    assert restored.environment.selected_device_platforms == ("cpu", "cpu")
+
+
+def test_build_configuration_accepts_packed_without_exact_availability() -> None:
+    configuration = BuildConfiguration(
+        backend="cpu",
+        ffi_cpu_built=True,
+        ffi_cpu_available=False,
+        ffi_cpu_exact_available=False,
+        ffi_cpu_packed_available=True,
+        ffi_cpu_blas_enabled=False,
+        ffi_cpu_blas_backend=None,
+        ffi_cpu_native_tuning=False,
+        ffi_cpu_error="exact target unavailable",
+        ffi_cpu_exact_error="exact target unavailable",
+        ffi_cpu_packed_error=None,
+    )
+
+    assert configuration.ffi_cpu_packed_available is True
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    (
+        ({"ffi_cpu_available": True}, "availability aliases"),
+        ({"ffi_cpu_error": "legacy error differs"}, "error aliases"),
+    ),
+)
+def test_build_configuration_rejects_exact_alias_mismatches(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    values = {
+        "backend": "cpu",
+        "ffi_cpu_built": True,
+        "ffi_cpu_available": False,
+        "ffi_cpu_exact_available": False,
+        "ffi_cpu_packed_available": True,
+        "ffi_cpu_blas_enabled": False,
+        "ffi_cpu_blas_backend": None,
+        "ffi_cpu_native_tuning": False,
+        "ffi_cpu_error": "exact target unavailable",
+        "ffi_cpu_exact_error": "exact target unavailable",
+        "ffi_cpu_packed_error": None,
+    }
+    values.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        BuildConfiguration(**values)
+
+
 def test_schema_rejects_outer_and_timed_phase_disagreement() -> None:
     payload = _row(candidate_commit="test").to_dict()
     payload["timed"]["phase"] = TimingPhase.FIRST_EXECUTION.value
@@ -1272,8 +1361,20 @@ def test_local_benchmark_gates_name_memory_ir_and_numerical_failures() -> None:
         ),
         platform_label="forced-two-device-cpu",
     )
-    packed_rhe = replace(packed, record_id="packed-rhe", operation="rhe")
-    exact_rhe = replace(exact, record_id="exact-rhe", operation="rhe")
+    rhe_rows = tuple(
+        replace(
+            packed if representation is Representation.PACKED_CANDIDATE else exact,
+            record_id=f"rhe-{representation.value}-{k}",
+            operation="rhe",
+            workload_size=k,
+            representation=representation.value,
+            requested_backend=None if representation is Representation.NUMPY_CYTHON else "pure_jax",
+            resolved_backend=None if representation is Representation.NUMPY_CYTHON else "pure_jax",
+            metric=PerformanceMetrics() if representation is not Representation.PACKED_CANDIDATE else healthy_metric,
+        )
+        for k in (4, 20)
+        for representation in Representation
+    )
     environment = replace(
         _metadata_env(),
         platform_label="forced-two-device-cpu",
@@ -1290,7 +1391,7 @@ def test_local_benchmark_gates_name_memory_ir_and_numerical_failures() -> None:
         produced_at_utc="2026-08-19T12:00:00+00:00",
         cache_label=CachePolicy.FRESH.value,
         environment=environment,
-        records=(packed, exact, packed_rhe, exact_rhe),
+        records=(packed, exact, *rhe_rows),
     )
     assert all(gate.status is GateStatus.PASS for gate in local_benchmark_gates(evidence, production=True))
 
@@ -1302,7 +1403,7 @@ def test_local_benchmark_gates_name_memory_ir_and_numerical_failures() -> None:
         logical_collective_bytes=0,
     )
     failed = replace(packed, metric=failed_metric, numeric_passed=False)
-    failed_evidence = replace(evidence, records=(failed, exact, packed_rhe, exact_rhe))
+    failed_evidence = replace(evidence, records=(failed, exact, *rhe_rows))
     gates = local_benchmark_gates(failed_evidence, production=True)
     failed_names = {gate.gate for gate in gates if gate.status is GateStatus.FAIL}
     assert {"padding", "residency", "graph_constants", "dense_communication", "numerical"} <= failed_names
@@ -1361,6 +1462,60 @@ def test_local_numerical_gate_requires_exact_and_packed_rhe_parity(include_exact
 
     gate = next(item for item in local_benchmark_gates(evidence, production=True) if item.gate == "numerical")
     assert gate.status is GateStatus.FAIL
+
+
+@pytest.mark.parametrize("defect", ["missing-k20", "missing-numpy-k20", "duplicate-packed-k20"])
+def test_local_numerical_gate_requires_exact_rhe_matrix_for_each_production_k(defect: str) -> None:
+    from tests.jax.bench.test_promotion_benchmarks import local_benchmark_gates
+
+    product = _row(candidate_commit="x")
+    rhe_rows = []
+    for k in (4, 20):
+        for representation in Representation:
+            rhe_rows.append(
+                replace(
+                    _row(
+                        candidate_commit="x",
+                        representation=representation.value,
+                        operation="rhe",
+                        workload_size=k,
+                        requested_backend=None if representation is Representation.NUMPY_CYTHON else "pure_jax",
+                        resolved_backend=None if representation is Representation.NUMPY_CYTHON else "pure_jax",
+                    ),
+                    record_id=f"rhe-{representation.value}-{k}",
+                )
+            )
+    if defect == "missing-k20":
+        rhe_rows = [row for row in rhe_rows if row.workload_size != 20]
+    elif defect == "missing-numpy-k20":
+        rhe_rows = [
+            row
+            for row in rhe_rows
+            if not (row.workload_size == 20 and row.representation == Representation.NUMPY_CYTHON.value)
+        ]
+    else:
+        duplicate = next(
+            row
+            for row in rhe_rows
+            if row.workload_size == 20 and row.representation == Representation.PACKED_CANDIDATE.value
+        )
+        rhe_rows.append(replace(duplicate, record_id="rhe-packed-20-duplicate"))
+    evidence = PromotionEvidence(
+        schema_version="2026-08-13+2",
+        candidate_commit="x",
+        dirty_worktree=False,
+        behavioral_reference_commit="b68e7da",
+        dataset=_dataset(),
+        produced_at_utc="2026-08-19T12:00:00+00:00",
+        cache_label=CachePolicy.FRESH.value,
+        environment=_metadata_env(),
+        records=(product, *rhe_rows),
+    )
+
+    gate = next(item for item in local_benchmark_gates(evidence, production=True) if item.gate == "numerical")
+
+    assert gate.status is GateStatus.FAIL
+    assert "K=4,20" in gate.reason
 
 
 def test_current_schema_requires_complete_packed_memory_and_communication_metrics() -> None:
@@ -1451,8 +1606,20 @@ def test_one_device_local_enforcement_applies_only_applicable_gates(
         ),
         platform_label=platform_label,
     )
-    packed_rhe = replace(packed, record_id="packed-rhe", operation="rhe")
-    exact_rhe = replace(exact, record_id="exact-rhe", operation="rhe")
+    rhe_rows = tuple(
+        replace(
+            packed if representation is Representation.PACKED_CANDIDATE else exact,
+            record_id=f"rhe-{representation.value}-{k}",
+            operation="rhe",
+            workload_size=k,
+            representation=representation.value,
+            requested_backend=None if representation is Representation.NUMPY_CYTHON else "pure_jax",
+            resolved_backend=None if representation is Representation.NUMPY_CYTHON else "pure_jax",
+            metric=PerformanceMetrics() if representation is not Representation.PACKED_CANDIDATE else metric,
+        )
+        for k in (4, 20)
+        for representation in Representation
+    )
     environment = replace(
         _metadata_env(),
         platform_label=platform_label,
@@ -1469,7 +1636,7 @@ def test_one_device_local_enforcement_applies_only_applicable_gates(
         produced_at_utc="2026-08-19T12:00:00+00:00",
         cache_label=CachePolicy.FRESH.value,
         environment=environment,
-        records=(packed, exact, packed_rhe, exact_rhe),
+        records=(packed, exact, *rhe_rows),
     )
 
     gates = local_benchmark_gates(evidence, production=True)
@@ -1857,6 +2024,16 @@ def test_committed_promotion_decision_matches_normalized_evidence() -> None:
     assert all(not evidence.dirty_worktree for evidence in evidences)
     assert "2b9165403c912a9d0a11502bebee0fad14b45e6e" in markdown
     assert "historical" in markdown.lower()
+    assert "Historical evidence-candidate commit: `764c3f8c29f63d75ba4e47d88e61d2019f129d01`" in markdown
+    assert "Final-candidate benchmark attestation: `missing`" in markdown
+    assert "Final-candidate validation attestation: `missing`" in markdown
+    assert (
+        "AC6 GRM/RHE/research losses | historical and targeted regression pass; final-candidate attestation missing"
+    ) in markdown
+    assert (
+        "AC7 backend, ingress, and API compatibility | historical and targeted regression pass; "
+        "final-candidate attestation missing"
+    ) in markdown
 
     required_platforms = {
         "arm64-cpu",

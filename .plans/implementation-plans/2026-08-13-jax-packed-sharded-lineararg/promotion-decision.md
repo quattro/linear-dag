@@ -7,6 +7,8 @@ The packed operator remains private and experimental. The public exact `JaxLinea
 ## Evidence provenance
 
 - Historical evidence-candidate commit: `764c3f8c29f63d75ba4e47d88e61d2019f129d01`.
+- Final-candidate benchmark attestation: `missing`.
+- Final-candidate validation attestation: `missing`.
 - No benchmark or validation attestation was collected for the final Phase 7
   implementation candidate after the subsequent schema, topology, numerical,
   and compatibility fixes. Final-candidate promotion evidence is therefore
@@ -48,8 +50,8 @@ One forced-two-device run can satisfy both available CPU labels because its sche
 | AC3 product numerics | diagnostic pass; promotion evidence missing | Rows report `numeric_passed=true`, but legacy JSON lacks a numerical gate outcome ID. |
 | AC4 multi-device ownership | diagnostic pass; promotion evidence missing | Two-device metrics exist, but legacy JSON lacks communication/residency gate outcome IDs. |
 | AC5 transform composition | diagnostic pass; promotion evidence missing | Setup logs report passing tests, but legacy JSON lacks a transform-suite gate outcome ID. |
-| AC6 GRM/RHE/research losses | pass on collected CPU environment | GRM and fixed-probe RHE correctness passed; all RHE evidence rows are finite and numerically accepted. |
-| AC7 backend, ingress, and API compatibility | pass for available CPU backends | Pure JAX and CPU FFI passed. Task 4 coexistence/public-inspection and CLI regressions retain the exact public facade. |
+| AC6 GRM/RHE/research losses | historical and targeted regression pass; final-candidate attestation missing | Historical GRM and fixed-probe RHE evidence passed, and targeted Phase 7 regression tests passed after the evidence-candidate run. Neither result is a final-candidate benchmark/validation attestation. |
+| AC7 backend, ingress, and API compatibility | historical and targeted regression pass; final-candidate attestation missing | Historical pure-JAX/CPU-FFI evidence and targeted coexistence, ingress, public-inspection, and CLI regressions passed. No final-candidate validation attestation was collected. |
 | AC8 cross-platform promotion | fail and missing | All 32 required product warm ratios exceed 1.20 across two cache states; x86_64 and GPU evidence are missing. |
 
 The historical local structural evaluator reported seven passes in each cache state: `numerical`, `graph_constants`, `graph_operands`, `stablehlo`, `padding`, `residency`, and `dense_communication`. Because the legacy files did not persist those outcomes with evidence IDs, the cross-machine evaluator now records the corresponding promotion gates as missing.

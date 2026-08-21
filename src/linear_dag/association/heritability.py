@@ -93,8 +93,8 @@ def randomized_haseman_elston(
     if grm.iids is None:
         raise ValueError("GRM operator must expose IIDs for phenotype alignment")
     left_op, right_op = get_inner_merge_operators(data.select("iid").cast(pl.Utf8).collect().to_series(), grm.iids)
-    if not np.allclose(data.select(covar_cols[0]).collect().to_numpy(), 1.0):
-        raise ValueError("First column of covar_cols should be '1'")
+    _validate_merge_multiplicity(left_op, right_op)
+    _validate_rhe_values(data, pheno_cols, covar_cols)
     phenotypes = data.select(pheno_cols).collect().to_numpy(writable=True)
     covariates = data.select(covar_cols).collect().to_numpy(writable=True)
     yresid, covariates = _prep_for_h2_estimation(left_op, right_op, phenotypes, covariates)
@@ -196,6 +196,45 @@ def _validate_rhe_columns(data: pl.LazyFrame, pheno_cols: list[str], covar_cols:
         raise ValueError(f"RHE data is missing required column(s): {missing_names}")
 
 
+def _validate_rhe_values(data: pl.LazyFrame, pheno_cols: list[str], covar_cols: list[str]) -> None:
+    intercept_is_valid = (
+        data.select((pl.col(covar_cols[0]).cast(pl.Float64, strict=False) == 1.0).fill_null(False).all())
+        .collect()
+        .item()
+    )
+    if not intercept_is_valid:
+        raise ValueError("First column of covar_cols should be '1'")
+    phenotype_has_value = (
+        data.select(
+            [
+                (
+                    pl.col(name).cast(pl.Float64, strict=False).is_not_null()
+                    & pl.col(name).cast(pl.Float64, strict=False).is_not_nan()
+                )
+                .any()
+                .alias(name)
+                for name in pheno_cols
+            ]
+        )
+        .collect()
+        .row(0)
+    )
+    if not all(phenotype_has_value):
+        raise ValueError("Each phenotype must have at least one non-missing value")
+
+
+def _validate_merge_multiplicity(left_op: LinearOperator, right_op: LinearOperator) -> None:
+    cols_matched_per_row = left_op @ np.ones(left_op.shape[1])
+    if not np.all(cols_matched_per_row[cols_matched_per_row != 0] == 2):
+        raise ValueError("Each row of the phenotype matrix should match zero or two rows of the genotype operator")
+    rows_matched_per_col = np.ones(right_op.shape[0]) @ right_op
+    if not np.all(rows_matched_per_col[rows_matched_per_col != 0] == 1):
+        raise ValueError("Each row of the genotype operator should match at most one row of the phenotype matrix")
+    two_n = np.sum(rows_matched_per_col > 0)
+    if two_n != 2 * np.sum(cols_matched_per_row > 0):
+        raise ValueError("Diploid IID alignment is inconsistent")
+
+
 def _prep_for_h2_estimation(
     left_op: LinearOperator,
     right_op: LinearOperator,
@@ -205,18 +244,7 @@ def _prep_for_h2_estimation(
     if not np.allclose(covariates[:, 0], 1):
         raise ValueError("First column of covariates should be all-ones")
 
-    cols_matched_per_row = left_op @ np.ones(left_op.shape[1])
-    # Check if all *non-zero* counts are exactly 2
-    if not np.all(cols_matched_per_row[cols_matched_per_row != 0] == 2):
-        raise ValueError("Each row of the phenotype matrix should match zero or two rows of the genotype operator")
-
-    rows_matched_per_col = np.ones(right_op.shape[0]) @ right_op
-    # Check if all *non-zero* counts are exactly 1
-    if not np.all(rows_matched_per_col[rows_matched_per_col != 0] == 1):
-        raise ValueError("Each row of the genotype operator should match at most one row of the phenotype matrix")
-
-    two_n = np.sum(rows_matched_per_col > 0)
-    assert two_n == 2 * np.sum(cols_matched_per_row > 0)
+    _validate_merge_multiplicity(left_op, right_op)
 
     # covariates = left_op.T @ covariates
     # phenotypes = left_op.T @ phenotypes

@@ -223,6 +223,33 @@ def _validate_rhe_columns(data: pl.LazyFrame, pheno_cols: list[str], covar_cols:
         raise ValueError(f"RHE data is missing required column(s): {missing_names}")
 
 
+def _validate_rhe_values(data: pl.LazyFrame, pheno_cols: list[str], covar_cols: list[str]) -> None:
+    intercept_is_valid = (
+        data.select((pl.col(covar_cols[0]).cast(pl.Float64, strict=False) == 1.0).fill_null(False).all())
+        .collect()
+        .item()
+    )
+    if not intercept_is_valid:
+        raise ValueError("First column of covariates should be all-ones")
+    phenotype_has_value = (
+        data.select(
+            [
+                (
+                    pl.col(name).cast(pl.Float64, strict=False).is_not_null()
+                    & pl.col(name).cast(pl.Float64, strict=False).is_not_nan()
+                )
+                .any()
+                .alias(name)
+                for name in pheno_cols
+            ]
+        )
+        .collect()
+        .row(0)
+    )
+    if not all(phenotype_has_value):
+        raise ValueError("Each phenotype must have at least one non-missing value")
+
+
 def _prepare_jax_rhe_inputs(
     grm: JaxGRMOperator,
     data: pl.LazyFrame,
@@ -232,6 +259,7 @@ def _prepare_jax_rhe_inputs(
     grm_iids = _require_grm_iids(grm)
     alignment = get_iid_alignment(data.select("iid").cast(pl.Utf8).collect().to_series(), grm_iids.cast(pl.Utf8))
     _validate_diploid_alignment(alignment)
+    _validate_rhe_values(data, pheno_cols, covar_cols)
 
     phenotypes = data.select(pheno_cols).collect().to_numpy(writable=True)
     covariates = data.select(covar_cols).collect().to_numpy(writable=True)
