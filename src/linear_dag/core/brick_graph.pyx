@@ -344,7 +344,11 @@ cdef class BrickGraph:
         cnp.import_array()
         self.num_samples = num_samples
         self.num_variants = num_variants
-        self.graph = DiGraph(num_variants + num_samples, num_variants + num_samples)
+        # Disk mode streams every inferred edge through ``self._add_edge_to_file``.
+        # Keep the full node arena used by sample bookkeeping, but avoid an
+        # otherwise unused edge arena proportional to the partition width.
+        cdef int graph_edge_capacity = 1 if save_to_disk else num_variants + num_samples
+        self.graph = DiGraph(num_variants + num_samples, graph_edge_capacity)
         # self.graph.initialize_all_nodes()
         self.initialize_tree()
         tree_num_nodes = self.tree.maximum_number_of_nodes
@@ -353,6 +357,11 @@ cdef class BrickGraph:
         self.direction = 0
         self.save_to_disk = save_to_disk
         self.out = out
+
+    @property
+    def _native_graph_stats(self):
+        """Expose native graph allocation counters for focused regression tests."""
+        return self.graph.number_of_edges, self.graph.max_edges
 
 
     def __dealloc__(self):
