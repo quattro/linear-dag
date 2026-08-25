@@ -4,7 +4,9 @@ import weakref
 import h5py
 import numpy as np
 
-from linear_dag.core.brick_graph import BrickGraph, reduction_union, reduction_union_packed
+from scipy.sparse import csc_matrix
+
+from linear_dag.core.brick_graph import BrickGraph, read_graph_from_disk, reduction_union, reduction_union_packed
 from linear_dag.core.digraph import DiGraph
 from linear_dag.core.recombination import Recombination
 from linear_dag.genotype import read_vcf, write_vcf_to_hdf5
@@ -119,6 +121,51 @@ def test_packed_reduction_union_handles_empty_and_single_edge_boundaries():
     assert actual_recombination.edge_list() == expected_recombination.edge_list()
 
 
+def test_disk_brick_graph_keeps_minimal_native_edge_arena_and_stream_order(tmp_path):
+    output = tmp_path / "streamed.h5"
+    brick_graph = BrickGraph(2, 4, save_to_disk=True, out=str(output))
+    streamed_edges = [(0, 2), (1, 3), (2, 4), (3, 5)]
+
+    assert brick_graph._native_graph_stats == (0, 1)
+    for parent, child in streamed_edges:
+        brick_graph.add_edge(parent, child)
+    assert brick_graph._native_graph_stats == (0, 1)
+    del brick_graph
+    gc.collect()
+
+    with h5py.File(output, "r") as stored:
+        assert stored.attrs["n"] == 6
+        np.testing.assert_array_equal(stored["rows"][:], np.array([0, 1, 2, 3], dtype=np.int32))
+        np.testing.assert_array_equal(stored["cols"][:], np.array([2, 3, 4, 5], dtype=np.int32))
+
+    in_memory = BrickGraph(2, 4)
+    assert in_memory._native_graph_stats == (0, 6)
+    for parent, child in streamed_edges:
+        in_memory.add_edge(parent, child)
+    assert in_memory._native_graph_stats == (4, 6)
+
+
+def test_disk_brick_graph_handles_zero_variant_boundary(tmp_path):
+    genotypes = csc_matrix((2, 0), dtype=np.int32)
+    output_prefix = tmp_path / "empty"
+
+    expected_forward, expected_backward, expected_samples = BrickGraph.forward_backward(genotypes)
+    actual_samples = BrickGraph.forward_backward(
+        genotypes,
+        save_to_disk=True,
+        out=str(output_prefix),
+    )
+
+    np.testing.assert_array_equal(actual_samples, expected_samples)
+    assert expected_forward.number_of_edges == 0
+    assert expected_backward.number_of_edges == 0
+    for direction in ("forward", "backward"):
+        with h5py.File(f"{output_prefix}_{direction}_graph.h5", "r") as stored:
+            assert stored.attrs["n"] == 2
+            assert stored["rows"].shape == (0,)
+            assert stored["cols"].shape == (0,)
+
+
 def test_batched_hdf5_forward_backward_matches_in_memory(test_data_dir, tmp_path):
     vcf_path = test_data_dir / "1kg_small.vcf"
     genotype_path = tmp_path / "genotypes.h5"
@@ -141,9 +188,15 @@ def test_batched_hdf5_forward_backward_matches_in_memory(test_data_dir, tmp_path
     )
 
     np.testing.assert_array_equal(actual_samples, expected_samples)
+    expected_forward, expected_backward, in_memory_samples = BrickGraph.forward_backward(genotypes)
+    np.testing.assert_array_equal(actual_samples, in_memory_samples)
     for direction in ["forward", "backward"]:
         with h5py.File(f"{in_memory_prefix}_{direction}_graph.h5", "r") as expected:
             with h5py.File(f"{streamed_prefix}_{direction}_graph.h5", "r") as actual:
                 assert actual.attrs["n"] == expected.attrs["n"]
                 np.testing.assert_array_equal(actual["rows"][:], expected["rows"][:])
                 np.testing.assert_array_equal(actual["cols"][:], expected["cols"][:])
+
+        expected_graph = expected_forward if direction == "forward" else expected_backward
+        actual_graph = read_graph_from_disk(f"{streamed_prefix}_{direction}_graph.h5")
+        np.testing.assert_array_equal(actual_graph.to_csc().toarray(), expected_graph.to_csc().toarray())
