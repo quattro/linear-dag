@@ -940,7 +940,7 @@ cpdef tuple get_graph_statistics(str brick_graph_dir, list partition_identifiers
     number_of_nodes -= num_samples * (len(partition_identifiers)-1)
     return num_samples, number_of_nodes, number_of_edges
 
-cdef add_neighbors(DiGraph graph_to_modify, node* v, node_ids):
+cdef void add_neighbors(DiGraph graph_to_modify, node* v, long[:] node_ids):
     """
     Add edges from the parents of node v to node v to graph_to_modify using the index mapping node_ids.
     :param graph_to_modify: DiGraph object
@@ -959,6 +959,146 @@ cdef add_neighbors(DiGraph graph_to_modify, node* v, node_ids):
         e = e.prev_in
 
 
+cdef long add_neighbors_defer_first(
+    DiGraph graph_to_modify,
+    node* v,
+    long[:] node_ids,
+    bint* has_deferred_edge,
+    long* deferred_parent,
+    long* deferred_child,
+):
+    """Add incoming edges while retaining the first edge for allocator-order compatibility."""
+    cdef edge* e = v.first_in
+    cdef long node_idx
+    cdef long parent_idx
+    cdef long num_edges = 0
+    if e is NULL:
+        return 0
+    node_idx = node_ids[v.index]
+    while e.next_in is not NULL:
+        e = e.next_in
+    while e is not NULL:
+        parent_idx = node_ids[e.u.index]
+        if not has_deferred_edge[0]:
+            deferred_parent[0] = parent_idx
+            deferred_child[0] = node_idx
+            has_deferred_edge[0] = True
+        else:
+            graph_to_modify.add_edge(parent_idx, node_idx)
+        num_edges += 1
+        e = e.prev_in
+    return num_edges
+
+
+cdef tuple _fill_merged_graph(
+    DiGraph result,
+    str brick_graph_dir,
+    list partition_identifiers,
+    long num_samples,
+    bint preserve_copy_order,
+    bint collect_index_mapping,
+):
+    cdef DiGraph graph
+    cdef long number_of_nodes
+    cdef long i
+    cdef long var
+    cdef long sample_idx
+    cdef long non_sample_counter = num_samples
+    cdef long sample_counter
+    cdef long edge_count = 0
+    cdef long[:] new_node_ids
+    cdef long[:] samples_view
+    cdef unsigned char[:] sample_mask
+    cdef list variant_indices = []
+    cdef object index_mapping = [] if collect_index_mapping else None
+    cdef bint has_deferred_edge = False
+    cdef long deferred_parent = -1
+    cdef long deferred_child = -1
+
+    for filename in partition_identifiers:
+        graph, samples, variants = read_brick_graph_h5(f'{brick_graph_dir}/{filename}.h5')
+        number_of_nodes = graph.maximum_number_of_nodes
+        samples_view = np.asarray(samples, dtype=np.int64)
+        if len(samples_view) != num_samples:
+            raise ValueError("Brick graph partitions have inconsistent sample counts")
+
+        # Match the previous ascending-node mapping in O(nodes + samples).
+        sample_mask = np.zeros(number_of_nodes, dtype=np.uint8)
+        for sample_idx in samples_view:
+            if sample_idx < 0 or sample_idx >= number_of_nodes:
+                raise ValueError("Sample index is outside the brick graph")
+            sample_mask[sample_idx] = 1
+
+        sample_counter = 0
+        new_node_ids = np.empty(number_of_nodes, dtype=np.int64)
+        for i in range(number_of_nodes):
+            if sample_mask[i]:
+                new_node_ids[i] = sample_counter
+                sample_counter += 1
+            else:
+                new_node_ids[i] = non_sample_counter
+                non_sample_counter += 1
+        if sample_counter != num_samples:
+            raise ValueError("Brick graph sample indices contain duplicates")
+        if non_sample_counter > result.maximum_number_of_nodes:
+            raise ValueError("Merged graph node capacity is too small")
+
+        for var in variants:
+            variant_indices.append(new_node_ids[var])
+        if collect_index_mapping:
+            index_mapping.append(np.asarray(new_node_ids))
+
+        # Add incoming edges in the same parent order as the previous merge.
+        # The old merge graph's allocator rotated the first inserted edge to
+        # the final source slot; Recombination.copy_from then visited that edge
+        # last. Deferring one edge reproduces that effective insertion order
+        # without constructing and copying an intermediate DiGraph.
+        for i in range(number_of_nodes):
+            if not graph.is_node(i):
+                continue
+            if preserve_copy_order:
+                edge_count += add_neighbors_defer_first(
+                    result,
+                    &graph.nodes[i],
+                    new_node_ids,
+                    &has_deferred_edge,
+                    &deferred_parent,
+                    &deferred_child,
+                )
+            else:
+                edge_count += graph.number_of_predecessors(&graph.nodes[i])
+                add_neighbors(result, &graph.nodes[i], new_node_ids)
+
+    if preserve_copy_order and has_deferred_edge:
+        result.add_edge(deferred_parent, deferred_child)
+
+    return variant_indices, non_sample_counter, index_mapping, edge_count
+
+
+cpdef tuple merge_brick_graphs_into(
+    DiGraph result,
+    str brick_graph_dir,
+    list partition_identifiers,
+    long num_samples,
+    long number_of_nodes,
+    bint preserve_copy_order=True,
+):
+    """Fill an existing graph directly from partition files without retaining mappings."""
+    cdef long node_idx
+    for node_idx in range(number_of_nodes):
+        result.add_node(node_idx)
+
+    variant_indices, merged_number_of_nodes, _, edge_count = _fill_merged_graph(
+        result,
+        brick_graph_dir,
+        partition_identifiers,
+        num_samples,
+        preserve_copy_order,
+        False,
+    )
+    return variant_indices, num_samples, merged_number_of_nodes, edge_count
+
+
 cpdef tuple merge_brick_graphs(str brick_graph_dir, list partition_identifiers):
     """
     Merge multiple brick graphs with shared sample nodes and other nodes disjoint.
@@ -967,41 +1107,16 @@ cpdef tuple merge_brick_graphs(str brick_graph_dir, list partition_identifiers):
     """
     num_samples, number_of_nodes, number_of_edges = get_graph_statistics(brick_graph_dir, partition_identifiers) # get statistics to initialize DiGraph object
     cdef DiGraph result = DiGraph(number_of_nodes, number_of_edges)
-    cdef DiGraph graph
-    cdef long i
-    cdef long u, v
-    cdef long non_sample_counter = num_samples
-    cdef long sample_counter
-    cdef long[:] new_node_ids
-    cdef list variant_indices = []
-    cdef list index_mapping = []
-
-    for f in partition_identifiers:
-
-        graph, samples, variants = read_brick_graph_h5(f'{brick_graph_dir}/{f}.h5')
-        #number_of_nodes = adj_mat.shape[0]
-        number_of_nodes = graph.maximum_number_of_nodes
-
-        # Get new node ids corresponding to the merged graph
-        sample_counter = 0
-        new_node_ids = np.zeros(number_of_nodes, dtype=np.int64)
-        for i in range(number_of_nodes):
-            if i in samples: # TODO slow
-                new_node_ids[i] = sample_counter
-                sample_counter += 1
-            else:
-                new_node_ids[i] = non_sample_counter
-                non_sample_counter += 1
-        for var in variants:
-            variant_indices.append(new_node_ids[var])
-        index_mapping.append(new_node_ids)
-
-        # Add edges from graph to result while preserving the order of the parent nodes for each child node
-        for node_idx in range(number_of_nodes):
-            if not graph.is_node(node_idx):
-                continue
-            add_neighbors(result, &graph.nodes[node_idx], new_node_ids)
-
+    variant_indices, _, index_mapping, edge_count = _fill_merged_graph(
+        result,
+        brick_graph_dir,
+        partition_identifiers,
+        num_samples,
+        False,
+        True,
+    )
+    if edge_count != number_of_edges:
+        raise ValueError("Merged edge count does not match partition metadata")
     return result, variant_indices, num_samples, index_mapping
 
 

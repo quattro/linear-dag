@@ -43,6 +43,19 @@ cdef class Recombination(DiGraph):
     def get_cliques(self):
         return np.asarray(self.clique)
 
+    @property
+    def workspace_allocated(self):
+        """Return whether clique-discovery workspace is currently retained."""
+        return self.clique_rows is not None
+
+    cpdef void release_workspace(self):
+        """Release clique-discovery state after recombination inference."""
+        self.clique_size_heap = None
+        self.clique_rows = None
+        self.unique_cliques_tracker = None
+        self.clique = None
+        self.num_cliques = 0
+
     @staticmethod
     def from_graph(brick_graph: DiGraph) -> Recombination:
         n, m = brick_graph.maximum_node_index() + 1, brick_graph.number_of_edges
@@ -117,13 +130,17 @@ cdef class Recombination(DiGraph):
             # clears in O(1)
             right_parent_to_clique.clear()
 
-    cpdef void collect_cliques(self):
+    cpdef void collect_cliques(self, long heap_length=-1):
         cdef long[:] what = np.where(np.asarray(self.clique) != -1)[0].astype(np.int64)
         cdef long[:] where = np.arange(self.num_cliques, dtype=np.int64)
         cdef long[:] which = np.take(self.clique, what)
 
         self.clique_rows.assign(what, where, which)
-        self.clique_size_heap = ModHeap(np.asarray(self.clique_rows.length, dtype=np.int64))
+        if heap_length < 0:
+            heap_length = len(self.clique_rows.length)
+        if heap_length < self.num_cliques or heap_length > len(self.clique_rows.length):
+            raise ValueError("Heap length must cover every clique row")
+        self.clique_size_heap = ModHeap(np.asarray(self.clique_rows.length[:heap_length], dtype=np.int64))
 
     cpdef void find_recombinations(self):
         cdef long c

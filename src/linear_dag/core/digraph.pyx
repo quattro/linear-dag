@@ -117,6 +117,45 @@ cdef class DiGraph:
     def max_edges(self) -> int:
         return self.maximum_number_of_edges
 
+    def _limit_initial_edge_capacity(self, long logical_capacity):
+        """Temporarily expose only a prefix of the already allocated first edge array."""
+        if self.number_of_edges != 0 or self.maximum_number_of_edges != self.edge_array_length:
+            raise ValueError("Initial edge capacity can only be limited on an empty one-array graph")
+        if logical_capacity <= 0 or logical_capacity > self.edge_array_length:
+            raise ValueError("Logical edge capacity is outside the allocated edge array")
+
+        cdef long i
+        for i in range(logical_capacity):
+            self.edge_arrays[0][i].next_in = &self.edge_arrays[0][(i + 1) % logical_capacity]
+        self.available_edge = &self.edge_arrays[0][logical_capacity - 1]
+        self.maximum_number_of_edges = logical_capacity
+        self.number_of_available_edges = logical_capacity
+
+    def _activate_initial_edge_reserve(self):
+        """Expose the unused suffix of the first edge array without changing existing free-edge order."""
+        cdef long physical_capacity = self.edge_array_length
+        cdef long logical_capacity = self.maximum_number_of_edges
+        cdef long reserve = physical_capacity - logical_capacity
+        cdef long i
+        cdef edge* last_free
+        if reserve <= 0:
+            return
+
+        for i in range(logical_capacity, physical_capacity - 1):
+            self.edge_arrays[0][i].next_in = &self.edge_arrays[0][i + 1]
+        self.edge_arrays[0][physical_capacity - 1].next_in = &self.edge_arrays[0][physical_capacity - 1]
+
+        if self.number_of_available_edges == 0:
+            self.available_edge = &self.edge_arrays[0][logical_capacity]
+        else:
+            last_free = self.available_edge
+            for i in range(self.number_of_available_edges - 1):
+                last_free = last_free.next_in
+            last_free.next_in = &self.edge_arrays[0][logical_capacity]
+
+        self.maximum_number_of_edges = physical_capacity
+        self.number_of_available_edges += reserve
+
     def parents(self, node_index: int) -> int:
         if not self.is_node(node_index):
             raise ValueError("Node index is not a node")
@@ -537,6 +576,10 @@ cdef class DiGraph:
     cdef void extend_edge_array(self):
         cdef long which_arr
         cdef long array_len = self.edge_array_length
+        if self.edge_arrays[0] is not NULL and self.maximum_number_of_edges < self.edge_array_length:
+            raise RuntimeError(
+                "Initial edge reserve must be activated before extending edge capacity"
+            )
         for which_arr in range(64):
             if self.edge_arrays[which_arr] is NULL:
                 break
