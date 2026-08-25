@@ -25,7 +25,7 @@ cdef class Recombination(DiGraph):
         DiGraph.__init__(self, num_nodes, num_edges)
         
         self.clique = -np.ones(num_edges, dtype=np.int64)
-        self.clique_rows = LinkedListArray(num_edges)
+        self.clique_rows = None
         self.clique_size_heap = None
         self.num_cliques = 0
         self.unique_cliques_tracker = CountingArray(num_edges)
@@ -131,11 +131,26 @@ cdef class Recombination(DiGraph):
             right_parent_to_clique.clear()
 
     cpdef void collect_cliques(self, long heap_length=-1):
-        cdef long[:] what = np.where(np.asarray(self.clique) != -1)[0].astype(np.int64)
-        cdef long[:] where = np.arange(self.num_cliques, dtype=np.int64)
-        cdef long[:] which = np.take(self.clique, what)
+        cdef long edge_index, clique_index
+        cdef long num_memberships = 0
+        cdef long pool_capacity = 1000
 
-        self.clique_rows.assign(what, where, which)
+        for edge_index in range(len(self.clique)):
+            if self.clique[edge_index] >= 0:
+                num_memberships += 1
+
+        # Match the capacity that repeated doubling from the historical
+        # 1,000-node pool would have reached, retaining some free nodes for
+        # update_trios' insert-before-remove behavior.
+        while pool_capacity <= num_memberships:
+            pool_capacity *= 2
+
+        self.clique_rows = LinkedListArray(len(self.clique), pool_capacity)
+        for edge_index in range(len(self.clique)):
+            clique_index = self.clique[edge_index]
+            if clique_index >= 0:
+                self.clique_rows._extend(clique_index, edge_index)
+
         if heap_length < 0:
             heap_length = len(self.clique_rows.length)
         if heap_length < self.num_cliques or heap_length > len(self.clique_rows.length):
@@ -169,7 +184,7 @@ cdef class Recombination(DiGraph):
             self.collapse_clique(c, new_node.index, clique_rows)
             
             c = self.max_clique()
-            if self.clique_rows.length[c] <= 1:
+            if c < 0 or self.clique_rows.length[c] <= 1:
                 break
 
     cpdef int max_clique(self):
