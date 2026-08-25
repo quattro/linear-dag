@@ -9,6 +9,112 @@ import os
 import h5py
 cdef int MAXINT = 2147483647
 cdef int TRAVERSAL_METHOD_THRESHOLD = 10
+cdef long PACKED_EDGE_CHUNK_SIZE = 262144
+
+
+cdef class PackedEdges:
+    """Owned, chunked endpoint storage for a reduction-union graph."""
+
+    cdef list _chunks
+    cdef object _current_array
+    cdef cnp.int32_t[:, ::1] _current
+    cdef long _chunk_size
+    cdef long _used
+    cdef long _length
+    cdef long _number_of_nodes
+    cdef long _allocated_nbytes
+    cdef long _first_parent
+    cdef long _first_child
+    cdef bint _has_first
+    cdef bint _finished
+    cdef bint _released
+
+    def __cinit__(self, long number_of_nodes, long chunk_size=PACKED_EDGE_CHUNK_SIZE):
+        if number_of_nodes < 0:
+            raise ValueError("number_of_nodes must be non-negative")
+        if number_of_nodes > MAXINT:
+            raise OverflowError("Packed endpoint node indices must fit in int32")
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        self._chunks = []
+        self._current_array = None
+        self._chunk_size = chunk_size
+        self._used = 0
+        self._length = 0
+        self._number_of_nodes = number_of_nodes
+        self._allocated_nbytes = 0
+        self._has_first = False
+        self._finished = False
+        self._released = False
+
+    cdef void append_insertion_order(self, long parent, long child):
+        """Record insertion order while reproducing DiGraph's edge-index rotation."""
+        if self._finished:
+            raise RuntimeError("Cannot append to finalized packed edges")
+        if not self._has_first:
+            self._first_parent = parent
+            self._first_child = child
+            self._has_first = True
+            return
+        self._append(parent, child)
+
+    cdef void _append(self, long parent, long child):
+        cdef object chunk
+        if self._current_array is None or self._used == self._chunk_size:
+            chunk = np.empty((self._chunk_size, 2), dtype=np.int32)
+            self._chunks.append(chunk)
+            self._current_array = chunk
+            self._current = chunk
+            self._used = 0
+            self._allocated_nbytes += chunk.nbytes
+        self._current[self._used, 0] = <cnp.int32_t> parent
+        self._current[self._used, 1] = <cnp.int32_t> child
+        self._used += 1
+        self._length += 1
+
+    cdef void finish(self):
+        if self._finished:
+            return
+        if self._has_first:
+            self._append(self._first_parent, self._first_child)
+        if self._chunks and self._used < self._chunk_size:
+            self._chunks[-1] = self._current_array[:self._used]
+        self._finished = True
+
+    @property
+    def chunks(self):
+        if self._released:
+            return ()
+        return tuple(self._chunks)
+
+    @property
+    def number_of_edges(self):
+        return self._length
+
+    @property
+    def number_of_nodes(self):
+        return self._number_of_nodes
+
+    @property
+    def allocated_nbytes(self):
+        return self._allocated_nbytes
+
+    @property
+    def released(self):
+        return bool(self._released)
+
+    def take_chunks(self):
+        """Transfer ownership of endpoint chunks to a single consumer."""
+        if not self._finished:
+            raise RuntimeError("Packed edges must be finalized before consumption")
+        if self._released:
+            raise RuntimeError("Packed edges have already been consumed")
+        chunks = self._chunks
+        self._chunks = []
+        self._current = None
+        self._current_array = None
+        self._released = True
+        return chunks
 
 cdef class BrickGraph:
     """
@@ -197,6 +303,13 @@ cdef class BrickGraph:
         cdef DiGraph brick_graph = reduction_union(forward_graph, backward_graph)
 
         return brick_graph, variant_indices[:num_variants]
+
+    @staticmethod
+    def combine_graphs_packed(forward_graph: DiGraph, backward_graph: DiGraph, num_variants: int):
+        """Combine graphs into packed endpoints for direct recombination construction."""
+        cdef long[:] variant_indices = combine_cliques(forward_graph, backward_graph)
+        cdef PackedEdges packed_edges = reduction_union_packed(forward_graph, backward_graph)
+        return packed_edges, variant_indices[:num_variants]
 
 
     @staticmethod
@@ -699,6 +812,41 @@ cpdef DiGraph reduction_union(DiGraph forward_reduction, DiGraph backward_reduct
 
     return result
 
+
+cpdef PackedEdges reduction_union_packed(
+    DiGraph forward_reduction,
+    DiGraph backward_reduction,
+    long chunk_size=PACKED_EDGE_CHUNK_SIZE,
+):
+    """Compute a reduction union into packed int32 endpoint chunks.
+
+    Endpoints are stored in the edge-index order that ``reduction_union``
+    exposes. ``DiGraph`` assigns the first inserted edge to the last slot of
+    its initial arena, so this is the insertion sequence rotated left by one.
+    """
+    cdef long num_nodes = max(forward_reduction.maximum_number_of_nodes, backward_reduction.maximum_number_of_nodes)
+    cdef IntegerSet reachable_in_two_hops = IntegerSet(num_nodes)
+    cdef long node_index
+    cdef node * current_node
+    cdef PackedEdges result = PackedEdges(num_nodes, chunk_size)
+
+    for node_index in range(num_nodes):
+        reachable_in_two_hops.clear()
+        if forward_reduction.is_node(node_index):
+            search_two_hops(reachable_in_two_hops, forward_reduction, backward_reduction, node_index)
+        if backward_reduction.is_node(node_index):
+            search_two_hops(reachable_in_two_hops, backward_reduction, forward_reduction, node_index)
+
+        if forward_reduction.is_node(node_index):
+            current_node = &forward_reduction.nodes[node_index]
+            add_nonredundant_neighbors_packed(result, current_node, reachable_in_two_hops)
+        if backward_reduction.is_node(node_index):
+            current_node = &backward_reduction.nodes[node_index]
+            add_nonredundant_neighbors_packed(result, current_node, reachable_in_two_hops)
+
+    result.finish()
+    return result
+
 # Subroutines of reduction_union
 cdef void search_two_hops(IntegerSet result, DiGraph first_graph, DiGraph second_graph, long starting_node_index):
     """
@@ -746,6 +894,19 @@ cdef void add_nonredundant_neighbors(DiGraph result, node * starting_node, Integ
     while out_edge is not NULL:
         if not neighbors_to_exclude.contains(out_edge.v.index):
             result.add_edge(starting_node.index, out_edge.v.index)
+        out_edge = out_edge.next_out
+
+
+cdef void add_nonredundant_neighbors_packed(
+    PackedEdges result,
+    node * starting_node,
+    IntegerSet neighbors_to_exclude,
+):
+    """Append nonredundant neighbor endpoints in reduction-union insertion order."""
+    cdef edge * out_edge = starting_node.first_out
+    while out_edge is not NULL:
+        if not neighbors_to_exclude.contains(out_edge.v.index):
+            result.append_insertion_order(starting_node.index, out_edge.v.index)
         out_edge = out_edge.next_out
 
 cpdef tuple read_brick_graph_h5(filename):

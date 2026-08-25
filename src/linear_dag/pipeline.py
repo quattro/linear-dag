@@ -851,18 +851,17 @@ def reduction_union_recom(
 
     logger.info("Combining nodes and computing reduction union")
     t3 = time.time()
-    brick_graph, variant_indices = BrickGraph.combine_graphs(forward_graph, backward_graph, m)
+    packed_edges, variant_indices = BrickGraph.combine_graphs_packed(forward_graph, backward_graph, m)
     del forward_graph, backward_graph
     t4 = time.time()
     logger.info(f"Combined nodes and computed reduction union in {np.round(t4 - t3, 3)} seconds")
 
-    for i in sample_indices:
-        assert len(list(brick_graph.successors(int(i)))) == 0
-
     logger.info("Finding recombinations")
     t5 = time.time()
-    recom = Recombination.from_graph(brick_graph)
-    del brick_graph
+    recom = Recombination.from_packed_edges(packed_edges)
+    del packed_edges
+    for i in sample_indices:
+        assert len(list(recom.successors(int(i)))) == 0
     recom.find_recombinations()
     t6 = time.time()
     logger.info(f"Found recombinations in {np.round(t6 - t5, 3)} seconds")

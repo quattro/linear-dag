@@ -56,6 +56,34 @@ cdef class Recombination(DiGraph):
         
         return result
 
+    @staticmethod
+    def from_packed_edges(packed_edges) -> Recombination:
+        """Construct from and consume owned packed endpoint chunks."""
+        cdef long n = packed_edges.number_of_nodes
+        cdef long m = packed_edges.number_of_edges
+        cdef Recombination result = Recombination(n + m // 4 + 1, m + 2)
+        cdef long node_index
+        cdef long edge_index
+        cdef object chunk_array
+        cdef list chunks
+        cdef cnp.int32_t[:, ::1] chunk
+
+        for node_index in range(n):
+            result.add_node(node_index)
+
+        chunks = packed_edges.take_chunks()
+        for chunk_array in chunks:
+            chunk = chunk_array
+            for edge_index in range(chunk.shape[0]):
+                result.add_edge(chunk[edge_index, 0], chunk[edge_index, 1])
+        chunk = None
+        chunk_array = None
+        chunks.clear()
+
+        result.compute_cliques()
+        result.collect_cliques()
+        return result
+
     cpdef void compute_cliques(self):
         # cdef CountingArray right_parent_to_clique = CountingArray(self.number_of_nodes)
         cdef CountingArray right_parent_to_clique = CountingArray(self.maximum_number_of_nodes)
