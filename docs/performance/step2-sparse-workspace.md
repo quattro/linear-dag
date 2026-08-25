@@ -9,7 +9,32 @@ This change was benchmarked on the same 500-kb 1,000 Genomes chromosome 22 parti
 - Build initial clique rows by scanning edge IDs once in ascending order.
 - Preallocate the linked-list node pool to the same rounded capacity that repeated doubling from 1,000 entries would have reached, preserving update headroom.
 
-## Results
+## Integrated 1KG result
+
+After the packed reduction-union construction change was merged into the target
+branch, the sparse-workspace patch was rebased and measured again. Values are
+medians of three sequential fresh-process runs of the aggregate-only profiler.
+
+| Measurement | Packed-only target branch | Packed + sparse workspace | Sparse-workspace effect |
+| --- | ---: | ---: | ---: |
+| Process-tree peak RSS | 811,565,056 B | 598,114,304 B | 26.3% lower |
+| Wall time | 2.950 s | 2.635 s | 10.7% faster |
+| CPU time | 3.085 s | 2.786 s | 9.7% lower |
+| Initial physical heap entries | 2,902,610 | 97,077 | 96.7% fewer |
+| Output edges | 324,439 | 324,365 | 0.023% fewer |
+| Raw CSC bytes | 4,231,112 | 4,230,192 | 0.022% fewer |
+
+Relative to the original pipeline before either accepted Step 2 patch, the
+combined peak RSS is 39.1% lower, wall time is 14.8% faster, and CPU time is
+14.2% lower. All three integrated runs produced identical graph-array hashes.
+
+The production writer emitted a 705,858-byte HDF5 partition with 324,365 edges
+and 84,452 nodes. An exact comparison of all 20,064 variant carrier sets across
+6,404 samples found zero mismatches against the original output; both complete
+carrier-set matrices hashed to
+`5eb15e067ed5d1a4784f87b49e5f0ac4608c4cb97b0b74d5a5ea7599a47e0bec`.
+
+## Isolated sparse-workspace result
 
 The primary pilot reports medians from two isolated-process runs per revision. Its wall and CPU measurements include loading, recombination, output checksums, and an aggregate semantic fingerprint.
 
@@ -31,12 +56,12 @@ The old collector simultaneously materialized `what`, `where`, `which`, `tmp`, a
 
 The isolated heap-constructor RSS target of at most 10 MB was not attainable while retaining the agreed full-width priority vector: 2,902,610 `int64` priorities require 23.2 MB. With the input pages resident before measurement, constructor RSS fell from 164.7 MB to 26.8 MB (83.7%). Removing the remaining full vector would require the sparse or dynamically sized clique-state redesign excluded from this patch.
 
-The CSC checksum changed because equal-priority processing now has an explicit clique-ID tie-break. An exact comparison of all 20,064 variant carrier sets across 6,404 samples found zero mismatches; both complete carrier-set matrices hashed to `5eb15e067ed5d1a4784f87b49e5f0ac4608c4cb97b0b74d5a5ea7599a47e0bec`.
+The CSC checksum changed because equal-priority processing now has an explicit clique-ID tie-break.
 
 ## Validation
 
-- Focused heap, clique-row, recombination, LinearARG, pipeline, and logging tests: 36 passed.
+- Post-rebase focused packed-construction, heap, clique-row, recombination, LinearARG, pipeline, and logging tests: 38 passed.
 - Exact 1KG carrier-set comparison: 20,064 of 20,064 variants matched.
-- Full suite: 147 passed and 32 failed. All 32 failures are the baseline SciPy `LinearOperator._xp` incompatibility in untouched `ParallelOperator` and `GRMOperator` paths.
+- Pre-rebase full suite: 147 passed and 32 failed. All 32 failures are the baseline SciPy `LinearOperator._xp` incompatibility in untouched `ParallelOperator` and `GRMOperator` paths.
 - Ruff check and format check passed for the changed Python tests.
 - `git diff --check` passed.
