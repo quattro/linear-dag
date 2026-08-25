@@ -31,6 +31,9 @@ After the Step 3 direct-merge patch was added to the target branch, a fresh
 confirmation run measured 598,523,904 B peak RSS, 2.653 s wall time, and 2.809 s
 CPU time, with the same graph-array hashes; the three-run medians above remain
 representative.
+The final rebase after the Step 1 disk-arena patch resolved only overlapping
+tests. The sparse-workspace production patch remained byte-for-byte identical,
+so the 1KG pilot was not repeated.
 
 The production writer emitted a 705,858-byte HDF5 partition with 324,365 edges
 and 84,452 nodes. An exact comparison of all 20,064 variant carrier sets across
@@ -64,7 +67,7 @@ The CSC checksum changed because equal-priority processing now has an explicit c
 
 ## Validation
 
-- Final-base focused packed-construction, heap, clique-row, recombination, direct Step 3 merge, LinearARG, pipeline, and logging tests: 42 passed.
+- Final-base focused disk-arena, packed-construction, heap, clique-row, recombination, direct Step 3 merge, LinearARG, pipeline, and logging tests: 44 passed.
 - Exact 1KG carrier-set comparison: 20,064 of 20,064 variants matched.
 - Pre-rebase full suite: 147 passed and 32 failed. All 32 failures are the baseline SciPy `LinearOperator._xp` incompatibility in untouched `ParallelOperator` and `GRMOperator` paths.
 - Ruff check and format check passed for the changed Python tests.
