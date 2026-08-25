@@ -31,11 +31,12 @@ The old collector simultaneously materialized `what`, `where`, `which`, `tmp`, a
 
 The isolated heap-constructor RSS target of at most 10 MB was not attainable while retaining the agreed full-width priority vector: 2,902,610 `int64` priorities require 23.2 MB. With the input pages resident before measurement, constructor RSS fell from 164.7 MB to 26.8 MB (83.7%). Removing the remaining full vector would require the sparse or dynamically sized clique-state redesign excluded from this patch.
 
-The CSC checksum changed because equal-priority processing now has an explicit clique-ID tie-break. The aggregate descendant-sample fingerprint was identical before and after (`997a7399f40d006f231ebe8614ef3254104d4493c6805863256fe9c3df218702`), providing exact operator-semantic validation for every variant under three deterministic 64-bit sample projections.
+The CSC checksum changed because equal-priority processing now has an explicit clique-ID tie-break. An exact comparison of all 20,064 variant carrier sets across 6,404 samples found zero mismatches; both complete carrier-set matrices hashed to `5eb15e067ed5d1a4784f87b49e5f0ac4608c4cb97b0b74d5a5ea7599a47e0bec`.
 
 ## Validation
 
 - Focused heap, clique-row, recombination, LinearARG, pipeline, and logging tests: 36 passed.
+- Exact 1KG carrier-set comparison: 20,064 of 20,064 variants matched.
 - Full suite: 147 passed and 32 failed. All 32 failures are the baseline SciPy `LinearOperator._xp` incompatibility in untouched `ParallelOperator` and `GRMOperator` paths.
 - Ruff check and format check passed for the changed Python tests.
 - `git diff --check` passed.
