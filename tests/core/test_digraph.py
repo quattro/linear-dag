@@ -166,6 +166,69 @@ def test_disk_brick_graph_handles_zero_variant_boundary(tmp_path):
             assert stored["cols"].shape == (0,)
 
 
+def test_collect_cliques_matches_edge_labels_in_ascending_order():
+    edges = []
+    for parents, children in [((0, 1), range(6, 10)), ((2, 3), range(10, 13)), ((4, 5), range(13, 16))]:
+        edges.extend((parent, child) for parent in parents for child in children)
+    graph = DiGraph(16, len(edges))
+    for parent, child in edges:
+        graph.create_edge(parent, child)
+
+    recombination = Recombination.from_graph(graph)
+    cliques = recombination.get_cliques
+    clique_rows = recombination.get_clique_rows
+
+    for clique_index in range(max(cliques) + 1):
+        np.testing.assert_array_equal(clique_rows[clique_index], np.flatnonzero(cliques == clique_index))
+    assert sum(map(len, clique_rows)) == np.count_nonzero(cliques >= 0)
+
+    heap, priorities = recombination.get_heap
+    assert len(heap) == np.count_nonzero(priorities)
+
+
+def test_sparse_heap_handles_exhausting_the_only_clique():
+    edges = [(parent, child) for parent in (0, 1) for child in range(2, 8)]
+    graph = DiGraph(8, len(edges))
+    for parent, child in edges:
+        graph.create_edge(parent, child)
+
+    recombination = Recombination.from_graph(graph)
+    recombination.find_recombinations()
+
+    assert recombination.number_of_edges < len(edges)
+
+
+def test_sparse_heap_handles_graph_without_cliques():
+    graph = DiGraph(3, 2)
+    graph.create_edge(0, 1)
+    graph.create_edge(1, 2)
+
+    recombination = Recombination.from_graph(graph)
+    heap, _ = recombination.get_heap
+
+    assert heap == []
+    recombination.find_recombinations()
+    assert recombination.number_of_edges == 2
+
+
+def test_recombination_is_deterministic_for_equal_priority_cliques():
+    edges = []
+    for parents, children in [((0, 1), range(6, 10)), ((2, 3), range(10, 14)), ((4, 5), range(14, 18))]:
+        edges.extend((parent, child) for parent in parents for child in children)
+
+    outputs = []
+    for _ in range(2):
+        graph = DiGraph(18, len(edges))
+        for parent, child in edges:
+            graph.create_edge(parent, child)
+        recombination = Recombination.from_graph(graph)
+        recombination.find_recombinations()
+        outputs.append(tuple(np.asarray(array).copy() for array in recombination.to_csc_arrays()[:3]))
+
+    for first, second in zip(*outputs):
+        np.testing.assert_array_equal(first, second)
+
+
 def test_batched_hdf5_forward_backward_matches_in_memory(test_data_dir, tmp_path):
     vcf_path = test_data_dir / "1kg_small.vcf"
     genotype_path = tmp_path / "genotypes.h5"
