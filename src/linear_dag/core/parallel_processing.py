@@ -21,6 +21,7 @@ from .lineararg import (
     list_blocks,
     list_iids,
 )
+from .solve import spsolve_backward_triangular_matmat
 
 FLAGS = {
     "wait": 0,
@@ -30,6 +31,7 @@ FLAGS = {
     "matmat": 2,
     "rmatmat": 3,
     "num_heterozygotes": 4,
+    "weighted_heterozygotes": 5,
 }
 assert len(np.unique([val for val in FLAGS.values()])) == len(FLAGS)
 
@@ -294,7 +296,7 @@ class ParallelOperator(LinearOperator):
     _num_traits: Value
     _max_num_traits: int
     shape: tuple[int, int]
-    dtype: np.dtype = np.float32
+    dtype: np.dtype = np.dtype(np.float32)
     iids: Optional[pl.Series] = None
     _variant_view_handles: List[_SharedArrayHandle] = field(default_factory=list)
 
@@ -359,7 +361,7 @@ class ParallelOperator(LinearOperator):
             )
         if in_place and k > self._max_num_traits:
             raise ValueError(f"in_place=True requires x.shape[1] <= max_num_traits = {self._max_num_traits}")
-        result = np.empty((self.shape[0], k), dtype=np.float32)
+        result = np.empty((self.shape[0], k), dtype=self.dtype)
 
         # Process max_num_traits columns at a time
         for start in range(0, k, self._max_num_traits):
@@ -367,11 +369,11 @@ class ParallelOperator(LinearOperator):
 
             if not in_place:
                 with self._variant_data_handle as variant_data:
-                    variant_data[:, : end - start] = x[:, start:end].astype(np.float32)
+                    variant_data[:, : end - start] = x[:, start:end].astype(self.dtype, copy=False)
 
             self._num_traits.value = end - start
             with self._sample_data_handle as sample_data:
-                sample_data[:] = np.zeros((self._max_num_traits, self.shape[0]), dtype=np.float32)
+                sample_data.fill(0)
             self._manager.start_workers(FLAGS["matmat"])
             self._manager.await_workers()
             with self._sample_data_handle as sample_data:
@@ -391,7 +393,7 @@ class ParallelOperator(LinearOperator):
                 raise ValueError("in_place=True requires x.shape[1] <= max_num_traits")
             result = self.borrow_variant_data_view()[:, :k]
         else:
-            result = np.empty((self.shape[1], k), dtype=np.float32)
+            result = np.empty((self.shape[1], k), dtype=self.dtype)
 
         # Process max_num_traits columns at a time
         for start in range(0, k, self._max_num_traits):
@@ -399,7 +401,7 @@ class ParallelOperator(LinearOperator):
             self._num_traits.value = end - start
 
             with self._sample_data_handle as sample_data:
-                sample_data[: end - start, :] = x[:, start:end].astype(np.float32).T
+                sample_data[: end - start, :] = x[:, start:end].astype(self.dtype, copy=False).T
             self._manager.start_workers(FLAGS["rmatmat"])
             self._manager.await_workers()
 
@@ -445,6 +447,49 @@ class ParallelOperator(LinearOperator):
                     individuals_to_include[:, start:end].astype(np.float32).T
                 )
             self._manager.start_workers(FLAGS["num_heterozygotes"])
+            self._manager.await_workers()
+
+            with self._variant_data_handle as variant_data:
+                result[:, start:end] = variant_data[:, : end - start]
+
+        return result
+
+    def weighted_heterozygote_matmat(self, weights: np.ndarray) -> np.ndarray:
+        """Compute weighted heterozygote sums for each variant.
+
+        This is the weighted analogue of
+        [`ParallelOperator.number_of_heterozygotes`][]. If ``H`` is the
+        diploid heterozygote indicator matrix, this returns ``H.T @ weights``
+        without materializing ``H``.
+
+        **Arguments:**
+
+        - `weights`: Array with shape `(n_individuals, n_traits)`, or a vector
+          with one entry per diploid individual.
+
+        **Returns:**
+
+        - Array with shape `(n_variants, n_traits)`.
+        """
+        weights = np.asarray(weights, dtype=self.dtype)
+        if weights.ndim == 1:
+            weights = weights.reshape(-1, 1)
+        if weights.ndim != 2:
+            raise ValueError("weights must be a vector or matrix")
+        if weights.shape[0] != self.n_individuals:
+            raise ValueError(f"weights should have size {self.n_individuals} in dim 0.")
+
+        result = np.empty((self.shape[1], weights.shape[1]), dtype=self.dtype)
+
+        # Process max_num_traits columns at a time.
+        for start in range(0, weights.shape[1], self._max_num_traits):
+            end = min(start + self._max_num_traits, weights.shape[1])
+            self._num_traits.value = end - start
+
+            with self._sample_data_handle as sample_data:
+                sample_data.fill(0)
+                sample_data[: end - start, : self.n_individuals] = weights[:, start:end].T
+            self._manager.start_workers(FLAGS["weighted_heterozygotes"])
             self._manager.await_workers()
 
             with self._variant_data_handle as variant_data:
@@ -546,6 +591,8 @@ class ParallelOperator(LinearOperator):
                 func = cls._worker_rmatmat
             elif flag.value == FLAGS["num_heterozygotes"]:
                 func = cls._worker_num_heterozygotes
+            elif flag.value == FLAGS["weighted_heterozygotes"]:
+                func = cls._worker_weighted_heterozygotes
             else:
                 flag.value = FLAGS["error"]
                 raise ValueError(f"Unexpected flag value: {flag.value}; possible: {FLAGS}")
@@ -602,6 +649,42 @@ class ParallelOperator(LinearOperator):
             variant_data[:, t] = counts.astype(variant_data.dtype, copy=False)
 
     @classmethod
+    def _worker_weighted_heterozygotes(
+        cls,
+        linarg: LinearARG,
+        sample_data: np.ndarray,
+        variant_data: np.ndarray,
+        sample_lock: Lock,
+    ) -> None:
+        if linarg.n_individuals is None:
+            raise ValueError(
+                "Cannot compute weighted heterozygotes:",
+                "linear ARG lacks individual nodes. Run add_individual_nodes first.",
+            )
+
+        weights = sample_data[: linarg.n_individuals, :]
+        linarg.calculate_nonunique_indices()
+        work = np.zeros(
+            (weights.shape[1], linarg.num_nonunique_indices),
+            dtype=variant_data.dtype,
+            order="F",
+        )
+        individual_indices = linarg.nonunique_indices[linarg.individual_indices]
+        sample_indices = linarg.nonunique_indices[linarg.sample_indices]
+        work[:, individual_indices] = (2.0 * weights).T
+        work[:, sample_indices] = -np.repeat(weights, 2, axis=0).T
+
+        spsolve_backward_triangular_matmat(
+            linarg.A,
+            work,
+            linarg.nonunique_indices,
+            int(linarg.sample_indices[-1]),
+        )
+
+        variant_indices = linarg.nonunique_indices[linarg.variant_indices]
+        variant_data[:] = work[:, variant_indices].T
+
+    @classmethod
     def from_hdf5(
         cls,
         hdf5_file: str,
@@ -612,6 +695,7 @@ class ParallelOperator(LinearOperator):
         bed_file: Optional[str] = None,
         bed_maf_log10_threshold: Optional[int] = None,
         alpha: float = -1.0,
+        dtype: Type[np.generic] | np.dtype = np.float32,
     ) -> ParallelOperator:
         """Build a blockwise parallel genotype operator from HDF5 storage.
 
@@ -632,6 +716,7 @@ class ParallelOperator(LinearOperator):
         - `bed_file`: Optional BED file path.
         - `bed_maf_log10_threshold`: Keep BED variants with MAF greater than `10**x`.
         - `alpha`: Accepted for API parity; not used by `ParallelOperator`.
+        - `dtype`: Floating-point dtype for shared-memory inputs/outputs.
 
         **Returns:**
 
@@ -642,6 +727,9 @@ class ParallelOperator(LinearOperator):
         - `RuntimeError`: If any worker signals an error while initializing/awaiting.
         """
         _ = alpha
+        dtype = np.dtype(dtype)
+        if dtype not in {np.dtype(np.float32), np.dtype(np.float64)}:
+            raise ValueError("dtype must be np.float32 or np.float64")
         context = _prepare_from_hdf5_context(
             hdf5_file=hdf5_file,
             num_processes=num_processes,
@@ -652,8 +740,8 @@ class ParallelOperator(LinearOperator):
         )
 
         shm_specification = {
-            "sample_data": ((max_num_traits, context.num_samples), np.float32),
-            "variant_data": ((context.num_variants, max_num_traits), np.float32),
+            "sample_data": ((max_num_traits, context.num_samples), dtype.type),
+            "variant_data": ((context.num_variants, max_num_traits), dtype.type),
         }
 
         manager = _ManagerFactory.create_manager(
@@ -680,7 +768,7 @@ class ParallelOperator(LinearOperator):
             _num_traits=manager.num_traits,
             _max_num_traits=max_num_traits,
             shape=(context.num_samples, context.num_variants),
-            dtype=np.float32,
+            dtype=dtype,
             iids=context.iids,
         )
 

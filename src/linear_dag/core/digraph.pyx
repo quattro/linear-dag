@@ -2,7 +2,7 @@
 #define NPY_NO_DEPRECATED_API
 
 from typing import Type
-from libc.stdlib cimport free, malloc, realloc
+from libc.stdlib cimport free, malloc, qsort, realloc
 import numpy as np
 from scipy.sparse import csr_matrix, csc_matrix
 cimport numpy as cnp
@@ -11,6 +11,12 @@ from .data_structures cimport Stack
 from libc.stdint cimport int64_t, uint64_t
 
 cdef int MAXINT = 32767
+
+
+cdef int compare_int32(const void* a, const void* b) noexcept nogil:
+    cdef int left = (<int*>a)[0]
+    cdef int right = (<int*>b)[0]
+    return (left > right) - (left < right)
 
 cdef struct node:
     int index # needed?
@@ -432,8 +438,89 @@ cdef class DiGraph:
         return csr_matrix((np.ones(len(edges)), (list(rows), list(cols))),
                        shape=(n, n))
 
+    def to_csc_arrays(self):
+        """Return canonical CSC arrays without materializing Python edge objects.
+
+        Directed edge ``u -> v`` is stored at matrix position ``(u, v)``.
+        Parent indices are sorted within each child column. Duplicate edges are
+        summed to preserve the behavior of SciPy's coordinate-to-CSC conversion.
+        """
+        cdef long n = self.maximum_node_index() + 1
+        cdef long num_edges = self.number_of_edges
+        cdef cnp.ndarray[cnp.int64_t, ndim=1] raw_indptr = np.zeros(n + 1, dtype=np.int64)
+        cdef cnp.int64_t[:] raw_indptr_view = raw_indptr
+        cdef long i
+        cdef edge* e
+
+        for i in range(self.maximum_number_of_edges):
+            e = self.get_edge(i)
+            if e.u is NULL:
+                continue
+            raw_indptr_view[e.v.index + 1] += 1
+
+        np.cumsum(raw_indptr, out=raw_indptr)
+
+        cdef cnp.ndarray[cnp.int64_t, ndim=1] cursor = raw_indptr[:-1].copy()
+        cdef cnp.int64_t[:] cursor_view = cursor
+        cdef cnp.ndarray[cnp.int32_t, ndim=1] indices = np.empty(num_edges, dtype=np.int32)
+        cdef int[:] indices_view = indices
+        cdef long position
+
+        for i in range(self.maximum_number_of_edges):
+            e = self.get_edge(i)
+            if e.u is NULL:
+                continue
+            position = cursor_view[e.v.index]
+            indices_view[position] = e.u.index
+            cursor_view[e.v.index] += 1
+
+        cdef long column
+        cdef long start
+        cdef long end
+        for column in range(n):
+            start = raw_indptr_view[column]
+            end = raw_indptr_view[column + 1]
+            if end - start > 1:
+                qsort(&indices_view[start], end - start, sizeof(int), compare_int32)
+
+        cdef cnp.ndarray[cnp.int64_t, ndim=1] indptr = np.empty(n + 1, dtype=np.int64)
+        cdef cnp.int64_t[:] indptr_view = indptr
+        cdef cnp.ndarray[cnp.float64_t, ndim=1] data = np.empty(num_edges, dtype=np.float64)
+        cdef double[:] data_view = data
+        cdef long read_position
+        cdef long write_position = 0
+        cdef int parent
+        cdef long duplicate_count
+
+        for column in range(n):
+            indptr_view[column] = write_position
+            start = raw_indptr_view[column]
+            end = raw_indptr_view[column + 1]
+            read_position = start
+            while read_position < end:
+                parent = indices_view[read_position]
+                duplicate_count = 1
+                read_position += 1
+                while read_position < end and indices_view[read_position] == parent:
+                    duplicate_count += 1
+                    read_position += 1
+                indices_view[write_position] = parent
+                data_view[write_position] = duplicate_count
+                write_position += 1
+        indptr_view[n] = write_position
+
+        final_indices = indices[:write_position]
+        final_data = data[:write_position]
+        if n <= np.iinfo(np.int32).max and write_position <= np.iinfo(np.int32).max:
+            final_indptr = indptr.astype(np.int32)
+        else:
+            final_indptr = indptr
+            final_indices = final_indices.astype(np.int64)
+        return final_indptr, final_indices, final_data, n
+
     def to_csc(self) -> csc_matrix:
-        return csc_matrix(self.to_csr())
+        indptr, indices, data, n = self.to_csc_arrays()
+        return csc_matrix((data, indices, indptr), shape=(n, n))
 
     def add_edges_from(self, list[tuple[int, int]] edges) -> None:
         for i, j in edges:
@@ -692,5 +779,3 @@ def create_test_digraph(int num_nodes, int num_edges):
         A DiGraph object with allocated space for the specified nodes and edges
     """
     return DiGraph(num_nodes, num_edges)
-
-

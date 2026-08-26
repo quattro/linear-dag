@@ -39,8 +39,8 @@ cdef class BrickGraph:
         :param genotypes: sparse genotype matrix in csc_matrix format; rows=samples, columns=variants. Order of variants
         matters, order of samples does not.
         :param add_samples: whether to add nodes to the brick graph for the sample haplotypes.
-        :param save_to_disk: If False, saves the forward and backward graph as a sparse matrix to disk. If True, returns forward and backward graphs.
-        :param out: If save_to_disk is True, the path save the forward and backward graphs.
+        :param save_to_disk: If True, stream inferred edges to disk; otherwise return both graphs.
+        :param out: Output prefix used when save_to_disk is True.
         """
         num_samples, num_variants = genotypes.shape
 
@@ -70,6 +70,9 @@ cdef class BrickGraph:
         else:
             sample_indices = np.array([])
         cdef DiGraph forward_graph = forward_pass.graph
+        del forward_pass
+        if save_to_disk:
+            del forward_graph
 
         # Backward pass
         cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_backward_graph.h5')
@@ -78,13 +81,111 @@ cdef class BrickGraph:
             carriers = indices[indptr[i]:indptr[i+1]]
             backward_pass.intersect_clades(carriers, i)
         cdef DiGraph backward_graph = backward_pass.graph
+        del backward_pass
 
         if not save_to_disk:
             return forward_graph, backward_graph, sample_indices
         else:
-            del forward_graph # calls __dealloc__ to save to disk
             del backward_graph
             return sample_indices
+
+
+    @staticmethod
+    def forward_backward_from_hdf5(str genotype_path, bint add_samples = True, str out = None, long batch_nnz = 1000000):
+        """Run sequential passes from bounded batches of CSC carrier indices."""
+        cdef long num_samples
+        cdef long num_variants
+        cdef cnp.ndarray[cnp.int64_t, ndim=1] indptr_array
+        cdef cnp.int64_t[:] indptr
+        cdef cnp.ndarray[cnp.int32_t, ndim=1] batch_indices_array
+        cdef int[:] batch_indices
+        cdef int[:] carriers
+        cdef long batch_start
+        cdef long batch_end
+        cdef long index_start
+        cdef long index_end
+        cdef long target
+        cdef long i
+        cdef BrickGraph forward_pass
+        cdef BrickGraph backward_pass
+        cdef long[:] sample_indices
+        cdef node* u
+
+        if out is None:
+            raise ValueError("out is required when streaming forward/backward graphs to disk")
+        if batch_nnz <= 0:
+            raise ValueError("batch_nnz must be positive")
+
+        with h5py.File(genotype_path, 'r') as f:
+            num_samples, num_variants = f['shape'][:]
+            indptr_array = np.asarray(f['indptr'][:], dtype=np.int64)
+            indptr = indptr_array
+
+            forward_pass = BrickGraph(
+                num_samples,
+                num_variants,
+                save_to_disk=True,
+                out=f'{out}_forward_graph.h5',
+            )
+            forward_pass.direction = 1
+            batch_start = 0
+            while batch_start < num_variants:
+                target = indptr[batch_start] + batch_nnz
+                batch_end = np.searchsorted(indptr_array, target, side='right') - 1
+                if batch_end <= batch_start:
+                    batch_end = batch_start + 1
+                if batch_end > num_variants:
+                    batch_end = num_variants
+                index_start = indptr[batch_start]
+                index_end = indptr[batch_end]
+                batch_indices_array = np.asarray(f['indices'][index_start:index_end], dtype=np.int32)
+                batch_indices = batch_indices_array
+                for i in range(batch_start, batch_end):
+                    carriers = batch_indices[indptr[i] - index_start:indptr[i + 1] - index_start]
+                    forward_pass.intersect_clades(carriers, i)
+                batch_start = batch_end
+
+            if add_samples:
+                sample_indices = np.arange(num_variants, num_variants + num_samples, dtype=np.int64)
+                for i in range(num_samples):
+                    u = forward_pass.graph.add_node(sample_indices[i])
+                    forward_pass.add_edges_from_subsequence(i, sample_indices[i])
+                    forward_pass.subsequence.clear_list(i)
+                    assert forward_pass.graph.has_node(sample_indices[i])
+                    assert forward_pass.graph.number_of_successors(u) == 0
+            else:
+                sample_indices = np.array([], dtype=np.int64)
+
+            carriers = None
+            batch_indices = None
+            batch_indices_array = None
+            del forward_pass
+
+            backward_pass = BrickGraph(
+                num_samples,
+                num_variants,
+                save_to_disk=True,
+                out=f'{out}_backward_graph.h5',
+            )
+            backward_pass.direction = -1
+            batch_end = num_variants
+            while batch_end > 0:
+                target = indptr[batch_end] - batch_nnz
+                batch_start = np.searchsorted(indptr_array, target, side='left')
+                if batch_start >= batch_end:
+                    batch_start = batch_end - 1
+                index_start = indptr[batch_start]
+                index_end = indptr[batch_end]
+                batch_indices_array = np.asarray(f['indices'][index_start:index_end], dtype=np.int32)
+                batch_indices = batch_indices_array
+                for i in reversed(range(batch_start, batch_end)):
+                    carriers = batch_indices[indptr[i] - index_start:indptr[i + 1] - index_start]
+                    backward_pass.intersect_clades(carriers, i)
+                batch_end = batch_start
+
+            del backward_pass
+
+        return sample_indices
 
 
     @staticmethod

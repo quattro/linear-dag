@@ -24,7 +24,7 @@ class _FakeManager:
 
 
 def test_from_hdf5_signature_constructor_contract_parameter_order():
-    expected = [
+    shared_parameters = [
         "hdf5_file",
         "num_processes",
         "max_num_traits",
@@ -38,9 +38,8 @@ def test_from_hdf5_signature_constructor_contract_parameter_order():
     parallel_params = list(signature(ParallelOperator.from_hdf5).parameters)
     grm_params = list(signature(GRMOperator.from_hdf5).parameters)
 
-    assert parallel_params == expected
-    assert grm_params == expected
-    assert parallel_params == grm_params
+    assert parallel_params == [*shared_parameters, "dtype"]
+    assert grm_params == shared_parameters
 
 
 def test_from_hdf5_signature_constructor_contract_default_values():
