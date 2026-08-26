@@ -1,3 +1,5 @@
+# pattern: Imperative Shell
+
 import os
 import tempfile
 
@@ -23,7 +25,7 @@ class _FakeManager:
 
 
 def test_from_hdf5_signature_constructor_contract_parameter_order():
-    expected = [
+    common_expected = [
         "hdf5_file",
         "num_processes",
         "max_num_traits",
@@ -37,9 +39,8 @@ def test_from_hdf5_signature_constructor_contract_parameter_order():
     parallel_params = list(signature(ParallelOperator.from_hdf5).parameters)
     grm_params = list(signature(GRMOperator.from_hdf5).parameters)
 
-    assert parallel_params == expected
-    assert grm_params == expected
-    assert parallel_params == grm_params
+    assert parallel_params == [*common_expected, "dtype"]
+    assert grm_params == common_expected
 
 
 def test_from_hdf5_signature_constructor_contract_default_values():
@@ -60,6 +61,7 @@ def test_from_hdf5_signature_constructor_contract_default_values():
 
     assert parallel_signature.parameters["alpha"].default == -1.0
     assert grm_signature.parameters["alpha"].default == -1.0
+    assert parallel_signature.parameters["dtype"].default is np.float32
 
 
 def test_from_hdf5_shared_pipeline_path_for_parallel_and_grm(monkeypatch):

@@ -1,4 +1,11 @@
+# pattern: Imperative Shell
+
 from .brick_graph import BrickGraph as BrickGraph
+from .jaxlinarg import (
+    Backend as Backend,
+    JaxLinearARG as JaxLinearARG,
+    JaxParallelOperator as JaxParallelOperator,
+)
 from .linear_arg_inference import linear_arg_from_genotypes as linear_arg_from_genotypes
 from .lineararg import LinearARG as LinearARG, list_blocks as list_blocks
 from .parallel_processing import (

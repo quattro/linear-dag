@@ -1,3 +1,5 @@
+# pattern: Imperative Shell
+
 import argparse
 import io
 import logging
@@ -7,6 +9,7 @@ from argparse import Namespace
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+import jax
 import numpy as np
 import polars as pl
 import pytest
@@ -674,6 +677,147 @@ def test_estimate_h2g_forwards_variant_filtering_kwargs_to_grm_operator(tmp_path
     assert captured["bed_maf_log10_threshold"] == -4
 
 
+def test_estimate_h2g_jax_backend_uses_jax_grm_operator(tmp_path: Path, monkeypatch):
+    block_metadata = pl.DataFrame(
+        {
+            "block_name": ["1:0-100"],
+            "chrom": ["1"],
+            "n_samples": [2],
+            "n_variants": [4],
+            "n_entries": [8],
+        }
+    )
+    phenotypes = pl.DataFrame(
+        {
+            "iid": ["id1", "id2"],
+            "trait1": [0.1, 0.2],
+            "i0": [1.0, 1.0],
+        }
+    )
+    fake_grm = object()
+    captured = {}
+
+    def _fake_prep_data(*_args, **_kwargs):
+        return block_metadata, ["i0"], ["trait1"], phenotypes
+
+    def _fake_open_jax_grm_operator(args, observed_block_metadata, logger):
+        captured["args"] = args
+        captured["block_metadata"] = observed_block_metadata
+        captured["logger"] = logger
+        return _DummyContext(fake_grm)
+
+    def _fail_grm_from_hdf5(*_args, **_kwargs):
+        raise AssertionError("cython GRMOperator should not be used when --jax-backend is set")
+
+    def _fake_randomized_he(grm, *_args, **_kwargs):
+        captured["grm"] = grm
+        return pl.DataFrame({"trait": ["trait1"], "h2g": [0.2]})
+
+    monkeypatch.setattr(cli, "_prep_data", _fake_prep_data)
+    monkeypatch.setattr(cli, "_open_jax_grm_operator", _fake_open_jax_grm_operator)
+    monkeypatch.setattr(cli.GRMOperator, "from_hdf5", _fail_grm_from_hdf5)
+    monkeypatch.setattr(cli, "randomized_haseman_elston_jax", _fake_randomized_he)
+
+    args = Namespace(
+        linarg_path="dummy.h5",
+        pheno="dummy.tsv",
+        pheno_name=None,
+        pheno_col_nums=None,
+        covar=None,
+        covar_name=None,
+        covar_col_nums=None,
+        chromosomes=["1"],
+        block_names=None,
+        num_processes=2,
+        num_matvecs=10,
+        estimator="xnystrace",
+        sampler="normal",
+        seed=0,
+        maf_log10_threshold=None,
+        bed=None,
+        bed_maf_log10_threshold=None,
+        jax_backend=True,
+        out=str(tmp_path / "rhe"),
+    )
+    cli._estimate_h2g(args, logging.getLogger("linear_dag.tests.cli.rhe"))
+
+    assert captured["args"] is args
+    assert captured["block_metadata"].to_dicts() == block_metadata.to_dicts()
+    assert captured["grm"] is fake_grm
+
+
+def test_estimate_h2g_jax_backend_rejects_variant_filters(tmp_path: Path, monkeypatch):
+    block_metadata = pl.DataFrame(
+        {
+            "block_name": ["1:0-100"],
+            "chrom": ["1"],
+            "n_samples": [2],
+            "n_variants": [4],
+            "n_entries": [8],
+        }
+    )
+    phenotypes = pl.DataFrame(
+        {
+            "iid": ["id1", "id2"],
+            "trait1": [0.1, 0.2],
+            "i0": [1.0, 1.0],
+        }
+    )
+
+    def _fake_prep_data(*_args, **_kwargs):
+        return block_metadata, ["i0"], ["trait1"], phenotypes
+
+    monkeypatch.setattr(cli, "_prep_data", _fake_prep_data)
+
+    args = Namespace(
+        linarg_path="dummy.h5",
+        pheno="dummy.tsv",
+        pheno_name=None,
+        pheno_col_nums=None,
+        covar=None,
+        covar_name=None,
+        covar_col_nums=None,
+        chromosomes=["1"],
+        block_names=None,
+        num_processes=2,
+        num_matvecs=10,
+        estimator="xnystrace",
+        sampler="normal",
+        seed=0,
+        maf_log10_threshold=-2,
+        bed=None,
+        bed_maf_log10_threshold=None,
+        jax_backend=True,
+        out=str(tmp_path / "rhe"),
+    )
+
+    with pytest.raises(ValueError, match="--jax-backend does not yet support variant filtering"):
+        cli._estimate_h2g(args, logging.getLogger("linear_dag.tests.cli.rhe"))
+
+
+def test_open_jax_grm_logs_effective_backend_and_devices(
+    linarg_h5_path: Path,
+    linarg_block_metadata: pl.DataFrame,
+    caplog,
+):
+    args = Namespace(
+        linarg_path=str(linarg_h5_path),
+        num_processes=1,
+        maf_log10_threshold=None,
+        bed=None,
+        bed_maf_log10_threshold=None,
+    )
+    logger = logging.getLogger("linear_dag.tests.cli.jax_backend")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        with cli._open_jax_grm_operator(args, linarg_block_metadata, logger) as grm:
+            expected_backend = grm.operator.blocks[0].backend.value
+            selected_device = jax.devices()[0]
+
+    assert f"backend={expected_backend}" in caplog.text
+    assert f"devices={selected_device.platform}:{selected_device.id}" in caplog.text
+
+
 def test_cli_help_includes_argument_groups():
     assoc_stdout = io.StringIO()
     with pytest.raises(SystemExit):
@@ -695,6 +839,7 @@ def test_cli_help_includes_argument_groups():
     assert "Execution and Output:" in rhe_help
     assert "Variant Filtering:" in rhe_help
     assert "RHE Estimator:" in rhe_help
+    assert "maximum number of JAX devices" in rhe_help
 
     score_stdout = io.StringIO()
     with pytest.raises(SystemExit):
@@ -849,6 +994,7 @@ def test_assoc_specific_options_parse_and_do_not_leak_to_rhe():
     assert "--recompute-ac" not in rhe._option_string_actions
     assert "--all-variant-info" not in rhe._option_string_actions
     assert "--no-variant-info" not in rhe._option_string_actions
+    assert "--jax-backend" in rhe._option_string_actions
     assert "--maf-log10-threshold" in rhe._option_string_actions
     assert "--bed" in rhe._option_string_actions
     assert "--bed-maf-log10-threshold" in rhe._option_string_actions
@@ -911,6 +1057,8 @@ def test_assoc_and_rhe_assemblers_scope_options_and_dispatch():
     assert "--no-hwe" not in rhe._option_string_actions
     assert "--num-matvecs" in rhe._option_string_actions
     assert "--num-matvecs" not in assoc._option_string_actions
+    assert "--jax-backend" in rhe._option_string_actions
+    assert "--jax-backend" not in assoc._option_string_actions
     assert "--maf-log10-threshold" in assoc._option_string_actions
     assert "--maf-log10-threshold" in rhe._option_string_actions
 
@@ -961,6 +1109,8 @@ def test_assoc_rhe_assembler_wiring_preserves_expected_parse_behavior():
     assert "--no-hwe" not in rhe._option_string_actions
     assert "--num-matvecs" in rhe._option_string_actions
     assert "--num-matvecs" not in assoc._option_string_actions
+    assert "--jax-backend" in rhe._option_string_actions
+    assert "--jax-backend" not in assoc._option_string_actions
     assert "--maf-log10-threshold" in rhe._option_string_actions
     assert "--bed-maf-log10-threshold" in rhe._option_string_actions
 
@@ -1003,6 +1153,7 @@ def test_assoc_rhe_assembler_wiring_preserves_expected_parse_behavior():
             "rademacher",
             "--seed",
             "9",
+            "--jax-backend",
             "--maf-log10-threshold",
             "-3",
             "--bed",
@@ -1017,6 +1168,7 @@ def test_assoc_rhe_assembler_wiring_preserves_expected_parse_behavior():
     assert rhe_args.estimator == "hutchinson"
     assert rhe_args.sampler == "rademacher"
     assert rhe_args.seed == 9
+    assert rhe_args.jax_backend is True
     assert rhe_args.maf_log10_threshold == -3
     assert rhe_args.bed == "regions.bed"
     assert rhe_args.bed_maf_log10_threshold == -5
