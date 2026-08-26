@@ -12,6 +12,7 @@ from .core import (
     linear_arg_from_genotypes as linear_arg_from_genotypes,
     LinearARG as LinearARG,
     list_blocks as list_blocks,
+    OneSparseMatrix as OneSparseMatrix,
     ParallelOperator as ParallelOperator,
 )
 from .genotype import (

@@ -1,6 +1,7 @@
 from .brick_graph import BrickGraph as BrickGraph
 from .linear_arg_inference import linear_arg_from_genotypes as linear_arg_from_genotypes
 from .lineararg import LinearARG as LinearARG, list_blocks as list_blocks
+from .one_sparse import OneSparseMatrix as OneSparseMatrix
 from .parallel_processing import (
     GRMOperator as GRMOperator,
     ParallelOperator as ParallelOperator,

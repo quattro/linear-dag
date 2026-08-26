@@ -23,13 +23,18 @@ from linear_dag.genotype import read_vcf
 
 from .digraph import DiGraph
 from .linear_arg_inference import linear_arg_from_genotypes
+from .one_sparse import OneSparseMatrix
 from .one_summed_cy import linearize_brick_graph
 from .solve import (
     add_at,
     spsolve_backward_triangular,
     spsolve_backward_triangular_matmat,
+    spsolve_backward_triangular_matmat_one_sparse,
+    spsolve_backward_triangular_one_sparse,
     spsolve_forward_triangular,
     spsolve_forward_triangular_matmat,
+    spsolve_forward_triangular_matmat_one_sparse,
+    spsolve_forward_triangular_one_sparse,
     topological_sort,
 )
 
@@ -54,6 +59,11 @@ class LinearARG(LinearOperator):
         Sample nodes are stored at the tail of the graph. `shape` is derived
         from `sample_indices` and `variant_indices`, not directly from `A.shape`.
 
+        `A` is stored as a
+        [`linear_dag.core.one_sparse.OneSparseMatrix`][], with unit edge weights
+        represented implicitly. Use `A.to_csc()` only at boundaries that
+        require a SciPy sparse matrix.
+
     !!! Example
 
         ```python
@@ -63,7 +73,7 @@ class LinearARG(LinearOperator):
         ```
     """
 
-    A: csc_matrix  # samples must be in descending order starting from the final row/col
+    A: Union[csc_matrix, OneSparseMatrix]  # samples must descend from the final row/col
     variant_indices: npt.NDArray[np.int32]
     flip: npt.NDArray[np.bool_]
     n_samples: np.int32
@@ -75,6 +85,11 @@ class LinearARG(LinearOperator):
     # allele_counts: Optional[npt.NDArray[np.int32]] = None
 
     def __post_init__(self) -> None:
+        if isinstance(self.A, csc_matrix):
+            self.A = OneSparseMatrix.from_csc(self.A)
+        elif not isinstance(self.A, OneSparseMatrix):
+            raise TypeError("LinearARG adjacency must be a CSC or OneSparseMatrix")
+
         # SciPy's LinearOperator namespace checks expect subclasses to define
         # this attribute. LinearARG exposes shape/dtype as derived properties,
         # so it cannot call LinearOperator.__init__ directly.
@@ -448,7 +463,10 @@ class LinearARG(LinearOperator):
         vi = np.zeros(self.A.shape[0], dtype=np.float64)
         vi[self.individual_indices[indiv_to_include]] = 2
         vi[self.sample_indices[np.repeat(indiv_to_include, 2)]] = -1
-        spsolve_backward_triangular(self.A, vi)
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_backward_triangular_one_sparse(self.A, vi)
+        else:
+            spsolve_backward_triangular(self.A, vi)
         return vi[self.variant_indices].astype(np.int32)
 
     def number_of_carriers(self, indiv_to_include: np.ndarray | None = None):
@@ -481,7 +499,10 @@ class LinearARG(LinearOperator):
         # n1 + n2
         vi = np.zeros(self.A.shape[0], dtype=np.float64)
         vi[self.individual_indices[indiv_to_include]] = 1
-        spsolve_backward_triangular(self.A, vi)
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_backward_triangular_one_sparse(self.A, vi)
+        else:
+            spsolve_backward_triangular(self.A, vi)
         alt_carriers = vi[self.variant_indices]
 
         if not np.any(self.flip):
@@ -490,7 +511,10 @@ class LinearARG(LinearOperator):
         # n1 + 2*n2
         vh = np.zeros(self.A.shape[0], dtype=np.float64)
         vh[self.sample_indices[np.repeat(indiv_to_include, 2)]] = 1
-        spsolve_backward_triangular(self.A, vh)
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_backward_triangular_one_sparse(self.A, vh)
+        else:
+            spsolve_backward_triangular(self.A, vh)
         hap_counts = vh[self.variant_indices]
 
         # handle flipped variants
@@ -524,7 +548,7 @@ class LinearARG(LinearOperator):
         """
         variant_node_indices = self.variant_indices[variant_indices]
         if self.n_individuals is None:
-            A = self.A
+            A = self.A.tocsc(copy=False)
         else:
             n = self.A.shape[0] - self.n_individuals
             A = self.A[:n, :][:, :n]
@@ -564,14 +588,14 @@ class LinearARG(LinearOperator):
         else:
             nodes_to_remove = self.sample_indices[sample_indices_to_remove]
 
-        A = self.A
+        A = self.A.tocsc(copy=False)
         nodes_to_keep = np.setdiff1d(np.arange(A.shape[0]), nodes_to_remove)
         A = A.tocsr()
         A = A[nodes_to_keep, :].tocsc()  # efficient row slice, then convert back to CSC
         A = A[:, nodes_to_keep]
 
         linarg_samples_removed = LinearARG(A, self.variant_indices, self.flip, len(iids_to_keep))
-        linarg_samples_removed.iids = pl.Series(iids_to_keep).cast(pl.Int64)
+        linarg_samples_removed.iids = pl.Series(iids_to_keep).cast(self.iids.dtype)
 
         if self.n_individuals is not None:
             linarg_samples_removed.n_individuals = self.n_individuals - len(iids_to_remove)
@@ -595,7 +619,7 @@ class LinearARG(LinearOperator):
         v = np.zeros((self.A.shape[0], other.shape[1]), dtype=other.dtype)
         temp = (other.T * (-1) ** self.flip).T
         np.add.at(v, self.variant_indices, temp)
-        x = spsolve_triangular(eye(self.A.shape[0]) - self.A, v)
+        x = spsolve_triangular(eye(self.A.shape[0]) - self.A.tocsc(copy=False), v)
         return x[self.sample_indices] + np.sum(other[self.flip], axis=0)
 
     def _matmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
@@ -616,7 +640,12 @@ class LinearARG(LinearOperator):
 
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
         add_at(v, variant_nonunique_indices, temp)
-        spsolve_forward_triangular_matmat(self.A, v, self.nonunique_indices, int(self.sample_indices[-1]))
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_forward_triangular_matmat_one_sparse(
+                self.A, v, self.nonunique_indices, int(self.sample_indices[-1])
+            )
+        else:
+            spsolve_forward_triangular_matmat(self.A, v, self.nonunique_indices, int(self.sample_indices[-1]))
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
         return v[:, sample_nonunique_indices].T + np.sum(other[self.flip], axis=0)
 
@@ -637,9 +666,18 @@ class LinearARG(LinearOperator):
         stop_at_node = None
         if stop_before_individual_nodes and self.n_individuals is not None:
             stop_at_node = int(self.individual_indices[0])
-        spsolve_backward_triangular_matmat(
-            self.A, v, self.nonunique_indices, int(self.sample_indices[-1]), stop_at_node=stop_at_node
-        )
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_backward_triangular_matmat_one_sparse(
+                self.A,
+                v,
+                self.nonunique_indices,
+                int(self.sample_indices[-1]),
+                stop_at_node=stop_at_node,
+            )
+        else:
+            spsolve_backward_triangular_matmat(
+                self.A, v, self.nonunique_indices, int(self.sample_indices[-1]), stop_at_node=stop_at_node
+            )
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
         v = v[:, variant_nonunique_indices]
         if np.any(self.flip):
@@ -673,9 +711,18 @@ class LinearARG(LinearOperator):
         stop_at_node = None
         if self.n_individuals is not None:
             stop_at_node = int(self.individual_indices[0])
-        spsolve_backward_triangular_matmat(
-            self.A, v, self.nonunique_indices, int(self.sample_indices[-1]), stop_at_node=stop_at_node
-        )
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_backward_triangular_matmat_one_sparse(
+                self.A,
+                v,
+                self.nonunique_indices,
+                int(self.sample_indices[-1]),
+                stop_at_node=stop_at_node,
+            )
+        else:
+            spsolve_backward_triangular_matmat(
+                self.A, v, self.nonunique_indices, int(self.sample_indices[-1]), stop_at_node=stop_at_node
+            )
 
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
         v = v[:, variant_nonunique_indices]
@@ -693,7 +740,7 @@ class LinearARG(LinearOperator):
         v = np.zeros((other.shape[0], self.A.shape[1]), dtype=other.dtype)
         v[:, self.sample_indices] = other
 
-        x = spsolve_triangular(eye(self.A.shape[1]) - self.A.T, v.T, lower=False)
+        x = spsolve_triangular(eye(self.A.shape[1]) - self.A.tocsc(copy=False).T, v.T, lower=False)
 
         x = x[self.variant_indices]
         if np.any(self.flip):
@@ -713,7 +760,10 @@ class LinearARG(LinearOperator):
         v = np.zeros(self.A.shape[0], dtype=np.float64)
         temp = other.ravel().astype(np.float64) * ((-1) ** self.flip.ravel())
         np.add.at(v, self.variant_indices, temp)  # handles duplicate variant indices
-        spsolve_forward_triangular(self.A, v)
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_forward_triangular_one_sparse(self.A, v)
+        else:
+            spsolve_forward_triangular(self.A, v)
         result = np.asarray(v[self.sample_indices]) + np.sum(other[self.flip])
         return result if other.ndim == 1 else result.reshape(-1, 1)
 
@@ -727,7 +777,10 @@ class LinearARG(LinearOperator):
             )
         v = np.zeros(self.A.shape[0], dtype=np.float64)
         v[self.sample_indices] = other.ravel().astype(np.float64)
-        spsolve_backward_triangular(self.A, v)
+        if isinstance(self.A, OneSparseMatrix):
+            spsolve_backward_triangular_one_sparse(self.A, v)
+        else:
+            spsolve_backward_triangular(self.A, v)
         v = v[self.variant_indices]
         if np.any(self.flip):
             v[self.flip] = np.sum(other) - v[self.flip]
@@ -762,6 +815,7 @@ class LinearARG(LinearOperator):
         block_info: Optional[dict] = None,
         compression_option: str = "gzip",
         save_allele_counts: bool = True,
+        compress_edge_weights: bool = False,
     ):
         """Write this LinearARG to HDF5 in the package's on-disk schema.
 
@@ -776,6 +830,8 @@ class LinearARG(LinearOperator):
         - `h5_fname`: Base path/prefix used for output files.
         - `block_info`: Optional dictionary with keys `chrom`, `start`, and `end`.
         - `compression_option`: HDF5 compression option.
+        - `compress_edge_weights`: Store only indices and values of non-unit
+          edges. Set to `False` to write the legacy `data` dataset.
         - `save_allele_counts`: Whether to persist per-variant
           $\\mathbf{1}^\\top X$ counts for faster reloads.
 
@@ -812,7 +868,24 @@ class LinearARG(LinearOperator):
 
             destination.create_dataset("indptr", data=self.A.indptr, compression=compression_option, shuffle=True)
             destination.create_dataset("indices", data=self.A.indices, compression=compression_option, shuffle=True)
-            destination.create_dataset("data", data=self.A.data, compression=compression_option, shuffle=True)
+            if compress_edge_weights:
+                compressed_A = self.A if isinstance(self.A, OneSparseMatrix) else OneSparseMatrix.from_csc(self.A)
+                destination.attrs["edge_weight_encoding"] = "one_sparse_v1"
+                destination.create_dataset(
+                    "nonunit_edge_indices",
+                    data=compressed_A.nonunit_edge_indices,
+                    compression=compression_option,
+                    shuffle=True,
+                )
+                destination.create_dataset(
+                    "nonunit_values",
+                    data=compressed_A.nonunit_values,
+                    compression=compression_option,
+                    shuffle=True,
+                )
+            else:
+                data = self.A.to_csc().data if isinstance(self.A, OneSparseMatrix) else self.A.data
+                destination.create_dataset("data", data=data, compression=compression_option, shuffle=True)
             destination.create_dataset(
                 "variant_indices", data=self.variant_indices, compression=compression_option, shuffle=True
             )
@@ -870,6 +943,7 @@ class LinearARG(LinearOperator):
         save_threshold: bool = False,
         codec: str = "zstd",
         level: int = 5,
+        compress_edge_weights: bool = False,
     ):
         """Write this LinearARG to HDF5 using Blosc-compressed datasets.
 
@@ -887,6 +961,8 @@ class LinearARG(LinearOperator):
         - `save_threshold`: Whether to save threshold summary attributes.
         - `codec`: Blosc codec (`'zstd'`, `'lz4'`, `'lz4hc'`, `'zlib'`).
         - `level`: Blosc compression level (`0-9`).
+        - `compress_edge_weights`: Store only indices and values of non-unit
+          edges. Set to `False` to write the legacy `data` dataset.
 
         **Returns:**
 
@@ -938,7 +1014,22 @@ class LinearARG(LinearOperator):
             # Write main datasets with Blosc compression
             destination.create_dataset("indptr", data=self.A.indptr, compression=get_blosc_filter(self.A.indptr))
             destination.create_dataset("indices", data=self.A.indices, compression=get_blosc_filter(self.A.indices))
-            destination.create_dataset("data", data=self.A.data, compression=get_blosc_filter(self.A.data))
+            if compress_edge_weights:
+                compressed_A = self.A if isinstance(self.A, OneSparseMatrix) else OneSparseMatrix.from_csc(self.A)
+                destination.attrs["edge_weight_encoding"] = "one_sparse_v1"
+                destination.create_dataset(
+                    "nonunit_edge_indices",
+                    data=compressed_A.nonunit_edge_indices,
+                    compression=get_blosc_filter(compressed_A.nonunit_edge_indices),
+                )
+                destination.create_dataset(
+                    "nonunit_values",
+                    data=compressed_A.nonunit_values,
+                    compression=get_blosc_filter(compressed_A.nonunit_values),
+                )
+            else:
+                data = self.A.to_csc().data if isinstance(self.A, OneSparseMatrix) else self.A.data
+                destination.create_dataset("data", data=data, compression=get_blosc_filter(data))
             destination.create_dataset(
                 "variant_indices", data=self.variant_indices, compression=get_blosc_filter(self.variant_indices)
             )
@@ -1027,6 +1118,7 @@ class LinearARG(LinearOperator):
         h5_fname: Union[str, PathLike],
         block: Optional[str] = None,
         load_metadata: bool = False,
+        compress_edge_weights: bool = True,
     ) -> "LinearARG":
         """Read a [`linear_dag.core.lineararg.LinearARG`][] from HDF5 storage.
 
@@ -1042,6 +1134,9 @@ class LinearARG(LinearOperator):
 
         - `h5_fname`: Base path/prefix of the HDF5 file.
         - `block`: Optional block/group name.
+        - `compress_edge_weights`: Deprecated compatibility argument. LinearARG
+          adjacency is always compressed in memory; use `linarg.A.to_csc()` at
+          a boundary that requires a SciPy sparse matrix.
         - `load_metadata`: Whether to load variant metadata into `variants`.
 
         **Returns:**
@@ -1069,7 +1164,31 @@ class LinearARG(LinearOperator):
         with h5py.File(fname, "r") as file:
             iids = pl.Series(file["iids"][:].astype(str))
             f = file[block] if block else file
-            A = csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=(f.attrs["n"], f.attrs["n"]))
+            shape = (f.attrs["n"], f.attrs["n"])
+            if not compress_edge_weights:
+                import warnings
+
+                warnings.warn(
+                    "LinearARG adjacency is always compressed in memory; "
+                    "use `linarg.A.to_csc()` for a SciPy CSC adapter",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+
+            if "data" in f:
+                A = OneSparseMatrix.from_csc(
+                    csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=shape)
+                )
+            elif f.attrs.get("edge_weight_encoding") == "one_sparse_v1":
+                A = OneSparseMatrix(
+                    indptr=np.asarray(f["indptr"][:], dtype=np.int32),
+                    indices=np.asarray(f["indices"][:], dtype=np.int32),
+                    nonunit_edge_indices=np.asarray(f["nonunit_edge_indices"][:], dtype=np.int32),
+                    nonunit_values=np.asarray(f["nonunit_values"][:], dtype=np.int32),
+                    shape=shape,
+                )
+            else:
+                raise ValueError("LinearARG block has no recognized edge-weight encoding")
             variant_indices = f["variant_indices"][:]
             flip = f["flip"][:]
             n_samples = f.attrs["n_samples"]
@@ -1236,7 +1355,7 @@ class LinearARG(LinearOperator):
 
         - New [`linear_dag.core.lineararg.LinearARG`][] instance that includes individual nodes.
         """
-        A, individual_indices = add_individuals_to_graph(self.A, self.sample_indices, sex=sex)
+        A, individual_indices = add_individuals_to_graph(self.A.tocsc(copy=False), self.sample_indices, sex=sex)
         individuals_graph = DiGraph.from_csr(A)  # edges are defined the other way around
         A = csc_matrix(linearize_brick_graph(individuals_graph))
         linarg = LinearARG(

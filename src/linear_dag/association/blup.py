@@ -23,6 +23,11 @@ class triangular_solver(LinearOperator):
 
     A: csr_matrix
 
+    def __post_init__(self) -> None:
+        scipy_array_operator = aslinearoperator(np.empty((0, 0)))
+        if hasattr(scipy_array_operator, "_xp"):
+            self._xp = scipy_array_operator._xp
+
     @property
     def dtype(self):
         """Return the scalar dtype used by the wrapped sparse matrix."""
@@ -68,7 +73,8 @@ def blup(linarg: LinearARG, heritability: float, y: np.ndarray):
 
     X = linarg
     n, m = X.shape
-    k = linarg.A.shape[0]
+    adjacency = linarg.A.tocsc(copy=False)
+    k = adjacency.shape[0]
 
     ## Generate M and S
     M = csc_matrix(eye(k))
@@ -95,7 +101,7 @@ def blup(linarg: LinearARG, heritability: float, y: np.ndarray):
 
     ## Generate B
     I = eye(k)  # noqa: E741
-    I_minus_A = aslinearoperator(I - X.A)
+    I_minus_A = aslinearoperator(I - adjacency)
     B = (I_minus_A.T @ Om) @ I_minus_A
 
     # B_s,s * y
@@ -105,7 +111,7 @@ def blup(linarg: LinearARG, heritability: float, y: np.ndarray):
     second_term = T @ (B @ (S.T @ y))
 
     SigmaTilde = aslinearoperator(diags(SigmaTilde[non_sample_indices]))
-    adjacency_matrix = linarg.A[non_sample_indices, :]
+    adjacency_matrix = adjacency[non_sample_indices, :]
     adjacency_matrix = adjacency_matrix[:, non_sample_indices]
     linarg_adjacency_submatrix_nonsamples = triangular_solver(adjacency_matrix)
     preconditioner = linarg_adjacency_submatrix_nonsamples @ SigmaTilde @ linarg_adjacency_submatrix_nonsamples.T
