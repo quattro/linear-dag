@@ -760,6 +760,43 @@ class LinearARG(LinearOperator):
             copied.set_allele_counts(self.allele_counts.copy())
         return copied
 
+    @staticmethod
+    def augment_rare_variants_file(
+        input_h5: Union[str, PathLike],
+        carrier_table: Union[str, PathLike],
+        output_h5: Union[str, PathLike],
+    ):
+        """Add sparse singleton/doubleton calls to compressed HDF5 data.
+
+        This is the object-oriented entry point for
+        [`linear_dag.rare_variants.augment_rare_variants_file`][]. The source
+        file is copied, augmented, and atomically installed at `output_h5`.
+
+        !!! info
+
+            Heterozygous calls are pseudo-phased to minimize incremental graph
+            storage. Diploid dosage is preserved, but the selected phase is not
+            a biological inference.
+
+        **Arguments:**
+
+        - `input_h5`: Existing block-structured LinearARG HDF5 file.
+        - `carrier_table`: Sparse carrier table with one row per non-reference call.
+        - `output_h5`: Path for the new augmented copy.
+
+        **Returns:**
+
+        - [`linear_dag.rare_variants.AugmentationStats`][] summarizing graph reuse and additions.
+
+        **Raises:**
+
+        - `FileExistsError`: If `output_h5` already exists.
+        - `ValueError`: If carrier data cannot be assigned or augmented safely.
+        """
+        from linear_dag.rare_variants import augment_rare_variants_file
+
+        return augment_rare_variants_file(input_h5, carrier_table, output_h5)
+
     def write(
         self,
         h5_fname: Union[str, PathLike],
