@@ -55,11 +55,14 @@ def linearize_brick_graph(G: DiGraph) -> csr_matrix:
                 edge_weights[old_len:] = 1
             edge_weights[new_edge.index] = 1 - weighted_in_degree
 
-    cdef int[:] data = np.zeros(G.maximum_number_of_edges, dtype=np.intc)
-    cdef long[:] row_ind = np.empty(G.maximum_number_of_edges, dtype=np.int64)
-    cdef long[:] col_ind = np.empty(G.maximum_number_of_edges, dtype=np.int64)
+    # Linearization can trigger a geometric edge-pool expansion. Size the
+    # exported sparse arrays from live edges after mutation, not pool capacity.
+    cdef long active_edges = G.number_of_edges
+    cdef int[:] data = np.zeros(active_edges, dtype=np.intc)
+    cdef long[:] row_ind = np.empty(active_edges, dtype=np.int64)
+    cdef long[:] col_ind = np.empty(active_edges, dtype=np.int64)
     cdef long i
-    cdef int counter = 0
+    cdef long counter = 0
     cdef edge * e
     for i in range(G.maximum_number_of_edges):
         e = G.get_edge(i)

@@ -151,7 +151,13 @@ cdef void _spsolve_forward_triangular_matmat_float32(int[:] indptr,
         if node_idx < min_index_to_keep: # avoid zeroing out sample nodes, which can have individual nodes as children
             memset(source_ptr, 0, vector_bytes)
 
-def spsolve_backward_triangular_matmat(A: "csc_matrix", b: np.ndarray, nonunique_indices: np.ndarray, min_index_to_keep: int) -> None:
+def spsolve_backward_triangular_matmat(
+    A: "csc_matrix",
+    b: np.ndarray,
+    nonunique_indices: np.ndarray,
+    min_index_to_keep: int,
+    stop_at_node: int | None = None,
+) -> None:
     """Solves (I-A)'x' = b' in place, where A is a lower-triangular, zero-diagonal CSR matrix.
     Assumes that b is Fortran-contiguous. nonunique_indices is an array of length equal to A.shape[0] that
     maps each row/col of A (node) to a column of b. There can be multiple nodes mapped to the same column of b.
@@ -163,6 +169,10 @@ def spsolve_backward_triangular_matmat(A: "csc_matrix", b: np.ndarray, nonunique
     if b.ndim == 1:
         b = b.reshape(1, -1)
     
+    if stop_at_node is not None:
+        _spsolve_backward_triangular_matmat_node_limit(A, b, nonunique_indices, min_index_to_keep, stop_at_node)
+        return
+
     if b.dtype == np.float64:
         _spsolve_backward_triangular_matmat_float64(A.indptr, A.indices, A.data, b, nonunique_indices, min_index_to_keep)
     elif b.dtype == np.float32:
@@ -172,6 +182,129 @@ def spsolve_backward_triangular_matmat(A: "csc_matrix", b: np.ndarray, nonunique
         b_copy = b.astype(np.float64)
         _spsolve_backward_triangular_matmat_float64(A.indptr, A.indices, A.data, b_copy, nonunique_indices, min_index_to_keep)
         b[:] = b_copy
+
+def _spsolve_backward_triangular_matmat_node_limit(
+    A: "csc_matrix",
+    b: np.ndarray,
+    nonunique_indices: np.ndarray,
+    min_index_to_keep: int,
+    node_limit: int,
+) -> None:
+    """Solve (I-A)'x' = b' over the leading node subgraph only.
+
+    This is useful for LinearARGs with appended individual nodes: diploid dosage
+    products seed haplotype sample nodes and should traverse the original
+    haplotype ARG, while heterozygote products intentionally use individual
+    nodes.
+    """
+
+    if b.ndim == 1:
+        b = b.reshape(1, -1)
+    if node_limit < 0 or node_limit > A.shape[0]:
+        raise ValueError(f"node_limit must be between 0 and {A.shape[0]}, got {node_limit}.")
+
+    if b.dtype == np.float64:
+        _spsolve_backward_triangular_matmat_node_limit_float64(
+            A.indptr, A.indices, A.data, b, nonunique_indices, min_index_to_keep, node_limit
+        )
+    elif b.dtype == np.float32:
+        _spsolve_backward_triangular_matmat_node_limit_float32(
+            A.indptr, A.indices, A.data, b, nonunique_indices, min_index_to_keep, node_limit
+        )
+    else:
+        b_copy = b.astype(np.float64)
+        _spsolve_backward_triangular_matmat_node_limit_float64(
+            A.indptr, A.indices, A.data, b_copy, nonunique_indices, min_index_to_keep, node_limit
+        )
+        b[:] = b_copy
+
+cdef void _spsolve_backward_triangular_matmat_node_limit_float64(
+                                                    int[:] indptr,
+                                                    int[:] indices,
+                                                    int[:] data,
+                                                    double[:, :] b_view,
+                                                    int[:] nonunique_indices,
+                                                    int min_index_to_keep,
+                                                    int node_limit
+                                                    ) noexcept nogil:
+    cdef int node_idx
+    cdef int edge_idx = indptr[node_limit]
+    cdef int vector_length = b_view.shape[0]
+    cdef int vector_bytes = vector_length * sizeof(double)
+    cdef int* vector_length_ptr = &vector_length
+    cdef int inc = 1
+    cdef int* inc_ptr = &inc
+    cdef double alpha
+    cdef double* alpha_ptr = &alpha
+    cdef int neighbor_idx
+    cdef int neighbor_nonunique_index
+
+    cdef double* source_ptr
+    cdef double* destination_ptr
+
+    for node_idx in range(node_limit - 1, -1, -1):
+        if edge_idx == indptr[node_idx]:
+            continue
+
+        destination_ptr = &b_view[0, nonunique_indices[node_idx]]
+
+        if node_idx < min_index_to_keep:
+            memset(destination_ptr, 0, vector_bytes)
+
+        while edge_idx > indptr[node_idx]:
+            edge_idx -= 1
+            neighbor_idx = indices[edge_idx]
+            if neighbor_idx >= node_limit:
+                continue
+            alpha = <double> data[edge_idx]
+            neighbor_nonunique_index = nonunique_indices[neighbor_idx]
+            source_ptr = &b_view[0, neighbor_nonunique_index]
+
+            blas.daxpy(vector_length_ptr, alpha_ptr, source_ptr, inc_ptr, destination_ptr, inc_ptr)
+
+cdef void _spsolve_backward_triangular_matmat_node_limit_float32(
+                                                    int[:] indptr,
+                                                    int[:] indices,
+                                                    int[:] data,
+                                                    float[:, :] b_view,
+                                                    int[:] nonunique_indices,
+                                                    int min_index_to_keep,
+                                                    int node_limit
+                                                    ) noexcept nogil:
+    cdef int node_idx
+    cdef int edge_idx = indptr[node_limit]
+    cdef int vector_length = b_view.shape[0]
+    cdef int vector_bytes = vector_length * sizeof(float)
+    cdef int* vector_length_ptr = &vector_length
+    cdef int inc = 1
+    cdef int* inc_ptr = &inc
+    cdef float alpha
+    cdef float* alpha_ptr = &alpha
+    cdef int neighbor_idx
+    cdef int neighbor_nonunique_index
+
+    cdef float* source_ptr
+    cdef float* destination_ptr
+
+    for node_idx in range(node_limit - 1, -1, -1):
+        if edge_idx == indptr[node_idx]:
+            continue
+
+        destination_ptr = &b_view[0, nonunique_indices[node_idx]]
+
+        if node_idx < min_index_to_keep:
+            memset(destination_ptr, 0, vector_bytes)
+
+        while edge_idx > indptr[node_idx]:
+            edge_idx -= 1
+            neighbor_idx = indices[edge_idx]
+            if neighbor_idx >= node_limit:
+                continue
+            alpha = <float> data[edge_idx]
+            neighbor_nonunique_index = nonunique_indices[neighbor_idx]
+            source_ptr = &b_view[0, neighbor_nonunique_index]
+
+            blas.saxpy(vector_length_ptr, alpha_ptr, source_ptr, inc_ptr, destination_ptr, inc_ptr)
 
 cdef void _spsolve_backward_triangular_matmat_float64(
                                                     int[:] indptr,
@@ -611,8 +744,5 @@ cdef void _dfs(long node, Stack leaves_visited, long[:] indices, long[:] indptr,
         _dfs(neighbors[i], leaves_visited, indices, indptr, visited)
 
     
-
-
-
 
 

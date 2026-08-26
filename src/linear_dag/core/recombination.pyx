@@ -25,7 +25,7 @@ cdef class Recombination(DiGraph):
         DiGraph.__init__(self, num_nodes, num_edges)
         
         self.clique = -np.ones(num_edges, dtype=np.int64)
-        self.clique_rows = LinkedListArray(num_edges)
+        self.clique_rows = None
         self.clique_size_heap = None
         self.num_cliques = 0
         self.unique_cliques_tracker = CountingArray(num_edges)
@@ -43,6 +43,19 @@ cdef class Recombination(DiGraph):
     def get_cliques(self):
         return np.asarray(self.clique)
 
+    @property
+    def workspace_allocated(self):
+        """Return whether clique-discovery workspace is currently retained."""
+        return self.clique_rows is not None
+
+    cpdef void release_workspace(self):
+        """Release clique-discovery state after recombination inference."""
+        self.clique_size_heap = None
+        self.clique_rows = None
+        self.unique_cliques_tracker = None
+        self.clique = None
+        self.num_cliques = 0
+
     @staticmethod
     def from_graph(brick_graph: DiGraph) -> Recombination:
         n, m = brick_graph.maximum_node_index() + 1, brick_graph.number_of_edges
@@ -54,6 +67,34 @@ cdef class Recombination(DiGraph):
         result.compute_cliques()
         result.collect_cliques()
         
+        return result
+
+    @staticmethod
+    def from_packed_edges(packed_edges) -> Recombination:
+        """Construct from and consume owned packed endpoint chunks."""
+        cdef long n = packed_edges.number_of_nodes
+        cdef long m = packed_edges.number_of_edges
+        cdef Recombination result = Recombination(n + m // 4 + 1, m + 2)
+        cdef long node_index
+        cdef long edge_index
+        cdef object chunk_array
+        cdef list chunks
+        cdef cnp.int32_t[:, ::1] chunk
+
+        for node_index in range(n):
+            result.add_node(node_index)
+
+        chunks = packed_edges.take_chunks()
+        for chunk_array in chunks:
+            chunk = chunk_array
+            for edge_index in range(chunk.shape[0]):
+                result.add_edge(chunk[edge_index, 0], chunk[edge_index, 1])
+        chunk = None
+        chunk_array = None
+        chunks.clear()
+
+        result.compute_cliques()
+        result.collect_cliques()
         return result
 
     cpdef void compute_cliques(self):
@@ -89,13 +130,32 @@ cdef class Recombination(DiGraph):
             # clears in O(1)
             right_parent_to_clique.clear()
 
-    cpdef void collect_cliques(self):
-        cdef long[:] what = np.where(np.asarray(self.clique) != -1)[0].astype(np.int64)
-        cdef long[:] where = np.arange(self.num_cliques, dtype=np.int64)
-        cdef long[:] which = np.take(self.clique, what)
+    cpdef void collect_cliques(self, long heap_length=-1):
+        cdef long edge_index, clique_index
+        cdef long num_memberships = 0
+        cdef long pool_capacity = 1000
 
-        self.clique_rows.assign(what, where, which)
-        self.clique_size_heap = ModHeap(np.asarray(self.clique_rows.length, dtype=np.int64))
+        for edge_index in range(len(self.clique)):
+            if self.clique[edge_index] >= 0:
+                num_memberships += 1
+
+        # Match the capacity that repeated doubling from the historical
+        # 1,000-node pool would have reached, retaining some free nodes for
+        # update_trios' insert-before-remove behavior.
+        while pool_capacity <= num_memberships:
+            pool_capacity *= 2
+
+        self.clique_rows = LinkedListArray(len(self.clique), pool_capacity)
+        for edge_index in range(len(self.clique)):
+            clique_index = self.clique[edge_index]
+            if clique_index >= 0:
+                self.clique_rows._extend(clique_index, edge_index)
+
+        if heap_length < 0:
+            heap_length = len(self.clique_rows.length)
+        if heap_length < self.num_cliques or heap_length > len(self.clique_rows.length):
+            raise ValueError("Heap length must cover every clique row")
+        self.clique_size_heap = ModHeap(np.asarray(self.clique_rows.length[:heap_length], dtype=np.int64))
 
     cpdef void find_recombinations(self):
         cdef long c
@@ -124,7 +184,7 @@ cdef class Recombination(DiGraph):
             self.collapse_clique(c, new_node.index, clique_rows)
             
             c = self.max_clique()
-            if self.clique_rows.length[c] <= 1:
+            if c < 0 or self.clique_rows.length[c] <= 1:
                 break
 
     cpdef int max_clique(self):

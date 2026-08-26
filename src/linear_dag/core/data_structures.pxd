@@ -69,7 +69,11 @@ cdef class ModHeap:
     cdef public list act_heap
     cdef long[:] priority
     cdef public long n
+    cdef public long live_count
+    cdef public long rebuild_count
 
     cdef list _create_heap(self, long[:] priority)
+    cdef void _maybe_rebuild(self)
+    cdef void _rebuild(self)
     cpdef void push(self, long index, long priority)
     cpdef long pop(self)

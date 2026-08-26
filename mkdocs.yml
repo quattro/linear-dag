@@ -116,6 +116,7 @@ nav:
       - 'api/parallel_ops.md'
   - Reference:
       - FAQ: faq.md
+      - Performance: performance.md
       - Contributing: contributing.md
       - License: license.md
       - Conduct: conduct.md

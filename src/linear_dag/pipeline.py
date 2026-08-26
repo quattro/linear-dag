@@ -14,7 +14,7 @@ import numpy as np
 import polars as pl
 import scipy.sparse as sp
 
-from .core.brick_graph import BrickGraph, merge_brick_graphs, read_graph_from_disk
+from .core.brick_graph import BrickGraph, get_graph_statistics, merge_brick_graphs_into, read_graph_from_disk
 from .core.lineararg import LinearARG, make_triangular, remove_degree_zero_nodes
 from .core.one_summed_cy import linearize_brick_graph
 from .core.recombination import Recombination
@@ -940,18 +940,17 @@ def reduction_union_recom(
 
     logger.info("Combining nodes and computing reduction union")
     t3 = time.time()
-    brick_graph, variant_indices = BrickGraph.combine_graphs(forward_graph, backward_graph, m)
+    packed_edges, variant_indices = BrickGraph.combine_graphs_packed(forward_graph, backward_graph, m)
     del forward_graph, backward_graph
     t4 = time.time()
     logger.info(f"Combined nodes and computed reduction union in {np.round(t4 - t3, 3)} seconds")
 
-    for i in sample_indices:
-        assert len(list(brick_graph.successors(int(i)))) == 0
-
     logger.info("Finding recombinations")
     t5 = time.time()
-    recom = Recombination.from_graph(brick_graph)
-    del brick_graph
+    recom = Recombination.from_packed_edges(packed_edges)
+    del packed_edges
+    for i in sample_indices:
+        assert len(list(recom.successors(int(i)))) == 0
     recom.find_recombinations()
     t6 = time.time()
     logger.info(f"Found recombinations in {np.round(t6 - t5, 3)} seconds")
@@ -1059,23 +1058,55 @@ def merge(
     logger.info("Merging brick graphs")
     t1 = time.time()
 
-    merged_graph, variant_indices, num_samples, index_mapping = merge_brick_graphs(
-        f"{mount_point}{out}/brick_graph_partitions", partition_identifiers
+    brick_graph_dir = f"{mount_point}{out}/brick_graph_partitions"
+    num_samples, number_of_nodes, number_of_edges = get_graph_statistics(brick_graph_dir, partition_identifiers)
+    edge_capacity = max(number_of_edges + 2, (5 * number_of_edges + 3) // 4)
+    node_capacity = number_of_nodes + number_of_edges // 4 + 1
+    merged_graph_recom = Recombination(node_capacity, edge_capacity)
+    merged_graph_recom._limit_initial_edge_capacity(number_of_edges + 2)
+    variant_indices, num_samples, merged_number_of_nodes, merged_number_of_edges = merge_brick_graphs_into(
+        merged_graph_recom,
+        brick_graph_dir,
+        partition_identifiers,
+        num_samples,
+        number_of_nodes,
     )
+    if merged_number_of_nodes != number_of_nodes or merged_number_of_edges != number_of_edges:
+        raise ValueError("Merged graph size does not match partition metadata")
     t2 = time.time()
     logger.info(f"Brick graphs merged in {np.round(t2 - t1, 3)} seconds")
+    logger.info(
+        "Step 3 graph capacity - active_edges: %s, reserved_edges: %s, fill_ratio: %.3f",
+        merged_number_of_edges,
+        edge_capacity,
+        merged_number_of_edges / edge_capacity if edge_capacity else 0.0,
+    )
 
     logger.info("Finding recombinations")
     t3 = time.time()
-    merged_graph_recom = Recombination.from_graph(merged_graph)
+    merged_graph_recom.compute_cliques()
+    # Match the previous merge-then-copy heap extent. Extra reserved graph
+    # slots are for linearization and must not perturb equal-priority heap ties.
+    merged_graph_recom.collect_cliques(number_of_edges + 2)
     merged_graph_recom.find_recombinations()
+    if merged_graph_recom.max_edges != number_of_edges + 2:
+        raise RuntimeError("Recombination exceeded its two-edge working reserve")
     t4 = time.time()
     logger.info(f"Recombinations found in {np.round(t4 - t3, 3)} seconds")
+    merged_graph_recom.release_workspace()
+    merged_graph_recom._activate_initial_edge_reserve()
     logger.info("Linearizing brick graph")
     t5 = time.time()
     A = sp.csc_matrix(linearize_brick_graph(merged_graph_recom))
     t6 = time.time()
     logger.info(f"Linearized brick graph in {np.round(t6 - t5, 3)} seconds")
+    logger.info(
+        "Step 3 final graph capacity - active_edges: %s, edge_capacity: %s, fallback_expanded: %s",
+        merged_graph_recom.number_of_edges,
+        merged_graph_recom.max_edges,
+        merged_graph_recom.max_edges > edge_capacity,
+    )
+    del merged_graph_recom
     sample_indices = np.arange(num_samples)
 
     logger.info("Reading variant metadata and flip")
@@ -1122,6 +1153,27 @@ def merge(
     return
 
 
+def _read_genotype_partition_stats(filename):
+    """Read per-column counts without materializing a SciPy sparse matrix."""
+    with h5py.File(filename, "r") as f:
+        num_rows, num_columns = map(int, f["shape"][:])
+        indptr = np.asarray(f["indptr"][:], dtype=np.int64)
+        data = f["data"][:]
+
+    column_nnz = np.diff(indptr)
+    folded_nnz = int(np.minimum(column_nnz, num_rows - column_nnz).sum(dtype=np.int64))
+    sum_dtype = np.float64 if np.issubdtype(data.dtype, np.floating) else np.int64
+    allele_counts = np.zeros(num_columns, dtype=sum_dtype)
+    nonempty_columns = np.flatnonzero(column_nnz)
+    if nonempty_columns.size:
+        allele_counts[nonempty_columns] = np.add.reduceat(
+            data,
+            indptr[nonempty_columns],
+            dtype=sum_dtype,
+        )
+    return folded_nnz, allele_counts
+
+
 def get_linarg_stats(out, mount_point, partition_identifiers, partition_identifier, linarg=None):
     """Compute and persist validation stats for a large-partition LinearARG.
 
@@ -1153,18 +1205,11 @@ def get_linarg_stats(out, mount_point, partition_identifiers, partition_identifi
     genotypes_nnz = 0
     allele_counts = []
     for p_id in partition_identifiers:
-        with h5py.File(f"{mount_point}{out}/genotype_matrices/{p_id}.h5", "r") as f:
-            genotypes = sp.csc_matrix((f["data"][:], f["indices"][:], f["indptr"][:]), shape=f["shape"][:])
-
-        genotypes_nnz += np.sum(
-            [
-                np.minimum(genotypes[:, i].nnz, genotypes.shape[0] - genotypes[:, i].nnz)
-                for i in range(genotypes.shape[1])
-            ]
+        partition_nnz, partition_allele_counts = _read_genotype_partition_stats(
+            f"{mount_point}{out}/genotype_matrices/{p_id}.h5"
         )
-        v_0 = np.ones(genotypes.shape[0])
-        allele_count_from_genotypes = v_0 @ genotypes
-        allele_counts.append(allele_count_from_genotypes)
+        genotypes_nnz += partition_nnz
+        allele_counts.append(partition_allele_counts)
     allele_counts_from_genotype = np.concatenate(allele_counts)
 
     stats = [

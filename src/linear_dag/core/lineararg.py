@@ -624,7 +624,9 @@ class LinearARG(LinearOperator):
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
         return v[:, sample_nonunique_indices].T + np.sum(other[self.flip], axis=0)
 
-    def _rmatmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+    def _rmatmat(
+        self, other: npt.ArrayLike, stop_before_individual_nodes: bool = False
+    ) -> npt.NDArray[np.number]:
         if other.ndim == 1:
             other = other.reshape(1, -1)
         if other.shape[0] != self.shape[0]:
@@ -636,11 +638,53 @@ class LinearARG(LinearOperator):
         v = np.zeros((other.shape[1], self.num_nonunique_indices), dtype=other.dtype, order="F")
         sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
         v[:, sample_nonunique_indices] = other.T
-        spsolve_backward_triangular_matmat(self.A, v, self.nonunique_indices, int(self.sample_indices[-1]))
+        stop_at_node = None
+        if stop_before_individual_nodes and self.n_individuals is not None:
+            stop_at_node = int(self.individual_indices[0])
+        spsolve_backward_triangular_matmat(
+            self.A, v, self.nonunique_indices, int(self.sample_indices[-1]), stop_at_node=stop_at_node
+        )
         variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
         v = v[:, variant_nonunique_indices]
         if np.any(self.flip):
             v[:, self.flip] = np.sum(other, axis=0)[:, np.newaxis] - v[:, self.flip]
+        return v.T
+
+    def diploid_dosage_rmatmat(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
+        """Compute diploid dosage transpose products without traversing individual nodes.
+
+        This is equivalent to ``get_diploid_operator(self).T @ other`` for
+        diploid ``other``. For LinearARGs with appended individual nodes, it
+        seeds paired haplotype sample nodes and stops the backward traversal
+        before the appended individual-node layer.
+        """
+        other = np.asarray(other)
+        if other.ndim == 1:
+            other = other.reshape(-1, 1)
+        if self.shape[0] % 2 != 0:
+            raise ValueError("Diploid dosage products require an even number of haplotype sample rows.")
+        if other.shape[0] != self.shape[0] // 2:
+            raise ValueError(
+                f"Incorrect dimensions for diploid matrix multiplication. Inputs had size {other.shape} and {self.shape}."
+            )
+
+        self.calculate_nonunique_indices()
+        v = np.zeros((other.shape[1], self.num_nonunique_indices), dtype=other.dtype, order="F")
+        sample_nonunique_indices = self.nonunique_indices[self.sample_indices]
+        v[:, sample_nonunique_indices[0::2]] = other.T
+        v[:, sample_nonunique_indices[1::2]] = other.T
+
+        stop_at_node = None
+        if self.n_individuals is not None:
+            stop_at_node = int(self.individual_indices[0])
+        spsolve_backward_triangular_matmat(
+            self.A, v, self.nonunique_indices, int(self.sample_indices[-1]), stop_at_node=stop_at_node
+        )
+
+        variant_nonunique_indices = self.nonunique_indices[self.variant_indices]
+        v = v[:, variant_nonunique_indices]
+        if np.any(self.flip):
+            v[:, self.flip] = (2.0 * np.sum(other, axis=0))[:, np.newaxis] - v[:, self.flip]
         return v.T
 
     def _rmatmat_scipy(self, other: npt.ArrayLike) -> npt.NDArray[np.number]:
@@ -1560,12 +1604,15 @@ def remove_degree_zero_nodes(
     - `AssertionError`: If provided indices are out of bounds.
     """
     node_degree = A.getnnz(axis=0) + A.getnnz(axis=1)
-    nonzero_indices = set(np.where(node_degree > 0)[0])
-    required_indices = set(variant_indices).union(sample_indices)
-    assert all(idx < A.shape[0] for idx in nonzero_indices)
-    assert all(idx < A.shape[0] for idx in variant_indices)
-    assert all(idx < A.shape[0] for idx in sample_indices)
-    indices_to_keep = np.array(sorted(nonzero_indices.union(required_indices)), dtype=int)
+    variant_indices = np.asarray(variant_indices, dtype=np.intp)
+    sample_indices = np.asarray(sample_indices, dtype=np.intp)
+    assert np.all(variant_indices < A.shape[0])
+    assert np.all(sample_indices < A.shape[0])
+
+    keep = np.asarray(node_degree > 0, dtype=bool)
+    keep[variant_indices] = True
+    keep[sample_indices] = True
+    indices_to_keep = np.flatnonzero(keep)
 
     index_map = -np.ones(A.shape[0], dtype=int)
     index_map[indices_to_keep] = np.arange(len(indices_to_keep))

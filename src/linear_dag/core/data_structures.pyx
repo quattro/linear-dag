@@ -412,7 +412,9 @@ cdef class HeapNode:
         self.index = index
 
     def __lt__(self, HeapNode other):
-        return self.priority < other.priority
+        if self.priority != other.priority:
+            return self.priority < other.priority
+        return self.index < other.index
 
     def __int__(self):
         return self.index
@@ -420,8 +422,9 @@ cdef class HeapNode:
 cdef class ModHeap:
     """
     Implements a heap with added support for modifying the priority of a key. pop returns the highest-priority node.
-    The size of the heap is <= n+k, where n is the number of keys and k is the number of times that a key has had its
-    priority modified.
+    Only keys with nonzero priorities are stored. Stale entries from modified
+    priorities are discarded lazily and the heap is rebuilt when they would
+    make it larger than twice the number of live keys.
     """
     # cdef public list act_heap
     # cdef long[:] priority
@@ -430,25 +433,48 @@ cdef class ModHeap:
     def __init__(self, long[:] priority):
         cnp.import_array()  # Necessary for initializing the C API
         self.n = len(priority)
-        self.priority = np.copy(priority).astype(np.int64) # Copies the input array
-        self.act_heap = self._create_heap(np.copy(self.priority))
+        self.priority = np.asarray(priority, dtype=np.int64).copy()
+        self.act_heap = self._create_heap(self.priority)
+        self.live_count = len(self.act_heap)
+        self.rebuild_count = 0
+
     cdef list _create_heap(self, long[:] priority):
         cdef long i
         cdef list heap = []
         for i in range(self.n):
-            # Allocate a new Node and append it to the heap list
-            node = HeapNode(-priority[i], i)
-            heap.append(node)
+            if priority[i] != 0:
+                heap.append(HeapNode(-priority[i], i))
         heapq.heapify(heap)
         return heap
+
+    cdef void _maybe_rebuild(self):
+        if len(self.act_heap) > 2 * self.live_count:
+            self._rebuild()
+
+    cdef void _rebuild(self):
+        # The priority array is authoritative, so the stale heap can be
+        # released before constructing its compact replacement.
+        self.act_heap.clear()
+        self.act_heap = self._create_heap(self.priority)
+        self.rebuild_count += 1
 
     cpdef void push(self, long index, long priority):
         """
         Either push a new node to the heap, or modify priority of an existing one
         """
-        cdef HeapNode node = HeapNode(-priority, index)
-        heapq.heappush(self.act_heap, node)
+        cdef long old_priority = self.priority[index]
+        if old_priority == priority:
+            return
+
+        if old_priority == 0 and priority != 0:
+            self.live_count += 1
+        elif old_priority != 0 and priority == 0:
+            self.live_count -= 1
+
         self.priority[index] = priority
+        if priority != 0:
+            heapq.heappush(self.act_heap, HeapNode(-priority, index))
+        self._maybe_rebuild()
 
     cpdef long pop(self):
         cdef HeapNode node
@@ -456,5 +482,7 @@ cdef class ModHeap:
             node = heapq.heappop(self.act_heap)
             if self.priority[node.index] == -node.priority:
                 self.priority[node.index] = 0
+                self.live_count -= 1
+                self._maybe_rebuild()
                 return node.index
         return -1
