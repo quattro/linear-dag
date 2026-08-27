@@ -1,0 +1,217 @@
+{
+  "metadata": {
+    "generated_at": "2026-08-27T00:29:29.399455+00:00",
+    "baseline_sha": "c199307eeb1f04cb9204ce4bb99342f7ea32a2de",
+    "candidate_sha": "c199307eeb1f04cb9204ce4bb99342f7ea32a2de",
+    "candidate_base_sha": "c199307eeb1f04cb9204ce4bb99342f7ea32a2de",
+    "candidate_extension_sha256": "598175fb790c0c3472d41e51dc70c213fd1a72cbeb72d432b767e1955d9be1f2",
+    "baseline_wheel_sha256": "ec00bfaac17632ae868cbfd3605d2adfbcca4ca63e36f22d36c507fb971da747",
+    "candidate_wheel_sha256": "8aee98edadb2f0ce0dbc822d7a04fc68d8559c9ad6565feaacb9e14f5f611e96",
+    "baseline_label": "compact-init",
+    "candidate_label": "second-pass-final",
+    "comparison_description": "Both environments contain the first-pass optimized package and identical dependencies; the candidate replaces only the ABI-compatible recombination extension with the completed second pass.",
+    "repetitions": 3,
+    "system": {
+      "os": "macOS-26.4.1-arm64-arm-64bit",
+      "machine": "arm64",
+      "cpu": "Apple M1",
+      "physical_cpus": 8,
+      "logical_cpus": 8,
+      "ram_bytes": 17179869184,
+      "compiler": [
+        "Apple clang version 21.0.0 (clang-2100.0.123.102)",
+        "Target: arm64-apple-darwin25.4.0",
+        "Thread model: posix",
+        "InstalledDir: /Library/Developer/CommandLineTools/usr/bin"
+      ]
+    },
+    "baseline_runtime": {
+      "executable": "/private/tmp/msbf-benchmark/venv-msbf-optimized/bin/python",
+      "python": "3.11.15 (main, Jun 23 2026, 15:46:51) [Clang 22.1.3 ]",
+      "platform": "macOS-26.4.1-arm64-arm-64bit",
+      "cython": "3.3.0",
+      "numpy": "2.4.6",
+      "scipy": "1.17.1"
+    },
+    "candidate_runtime": {
+      "executable": "/private/tmp/msbf-benchmark/venv-msbf-second-pass/bin/python",
+      "python": "3.11.15 (main, Jun 23 2026, 15:46:51) [Clang 22.1.3 ]",
+      "platform": "macOS-26.4.1-arm64-arm-64bit",
+      "cython": "3.3.0",
+      "numpy": "2.4.6",
+      "scipy": "1.17.1"
+    },
+    "worker_sha256": "07cf99c5d5efa97a4306dc2396e60158e8c72ef48bd4b9968f43a1117ee4febd",
+    "has_adversarial_cases": false
+  },
+  "rows": [
+    {
+      "case": {
+        "family": "fixture_recombination",
+        "name": "external-vcf-recombination",
+        "path": "/Users/nicholas/Projects/linear-dag/inputs/large0.vcf.gz"
+      },
+      "end_to_end_ns": null,
+      "factor_nodes": 382751,
+      "find_ns": 5652684458,
+      "init_ns": 3583049583,
+      "input_edges": 20784669,
+      "input_nodes": 159096,
+      "output_edges": 2286719,
+      "output_nodes": 541847,
+      "peak_rss_after_init_bytes": 3397615616,
+      "peak_rss_bytes": 3404939264,
+      "total_ns": 9235839083,
+      "implementation": "baseline",
+      "warmup": true,
+      "repetition": -1
+    },
+    {
+      "case": {
+        "family": "fixture_recombination",
+        "name": "external-vcf-recombination",
+        "path": "/Users/nicholas/Projects/linear-dag/inputs/large0.vcf.gz"
+      },
+      "end_to_end_ns": null,
+      "factor_nodes": 382751,
+      "find_ns": 5891065541,
+      "init_ns": 3947315709,
+      "input_edges": 20784669,
+      "input_nodes": 159096,
+      "output_edges": 2286719,
+      "output_nodes": 541847,
+      "peak_rss_after_init_bytes": 3042508800,
+      "peak_rss_bytes": 3043147776,
+      "total_ns": 9838497875,
+      "implementation": "candidate",
+      "warmup": true,
+      "repetition": -1
+    },
+    {
+      "case": {
+        "family": "fixture_recombination",
+        "name": "external-vcf-recombination",
+        "path": "/Users/nicholas/Projects/linear-dag/inputs/large0.vcf.gz"
+      },
+      "end_to_end_ns": null,
+      "factor_nodes": 382751,
+      "find_ns": 5750117584,
+      "init_ns": 3896655458,
+      "input_edges": 20784669,
+      "input_nodes": 159096,
+      "output_edges": 2286719,
+      "output_nodes": 541847,
+      "peak_rss_after_init_bytes": 3333472256,
+      "peak_rss_bytes": 3333472256,
+      "total_ns": 9646898667,
+      "implementation": "baseline",
+      "warmup": false,
+      "repetition": 0
+    },
+    {
+      "case": {
+        "family": "fixture_recombination",
+        "name": "external-vcf-recombination",
+        "path": "/Users/nicholas/Projects/linear-dag/inputs/large0.vcf.gz"
+      },
+      "end_to_end_ns": null,
+      "factor_nodes": 382751,
+      "find_ns": 5595826750,
+      "init_ns": 3950378334,
+      "input_edges": 20784669,
+      "input_nodes": 159096,
+      "output_edges": 2286719,
+      "output_nodes": 541847,
+      "peak_rss_after_init_bytes": 3117481984,
+      "peak_rss_bytes": 3117481984,
+      "total_ns": 9546304917,
+      "implementation": "candidate",
+      "warmup": false,
+      "repetition": 0
+    },
+    {
+      "case": {
+        "family": "fixture_recombination",
+        "name": "external-vcf-recombination",
+        "path": "/Users/nicholas/Projects/linear-dag/inputs/large0.vcf.gz"
+      },
+      "end_to_end_ns": null,
+      "factor_nodes": 382751,
+      "find_ns": 6097909875,
+      "init_ns": 3570202958,
+      "input_edges": 20784669,
+      "input_nodes": 159096,
+      "output_edges": 2286719,
+      "output_nodes": 541847,
+      "peak_rss_after_init_bytes": 3137863680,
+      "peak_rss_bytes": 3137863680,
+      "total_ns": 9668208708,
+      "implementation": "candidate",
+      "warmup": false,
+      "repetition": 1
+    },
+    {
+      "case": {
+        "family": "fixture_recombination",
+        "name": "external-vcf-recombination",
+        "path": "/Users/nicholas/Projects/linear-dag/inputs/large0.vcf.gz"
+      },
+      "end_to_end_ns": null,
+      "factor_nodes": 382751,
+      "find_ns": 6366301292,
+      "init_ns": 4106394333,
+      "input_edges": 20784669,
+      "input_nodes": 159096,
+      "output_edges": 2286719,
+      "output_nodes": 541847,
+      "peak_rss_after_init_bytes": 3163815936,
+      "peak_rss_bytes": 3163815936,
+      "total_ns": 10476586625,
+      "implementation": "baseline",
+      "warmup": false,
+      "repetition": 1
+    },
+    {
+      "case": {
+        "family": "fixture_recombination",
+        "name": "external-vcf-recombination",
+        "path": "/Users/nicholas/Projects/linear-dag/inputs/large0.vcf.gz"
+      },
+      "end_to_end_ns": null,
+      "factor_nodes": 382751,
+      "find_ns": 5603942333,
+      "init_ns": 3819816750,
+      "input_edges": 20784669,
+      "input_nodes": 159096,
+      "output_edges": 2286719,
+      "output_nodes": 541847,
+      "peak_rss_after_init_bytes": 3491217408,
+      "peak_rss_bytes": 3491217408,
+      "total_ns": 9425821833,
+      "implementation": "baseline",
+      "warmup": false,
+      "repetition": 2
+    },
+    {
+      "case": {
+        "family": "fixture_recombination",
+        "name": "external-vcf-recombination",
+        "path": "/Users/nicholas/Projects/linear-dag/inputs/large0.vcf.gz"
+      },
+      "end_to_end_ns": null,
+      "factor_nodes": 382751,
+      "find_ns": 5494620625,
+      "init_ns": 3775992166,
+      "input_edges": 20784669,
+      "input_nodes": 159096,
+      "output_edges": 2286719,
+      "output_nodes": 541847,
+      "peak_rss_after_init_bytes": 3768664064,
+      "peak_rss_bytes": 3768664064,
+      "total_ns": 9270721000,
+      "implementation": "candidate",
+      "warmup": false,
+      "repetition": 2
+    }
+  ]
+}

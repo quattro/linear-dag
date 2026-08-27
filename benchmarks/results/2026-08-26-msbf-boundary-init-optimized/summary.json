@@ -1,0 +1,310 @@
+{
+  "metadata": {
+    "generated_at": "2026-08-26T23:36:16.617781+00:00",
+    "baseline_sha": "554f4fac3fbd244ba0400bde9eaaaeb0beb0ddd9+msbf-pyx-0710e0edb380dfc901402b71db0847d78eb27f9fdd83a4f9de1f90e093187406",
+    "candidate_sha": "554f4fac3fbd244ba0400bde9eaaaeb0beb0ddd9+msbf-pyx-57ef15f1ba0f00d8dcc196783608a8badf25d252a203317a4388365cca8f3528",
+    "candidate_base_sha": "c199307eeb1f04cb9204ce4bb99342f7ea32a2de",
+    "candidate_extension_sha256": "fce904e371fc7d8803dbd46be5a463a60f137da10b24898c1bab13b9740e8519",
+    "baseline_wheel_sha256": "78d8c5a92bc7726c7dd08a3daa204a221f2ed78282b8f58fd1c6514eba791183",
+    "candidate_wheel_sha256": "ec00bfaac17632ae868cbfd3605d2adfbcca4ca63e36f22d36c507fb971da747",
+    "baseline_label": "msbf-before",
+    "candidate_label": "msbf-compact-init",
+    "comparison_description": "Before/after comparison isolating the MSBF recombination extension. The candidate scans only the live node domain, grows distinct-pair classes dynamically, uses node-bounded frequency buckets, removes redundant boundary state, and compacts index fields to 32 bits. Both environments otherwise use identical package code, dependencies, Python, compiler, hardware, worker, and reconstructed inputs.",
+    "repetitions": 3,
+    "system": {
+      "os": "macOS-26.4.1-arm64-arm-64bit",
+      "machine": "arm64",
+      "cpu": "Apple M1",
+      "physical_cpus": 8,
+      "logical_cpus": 8,
+      "ram_bytes": 17179869184,
+      "compiler": [
+        "Apple clang version 21.0.0 (clang-2100.0.123.102)",
+        "Target: arm64-apple-darwin25.4.0",
+        "Thread model: posix",
+        "InstalledDir: /Library/Developer/CommandLineTools/usr/bin"
+      ]
+    },
+    "baseline_runtime": {
+      "executable": "/private/tmp/msbf-benchmark/venv-candidate/bin/python",
+      "python": "3.11.15 (main, Jun 23 2026, 15:46:51) [Clang 22.1.3 ]",
+      "platform": "macOS-26.4.1-arm64-arm-64bit",
+      "cython": "3.3.0",
+      "numpy": "2.4.6",
+      "scipy": "1.17.1"
+    },
+    "candidate_runtime": {
+      "executable": "/private/tmp/msbf-benchmark/venv-msbf-optimized/bin/python",
+      "python": "3.11.15 (main, Jun 23 2026, 15:46:51) [Clang 22.1.3 ]",
+      "platform": "macOS-26.4.1-arm64-arm-64bit",
+      "cython": "3.3.0",
+      "numpy": "2.4.6",
+      "scipy": "1.17.1"
+    },
+    "worker_sha256": "07cf99c5d5efa97a4306dc2396e60158e8c72ef48bd4b9968f43a1117ee4febd",
+    "has_adversarial_cases": false
+  },
+  "summaries": [
+    {
+      "case": {
+        "family": "fixture_recombination",
+        "name": "external-vcf-recombination",
+        "path": "/Users/nicholas/Projects/linear-dag/inputs/large0.vcf.gz"
+      },
+      "implementation": "baseline",
+      "repetitions": 3,
+      "input_nodes": 159096,
+      "input_edges": 20784669,
+      "output_nodes": 541847,
+      "output_edges": 2286719,
+      "factor_nodes": 382751,
+      "init_ns": {
+        "median": 5129051000,
+        "iqr": 705096979.5,
+        "minimum": 4597735791
+      },
+      "find_ns": {
+        "median": 7283451375,
+        "iqr": 4061594854.0,
+        "minimum": 6659586917
+      },
+      "total_ns": {
+        "median": 12412692625,
+        "iqr": 4766902104.5,
+        "minimum": 11257444208
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 4065378304,
+        "iqr": 501850112.0,
+        "minimum": 3250012160
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 4065378304,
+        "iqr": 501850112.0,
+        "minimum": 3250012160
+      }
+    },
+    {
+      "case": {
+        "family": "fixture_recombination",
+        "name": "external-vcf-recombination",
+        "path": "/Users/nicholas/Projects/linear-dag/inputs/large0.vcf.gz"
+      },
+      "implementation": "candidate",
+      "repetitions": 3,
+      "input_nodes": 159096,
+      "input_edges": 20784669,
+      "output_nodes": 541847,
+      "output_edges": 2286719,
+      "factor_nodes": 382751,
+      "init_ns": {
+        "median": 3891954458,
+        "iqr": 74085396.0,
+        "minimum": 3813755583
+      },
+      "find_ns": {
+        "median": 6122440000,
+        "iqr": 99734916.5,
+        "minimum": 5961030584
+      },
+      "total_ns": {
+        "median": 10052574375,
+        "iqr": 154812729.0,
+        "minimum": 9774873542
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 3725574144,
+        "iqr": 216883200.0,
+        "minimum": 3354279936
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 3725574144,
+        "iqr": 216883200.0,
+        "minimum": 3354279936
+      }
+    },
+    {
+      "case": {
+        "block": "1_125000001_130000000",
+        "family": "linarg_reconstructed_recombination",
+        "name": "linarg-1_125000001_130000000",
+        "path": "/Users/nicholas/Library/CloudStorage/Dropbox/collab/nick-luke/linearg_shared/data/1kg_chromosomes_n3202_blocks.h5"
+      },
+      "implementation": "baseline",
+      "repetitions": 3,
+      "input_nodes": 17727,
+      "input_edges": 600591,
+      "output_nodes": 39860,
+      "output_edges": 160257,
+      "factor_nodes": 22133,
+      "init_ns": {
+        "median": 61853333,
+        "iqr": 15759250.0,
+        "minimum": 56841958
+      },
+      "find_ns": {
+        "median": 142046583,
+        "iqr": 1902416.5,
+        "minimum": 141663709
+      },
+      "total_ns": {
+        "median": 207339000,
+        "iqr": 15952208.0,
+        "minimum": 198521667
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 334905344,
+        "iqr": 204800.0,
+        "minimum": 334790656
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 334839808,
+        "iqr": 204800.0,
+        "minimum": 334725120
+      }
+    },
+    {
+      "case": {
+        "block": "1_125000001_130000000",
+        "family": "linarg_reconstructed_recombination",
+        "name": "linarg-1_125000001_130000000",
+        "path": "/Users/nicholas/Library/CloudStorage/Dropbox/collab/nick-luke/linearg_shared/data/1kg_chromosomes_n3202_blocks.h5"
+      },
+      "implementation": "candidate",
+      "repetitions": 3,
+      "input_nodes": 17727,
+      "input_edges": 600591,
+      "output_nodes": 39860,
+      "output_edges": 160257,
+      "factor_nodes": 22133,
+      "init_ns": {
+        "median": 48554000,
+        "iqr": 20976458.0,
+        "minimum": 47834250
+      },
+      "find_ns": {
+        "median": 123935417,
+        "iqr": 31883521.0,
+        "minimum": 118258958
+      },
+      "total_ns": {
+        "median": 171784250,
+        "iqr": 52502729.0,
+        "minimum": 166827167
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 295993344,
+        "iqr": 147456.0,
+        "minimum": 295960576
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 289669120,
+        "iqr": 147456.0,
+        "minimum": 289636352
+      }
+    },
+    {
+      "case": {
+        "block": "22_10000001_15000000",
+        "family": "linarg_reconstructed_recombination",
+        "name": "linarg-22_10000001_15000000",
+        "path": "/Users/nicholas/Library/CloudStorage/Dropbox/collab/nick-luke/linearg_shared/data/1kg_chromosomes_n3202_blocks.h5"
+      },
+      "implementation": "baseline",
+      "repetitions": 3,
+      "input_nodes": 65464,
+      "input_edges": 3699752,
+      "output_nodes": 238343,
+      "output_edges": 1341418,
+      "factor_nodes": 172879,
+      "init_ns": {
+        "median": 577614375,
+        "iqr": 12895916.5,
+        "minimum": 557224459
+      },
+      "find_ns": {
+        "median": 1020573291,
+        "iqr": 16680979.0,
+        "minimum": 997905250
+      },
+      "total_ns": {
+        "median": 1580947292,
+        "iqr": 15544604.0,
+        "minimum": 1577818000
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 1479442432,
+        "iqr": 32768.0,
+        "minimum": 1479426048
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 1410236416,
+        "iqr": 49152.0,
+        "minimum": 1410220032
+      }
+    },
+    {
+      "case": {
+        "block": "22_10000001_15000000",
+        "family": "linarg_reconstructed_recombination",
+        "name": "linarg-22_10000001_15000000",
+        "path": "/Users/nicholas/Library/CloudStorage/Dropbox/collab/nick-luke/linearg_shared/data/1kg_chromosomes_n3202_blocks.h5"
+      },
+      "implementation": "candidate",
+      "repetitions": 3,
+      "input_nodes": 65464,
+      "input_edges": 3699752,
+      "output_nodes": 238343,
+      "output_edges": 1341418,
+      "factor_nodes": 172879,
+      "init_ns": {
+        "median": 517588541,
+        "iqr": 11628042.0,
+        "minimum": 512060833
+      },
+      "find_ns": {
+        "median": 917283875,
+        "iqr": 25854208.5,
+        "minimum": 872602333
+      },
+      "total_ns": {
+        "median": 1434890875,
+        "iqr": 37481792.0,
+        "minimum": 1384678708
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 1307377664,
+        "iqr": 90112.0,
+        "minimum": 1307230208
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 1213022208,
+        "iqr": 90112.0,
+        "minimum": 1212874752
+      }
+    }
+  ],
+  "gates": {
+    "candidate_faster_at_two_largest_adversarial_sizes": null,
+    "candidate_adversarial_log_log_slope": null,
+    "candidate_near_linear_slope_at_most_1_15": null,
+    "representative_runtime_ratios": {
+      "external-vcf-recombination": 0.8098625075717606,
+      "linarg-1_125000001_130000000": 0.8285187543105735,
+      "linarg-22_10000001_15000000": 0.9076146195770833
+    },
+    "representative_runtime_regression_at_most_10_percent": true,
+    "representative_peak_rss_ratios": {
+      "external-vcf-recombination": 0.9164151194328802,
+      "linarg-1_125000001_130000000": 0.883811946577956,
+      "linarg-22_10000001_15000000": 0.8836962058960331
+    },
+    "representative_peak_rss_regression_at_most_10_percent": true
+  }
+}
