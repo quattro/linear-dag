@@ -1,7 +1,9 @@
 import gzip
 import logging
 import os
+import resource
 import subprocess
+import sys
 import time
 
 from os import PathLike
@@ -32,6 +34,11 @@ def _coerce_logger(
     return MemoryLogger(__name__, log_file=log_file).logger
 
 
+def _peak_memory_mb() -> float:
+    maximum_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return maximum_rss / (1024 * 1024) if sys.platform == "darwin" else maximum_rss / 1024
+
+
 def compress_vcf(
     input_vcf: Union[str, PathLike],
     output_h5: Union[str, PathLike],
@@ -43,6 +50,7 @@ def compress_vcf(
     remove_multiallelics: bool = False,
     add_individual_nodes: bool = False,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+    split_multiallelics: bool = False,
 ):
     """Compress a VCF file into a [`linear_dag.core.lineararg.LinearARG`][] HDF5 file.
 
@@ -66,6 +74,8 @@ def compress_vcf(
     - `remove_indels`: Whether to remove indel variants.
     - `remove_multiallelics`: Whether to exclude multiallelic sites instead of
       raising an error.
+    - `split_multiallelics`: Whether to emit one variant column per ALT allele.
+      For multi-step compression, keep the multiallelic choice fixed for the run.
     - `add_individual_nodes`: Whether to append individual nodes before writing.
 
     **Returns:**
@@ -89,6 +99,7 @@ def compress_vcf(
         maf_filter=maf_filter,
         snps_only=remove_indels,
         remove_multiallelics=remove_multiallelics,
+        split_multiallelics=split_multiallelics,
     )
     logger.info(f"Number of variants: {linarg.shape[1]}")
     logger.info(f"Number of samples: {linarg.shape[0]}")
@@ -129,6 +140,7 @@ def msc_step0(
     sex_path: Optional[Union[str, PathLike]] = None,
     mount_point: Optional[Union[str, PathLike]] = None,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+    split_multiallelics: bool = False,
 ):
     """Plan jobs for the multi-step compression pipeline.
 
@@ -141,6 +153,10 @@ def msc_step0(
         `bcftools` is required because genomic extents are discovered by shelling
         out to `bcftools query`.
 
+        Choose the multiallelic behavior when creating the run and keep it fixed
+        while resuming later steps. Start a new output directory to change between
+        rejection, removal, and ALT-specific splitting.
+
     **Arguments:**
 
     - `vcf_metadata`: Path to the metadata table describing per-chromosome VCF inputs.
@@ -152,6 +168,7 @@ def msc_step0(
     - `maf`: Optional MAF threshold propagated to downstream steps.
     - `remove_indels`: Whether downstream jobs should exclude indels.
     - `remove_multiallelics`: Whether downstream jobs should exclude multiallelic sites.
+    - `split_multiallelics`: Whether downstream jobs should emit one column per ALT.
     - `sex_path`: Optional path to sex annotations propagated to downstream steps.
     - `mount_point`: Optional path prefix prepended to discovered VCF paths.
     - `logger`: Optional logger.
@@ -161,6 +178,8 @@ def msc_step0(
     - `None`. Planning metadata are written to disk under `out`.
     """
     logger = _coerce_logger(logger)
+    if remove_multiallelics and split_multiallelics:
+        raise ValueError("remove_multiallelics and split_multiallelics are mutually exclusive")
     os.makedirs(out, exist_ok=True)
 
     vcf_meta = pl.read_csv(vcf_metadata, separator=" ")
@@ -230,6 +249,7 @@ def msc_step0(
         "maf": str(maf),
         "remove_indels": str(remove_indels),
         "remove_multiallelics": str(remove_multiallelics),
+        "split_multiallelics": str(split_multiallelics),
         "sex_path": str(sex_path),
         "mount_point": "" if mount_point is None else str(mount_point),
     }
@@ -270,16 +290,18 @@ def msc_step1(
     region = job["small_region"].item()
 
     params = pl.read_parquet_metadata(jobs_metadata)
-    flip_minor_alleles = params["flip_minor_alleles"]
+    flip_minor_alleles = params["flip_minor_alleles"] == "True"
     keep = None if params["keep"] == "None" else params["keep"]
     maf = None if params["maf"] == "None" else float(params["maf"])
     remove_indels = params["remove_indels"] == "True"
-    remove_multiallelics = params["remove_multiallelics"] == "True"
+    remove_multiallelics = params.get("remove_multiallelics", "False") == "True"
+    split_multiallelics = params.get("split_multiallelics", "False") == "True"
     sex_path = None if params["sex_path"] == "None" else params["sex_path"]
     mount_point = params["mount_point"]
     out = params["out"]
 
-    if os.path.exists(f"{mount_point}{out}/genotype_matrices/{small_job_id}_{region}.h5"):
+    genotype_path = f"{mount_point}{out}/genotype_matrices/{small_job_id}_{region}.h5"
+    if os.path.exists(genotype_path):
         logger.info(f"Genotype matrix for {small_job_id}_{region} already exists. Skipping.")
     else:
         make_genotype_matrix(
@@ -292,11 +314,13 @@ def msc_step1(
             maf_filter=maf,
             remove_indels=remove_indels,
             remove_multiallelics=remove_multiallelics,
+            split_multiallelics=split_multiallelics,
             sex_path=sex_path,
             logger=logger,
         )
 
-    if os.path.exists(f"{mount_point}{out}/forward_backward_graphs/{small_job_id}_{region}_forward_graph.h5"):
+    forward_graph_path = f"{mount_point}{out}/forward_backward_graphs/{small_job_id}_{region}_forward_graph.h5"
+    if os.path.exists(forward_graph_path):
         logger.info(f"Forward backward graph for {small_job_id}_{region} already exists. Skipping.")
     else:
         run_forward_backward(
@@ -695,6 +719,7 @@ def make_genotype_matrix(
     remove_multiallelics: bool = False,
     sex_path=None,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+    split_multiallelics: bool = False,
 ):
     """Stream one regional genotype matrix plus variant metadata sidecars.
 
@@ -708,7 +733,8 @@ def make_genotype_matrix(
         and a sentinel metadata text file so downstream steps can skip them
         deterministically.
 
-        Multiallelic variants raise an error unless `remove_multiallelics=True`.
+        Multiallelic variants raise an error unless removal or splitting is enabled.
+        The setting comes from Step 0 and remains fixed for the run.
     """
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/variant_metadata/", exist_ok=True)
@@ -740,7 +766,9 @@ def make_genotype_matrix(
         maf_filter=maf_filter,
         remove_indels=remove_indels,
         remove_multiallelics=remove_multiallelics,
+        split_multiallelics=split_multiallelics,
         sex=sex,
+        logger=logger,
     )
     if v_info is None:
         logger.info("No variants found")
@@ -750,7 +778,20 @@ def make_genotype_matrix(
         return None
 
     t2 = time.time()
+    with h5py.File(genotype_path, "r") as f:
+        shape = tuple(f["shape"][:])
+        nnz = int(f["data"].shape[0])
     logger.info(f"VCF streaming completed in {np.round(t2 - t1, 3)} seconds")
+    logger.info(
+        "Step-1 genotype audit: remove_multiallelics=%s split_multiallelics=%s "
+        "shape=%s nnz=%s elapsed_seconds=%.3f peak_memory_mb=%.1f",
+        remove_multiallelics,
+        split_multiallelics,
+        shape,
+        nnz,
+        t2 - t1,
+        _peak_memory_mb(),
+    )
     logger.info("Saving variant metadata")
 
     v_info.write_csv(f"{out}/variant_metadata/{partition_number}_{region}.txt", separator=" ")

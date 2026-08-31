@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 
 from collections import defaultdict
 from os import PathLike
@@ -14,6 +15,37 @@ from numpy.typing import NDArray
 from scipy.io import mmread
 from scipy.sparse import csc_matrix
 
+_DEFAULT_VCF_PROGRESS_SECONDS = 60.0
+_DUPLICATE_EXAMPLE_LIMIT = 5
+_VARIANT_KEY_COLUMNS = ["CHROM", "POS", "REF", "ALT"]
+
+
+def _warn_duplicate_variant_keys(variants: pl.DataFrame, logger: logging.Logger) -> None:
+    """Warn about repeated emitted variant keys while retaining every column."""
+    if variants.height < 2:
+        return
+
+    duplicate_groups = (
+        variants.group_by(_VARIANT_KEY_COLUMNS, maintain_order=True)
+        .agg(pl.len().alias("_count"), pl.col("ID").alias("_ids"))
+        .filter(pl.col("_count") > 1)
+    )
+    if duplicate_groups.is_empty():
+        return
+
+    extra_columns = int((duplicate_groups["_count"] - 1).sum())
+    examples = []
+    for row in duplicate_groups.head(_DUPLICATE_EXAMPLE_LIMIT).iter_rows(named=True):
+        ids = ",".join("." if variant_id is None else str(variant_id) for variant_id in row["_ids"])
+        examples.append(f"{row['CHROM']}:{row['POS']} {row['REF']}>{row['ALT']} IDs={ids}")
+    logger.warning(
+        "Duplicate variant audit: duplicate_keys=%s extra_columns=%s; "
+        "duplicate columns were retained; examples=%s",
+        duplicate_groups.height,
+        extra_columns,
+        "; ".join(examples),
+    )
+
 
 def _iter_vcf_columns(
     path: Union[str, PathLike],
@@ -25,8 +57,28 @@ def _iter_vcf_columns(
     remove_indels: bool = False,
     remove_multiallelics: bool = False,
     sex: np.array = None,
+    split_multiallelics: bool = False,
+    logger: Optional[logging.Logger] = None,
 ):
     """Return sample metadata and an iterator over retained sparse VCF columns."""
+    if remove_multiallelics and split_multiallelics:
+        raise ValueError("remove_multiallelics and split_multiallelics are mutually exclusive")
+
+    active_logger = logger or logging.getLogger(__name__)
+    started_at = time.perf_counter()
+    progress_interval_raw = os.getenv("KODAMA_VCF_PROGRESS_SECONDS", str(_DEFAULT_VCF_PROGRESS_SECONDS))
+    try:
+        progress_interval_seconds = float(progress_interval_raw)
+        if progress_interval_seconds < 0:
+            raise ValueError
+    except ValueError:
+        active_logger.warning(
+            "Invalid KODAMA_VCF_PROGRESS_SECONDS=%r; using %.0f seconds",
+            progress_interval_raw,
+            _DEFAULT_VCF_PROGRESS_SECONDS,
+        )
+        progress_interval_seconds = _DEFAULT_VCF_PROGRESS_SECONDS
+
     if samples is not None:
         vcf_samples = cv.VCF(path, lazy=True).samples
         samples_to_load = list(set(samples) & set(vcf_samples))
@@ -41,14 +93,14 @@ def _iter_vcf_columns(
     iids = vcf.samples
     ploidy = 1 if phased else 2
 
-    if phased:
-        read_gt = lambda var: np.ravel(np.asarray(var.genotype.array())[:, :2])  # noqa: E731
-    else:
-        read_gt = lambda var: var.gt_types  # noqa: E731
-
     if sex is not None:
-        mask = 2 * np.where(sex == 1)[0] + 1
-        indices_to_keep = np.array([i for i in range(2 * len(vcf.samples)) if i not in mask])
+        if not phased:
+            raise ValueError("sex/ploidy masking is supported only when phased=True")
+        if len(sex) != len(vcf.samples):
+            raise ValueError("sex vector length must match the number of loaded VCF samples")
+        haplotypes_to_keep = np.ones(2 * len(vcf.samples), dtype=bool)
+        haplotypes_to_keep[2 * np.where(sex == 1)[0] + 1] = False
+        indices_to_keep = np.flatnonzero(haplotypes_to_keep)
         num_rows = len(indices_to_keep)
     else:
         indices_to_keep = None
@@ -65,46 +117,130 @@ def _iter_vcf_columns(
     variants = vcf(region) if region else vcf
 
     def columns():
+        counters = {
+            "input_records": 0,
+            "biallelic_records": 0,
+            "multiallelic_records": 0,
+            "emitted_columns": 0,
+            "biallelic_columns_emitted": 0,
+            "multiallelic_alt_columns_emitted": 0,
+            "missing_call_records_removed": 0,
+            "zero_carrier_alts_removed": 0,
+            "indel_alts_removed": 0,
+            "maf_alts_removed": 0,
+        }
+        emitted_nnz = 0
+        last_progress_at = started_at
+        active_logger.info(
+            "Starting VCF iteration: path=%s region=%s samples=%s phased=%s "
+            "split_multiallelics=%s progress_interval_seconds=%s",
+            path,
+            region,
+            len(iids),
+            phased,
+            split_multiallelics,
+            progress_interval_seconds,
+        )
+
         for var in variants:
             if (var.POS < start) or (var.POS > end):
                 continue
 
-            if len(var.ALT) > 1:
+            counters["input_records"] += 1
+            now = time.perf_counter()
+            if progress_interval_seconds and now - last_progress_at >= progress_interval_seconds:
+                active_logger.info(
+                    "VCF progress: records=%s emitted_columns=%s buffered_nonzeros=%s elapsed_seconds=%.1f",
+                    counters["input_records"],
+                    counters["emitted_columns"],
+                    emitted_nnz,
+                    now - started_at,
+                )
+                last_progress_at = now
+
+            is_multiallelic = len(var.ALT) > 1
+            counters["multiallelic_records" if is_multiallelic else "biallelic_records"] += 1
+            if is_multiallelic:
                 if remove_multiallelics:
                     continue
-                variant_id = var.ID if var.ID is not None else "."
-                raise ValueError(
-                    "Multiallelic variant encountered in VCF/BCF input: "
-                    f"{var.CHROM}:{var.POS} ID={variant_id} REF={var.REF} ALT={','.join(var.ALT)}. "
-                    "Multiallelic variants are not supported by default; use "
-                    "`remove_multiallelics=True` or `--remove-multiallelics` to exclude them."
-                )
+                if not split_multiallelics:
+                    variant_id = var.ID if var.ID is not None else "."
+                    raise ValueError(
+                        "Multiallelic variant encountered in VCF/BCF input: "
+                        f"{var.CHROM}:{var.POS} ID={variant_id} REF={var.REF} ALT={','.join(var.ALT)}. "
+                        "Multiallelic variants are not supported by default; use "
+                        "`remove_multiallelics=True`/`--remove-multiallelics` to exclude them or "
+                        "`split_multiallelics=True`/`--split-multiallelics` to split them."
+                    )
 
-            if remove_indels and (any(len(alt) != 1 for alt in var.ALT) or len(var.REF) != 1):
-                continue
-
-            gts = read_gt(var)
-            if indices_to_keep is not None:
-                gts = gts[indices_to_keep]
-                assert np.all((gts == 0) | (gts == 1)), (
+            alleles = np.asarray(var.genotype.array())[:, :2]
+            if phased:
+                alleles = np.ravel(alleles)
+                if indices_to_keep is not None:
+                    alleles = alleles[indices_to_keep]
+            if split_multiallelics:
+                if np.any(alleles == -1):
+                    counters["missing_call_records_removed"] += 1
+                    continue
+                if phased and np.any(alleles < 0):
+                    raise ValueError(
+                        f"Unexpected ploidy at {var.CHROM}:{var.POS}; "
+                        "provide a sex vector for haploid chromosome calls"
+                    )
+            elif phased and indices_to_keep is not None:
+                assert np.all((alleles == 0) | (alleles == 1)), (
                     "Haplotype vector contains non 0 or 1 values. Check genotype data or sex vector."
                 )
 
-            is_flipped = False
-            if flip_minor_alleles:
-                af = np.mean(gts) / ploidy
-                if af > 0.5:
-                    gts = ploidy - gts
-                    is_flipped = True
-
-            if maf_filter is not None:
-                af = np.mean(gts) / ploidy
-                if (af < maf_filter) or (1 - af < maf_filter):
+            alts = var.ALT if split_multiallelics else var.ALT[:1]
+            for alt_index, alt in enumerate(alts, start=1):
+                if remove_indels and (len(var.REF) != 1 or len(alt) != 1):
+                    counters["indel_alts_removed"] += 1
                     continue
 
-            indices = np.flatnonzero(gts)
-            metadata = (var.CHROM, var.POS, var.ID, var.REF, ",".join(var.ALT))
-            yield indices, gts[indices], is_flipped, metadata
+                if split_multiallelics:
+                    raw_gts = (alleles == alt_index).astype(np.int8)
+                    if not phased:
+                        raw_gts = np.sum(raw_gts, axis=1, dtype=np.int8)
+                elif phased:
+                    raw_gts = alleles
+                else:
+                    raw_gts = var.gt_types
+
+                if split_multiallelics and not np.any(raw_gts):
+                    counters["zero_carrier_alts_removed"] += 1
+                    continue
+
+                af = np.mean(raw_gts) / ploidy
+                if maf_filter is not None and (af < maf_filter or 1 - af < maf_filter):
+                    counters["maf_alts_removed"] += 1
+                    continue
+
+                is_flipped = bool(flip_minor_alleles and af > 0.5)
+                gts = ploidy - raw_gts if is_flipped else raw_gts
+                indices = np.flatnonzero(gts)
+                metadata = (var.CHROM, var.POS, var.ID, var.REF, alt)
+                counters["emitted_columns"] += 1
+                counters[
+                    "multiallelic_alt_columns_emitted" if is_multiallelic else "biallelic_columns_emitted"
+                ] += 1
+                emitted_nnz += len(indices)
+                yield indices, gts[indices], is_flipped, metadata
+
+        elapsed = time.perf_counter() - started_at
+        active_logger.info(
+            "Finished VCF iteration: records=%s emitted_columns=%s buffered_nonzeros=%s elapsed_seconds=%.1f",
+            counters["input_records"],
+            counters["emitted_columns"],
+            emitted_nnz,
+            elapsed,
+        )
+        active_logger.info(
+            "VCF read audit: %s elapsed_seconds=%.3f emitted_nonzeros=%s",
+            counters,
+            elapsed,
+            emitted_nnz,
+        )
 
     return iids, num_rows, columns()
 
@@ -120,6 +256,8 @@ def write_vcf_to_hdf5(
     remove_indels: bool = False,
     remove_multiallelics: bool = False,
     sex: np.array = None,
+    split_multiallelics: bool = False,
+    logger: Optional[logging.Logger] = None,
     batch_nnz: int = 1_000_000,
     batch_columns: int = 100_000,
     _index_dtype_max: int = np.iinfo(np.int32).max,
@@ -138,6 +276,8 @@ def write_vcf_to_hdf5(
         remove_indels=remove_indels,
         remove_multiallelics=remove_multiallelics,
         sex=sex,
+        split_multiallelics=split_multiallelics,
+        logger=logger,
     )
 
     output_path = str(output_path)
@@ -150,6 +290,7 @@ def write_vcf_to_hdf5(
     num_variants = 0
     flip = []
     var_table = defaultdict(list)
+    variant_info = None
 
     try:
         with h5py.File(partial_path, "w") as f:
@@ -262,12 +403,24 @@ def write_vcf_to_hdf5(
             else:
                 f.create_dataset("shape", data=(num_rows, num_variants), compression="gzip", shuffle=True)
                 f.create_dataset("flip", data=np.asarray(flip), compression="gzip", shuffle=True)
-                output_iids = [iid for iid in iids for _ in range(2)] if phased else iids
+                if phased and sex is None:
+                    output_iids = [iid for iid in iids for _ in range(2)]
+                elif phased:
+                    output_iids = [
+                        iid
+                        for iid, sample_sex in zip(iids, sex)
+                        for _ in range(1 if sample_sex == 1 else 2)
+                    ]
+                else:
+                    output_iids = iids
                 f.create_dataset("iids", data=output_iids, compression="gzip", shuffle=True)
                 if sex is not None:
                     f.create_dataset("sex", data=sex, compression="gzip", shuffle=True)
                 f.attrs["is_empty"] = False
 
+        if num_variants:
+            variant_info = pl.DataFrame(var_table)
+            _warn_duplicate_variant_keys(variant_info, logger or logging.getLogger(__name__))
         os.replace(partial_path, output_path)
     except BaseException:
         if os.path.exists(partial_path):
@@ -276,7 +429,7 @@ def write_vcf_to_hdf5(
 
     if num_variants == 0:
         return None
-    return pl.DataFrame(var_table)
+    return variant_info
 
 
 def read_vcf(
@@ -289,6 +442,8 @@ def read_vcf(
     remove_indels: bool = False,
     remove_multiallelics: bool = False,
     sex: np.array = None,
+    split_multiallelics: bool = False,
+    logger: Optional[logging.Logger] = None,
 ):
     """Load genotype calls from a VCF/BCF file into sparse CSC format.
 
@@ -317,6 +472,11 @@ def read_vcf(
     - `remove_multiallelics`: If `True`, skip multiallelic variants. If
       `False`, multiallelic variants raise a `ValueError`.
     - `sex`: Optional sex vector (`0` female / `1` male) for ploidy-aware filtering.
+    - `split_multiallelics`: If `True`, emit one binary/dosage column per ALT.
+      This option is mutually exclusive with `remove_multiallelics`. Repeated
+      `(CHROM, POS, REF, ALT)` keys are retained and reported after parsing. For
+      multi-step compression, keep the multiallelic choice fixed for the run.
+    - `logger`: Optional logger for audit counters, timings, and duplicate warnings.
 
     **Returns:**
 
@@ -343,6 +503,8 @@ def read_vcf(
         remove_indels=remove_indels,
         remove_multiallelics=remove_multiallelics,
         sex=sex,
+        split_multiallelics=split_multiallelics,
+        logger=logger,
     )
     data = []
     idxs = []
@@ -366,11 +528,33 @@ def read_vcf(
     if len(data) == 0:
         return None, None, None, None
 
+    active_logger = logger or logging.getLogger(__name__)
+    started_at = time.perf_counter()
+    active_logger.info("Starting array concatenation: columns=%s buffered_nonzeros=%s", len(data), ptrs[-1])
     data = np.concatenate(data)
     idxs = np.concatenate(idxs)
     ptrs = np.array(ptrs)
+    active_logger.info(
+        "Finished array concatenation: columns=%s nonzeros=%s elapsed_seconds=%.1f",
+        len(ptrs) - 1,
+        len(data),
+        time.perf_counter() - started_at,
+    )
+    active_logger.info(
+        "Starting CSC construction: rows=%s columns=%s nonzeros=%s",
+        num_rows,
+        len(ptrs) - 1,
+        len(data),
+    )
     genotypes = csc_matrix((data, idxs, ptrs), shape=(num_rows, len(ptrs) - 1))
     flip = np.array(flip)
+    active_logger.info(
+        "Finished CSC construction: matrix_shape=%s nnz=%s elapsed_seconds=%.1f",
+        genotypes.shape,
+        genotypes.nnz,
+        time.perf_counter() - started_at,
+    )
+    _warn_duplicate_variant_keys(v_info, active_logger)
 
     return genotypes, flip, v_info, iids
 

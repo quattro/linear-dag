@@ -265,6 +265,7 @@ class LinearARG(LinearOperator):
         maf_filter: float = None,
         snps_only: bool = False,
         remove_multiallelics: bool = False,
+        split_multiallelics: bool = False,
     ) -> Union[tuple, "LinearARG"]:
         """Read a VCF/BCF, parse genotype calls, and infer a LinearARG.
 
@@ -290,6 +291,8 @@ class LinearARG(LinearOperator):
         - `snps_only`: Whether to remove indels.
         - `remove_multiallelics`: Whether to exclude multiallelic sites instead
           of raising an error.
+        - `split_multiallelics`: Whether to emit one column per ALT allele. For
+          multi-step compression, keep the multiallelic choice fixed for the run.
 
         **Returns:**
 
@@ -315,6 +318,8 @@ class LinearARG(LinearOperator):
             maf_filter=maf_filter,
             remove_indels=snps_only,
             remove_multiallelics=remove_multiallelics,
+            split_multiallelics=split_multiallelics,
+            logger=logger,
         )
         t1 = time.time()
         if logger is not None:

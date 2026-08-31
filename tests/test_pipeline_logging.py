@@ -85,6 +85,32 @@ def test_msc_step0_records_remove_multiallelics_metadata(monkeypatch, tmp_path: 
 
     metadata = pl.read_parquet_metadata(out_dir / "job_metadata.parquet")
     assert metadata["remove_multiallelics"] == "True"
+    assert metadata["split_multiallelics"] == "False"
+    assert "multiallelic_policy" not in metadata
+
+
+def test_msc_step0_records_split_multiallelic_setting(monkeypatch, tmp_path: Path):
+    vcf_metadata = tmp_path / "vcf_metadata.txt"
+    vcf_metadata.write_text("chr vcf_path\nchr1 input.vcf.gz\n")
+    out_dir = tmp_path / "kodama"
+
+    monkeypatch.setattr(
+        pipeline.subprocess,
+        "check_output",
+        lambda cmd, shell, text: "100\n" if "head" in cmd else "200\n",
+    )
+    pipeline.msc_step0(
+        vcf_metadata=str(vcf_metadata),
+        large_partition_size=100,
+        n_small_blocks=2,
+        out=str(out_dir),
+        split_multiallelics=True,
+    )
+
+    metadata = pl.read_parquet_metadata(out_dir / "job_metadata.parquet")
+    assert metadata["remove_multiallelics"] == "False"
+    assert metadata["split_multiallelics"] == "True"
+    assert "multiallelic_policy" not in metadata
 
 
 def test_msc_step1_reads_remove_multiallelics_metadata(monkeypatch, tmp_path: Path):
@@ -127,6 +153,7 @@ def test_msc_step1_reads_remove_multiallelics_metadata(monkeypatch, tmp_path: Pa
     assert captured["vcf_path"] == "input.vcf.gz"
     assert captured["region"] == "chr1:100-150"
     assert captured["remove_multiallelics"] is True
+    assert captured["split_multiallelics"] is False
 
 
 def test_load_genotypes_does_not_print_progress(tmp_path: Path):

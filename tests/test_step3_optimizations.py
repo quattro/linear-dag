@@ -9,10 +9,16 @@ from linear_dag.core.brick_graph import (
     merge_brick_graphs_into,
 )
 from linear_dag.core.digraph import DiGraph
-from linear_dag.core.lineararg import remove_degree_zero_nodes
+from linear_dag.core.lineararg import LinearARG, remove_degree_zero_nodes
 from linear_dag.core.one_summed_cy import linearize_brick_graph
 from linear_dag.core.recombination import Recombination
-from linear_dag.pipeline import _read_genotype_partition_stats
+from linear_dag.genotype import read_vcf, write_vcf_to_hdf5
+from linear_dag.pipeline import (
+    _read_genotype_partition_stats,
+    merge,
+    reduction_union_recom,
+    run_forward_backward,
+)
 
 
 def _write_brick_graph(path, edges, sample_indices, variant_indices, num_nodes):
@@ -142,3 +148,35 @@ def test_remove_degree_zero_nodes_keeps_required_nodes_in_sorted_order():
     np.testing.assert_array_equal(filtered.toarray(), expected.toarray())
     np.testing.assert_array_equal(variant_indices, np.array([2]))
     np.testing.assert_array_equal(sample_indices, np.array([3]))
+
+
+def test_native_multiallelic_step1_artifact_survives_optimized_steps2_and3(test_data_dir, tmp_path):
+    partition_id = "0_1:100-160"
+    output_id = "0_1:100-160"
+    genotype_dir = tmp_path / "genotype_matrices"
+    metadata_dir = tmp_path / "variant_metadata"
+    genotype_dir.mkdir()
+    metadata_dir.mkdir()
+
+    vcf_path = test_data_dir / "multiallelic_split.vcf"
+    genotype_path = genotype_dir / f"{partition_id}.h5"
+    variant_info = write_vcf_to_hdf5(vcf_path, genotype_path, split_multiallelics=True)
+    variant_info.write_csv(metadata_dir / f"{partition_id}.txt", separator=" ")
+
+    run_forward_backward(str(tmp_path), "", partition_id)
+    reduction_union_recom(str(tmp_path), "", partition_id)
+    merge(str(tmp_path), "", [partition_id], output_id)
+
+    expected_genotypes, expected_flip, expected_variants, _ = read_vcf(
+        vcf_path,
+        split_multiallelics=True,
+    )
+    result = LinearARG.read(
+        tmp_path / "linear_args" / f"{output_id}.h5",
+        block="1:100-160",
+        load_metadata=True,
+    )
+
+    np.testing.assert_array_equal(result @ np.eye(result.shape[1]), expected_genotypes.toarray())
+    np.testing.assert_array_equal(result.flip, expected_flip)
+    assert result.variants.collect().equals(expected_variants)
