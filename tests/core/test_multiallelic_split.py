@@ -9,19 +9,18 @@ import pytest
 from scipy.sparse import csc_matrix
 
 from linear_dag.core.lineararg import LinearARG
-from linear_dag.genotype import _genotype_digest, read_vcf, write_vcf_to_hdf5
-
+from linear_dag.genotype import read_vcf, write_vcf_to_hdf5
 
 EXPECTED_PHASED = np.array(
     [
-        [0, 0, 0, 0, 0, 0, 0, 1, 0],
-        [0, 1, 0, 1, 0, 1, 0, 1, 1],
-        [0, 0, 0, 0, 0, 0, 0, 1, 1],
-        [1, 0, 1, 0, 1, 0, 1, 1, 0],
-        [1, 1, 0, 1, 0, 1, 0, 1, 0],
-        [0, 0, 1, 0, 0, 0, 1, 1, 0],
-        [1, 0, 1, 0, 1, 0, 1, 0, 1],
-        [1, 0, 1, 0, 0, 0, 1, 1, 1],
+        [0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0],
+        [0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1],
+        [0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1],
+        [1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0],
+        [1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0],
+        [0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0],
+        [1, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1],
+        [1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1],
     ],
     dtype=np.int8,
 )
@@ -31,6 +30,8 @@ EXPECTED_VARIANTS = [
     (110, "triallelic", "C"),
     (110, "triallelic", "G"),
     (120, "duplicate-first", "C"),
+    (120, "duplicate-exact", "C"),
+    (120, "duplicate-later", "C"),
     (120, "same-position-distinct", "G"),
     (130, "mixed-types", "C"),
     (130, "mixed-types", "AT"),
@@ -39,22 +40,7 @@ EXPECTED_VARIANTS = [
 ]
 
 
-def test_genotype_digest_storage_is_fixed_size_and_content_sensitive():
-    small = np.zeros(8, dtype=np.int8)
-    large = np.zeros(1_000_000, dtype=np.int8)
-    changed = large.copy()
-    changed[-1] = 1
-
-    small_digest = _genotype_digest(small)
-    large_digest = _genotype_digest(large)
-
-    assert isinstance(small_digest, bytes)
-    assert len(small_digest) == len(large_digest) == 16
-    assert large_digest != _genotype_digest(changed)
-    assert large_digest == _genotype_digest(large.copy())
-
-
-def test_native_phased_multiallelic_split_contents_metadata_and_audit(test_data_dir, caplog):
+def test_native_phased_multiallelic_split_retains_duplicates_and_audits(test_data_dir, caplog):
     path = test_data_dir / "multiallelic_split.vcf"
     logger = logging.getLogger("linear_dag.tests.multiallelic")
 
@@ -62,28 +48,26 @@ def test_native_phased_multiallelic_split_contents_metadata_and_audit(test_data_
         genotypes, flip, variants, iids = read_vcf(path, split_multiallelics=True, logger=logger)
 
     np.testing.assert_array_equal(genotypes.toarray(), EXPECTED_PHASED)
-    np.testing.assert_array_equal(genotypes.indptr, [0, 4, 6, 10, 12, 14, 16, 20, 27, 31])
-    np.testing.assert_array_equal(
-        genotypes.indices,
-        [
-            3, 4, 6, 7, 1, 4, 3, 5, 6, 7, 1, 4, 3, 6, 1, 4,
-            3, 5, 6, 7, 0, 1, 2, 3, 4, 5, 7, 1, 2, 6, 7,
-        ],
-    )
-    np.testing.assert_array_equal(genotypes.data, np.ones(31, dtype=np.int8))
+    expected_sparse = csc_matrix(EXPECTED_PHASED)
+    np.testing.assert_array_equal(genotypes.indptr, expected_sparse.indptr)
+    np.testing.assert_array_equal(genotypes.indices, expected_sparse.indices)
+    np.testing.assert_array_equal(genotypes.data, expected_sparse.data)
     np.testing.assert_array_equal(np.asarray(genotypes.sum(axis=0)).ravel(), EXPECTED_PHASED.sum(axis=0))
-    assert flip.tolist() == [False] * 9
+    assert flip.tolist() == [False] * 11
     assert list(zip(variants["POS"], variants["ID"], variants["ALT"])) == EXPECTED_VARIANTS
     assert iids == ["S1", "S2", "S3", "S4"]
     audit = next(record.message for record in caplog.records if record.message.startswith("VCF read audit:"))
     assert "'missing_call_records_removed': 1" in audit
     assert "'zero_carrier_alts_removed': 1" in audit
-    assert "'exact_duplicates_removed': 1" in audit
-    assert "'conflicting_duplicates_removed': 1" in audit
-    assert "'emitted_columns': 9" in audit
-    assert "'biallelic_columns_emitted': 4" in audit
+    assert "'emitted_columns': 11" in audit
+    assert "'biallelic_columns_emitted': 6" in audit
     assert "'multiallelic_alt_columns_emitted': 5" in audit
-    assert any("first ID=duplicate-first, later ID=duplicate-later" in record.message for record in caplog.records)
+    duplicate_audit = next(
+        record.message for record in caplog.records if record.message.startswith("Duplicate variant audit:")
+    )
+    assert "duplicate_keys=1" in duplicate_audit
+    assert "extra_columns=2" in duplicate_audit
+    assert "IDs=duplicate-first,duplicate-exact,duplicate-later" in duplicate_audit
 
 
 def test_vcf_progress_and_phase_logging(test_data_dir, caplog, monkeypatch):
@@ -102,13 +86,29 @@ def test_vcf_progress_and_phase_logging(test_data_dir, caplog, monkeypatch):
     progress = next(message for message in messages if message.startswith("VCF progress:"))
     assert "records=" in progress
     assert "emitted_columns=" in progress
-    assert "unique_keys=" in progress
     assert "buffered_nonzeros=" in progress
     assert any(message.startswith("Finished VCF iteration:") for message in messages)
     assert any(message.startswith("Starting array concatenation:") for message in messages)
     assert any(message.startswith("Finished array concatenation:") for message in messages)
     assert any(message.startswith("Starting CSC construction:") for message in messages)
     assert any(message.startswith("Finished CSC construction:") for message in messages)
+
+
+def test_duplicate_audit_also_runs_when_multiallelic_records_are_removed(test_data_dir, caplog):
+    logger = logging.getLogger("linear_dag.tests.multiallelic.remove")
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        genotypes, _, _, _ = read_vcf(
+            test_data_dir / "multiallelic_split.vcf",
+            remove_multiallelics=True,
+            logger=logger,
+        )
+
+    assert genotypes.shape[1] == 6
+    duplicate_audit = next(
+        record.message for record in caplog.records if record.message.startswith("Duplicate variant audit:")
+    )
+    assert "duplicate_keys=1" in duplicate_audit
+    assert "extra_columns=2" in duplicate_audit
 
 
 def test_native_unphased_split_is_alt_specific_dosage(test_data_dir):
@@ -118,7 +118,7 @@ def test_native_unphased_split_is_alt_specific_dosage(test_data_dir):
         split_multiallelics=True,
     )
 
-    np.testing.assert_array_equal(genotypes.toarray(), EXPECTED_PHASED.reshape(4, 2, 9).sum(axis=1))
+    np.testing.assert_array_equal(genotypes.toarray(), EXPECTED_PHASED.reshape(4, 2, 11).sum(axis=1))
     assert list(zip(variants["POS"], variants["ID"], variants["ALT"])) == EXPECTED_VARIANTS
 
 
@@ -159,8 +159,10 @@ def test_filters_and_flips_are_applied_per_alt(test_data_dir):
 
     assert "AT" not in variants["ALT"].to_list()
     high_frequency_index = variants["ID"].to_list().index("high-frequency")
-    assert flip.sum() == 1
+    duplicate_later_index = variants["ID"].to_list().index("duplicate-later")
+    assert flip.sum() == 2
     assert flip[high_frequency_index]
+    assert flip[duplicate_later_index]
     np.testing.assert_array_equal(genotypes[:, high_frequency_index].toarray().ravel(), [0, 0, 0, 0, 0, 0, 1, 0])
 
 
@@ -176,7 +178,7 @@ def test_maf_filter_is_applied_per_alt(test_data_dir, caplog):
 
     assert "high-frequency" not in variants["ID"].to_list()
     audit = next(record.message for record in caplog.records if record.message.startswith("VCF read audit:"))
-    assert "'maf_alts_removed': 1" in audit
+    assert "'maf_alts_removed': 2" in audit
 
 
 def test_split_and_remove_are_mutually_exclusive(test_data_dir):
@@ -234,7 +236,6 @@ def test_native_split_matches_bcftools_118(test_data_dir, tmp_path):
         pytest.skip("reference comparison is pinned to bcftools 1.18")
 
     split_vcf = tmp_path / "split.vcf"
-    normalized = tmp_path / "normalized.vcf"
     subprocess.run(
         [
             bcftools,
@@ -250,18 +251,11 @@ def test_native_split_matches_bcftools_118(test_data_dir, tmp_path):
         capture_output=True,
         text=True,
     )
-    # bcftools 1.18 rejects combining -m and -d in one invocation, so exact
-    # deduplication is a second normalization pass.
-    subprocess.run(
-        [bcftools, "norm", "-d", "exact", "-Ov", "-o", normalized, split_vcf],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
     native = read_vcf(test_data_dir / "multiallelic_split.vcf", split_multiallelics=True)
     # Reuse the enabled-path missing-record and zero-carrier policies on the
-    # already split reference; raw bcftools intentionally retains both.
-    reference = read_vcf(normalized, split_multiallelics=True)
+    # already split reference; raw bcftools intentionally retains both and all
+    # duplicate records.
+    reference = read_vcf(split_vcf, split_multiallelics=True)
 
     np.testing.assert_array_equal(native[0].toarray(), reference[0].toarray())
     np.testing.assert_array_equal(native[1], reference[1])

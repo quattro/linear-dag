@@ -162,8 +162,6 @@ def test_native_multiallelic_step1_artifact_survives_optimized_steps2_and3(test_
     genotype_path = genotype_dir / f"{partition_id}.h5"
     variant_info = write_vcf_to_hdf5(vcf_path, genotype_path, split_multiallelics=True)
     variant_info.write_csv(metadata_dir / f"{partition_id}.txt", separator=" ")
-    with h5py.File(genotype_path, "a") as genotype_file:
-        genotype_file.attrs["multiallelic_policy"] = "split"
 
     run_forward_backward(str(tmp_path), "", partition_id)
     reduction_union_recom(str(tmp_path), "", partition_id)

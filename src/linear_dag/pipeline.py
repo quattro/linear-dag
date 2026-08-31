@@ -34,29 +34,6 @@ def _coerce_logger(
     return MemoryLogger(__name__, log_file=log_file).logger
 
 
-def _multiallelic_policy(remove_multiallelics: bool, split_multiallelics: bool) -> str:
-    if remove_multiallelics and split_multiallelics:
-        raise ValueError("remove_multiallelics and split_multiallelics are mutually exclusive")
-    if split_multiallelics:
-        return "split"
-    if remove_multiallelics:
-        return "remove"
-    return "reject"
-
-
-def _metadata_multiallelic_policy(params: dict[str, str]) -> tuple[str, bool, bool]:
-    remove_multiallelics = params.get("remove_multiallelics", "False") == "True"
-    split_multiallelics = params.get("split_multiallelics", "False") == "True"
-    derived_policy = _multiallelic_policy(remove_multiallelics, split_multiallelics)
-    recorded_policy = params.get("multiallelic_policy", derived_policy)
-    if recorded_policy not in {"reject", "remove", "split"} or recorded_policy != derived_policy:
-        raise ValueError(
-            "Incompatible multiallelic policy in step metadata: "
-            f"recorded={recorded_policy!r}, derived={derived_policy!r}"
-        )
-    return recorded_policy, remove_multiallelics, split_multiallelics
-
-
 def _peak_memory_mb() -> float:
     maximum_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return maximum_rss / (1024 * 1024) if sys.platform == "darwin" else maximum_rss / 1024
@@ -98,6 +75,7 @@ def compress_vcf(
     - `remove_multiallelics`: Whether to exclude multiallelic sites instead of
       raising an error.
     - `split_multiallelics`: Whether to emit one variant column per ALT allele.
+      For multi-step compression, keep the multiallelic choice fixed for the run.
     - `add_individual_nodes`: Whether to append individual nodes before writing.
 
     **Returns:**
@@ -175,6 +153,10 @@ def msc_step0(
         `bcftools` is required because genomic extents are discovered by shelling
         out to `bcftools query`.
 
+        Choose the multiallelic behavior when creating the run and keep it fixed
+        while resuming later steps. Start a new output directory to change between
+        rejection, removal, and ALT-specific splitting.
+
     **Arguments:**
 
     - `vcf_metadata`: Path to the metadata table describing per-chromosome VCF inputs.
@@ -196,6 +178,8 @@ def msc_step0(
     - `None`. Planning metadata are written to disk under `out`.
     """
     logger = _coerce_logger(logger)
+    if remove_multiallelics and split_multiallelics:
+        raise ValueError("remove_multiallelics and split_multiallelics are mutually exclusive")
     os.makedirs(out, exist_ok=True)
 
     vcf_meta = pl.read_csv(vcf_metadata, separator=" ")
@@ -256,7 +240,6 @@ def msc_step0(
                 job_meta = pl.concat([job_meta, new_row])
             n_large_jobs += 1
 
-    multiallelic_policy = _multiallelic_policy(remove_multiallelics, split_multiallelics)
     params = {
         "large_partition_size": str(large_partition_size),
         "n_small_blocks": str(n_small_blocks),
@@ -267,7 +250,6 @@ def msc_step0(
         "remove_indels": str(remove_indels),
         "remove_multiallelics": str(remove_multiallelics),
         "split_multiallelics": str(split_multiallelics),
-        "multiallelic_policy": multiallelic_policy,
         "sex_path": str(sex_path),
         "mount_point": "" if mount_point is None else str(mount_point),
     }
@@ -312,21 +294,14 @@ def msc_step1(
     keep = None if params["keep"] == "None" else params["keep"]
     maf = None if params["maf"] == "None" else float(params["maf"])
     remove_indels = params["remove_indels"] == "True"
-    multiallelic_policy, remove_multiallelics, split_multiallelics = _metadata_multiallelic_policy(params)
+    remove_multiallelics = params.get("remove_multiallelics", "False") == "True"
+    split_multiallelics = params.get("split_multiallelics", "False") == "True"
     sex_path = None if params["sex_path"] == "None" else params["sex_path"]
     mount_point = params["mount_point"]
     out = params["out"]
 
     genotype_path = f"{mount_point}{out}/genotype_matrices/{small_job_id}_{region}.h5"
     if os.path.exists(genotype_path):
-        if h5py.is_hdf5(genotype_path):
-            with h5py.File(genotype_path, "r") as matrix_file:
-                artifact_policy = matrix_file.attrs.get("multiallelic_policy")
-            if artifact_policy != multiallelic_policy:
-                raise ValueError(
-                    "Existing step-1 genotype artifact has an incompatible multiallelic policy: "
-                    f"artifact={artifact_policy!r}, metadata={multiallelic_policy!r}"
-                )
         logger.info(f"Genotype matrix for {small_job_id}_{region} already exists. Skipping.")
     else:
         make_genotype_matrix(
@@ -340,21 +315,12 @@ def msc_step1(
             remove_indels=remove_indels,
             remove_multiallelics=remove_multiallelics,
             split_multiallelics=split_multiallelics,
-            multiallelic_policy=multiallelic_policy,
             sex_path=sex_path,
             logger=logger,
         )
 
     forward_graph_path = f"{mount_point}{out}/forward_backward_graphs/{small_job_id}_{region}_forward_graph.h5"
     if os.path.exists(forward_graph_path):
-        if h5py.is_hdf5(forward_graph_path):
-            with h5py.File(forward_graph_path, "r") as graph_file:
-                graph_policy = graph_file.attrs.get("multiallelic_policy")
-            if graph_policy != multiallelic_policy:
-                raise ValueError(
-                    "Existing step-1 graph artifact has an incompatible multiallelic policy: "
-                    f"artifact={graph_policy!r}, metadata={multiallelic_policy!r}"
-                )
         logger.info(f"Forward backward graph for {small_job_id}_{region} already exists. Skipping.")
     else:
         run_forward_backward(
@@ -754,7 +720,6 @@ def make_genotype_matrix(
     sex_path=None,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
     split_multiallelics: bool = False,
-    multiallelic_policy: Optional[str] = None,
 ):
     """Stream one regional genotype matrix plus variant metadata sidecars.
 
@@ -769,18 +734,13 @@ def make_genotype_matrix(
         deterministically.
 
         Multiallelic variants raise an error unless removal or splitting is enabled.
+        The setting comes from Step 0 and remains fixed for the run.
     """
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/variant_metadata/", exist_ok=True)
     os.makedirs(f"{out}/genotype_matrices/", exist_ok=True)
 
     logger = _coerce_logger(logger, log_file=f"{out}/logs/{partition_number}_{region}_make_genotype_matrix.log")
-    selected_policy = _multiallelic_policy(remove_multiallelics, split_multiallelics)
-    if multiallelic_policy is not None and multiallelic_policy != selected_policy:
-        raise ValueError(
-            "Requested genotype policy does not match step metadata: "
-            f"requested={selected_policy!r}, metadata={multiallelic_policy!r}"
-        )
 
     if samples_path is not None:
         samples = load_sample_ids(samples_path)
@@ -812,22 +772,21 @@ def make_genotype_matrix(
     )
     if v_info is None:
         logger.info("No variants found")
-        with h5py.File(genotype_path, "a") as f:
-            f.attrs["multiallelic_policy"] = selected_policy
         with open(f"{out}/variant_metadata/{partition_number}_{region}.txt", "w") as f:
             f.write("# No variants found in this region\n")
 
         return None
 
     t2 = time.time()
-    with h5py.File(genotype_path, "a") as f:
-        f.attrs["multiallelic_policy"] = selected_policy
+    with h5py.File(genotype_path, "r") as f:
         shape = tuple(f["shape"][:])
         nnz = int(f["data"].shape[0])
     logger.info(f"VCF streaming completed in {np.round(t2 - t1, 3)} seconds")
     logger.info(
-        "Step-1 genotype audit: policy=%s shape=%s nnz=%s elapsed_seconds=%.3f peak_memory_mb=%.1f",
-        selected_policy,
+        "Step-1 genotype audit: remove_multiallelics=%s split_multiallelics=%s "
+        "shape=%s nnz=%s elapsed_seconds=%.3f peak_memory_mb=%.1f",
+        remove_multiallelics,
+        split_multiallelics,
         shape,
         nnz,
         t2 - t1,
@@ -865,14 +824,11 @@ def run_forward_backward(
     genotype_path = f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5"
     with h5py.File(genotype_path, "r") as f:
         is_empty = f.attrs.get("is_empty", False)
-        multiallelic_policy = f.attrs.get("multiallelic_policy", "reject")
         if is_empty:
             with h5py.File(f"{out}/forward_backward_graphs/{partition_identifier}_forward_graph.h5", "w") as f:
                 f.attrs["is_empty"] = True
-                f.attrs["multiallelic_policy"] = multiallelic_policy
             with h5py.File(f"{out}/forward_backward_graphs/{partition_identifier}_backward_graph.h5", "w") as f:
                 f.attrs["is_empty"] = True
-                f.attrs["multiallelic_policy"] = multiallelic_policy
             with open(f"{out}/forward_backward_graphs/{partition_identifier}_sample_indices.txt", "w") as f:
                 f.write("# No variants found in this region\n")
             logger.info("Genotype matrix is empty")
@@ -887,10 +843,6 @@ def run_forward_backward(
         add_samples=True,
         out=f"{out}/forward_backward_graphs/{partition_identifier}",
     )
-    for direction in ("forward", "backward"):
-        graph_path = f"{out}/forward_backward_graphs/{partition_identifier}_{direction}_graph.h5"
-        with h5py.File(graph_path, "a") as graph_file:
-            graph_file.attrs["multiallelic_policy"] = multiallelic_policy
     np.savetxt(f"{out}/forward_backward_graphs/{partition_identifier}_sample_indices.txt", sample_indices)
     t4 = time.time()
     logger.info(f"Forward and backward brick graph algorithms completed in {np.round(t4 - t3, 3)} seconds")

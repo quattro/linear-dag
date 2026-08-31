@@ -4,7 +4,6 @@ import logging
 from contextlib import redirect_stdout
 from pathlib import Path
 
-import h5py
 import numpy as np
 import polars as pl
 
@@ -87,10 +86,10 @@ def test_msc_step0_records_remove_multiallelics_metadata(monkeypatch, tmp_path: 
     metadata = pl.read_parquet_metadata(out_dir / "job_metadata.parquet")
     assert metadata["remove_multiallelics"] == "True"
     assert metadata["split_multiallelics"] == "False"
-    assert metadata["multiallelic_policy"] == "remove"
+    assert "multiallelic_policy" not in metadata
 
 
-def test_msc_step0_records_split_multiallelic_policy(monkeypatch, tmp_path: Path):
+def test_msc_step0_records_split_multiallelic_setting(monkeypatch, tmp_path: Path):
     vcf_metadata = tmp_path / "vcf_metadata.txt"
     vcf_metadata.write_text("chr vcf_path\nchr1 input.vcf.gz\n")
     out_dir = tmp_path / "kodama"
@@ -111,7 +110,7 @@ def test_msc_step0_records_split_multiallelic_policy(monkeypatch, tmp_path: Path
     metadata = pl.read_parquet_metadata(out_dir / "job_metadata.parquet")
     assert metadata["remove_multiallelics"] == "False"
     assert metadata["split_multiallelics"] == "True"
-    assert metadata["multiallelic_policy"] == "split"
+    assert "multiallelic_policy" not in metadata
 
 
 def test_msc_step1_reads_remove_multiallelics_metadata(monkeypatch, tmp_path: Path):
@@ -154,73 +153,7 @@ def test_msc_step1_reads_remove_multiallelics_metadata(monkeypatch, tmp_path: Pa
     assert captured["vcf_path"] == "input.vcf.gz"
     assert captured["region"] == "chr1:100-150"
     assert captured["remove_multiallelics"] is True
-
-
-def test_msc_step1_rejects_inconsistent_multiallelic_metadata(tmp_path: Path):
-    jobs_metadata = tmp_path / "job_metadata.parquet"
-    pl.DataFrame(
-        {
-            "small_job_id": [0],
-            "large_job_id": [0],
-            "small_region": ["chr1:100-150"],
-            "large_region": ["chr1:100-200"],
-            "vcf_path": ["input.vcf.gz"],
-        }
-    ).write_parquet(
-        jobs_metadata,
-        metadata={
-            "flip_minor_alleles": "False",
-            "keep": "None",
-            "maf": "None",
-            "remove_indels": "False",
-            "remove_multiallelics": "False",
-            "split_multiallelics": "True",
-            "multiallelic_policy": "remove",
-            "sex_path": "None",
-            "mount_point": "",
-            "out": str(tmp_path / "out"),
-        },
-    )
-
-    with np.testing.assert_raises_regex(ValueError, "Incompatible multiallelic policy"):
-        pipeline.msc_step1(str(jobs_metadata), 0)
-
-
-def test_msc_step1_rejects_existing_artifact_from_another_policy(tmp_path: Path):
-    out_dir = tmp_path / "out"
-    matrix_dir = out_dir / "genotype_matrices"
-    matrix_dir.mkdir(parents=True)
-    region = "chr1:100-150"
-    with h5py.File(matrix_dir / f"0_{region}.h5", "w") as matrix_file:
-        matrix_file.attrs["multiallelic_policy"] = "remove"
-
-    jobs_metadata = tmp_path / "job_metadata.parquet"
-    pl.DataFrame(
-        {
-            "small_job_id": [0],
-            "large_job_id": [0],
-            "small_region": [region],
-            "large_region": ["chr1:100-200"],
-            "vcf_path": ["input.vcf.gz"],
-        }
-    ).write_parquet(
-        jobs_metadata,
-        metadata={
-            "flip_minor_alleles": "False",
-            "keep": "None",
-            "maf": "None",
-            "remove_indels": "False",
-            "remove_multiallelics": "False",
-            "split_multiallelics": "True",
-            "multiallelic_policy": "split",
-            "sex_path": "None",
-            "mount_point": "",
-            "out": str(out_dir),
-        },
-    )
-
-    with np.testing.assert_raises_regex(ValueError, "artifact has an incompatible multiallelic policy"):
-        pipeline.msc_step1(str(jobs_metadata), 0)
+    assert captured["split_multiallelics"] is False
 
 
 def test_load_genotypes_does_not_print_progress(tmp_path: Path):

@@ -291,7 +291,8 @@ class LinearARG(LinearOperator):
         - `snps_only`: Whether to remove indels.
         - `remove_multiallelics`: Whether to exclude multiallelic sites instead
           of raising an error.
-        - `split_multiallelics`: Whether to emit one column per ALT allele.
+        - `split_multiallelics`: Whether to emit one column per ALT allele. For
+          multi-step compression, keep the multiallelic choice fixed for the run.
 
         **Returns:**
 

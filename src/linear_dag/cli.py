@@ -935,7 +935,10 @@ def _main(args):
     compress_multiallelic_group.add_argument(
         "--split-multiallelics",
         action="store_true",
-        help="Emit one ALT-specific genotype column for each multi-allelic site.",
+        help=(
+            "Emit one ALT-specific genotype column for each multi-allelic site. "
+            "For multi-step compression, choose the behavior in step 0 and keep it fixed for the run."
+        ),
     )
     compress_p.add_argument(
         "--add-individual-nodes", action="store_true", help="Add individual nodes for Hardy Weinberg calculations."
@@ -984,12 +987,18 @@ def _main(args):
     step0_multiallelic_group.add_argument(
         "--remove-multiallelics",
         action="store_true",
-        help="Exclude multi-allelic sites instead of raising an error.",
+        help=(
+            "Exclude multi-allelic sites instead of raising an error. "
+            "Choose this behavior at step 0 and do not change it while resuming the run."
+        ),
     )
     step0_multiallelic_group.add_argument(
         "--split-multiallelics",
         action="store_true",
-        help="Emit one ALT-specific genotype column for each multi-allelic site.",
+        help=(
+            "Emit one ALT-specific genotype column for each multi-allelic site. "
+            "Choose this behavior at step 0 and do not change it while resuming the run."
+        ),
     )
     step0_p.add_argument(
         "--sex-path",

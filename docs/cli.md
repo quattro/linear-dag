@@ -37,8 +37,11 @@ kodama compress input.vcf.gz output.h5 \
 | `--maf FLOAT` | Exclude variants below this MAF threshold |
 | `--remove-indels` | Exclude indels |
 | `--remove-multiallelics` | Exclude multi-allelic sites |
+| `--split-multiallelics` | Emit one ALT-specific genotype column for each multi-allelic site |
 | `--add-individual-nodes` | Add individual nodes (required for `--no-hwe` in `assoc`) |
 | `--region chrN:start-end` | Restrict to a genomic region |
+
+VCF ingestion retains repeated `(CHROM, POS, REF, ALT)` columns and reports them in a duplicate-variant warning after parsing.
 
 ---
 
@@ -73,6 +76,8 @@ kodama multi-step-compress step0 -h
 ```
 
 The output of this step is `out_dir/job_metadata.parquet` which is the input for subsequent steps.
+
+Choose the multiallelic behavior in Step 0 and keep it fixed for the entire run. To change between rejecting, removing, or splitting multiallelic sites, start a new output directory rather than resuming an existing run.
 
 ### Step 1: Extract genotype matrix and infer forward and backward graphs
 
