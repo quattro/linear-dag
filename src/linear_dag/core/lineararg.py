@@ -772,7 +772,8 @@ class LinearARG(LinearOperator):
 
             Heterozygous calls are pseudo-phased to minimize incremental graph
             storage. Diploid dosage is preserved, but the selected phase is not
-            a biological inference.
+            a biological inference. Input blocks must contain two adjacent
+            haplotype rows for every diploid IID.
 
         **Arguments:**
 

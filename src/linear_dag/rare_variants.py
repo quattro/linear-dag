@@ -6,11 +6,11 @@ individual/variant call.  DOSAGE must be 1 or 2, and the total dosage for a
 variant must be one or two.
 
 Heterozygous calls are pseudo-phased to minimize incremental graph storage.
-Singletons point directly to one deterministic haplotype sample node and add
-no graph nodes or edges.  For doubletons, an existing rare-variant node is
-preferred, followed by a carrier pattern selected earlier in the same run.
-Remaining ties are deterministic.  The result preserves diploid dosage, but
-the chosen rare-variant phase is not a biological inference.
+An existing rare-variant node is preferred, followed by a carrier pattern
+selected earlier in the same run. Remaining ties are deterministic. The
+result preserves diploid dosage, but the chosen rare-variant phase is not a
+biological inference. Input blocks must contain two adjacent haplotype rows
+for every diploid IID.
 """
 
 from __future__ import annotations
@@ -39,6 +39,23 @@ except ImportError:
 
 REQUIRED_COLUMNS = ("CHROM", "POS", "ID", "REF", "ALT", "IID", "DOSAGE")
 META_COLUMNS = ("CHROM", "POS", "ID", "REF", "ALT")
+
+
+def _decode(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def _normalize_chromosome(value: object) -> str:
+    chrom = _decode(value)
+    if chrom.lower().startswith("chr"):
+        chrom = chrom[3:]
+    return chrom.upper()
+
+
+def _allele_key(chrom: object, pos: int, ref: object, alt: object) -> tuple[str, int, str, str]:
+    return _normalize_chromosome(chrom), int(pos), _decode(ref), _decode(alt)
 
 
 @dataclass(frozen=True)
@@ -80,7 +97,7 @@ class RareVariant:
 
     @property
     def allele_key(self) -> tuple[str, int, str, str]:
-        return self.chrom, self.pos, self.ref, self.alt
+        return _allele_key(self.chrom, self.pos, self.ref, self.alt)
 
 
 @dataclass
@@ -95,7 +112,6 @@ class AugmentationStats:
     """
 
     variants_added: int = 0
-    direct_singletons: int = 0
     reused_existing_nodes: int = 0
     reused_new_nodes: int = 0
     nodes_added: int = 0
@@ -104,12 +120,6 @@ class AugmentationStats:
     def add(self, other: "AugmentationStats") -> None:
         for field in self.__dataclass_fields__:
             setattr(self, field, getattr(self, field) + getattr(other, field))
-
-
-def _decode(value: object) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    return str(value)
 
 
 def _read_carrier_table(path: Path) -> list[RareVariant]:
@@ -128,8 +138,11 @@ def _read_carrier_table(path: Path) -> list[RareVariant]:
                 raise ValueError(f"invalid POS or DOSAGE on line {line_number}") from exc
             if pos < 1 or dosage not in (1, 2):
                 raise ValueError(f"invalid POS or DOSAGE on line {line_number}")
-            key = (row["CHROM"], pos, row["REF"], row["ALT"])
-            item = grouped.setdefault(key, {"id": row["ID"] or ".", "calls": {}})
+            key = _allele_key(row["CHROM"], pos, row["REF"], row["ALT"])
+            item = grouped.setdefault(
+                key,
+                {"chrom": row["CHROM"], "id": row["ID"] or ".", "calls": {}},
+            )
             if item["id"] != (row["ID"] or "."):
                 raise ValueError(f"conflicting IDs for allele {key}")
             calls = item["calls"]
@@ -139,15 +152,15 @@ def _read_carrier_table(path: Path) -> list[RareVariant]:
             calls[row["IID"]] = dosage
 
     result = []
-    for (chrom, pos, ref, alt), item in grouped.items():
+    for (_, pos, ref, alt), item in grouped.items():
         calls_dict = item["calls"]
         assert isinstance(calls_dict, dict)
         calls = tuple(CarrierCall(iid, dosage) for iid, dosage in sorted(calls_dict.items()))
-        variant = RareVariant(chrom, pos, str(item["id"]), ref, alt, calls)
+        variant = RareVariant(str(item["chrom"]), pos, str(item["id"]), ref, alt, calls)
         if variant.allele_count not in (1, 2):
             raise ValueError(f"allele {variant.allele_key} has allele count {variant.allele_count}; expected 1 or 2")
         result.append(variant)
-    return sorted(result, key=lambda v: (v.chrom, v.pos, v.ref, v.alt, v.variant_id))
+    return sorted(result, key=lambda v: (*v.allele_key, v.variant_id))
 
 
 def _block_names(h5: h5py.File) -> list[str]:
@@ -155,7 +168,7 @@ def _block_names(h5: h5py.File) -> list[str]:
 
 
 def _chrom_equal(left: object, right: str) -> bool:
-    return _decode(left).removeprefix("chr") == right.removeprefix("chr")
+    return _normalize_chromosome(left) == _normalize_chromosome(right)
 
 
 def _assign_variants_to_blocks(h5: h5py.File, variants: Sequence[RareVariant]) -> dict[str, list[RareVariant]]:
@@ -318,6 +331,46 @@ def _metadata(group: h5py.Group) -> dict[str, list[object]]:
     return {name: list(group[name][:]) for name in META_COLUMNS}
 
 
+def _diploid_iid_map(iids: Sequence[str], n_samples: int, block_name: str) -> dict[str, int]:
+    """Map deployed adjacent haplotype IID pairs to diploid individuals."""
+    if n_samples % 2 != 0 or len(iids) != n_samples:
+        raise ValueError(
+            f"block {block_name} has {n_samples} haplotypes and {len(iids)} IID rows; "
+            "this utility requires two adjacent haplotype rows per diploid IID"
+        )
+    paired_iids = list(zip(iids[0::2], iids[1::2]))
+    mismatched = [(left, right) for left, right in paired_iids if left != right]
+    if mismatched:
+        raise ValueError(f"LinearARG haplotype IID rows are not adjacent matching pairs: {mismatched[:5]}")
+    individual_iids = [left for left, _ in paired_iids]
+    iid_to_index = {iid: index for index, iid in enumerate(individual_iids)}
+    if len(iid_to_index) != len(individual_iids):
+        raise ValueError("LinearARG contains duplicate diploid IIDs")
+    return iid_to_index
+
+
+def _update_threshold_counts(group: h5py.Group, variants: Sequence[RareVariant], n_samples: int) -> None:
+    """Add the new variants to persisted MAF-threshold summary counts."""
+    has_values = "threshold_values" in group.attrs
+    has_counts = "threshold_n_variants" in group.attrs
+    if not has_values and not has_counts:
+        return
+    if has_values != has_counts:
+        raise ValueError(f"block {group.name} has incomplete threshold summary attributes")
+
+    thresholds = np.asarray(group.attrs["threshold_values"])
+    counts = np.asarray(group.attrs["threshold_n_variants"])
+    if thresholds.ndim != 1 or counts.shape != thresholds.shape:
+        raise ValueError(f"block {group.name} has inconsistent threshold summary attributes")
+
+    added_counts = np.asarray([variant.allele_count for variant in variants], dtype=np.float64)
+    added_frequencies = added_counts / n_samples
+    added_maf = np.minimum(added_frequencies, 1 - added_frequencies)
+    increments = (added_maf[:, np.newaxis] > thresholds).sum(axis=0)
+    updated = counts + increments
+    group.attrs.modify("threshold_n_variants", updated.astype(counts.dtype, copy=False))
+
+
 def _augment_block(
     group: h5py.Group,
     variants: Sequence[RareVariant],
@@ -330,59 +383,42 @@ def _augment_block(
     n_nodes = int(group.attrs["n"])
     n_samples = int(group.attrs["n_samples"])
     n_individual_nodes = int(group.attrs.get("n_individuals", 0))
-    if n_samples != 2 * len(iids):
-        raise ValueError(
-            f"block {group.name} has {n_samples} haplotypes for {len(iids)} IIDs; "
-            "this utility currently requires two haplotypes per IID"
-        )
-    iid_to_index = {iid: index for index, iid in enumerate(iids)}
-    if len(iid_to_index) != len(iids):
-        raise ValueError("LinearARG contains duplicate IIDs")
+    iid_to_index = _diploid_iid_map(iids, n_samples, group.name)
 
     old_variant_indices = np.asarray(group["variant_indices"][:], dtype=np.int64)
     old_flip = np.asarray(group["flip"][:], dtype=bool)
     metadata = _metadata(group)
     old_keys = {
-        (_decode(chrom), int(pos), _decode(ref), _decode(alt))
+        _allele_key(chrom, pos, ref, alt)
         for chrom, pos, ref, alt in zip(metadata["CHROM"], metadata["POS"], metadata["REF"], metadata["ALT"])
     }
     duplicate = [variant.allele_key for variant in variants if variant.allele_key in old_keys]
     if duplicate:
         raise ValueError(f"rare-variant input already exists in block {group.name}: {duplicate[:5]}")
 
-    has_doubletons = any(variant.allele_count == 2 for variant in variants)
+    A = _read_matrix(group)
+    core_n = n_nodes - n_individual_nodes
+    A_core = A[:core_n, :core_n].tocsc()
     if "allele_counts" in group:
         old_counts = np.asarray(group["allele_counts"][:], dtype=np.int64)
-        doubleton_mask = np.flatnonzero(old_counts == 2)
+        rare_mask = np.flatnonzero((old_counts >= 1) & (old_counts <= 2))
     else:
         old_counts = None
-        doubleton_mask = np.arange(len(old_variant_indices))
-    if has_doubletons:
-        A = _read_matrix(group)
-        core_n = n_nodes - n_individual_nodes
-        A_core = A[:core_n, :core_n].tocsc()
-        signatures_by_node = _capped_leaf_signatures(A_core, old_variant_indices[doubleton_mask], n_samples)
-    else:
-        signatures_by_node = {}
+        rare_mask = np.arange(len(old_variant_indices))
+    signatures_by_node = _capped_leaf_signatures(A_core, old_variant_indices[rare_mask], n_samples)
     existing_nodes: dict[tuple[int, ...], int] = {}
     for node, signature in signatures_by_node.items():
-        if len(signature) == 2:
-            existing_nodes.setdefault(signature, node)
+        existing_nodes.setdefault(signature, node)
 
     selected_nodes: dict[tuple[int, ...], int] = {}
     chosen: list[tuple[RareVariant, tuple[int, ...], str]] = []
     novel_signatures: list[tuple[int, ...]] = []
     for variant in sorted(variants, key=lambda value: (value.pos, value.ref, value.alt, value.variant_id)):
-        candidates = _phase_candidates(variant, iid_to_index)
-        if variant.allele_count == 1:
-            # Either haplotype preserves the unphased dosage.  Pointing the
-            # variant directly at the deterministic first candidate avoids
-            # both carrier-signature traversal and a singleton graph node.
-            signature = min(candidates)
-            source = "sample"
-            stats.direct_singletons += 1
-        else:
-            signature, source = _choose_signature(candidates, existing_nodes, selected_nodes)
+        signature, source = _choose_signature(
+            _phase_candidates(variant, iid_to_index),
+            existing_nodes,
+            selected_nodes,
+        )
         if source == "existing":
             stats.reused_existing_nodes += 1
         elif source == "selected":
@@ -394,9 +430,7 @@ def _augment_block(
             stats.edges_added += len(signature)
         chosen.append((variant, signature, source))
 
-    old_samples = _sample_indices(n_nodes, n_samples, n_individual_nodes)
     if novel_signatures:
-        assert has_doubletons
         expanded, mapping, new_nodes = _expand_graph(A, novel_signatures, n_samples, n_individual_nodes)
     else:
         expanded = None
@@ -410,16 +444,16 @@ def _augment_block(
 
     additions = []
     for ordinal, (variant, signature, source) in enumerate(chosen):
-        if source == "sample":
-            sample_node = old_samples[signature[0]]
-            node = int(sample_node if mapping is None else mapping[sample_node])
-        elif source == "existing":
+        if source == "existing":
             node = mapped_existing_nodes[signature]
         else:
             node = selected_nodes[signature]
+        output_chrom = (
+            _decode(metadata["CHROM"][0]) if metadata["CHROM"] else _decode(group.attrs.get("chrom", variant.chrom))
+        )
         additions.append(
             {
-                "CHROM": variant.chrom,
+                "CHROM": output_chrom,
                 "POS": variant.pos,
                 "ID": variant.variant_id,
                 "REF": variant.ref,
@@ -469,11 +503,13 @@ def _augment_block(
         group.attrs["n"] = expanded.shape[0]
         group.attrs["n_entries"] = expanded.nnz
     group.attrs["n_variants"] = len(records)
-    group.attrs["rare_variant_phase_method"] = "direct_singletons_greedy_doubletons"
+    _update_threshold_counts(group, variants, n_samples)
+    group.attrs["rare_variant_phase_method"] = "minimum_incremental_edges_greedy"
     group.attrs["rare_variant_phase_is_inferred"] = False
     group.attrs["rare_variant_diploid_dosage_preserved"] = True
     group.attrs["rare_variants_added"] = stats.variants_added
-    group.attrs["rare_variant_singletons_direct"] = stats.direct_singletons
+    if "rare_variant_singletons_direct" in group.attrs:
+        del group.attrs["rare_variant_singletons_direct"]
     group.attrs["rare_variant_nodes_added"] = stats.nodes_added
     group.attrs["rare_variant_edges_added"] = stats.edges_added
     return stats
@@ -534,13 +570,15 @@ def augment_rare_variants_file(
     """Copy and augment a block-structured LinearARG HDF5 file.
 
     The output is assembled under a temporary name and atomically installed
-    only after every block succeeds. Existing output paths are never replaced.
+    only after every block succeeds. An output path that already exists when
+    augmentation begins is rejected.
 
     !!! info
 
         Heterozygous calls are pseudo-phased to minimize incremental graph
         storage. Diploid dosage is preserved, but the selected phase is not a
-        biological inference.
+        biological inference. Input blocks must contain two adjacent haplotype
+        rows for every diploid IID.
 
     **Arguments:**
 
