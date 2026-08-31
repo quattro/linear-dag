@@ -6,10 +6,11 @@ individual/variant call.  DOSAGE must be 1 or 2, and the total dosage for a
 variant must be one or two.
 
 Heterozygous calls are pseudo-phased to minimize incremental graph storage.
-An existing rare-variant node is preferred, followed by a carrier pattern
-selected earlier in the same run.  Remaining ties are deterministic.  The
-result preserves diploid dosage, but the chosen rare-variant phase is not a
-biological inference.
+Singletons point directly to one deterministic haplotype sample node and add
+no graph nodes or edges.  For doubletons, an existing rare-variant node is
+preferred, followed by a carrier pattern selected earlier in the same run.
+Remaining ties are deterministic.  The result preserves diploid dosage, but
+the chosen rare-variant phase is not a biological inference.
 """
 
 from __future__ import annotations
@@ -94,6 +95,7 @@ class AugmentationStats:
     """
 
     variants_added: int = 0
+    direct_singletons: int = 0
     reused_existing_nodes: int = 0
     reused_new_nodes: int = 0
     nodes_added: int = 0
@@ -325,7 +327,7 @@ def _augment_block(
     stats = AugmentationStats(variants_added=len(variants))
     if not variants:
         return stats
-    A = _read_matrix(group)
+    n_nodes = int(group.attrs["n"])
     n_samples = int(group.attrs["n_samples"])
     n_individual_nodes = int(group.attrs.get("n_individuals", 0))
     if n_samples != 2 * len(iids):
@@ -348,43 +350,73 @@ def _augment_block(
     if duplicate:
         raise ValueError(f"rare-variant input already exists in block {group.name}: {duplicate[:5]}")
 
-    core_n = A.shape[0] - n_individual_nodes
-    A_core = A[:core_n, :core_n].tocsc()
+    has_doubletons = any(variant.allele_count == 2 for variant in variants)
     if "allele_counts" in group:
         old_counts = np.asarray(group["allele_counts"][:], dtype=np.int64)
-        rare_mask = np.flatnonzero((old_counts >= 1) & (old_counts <= 2))
+        doubleton_mask = np.flatnonzero(old_counts == 2)
     else:
         old_counts = None
-        rare_mask = np.arange(len(old_variant_indices))
-    signatures_by_node = _capped_leaf_signatures(A_core, old_variant_indices[rare_mask], n_samples)
+        doubleton_mask = np.arange(len(old_variant_indices))
+    if has_doubletons:
+        A = _read_matrix(group)
+        core_n = n_nodes - n_individual_nodes
+        A_core = A[:core_n, :core_n].tocsc()
+        signatures_by_node = _capped_leaf_signatures(A_core, old_variant_indices[doubleton_mask], n_samples)
+    else:
+        signatures_by_node = {}
     existing_nodes: dict[tuple[int, ...], int] = {}
     for node, signature in signatures_by_node.items():
-        existing_nodes.setdefault(signature, node)
+        if len(signature) == 2:
+            existing_nodes.setdefault(signature, node)
 
     selected_nodes: dict[tuple[int, ...], int] = {}
     chosen: list[tuple[RareVariant, tuple[int, ...], str]] = []
     novel_signatures: list[tuple[int, ...]] = []
     for variant in sorted(variants, key=lambda value: (value.pos, value.ref, value.alt, value.variant_id)):
-        signature, source = _choose_signature(_phase_candidates(variant, iid_to_index), existing_nodes, selected_nodes)
+        candidates = _phase_candidates(variant, iid_to_index)
+        if variant.allele_count == 1:
+            # Either haplotype preserves the unphased dosage.  Pointing the
+            # variant directly at the deterministic first candidate avoids
+            # both carrier-signature traversal and a singleton graph node.
+            signature = min(candidates)
+            source = "sample"
+            stats.direct_singletons += 1
+        else:
+            signature, source = _choose_signature(candidates, existing_nodes, selected_nodes)
         if source == "existing":
             stats.reused_existing_nodes += 1
         elif source == "selected":
             stats.reused_new_nodes += 1
-        else:
+        elif source == "new":
             selected_nodes[signature] = -1
             novel_signatures.append(signature)
             stats.nodes_added += 1
             stats.edges_added += len(signature)
         chosen.append((variant, signature, source))
 
-    expanded, mapping, new_nodes = _expand_graph(A, novel_signatures, n_samples, n_individual_nodes)
+    old_samples = _sample_indices(n_nodes, n_samples, n_individual_nodes)
+    if novel_signatures:
+        assert has_doubletons
+        expanded, mapping, new_nodes = _expand_graph(A, novel_signatures, n_samples, n_individual_nodes)
+    else:
+        expanded = None
+        mapping = None
+        new_nodes = []
     for signature, node in zip(novel_signatures, new_nodes):
         selected_nodes[signature] = node
-    mapped_existing_nodes = {signature: int(mapping[node]) for signature, node in existing_nodes.items()}
+    mapped_existing_nodes = {
+        signature: int(node if mapping is None else mapping[node]) for signature, node in existing_nodes.items()
+    }
 
     additions = []
     for ordinal, (variant, signature, source) in enumerate(chosen):
-        node = mapped_existing_nodes[signature] if source == "existing" else selected_nodes[signature]
+        if source == "sample":
+            sample_node = old_samples[signature[0]]
+            node = int(sample_node if mapping is None else mapping[sample_node])
+        elif source == "existing":
+            node = mapped_existing_nodes[signature]
+        else:
+            node = selected_nodes[signature]
         additions.append(
             {
                 "CHROM": variant.chrom,
@@ -405,7 +437,9 @@ def _augment_block(
         records.append(
             {
                 **{name: metadata[name][index] for name in META_COLUMNS},
-                "variant_index": int(mapping[old_variant_indices[index]]),
+                "variant_index": int(
+                    old_variant_indices[index] if mapping is None else mapping[old_variant_indices[index]]
+                ),
                 "flip": bool(old_flip[index]),
                 "allele_count": None if old_counts is None else int(old_counts[index]),
                 "is_new": False,
@@ -417,9 +451,10 @@ def _augment_block(
     # alleles; new alleles follow existing alleles at that position.
     records.sort(key=lambda record: (int(record["POS"]), bool(record["is_new"]), int(record["ordinal"])))
 
-    _replace_dataset(group, "indptr", expanded.indptr)
-    _replace_dataset(group, "indices", expanded.indices)
-    _replace_dataset(group, "data", expanded.data)
+    if expanded is not None:
+        _replace_dataset(group, "indptr", expanded.indptr)
+        _replace_dataset(group, "indices", expanded.indices)
+        _replace_dataset(group, "data", expanded.data)
     _replace_dataset(group, "variant_indices", np.asarray([r["variant_index"] for r in records], dtype=np.int32))
     _replace_dataset(group, "flip", np.asarray([r["flip"] for r in records], dtype=bool))
     for name in META_COLUMNS:
@@ -430,13 +465,15 @@ def _augment_block(
     if "nonunique_indices" in group:
         del group["nonunique_indices"]
 
-    group.attrs["n"] = expanded.shape[0]
+    if expanded is not None:
+        group.attrs["n"] = expanded.shape[0]
+        group.attrs["n_entries"] = expanded.nnz
     group.attrs["n_variants"] = len(records)
-    group.attrs["n_entries"] = expanded.nnz
-    group.attrs["rare_variant_phase_method"] = "minimum_incremental_edges_greedy"
+    group.attrs["rare_variant_phase_method"] = "direct_singletons_greedy_doubletons"
     group.attrs["rare_variant_phase_is_inferred"] = False
     group.attrs["rare_variant_diploid_dosage_preserved"] = True
     group.attrs["rare_variants_added"] = stats.variants_added
+    group.attrs["rare_variant_singletons_direct"] = stats.direct_singletons
     group.attrs["rare_variant_nodes_added"] = stats.nodes_added
     group.attrs["rare_variant_edges_added"] = stats.edges_added
     return stats
