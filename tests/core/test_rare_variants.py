@@ -45,10 +45,11 @@ def test_augment_rare_variants_file_preserves_diploid_dosage(tmp_path):
     stats = augment_rare_variants_file(input_h5, carrier_table, output_h5)
 
     assert stats.variants_added == 4
-    assert stats.reused_existing_nodes == 1
-    assert stats.reused_new_nodes == 1
-    assert stats.nodes_added == 2
-    assert stats.edges_added == 3
+    assert stats.direct_singletons == 3
+    assert stats.reused_existing_nodes == 0
+    assert stats.reused_new_nodes == 0
+    assert stats.nodes_added == 1
+    assert stats.edges_added == 2
     assert output_h5.exists()
     assert original.shape == (4, 1)
 
@@ -72,21 +73,22 @@ def test_augment_rare_variants_file_preserves_diploid_dosage(tmp_path):
     variant_nodes = dict(
         zip(augmented.variants.collect().get_column("POS").to_list(), augmented.variant_indices.tolist())
     )
-    assert variant_nodes[125] == variant_nodes[100]
-    assert variant_nodes[150] == variant_nodes[151]
-    assert all(node not in set(augmented.sample_indices) for node in variant_nodes.values())
+    assert variant_nodes[125] == augmented.sample_indices[0]
+    assert variant_nodes[150] == augmented.sample_indices[2]
+    assert variant_nodes[151] == augmented.sample_indices[2]
+    assert variant_nodes[160] not in set(augmented.sample_indices)
 
     with h5py.File(output_h5, "r") as handle:
         group = handle[block]
         assert not bool(group.attrs["rare_variant_phase_is_inferred"])
         assert bool(group.attrs["rare_variant_diploid_dosage_preserved"])
-        assert "rare_variant_singletons_direct" not in group.attrs
-        assert group.attrs["rare_variant_nodes_added"] == 2
-        assert group.attrs["rare_variant_edges_added"] == 3
+        assert group.attrs["rare_variant_singletons_direct"] == 3
+        assert group.attrs["rare_variant_nodes_added"] == 1
+        assert group.attrs["rare_variant_edges_added"] == 2
         assert "nonunique_indices" not in group
 
 
-def test_singletons_share_a_new_internal_node(tmp_path):
+def test_singletons_add_no_graph_nodes_or_edges(tmp_path):
     input_h5 = tmp_path / "input.h5"
     output_h5 = tmp_path / "output.h5"
     carrier_table = tmp_path / "carriers.tsv"
@@ -103,14 +105,13 @@ def test_singletons_share_a_new_internal_node(tmp_path):
     stats = augment_rare_variants_file(input_h5, carrier_table, output_h5)
 
     assert stats.variants_added == 2
-    assert stats.reused_new_nodes == 1
-    assert stats.nodes_added == 1
-    assert stats.edges_added == 1
+    assert stats.direct_singletons == 2
+    assert stats.nodes_added == 0
+    assert stats.edges_added == 0
 
     augmented = LinearARG.read(output_h5, block=block, load_metadata=True)
     new_nodes = augmented.variant_indices[1:]
-    np.testing.assert_array_equal(new_nodes, np.repeat(new_nodes[0], 2))
-    assert new_nodes[0] not in set(augmented.sample_indices)
+    np.testing.assert_array_equal(new_nodes, np.repeat(augmented.sample_indices[2], 2))
     np.testing.assert_array_equal(
         augmented @ np.eye(augmented.shape[1]),
         np.array(
@@ -125,8 +126,8 @@ def test_singletons_share_a_new_internal_node(tmp_path):
 
     with h5py.File(output_h5, "r") as handle:
         group = handle[block]
-        assert int(group.attrs["n"]) == original_n + 1
-        assert int(group.attrs["n_entries"]) == original_entries + 1
+        assert int(group.attrs["n"]) == original_n
+        assert int(group.attrs["n_entries"]) == original_entries
 
 
 def test_doubletons_share_a_new_internal_node(tmp_path):
@@ -145,6 +146,7 @@ def test_doubletons_share_a_new_internal_node(tmp_path):
     stats = augment_rare_variants_file(input_h5, carrier_table, output_h5)
 
     assert stats.variants_added == 2
+    assert stats.direct_singletons == 0
     assert stats.reused_new_nodes == 1
     assert stats.nodes_added == 1
     assert stats.edges_added == 2
@@ -210,28 +212,6 @@ def test_augmentation_rejects_nonpaired_haplotype_iids(tmp_path):
 
     with pytest.raises(ValueError, match="not adjacent matching pairs"):
         augment_rare_variants_file(input_h5, carrier_table, output_h5)
-
-
-def test_singleton_internal_nodes_survive_sample_removal(tmp_path):
-    input_h5 = tmp_path / "input.h5"
-    output_h5 = tmp_path / "output.h5"
-    carrier_table = tmp_path / "carriers.tsv"
-    _write_small_block(input_h5, iids=["1", "1", "2", "2"])
-    carrier_table.write_text("CHROM\tPOS\tID\tREF\tALT\tIID\tDOSAGE\n1\t150\tnew\tG\tA\t2\t1\n")
-    augment_rare_variants_file(input_h5, carrier_table, output_h5)
-    augmented = LinearARG.read(output_h5, block="1:1-1000", load_metadata=True)
-
-    assert augmented.variant_indices[1] not in set(augmented.sample_indices)
-    without_noncarrier = augmented.remove_samples(np.array(["1"]))
-    without_carrier = augmented.remove_samples(np.array(["2"]))
-    np.testing.assert_array_equal(
-        (without_noncarrier @ np.eye(without_noncarrier.shape[1])).sum(axis=0),
-        np.array([0, 1]),
-    )
-    np.testing.assert_array_equal(
-        (without_carrier @ np.eye(without_carrier.shape[1])).sum(axis=0),
-        np.array([1, 0]),
-    )
 
 
 def test_augmentation_updates_threshold_counts(tmp_path):
