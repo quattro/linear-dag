@@ -172,6 +172,28 @@ def test_zero_ac_variants():
     assert linarg.shape[0] == genotypes.shape[0]
 
 
+@pytest.mark.parametrize("find_recombinations", [False, True])
+def test_singletons_use_carrier_sample_nodes(find_recombinations):
+    genotypes = csc_matrix(
+        np.array(
+            [
+                [1, 1, 1],
+                [0, 0, 1],
+                [0, 0, 0],
+                [0, 0, 0],
+            ]
+        )
+    )
+    flip = np.zeros(genotypes.shape[1], dtype=bool)
+
+    linarg = LinearARG.from_genotypes(genotypes, flip, find_recombinations=find_recombinations)
+
+    np.testing.assert_array_equal(linarg.variant_indices[:2], np.repeat(linarg.sample_indices[0], 2))
+    assert linarg.variant_indices[2] not in set(linarg.sample_indices)
+    assert linarg.A.shape == (5, 5)
+    np.testing.assert_array_equal(linarg @ np.eye(genotypes.shape[1]), genotypes.toarray())
+
+
 def test_samples_with_no_variants():
     """Test handling of samples with no variants (all-zero rows)."""
     genotypes = csc_matrix(np.array([[1, 1, 1], [0, 0, 0], [1, 0, 1], [0, 0, 0]]))

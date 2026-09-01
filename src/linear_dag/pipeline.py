@@ -839,6 +839,11 @@ def reduction_union_recom(
                 f.attrs["is_empty"] = True
             return None
         n, m = f["shape"][:]
+        genotype_indptr = f["indptr"][:]
+        singleton_columns = np.flatnonzero(np.diff(genotype_indptr) == 1)
+        singleton_carriers = (
+            f["indices"][genotype_indptr[singleton_columns]] if len(singleton_columns) > 0 else np.array([], dtype=int)
+        )
     forward_graph = read_graph_from_disk(
         f"{mount_point}{out}/forward_backward_graphs/{partition_identifier}_forward_graph.h5"
     )
@@ -852,6 +857,8 @@ def reduction_union_recom(
     logger.info("Combining nodes and computing reduction union")
     t3 = time.time()
     packed_edges, variant_indices = BrickGraph.combine_graphs_packed(forward_graph, backward_graph, m)
+    variant_indices = np.asarray(variant_indices)
+    variant_indices[singleton_columns] = np.asarray(sample_indices, dtype=int)[singleton_carriers]
     del forward_graph, backward_graph
     t4 = time.time()
     logger.info(f"Combined nodes and computed reduction union in {np.round(t4 - t3, 3)} seconds")
@@ -883,8 +890,6 @@ def reduction_union_recom(
         f.create_dataset("sample_indices", data=np.array(sample_indices), compression="gzip", shuffle=True)
 
     del indptr, indices, data
-    with h5py.File(f"{mount_point}{out}/genotype_matrices/{partition_identifier}.h5", "r") as f:
-        genotype_indptr = f["indptr"][:]
     af = np.diff(genotype_indptr) / n
     geno_nnz = np.sum(n * np.minimum(af, 1 - af))
     nnz_ratio = geno_nnz / brickgraph_nnz

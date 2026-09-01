@@ -192,7 +192,8 @@ class LinearARG(LinearOperator):
 
             `genotypes` must already be phased. Diploid semantics are recovered
             later by pairing adjacent haplotypes or by adding explicit
-            individual nodes.
+            individual nodes. Singleton variants use their carrier sample node
+            directly and therefore do not add graph nodes.
 
         **Arguments:**
 

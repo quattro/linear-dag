@@ -159,6 +159,8 @@ cdef class BrickGraph:
         forward_pass.direction = 1
         cdef long i
         for i in range(num_variants):
+            if add_samples and indptr[i + 1] - indptr[i] == 1:
+                continue
             carriers = indices[indptr[i]:indptr[i + 1]]
             forward_pass.intersect_clades(carriers, i)
 
@@ -184,6 +186,8 @@ cdef class BrickGraph:
         cdef BrickGraph backward_pass = BrickGraph(num_samples, num_variants, save_to_disk=save_to_disk, out=f'{out}_backward_graph.h5')
         backward_pass.direction = -1
         for i in reversed(range(num_variants)):
+            if add_samples and indptr[i + 1] - indptr[i] == 1:
+                continue
             carriers = indices[indptr[i]:indptr[i+1]]
             backward_pass.intersect_clades(carriers, i)
         cdef DiGraph backward_graph = backward_pass.graph
@@ -247,6 +251,8 @@ cdef class BrickGraph:
                 batch_indices_array = np.asarray(f['indices'][index_start:index_end], dtype=np.int32)
                 batch_indices = batch_indices_array
                 for i in range(batch_start, batch_end):
+                    if add_samples and indptr[i + 1] - indptr[i] == 1:
+                        continue
                     carriers = batch_indices[indptr[i] - index_start:indptr[i + 1] - index_start]
                     forward_pass.intersect_clades(carriers, i)
                 batch_start = batch_end
@@ -285,6 +291,8 @@ cdef class BrickGraph:
                 batch_indices_array = np.asarray(f['indices'][index_start:index_end], dtype=np.int32)
                 batch_indices = batch_indices_array
                 for i in reversed(range(batch_start, batch_end)):
+                    if add_samples and indptr[i + 1] - indptr[i] == 1:
+                        continue
                     carriers = batch_indices[indptr[i] - index_start:indptr[i + 1] - index_start]
                     backward_pass.intersect_clades(carriers, i)
                 batch_end = batch_start
@@ -322,6 +330,12 @@ cdef class BrickGraph:
         """
         forward_graph, backward_graph, sample_indices = BrickGraph.forward_backward(genotypes, add_samples)
         brick_graph, variant_indices = BrickGraph.combine_graphs(forward_graph, backward_graph, genotypes.shape[1])
+        singleton_columns = np.flatnonzero(np.diff(genotypes.indptr) == 1)
+        if add_samples and len(singleton_columns) > 0:
+            carrier_rows = genotypes.indices[genotypes.indptr[singleton_columns]]
+            variant_indices_array = np.asarray(variant_indices)
+            variant_indices_array[singleton_columns] = np.asarray(sample_indices)[carrier_rows]
+            variant_indices = variant_indices_array
         return brick_graph, sample_indices, variant_indices
 
 

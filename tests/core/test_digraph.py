@@ -10,6 +10,7 @@ from linear_dag.core.brick_graph import BrickGraph, read_graph_from_disk, reduct
 from linear_dag.core.digraph import DiGraph
 from linear_dag.core.recombination import Recombination
 from linear_dag.genotype import read_vcf, write_vcf_to_hdf5
+from linear_dag.pipeline import reduction_union_recom, run_forward_backward
 
 
 def test_to_csc_arrays_sorts_parents_and_sums_duplicate_edges():
@@ -263,3 +264,35 @@ def test_batched_hdf5_forward_backward_matches_in_memory(test_data_dir, tmp_path
         expected_graph = expected_forward if direction == "forward" else expected_backward
         actual_graph = read_graph_from_disk(f"{streamed_prefix}_{direction}_graph.h5")
         np.testing.assert_array_equal(actual_graph.to_csc().toarray(), expected_graph.to_csc().toarray())
+
+
+def test_streamed_pipeline_singletons_use_carrier_sample_nodes(tmp_path):
+    out = tmp_path / "run"
+    partition = "0_chr1:1-10"
+    genotype_dir = out / "genotype_matrices"
+    genotype_dir.mkdir(parents=True)
+    genotypes = csc_matrix(
+        np.array(
+            [
+                [1, 1, 1],
+                [0, 0, 1],
+                [0, 0, 0],
+                [0, 0, 0],
+            ],
+            dtype=np.int8,
+        )
+    )
+    with h5py.File(genotype_dir / f"{partition}.h5", "w") as handle:
+        handle.create_dataset("shape", data=genotypes.shape)
+        handle.create_dataset("indptr", data=genotypes.indptr)
+        handle.create_dataset("indices", data=genotypes.indices)
+        handle.create_dataset("data", data=genotypes.data)
+
+    run_forward_backward(str(out), "", partition)
+    reduction_union_recom(str(out), "", partition)
+
+    with h5py.File(out / "brick_graph_partitions" / f"{partition}.h5", "r") as handle:
+        variant_indices = handle["variant_indices"][:]
+        sample_indices = handle["sample_indices"][:]
+        np.testing.assert_array_equal(variant_indices[:2], np.repeat(sample_indices[0], 2))
+        assert variant_indices[2] not in set(sample_indices)
