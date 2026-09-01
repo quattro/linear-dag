@@ -29,6 +29,7 @@ from linear_dag.rare_variants import (
     _diploid_iids,
     _phase_method,
     _read_carrier_table,
+    _repack_hdf5_file,
     _validate_reuse_policy,
     AugmentationStats,
     REQUIRED_COLUMNS,
@@ -199,6 +200,7 @@ def main() -> None:
     block_results = []
     edge_block_extensions = []
     temporary_output: Path | None = None
+    repacked_output: Path | None = None
     try:
         with tempfile.TemporaryDirectory(prefix="rare-carrier-blocks-", dir=args.output_h5.parent) as temp_dir:
             partition_started = time.perf_counter()
@@ -290,14 +292,28 @@ def main() -> None:
                     del variants
                     gc.collect()
                 set_root_attributes(h5, policy, total)
-            os.replace(temporary_output, args.output_h5)
+            fd, repacked_name = tempfile.mkstemp(
+                prefix=f".{args.output_h5.name}.repack.",
+                suffix=".tmp",
+                dir=args.output_h5.parent,
+            )
+            os.close(fd)
+            repacked_output = Path(repacked_name)
+            repack_started = time.perf_counter()
+            _repack_hdf5_file(temporary_output, repacked_output)
+            total.file_repack_seconds = time.perf_counter() - repack_started
+            temporary_output.unlink()
+            os.replace(repacked_output, args.output_h5)
             temporary_output = None
+            repacked_output = None
     finally:
         stop.set()
         monitor.join()
         rss_samples.append(process_tree_rss(process))
         if temporary_output is not None:
             temporary_output.unlink(missing_ok=True)
+        if repacked_output is not None:
+            repacked_output.unlink(missing_ok=True)
 
     wall_seconds = time.perf_counter() - wall_started
     cpu_seconds = time.process_time() - cpu_started

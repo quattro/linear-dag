@@ -109,6 +109,7 @@ class AugmentationStats:
     existing_signatures_available: int = 0
     carrier_parse_seconds: float = 0.0
     file_copy_seconds: float = 0.0
+    file_repack_seconds: float = 0.0
     iid_normalization_seconds: float = 0.0
     block_assignment_seconds: float = 0.0
     matrix_load_seconds: float = 0.0
@@ -373,6 +374,18 @@ def _replace_dataset(group: h5py.Group, name: str, data: np.ndarray, *, strings:
         kwargs["dtype"] = h5py.string_dtype(encoding="utf-8")
         data = np.asarray(data, dtype=object)
     group.create_dataset(name, data=data, **kwargs)
+
+
+def _repack_hdf5_file(source_path: Path, output_path: Path) -> None:
+    """Copy every live HDF5 object into a compact new container."""
+    if source_path.resolve() == output_path.resolve():
+        raise ValueError("HDF5 repack source and output must differ")
+    with h5py.File(source_path, "r") as source, h5py.File(output_path, "w") as output:
+        for key, value in source.attrs.items():
+            output.attrs[key] = value
+        for name in source:
+            source.copy(name, output, name=name)
+        output.flush()
 
 
 def _metadata(group: h5py.Group) -> dict[str, list[object]]:
@@ -777,6 +790,7 @@ def _augment_file(
     fd, temporary_name = tempfile.mkstemp(prefix=f".{output_h5.name}.", suffix=".tmp", dir=output_h5.parent)
     os.close(fd)
     temporary = Path(temporary_name)
+    repacked: Path | None = None
     try:
         file_copy_started = time.perf_counter()
         shutil.copy2(input_h5, temporary)
@@ -811,11 +825,25 @@ def _augment_file(
             h5.attrs["rare_variant_new_nodes_reused"] = total.reused_new_nodes
             h5.attrs["rare_variant_nodes_added"] = total.nodes_added
             h5.attrs["rare_variant_edges_added"] = total.edges_added
-        os.replace(temporary, output_h5)
+        fd, repacked_name = tempfile.mkstemp(
+            prefix=f".{output_h5.name}.repack.",
+            suffix=".tmp",
+            dir=output_h5.parent,
+        )
+        os.close(fd)
+        repacked = Path(repacked_name)
+        repack_started = time.perf_counter()
+        _repack_hdf5_file(temporary, repacked)
+        total.file_repack_seconds = time.perf_counter() - repack_started
+        temporary.unlink()
+        os.replace(repacked, output_h5)
+        repacked = None
         total.total_seconds = time.perf_counter() - total_started
         return total
-    except Exception:
+    except BaseException:
         temporary.unlink(missing_ok=True)
+        if repacked is not None:
+            repacked.unlink(missing_ok=True)
         raise
 
 
@@ -848,8 +876,9 @@ def augment_rare_variants_file(
 ) -> AugmentationStats:
     """Copy and augment a block-structured LinearARG HDF5 file.
 
-    The output is assembled under a temporary name and atomically installed
-    only after every block succeeds. Existing output paths are never replaced.
+    The output is assembled under a temporary name, repacked into a compact
+    HDF5 container, and atomically installed only after every block succeeds.
+    Existing output paths are never replaced.
 
     !!! info
 

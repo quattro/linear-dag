@@ -8,6 +8,7 @@ import pytest
 from scipy.sparse import csc_matrix
 
 from linear_dag import augment_rare_variants_file, LinearARG, read_rare_variant_carriers
+from linear_dag.rare_variants import _repack_hdf5_file
 
 
 def _write_small_block(path):
@@ -235,6 +236,7 @@ def test_doubleton_reuse_policies_separate_existing_and_within_run_reuse(tmp_pat
         for field, value in expected_stats.items():
             assert getattr(stats, field) == value
         assert stats.total_seconds > 0
+        assert stats.file_repack_seconds > 0
         assert stats.matrix_load_seconds >= 0
         assert stats.existing_scan_seconds >= 0
 
@@ -334,3 +336,36 @@ def test_augmentation_never_overwrites_existing_output(tmp_path):
     with pytest.raises(FileExistsError, match="output already exists"):
         augment_rare_variants_file(input_h5, carrier_table, output_h5)
     assert output_h5.read_bytes() == b"keep"
+
+
+def test_repack_hdf5_file_reclaims_deleted_dataset_space(tmp_path):
+    source_h5 = tmp_path / "source.h5"
+    repacked_h5 = tmp_path / "repacked.h5"
+    rng = np.random.default_rng(7)
+    with h5py.File(source_h5, "w") as handle:
+        handle.attrs["root"] = "preserved"
+        group = handle.create_group("block")
+        group.attrs["block"] = 1
+        group.create_dataset(
+            "discard",
+            data=rng.integers(0, 256, size=1_000_000, dtype=np.uint8),
+            compression="gzip",
+        )
+        group.create_dataset(
+            "keep",
+            data=np.arange(1000, dtype=np.int32),
+            compression="gzip",
+            shuffle=True,
+        )
+        del group["discard"]
+
+    _repack_hdf5_file(source_h5, repacked_h5)
+
+    assert repacked_h5.stat().st_size < source_h5.stat().st_size
+    with h5py.File(source_h5, "r") as source, h5py.File(repacked_h5, "r") as repacked:
+        assert dict(source.attrs) == dict(repacked.attrs)
+        assert dict(source["block"].attrs) == dict(repacked["block"].attrs)
+        np.testing.assert_array_equal(source["block/keep"][:], repacked["block/keep"][:])
+        assert source["block/keep"].chunks == repacked["block/keep"].chunks
+        assert source["block/keep"].compression == repacked["block/keep"].compression
+        assert source["block/keep"].shuffle == repacked["block/keep"].shuffle
