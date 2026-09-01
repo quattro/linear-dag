@@ -29,6 +29,25 @@ def _write_small_block(path):
     return linarg
 
 
+def _write_existing_doubleton_block(path):
+    # The existing variant node has exactly two descendant haplotypes: the
+    # first haplotype from each of the two individuals.
+    adjacency = csc_matrix(
+        (np.ones(2, dtype=np.int8), (np.array([4, 2]), np.array([0, 0]))),
+        shape=(5, 5),
+    )
+    linarg = LinearARG(
+        adjacency,
+        np.array([0], dtype=np.int32),
+        np.array([False]),
+        np.int32(4),
+        variants=pl.DataFrame({"CHROM": ["1"], "POS": [100], "ID": ["existing"], "REF": ["A"], "ALT": ["G"]}).lazy(),
+        iids=pl.Series(["iid1", "iid2"]),
+    ).add_individual_nodes()
+    linarg.write(path, block_info={"chrom": "1", "start": 1, "end": 1000})
+    return linarg
+
+
 def test_augment_rare_variants_file_preserves_diploid_dosage(tmp_path):
     input_h5 = tmp_path / "input.h5"
     output_h5 = tmp_path / "output.h5"
@@ -157,6 +176,128 @@ def test_doubletons_share_a_new_internal_node(tmp_path):
     dense_diploid = augmented @ np.eye(augmented.shape[1])
     dense_diploid = dense_diploid[0::2] + dense_diploid[1::2]
     np.testing.assert_array_equal(dense_diploid[:, 1:], np.ones((2, 2)))
+
+
+def test_doubleton_reuse_policies_separate_existing_and_within_run_reuse(tmp_path):
+    input_h5 = tmp_path / "input.h5"
+    carrier_table = tmp_path / "carriers.tsv"
+    original = _write_existing_doubleton_block(input_h5)
+    carrier_table.write_text(
+        "CHROM\tPOS\tID\tREF\tALT\tIID\tDOSAGE\n"
+        "1\t150\tfirst\tG\tA\tiid1\t1\n"
+        "1\t150\tfirst\tG\tA\tiid2\t1\n"
+        "1\t151\tsecond\tT\tC\tiid1\t1\n"
+        "1\t151\tsecond\tT\tC\tiid2\t1\n"
+    )
+
+    expected = {
+        "existing_then_batch": {
+            "reused_existing_nodes": 2,
+            "distinct_existing_nodes_reused": 1,
+            "reused_new_nodes": 0,
+            "nodes_added": 0,
+            "edges_added": 0,
+            "existing_candidate_nodes_scanned": 1,
+            "existing_signatures_available": 1,
+        },
+        "batch_only": {
+            "reused_existing_nodes": 0,
+            "distinct_existing_nodes_reused": 0,
+            "reused_new_nodes": 1,
+            "nodes_added": 1,
+            "edges_added": 2,
+            "existing_candidate_nodes_scanned": 0,
+            "existing_signatures_available": 0,
+        },
+        "none": {
+            "reused_existing_nodes": 0,
+            "distinct_existing_nodes_reused": 0,
+            "reused_new_nodes": 0,
+            "nodes_added": 2,
+            "edges_added": 4,
+            "existing_candidate_nodes_scanned": 0,
+            "existing_signatures_available": 0,
+        },
+    }
+    diploid_outputs = {}
+    for policy, expected_stats in expected.items():
+        output_h5 = tmp_path / f"output-{policy}.h5"
+        stats = augment_rare_variants_file(
+            input_h5,
+            carrier_table,
+            output_h5,
+            reuse_policy=policy,
+        )
+
+        assert stats.variants_added == 2
+        assert stats.direct_singletons == 0
+        assert stats.doubletons_added == 2
+        for field, value in expected_stats.items():
+            assert getattr(stats, field) == value
+        assert stats.total_seconds > 0
+        assert stats.matrix_load_seconds >= 0
+        assert stats.existing_scan_seconds >= 0
+
+        augmented = LinearARG.read(output_h5, block="1:1-1000", load_metadata=True)
+        haplotypes = augmented @ np.eye(augmented.shape[1])
+        diploid_outputs[policy] = haplotypes[0::2] + haplotypes[1::2]
+        with h5py.File(output_h5, "r") as handle:
+            assert handle.attrs["rare_variant_reuse_policy"] == policy
+            assert handle["1:1-1000"].attrs["rare_variant_reuse_policy"] == policy
+
+    for output in diploid_outputs.values():
+        np.testing.assert_array_equal(output, diploid_outputs["existing_then_batch"])
+    assert diploid_outputs["existing_then_batch"].shape == (2, 3)
+    assert original.shape == (4, 1)
+
+
+def test_augmentation_rejects_unknown_reuse_policy(tmp_path):
+    input_h5 = tmp_path / "input.h5"
+    carrier_table = tmp_path / "carriers.tsv"
+    _write_small_block(input_h5)
+    carrier_table.write_text("CHROM\tPOS\tID\tREF\tALT\tIID\tDOSAGE\n")
+
+    with pytest.raises(ValueError, match="unknown reuse policy"):
+        augment_rare_variants_file(
+            input_h5,
+            carrier_table,
+            tmp_path / "output.h5",
+            reuse_policy="invalid",
+        )
+
+
+def test_augmentation_accepts_adjacent_paired_haplotype_iids(tmp_path):
+    input_h5 = tmp_path / "input.h5"
+    output_h5 = tmp_path / "output.h5"
+    carrier_table = tmp_path / "carriers.tsv"
+    _write_small_block(input_h5)
+    with h5py.File(input_h5, "r+") as handle:
+        individual_iids = handle["iids"][:]
+        del handle["iids"]
+        handle.create_dataset("iids", data=np.repeat(individual_iids, 2))
+    carrier_table.write_text("CHROM\tPOS\tID\tREF\tALT\tIID\tDOSAGE\n1\t150\trs1\tG\tA\tiid2\t1\n")
+
+    stats = augment_rare_variants_file(input_h5, carrier_table, output_h5)
+
+    assert stats.variants_added == 1
+    assert stats.iid_normalization_seconds >= 0
+    assert output_h5.exists()
+
+
+def test_augmentation_rejects_unpaired_haplotype_iids(tmp_path):
+    input_h5 = tmp_path / "input.h5"
+    output_h5 = tmp_path / "output.h5"
+    carrier_table = tmp_path / "carriers.tsv"
+    _write_small_block(input_h5)
+    with h5py.File(input_h5, "r+") as handle:
+        individual_iids = handle["iids"][:]
+        del handle["iids"]
+        handle.create_dataset("iids", data=np.tile(individual_iids, 2))
+    carrier_table.write_text("CHROM\tPOS\tID\tREF\tALT\tIID\tDOSAGE\n1\t150\trs1\tG\tA\tiid2\t1\n")
+
+    with pytest.raises(ValueError, match="must repeat in adjacent pairs"):
+        augment_rare_variants_file(input_h5, carrier_table, output_h5)
+    assert not output_h5.exists()
 
 
 def test_lineararg_static_augmentation_entry_point(tmp_path):

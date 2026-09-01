@@ -761,6 +761,8 @@ class LinearARG(LinearOperator):
         input_h5: Union[str, PathLike],
         carrier_table: Union[str, PathLike],
         output_h5: Union[str, PathLike],
+        *,
+        reuse_policy: str = "existing_then_batch",
     ):
         """Add sparse singleton/doubleton calls to compressed HDF5 data.
 
@@ -772,13 +774,16 @@ class LinearARG(LinearOperator):
 
             Heterozygous calls are pseudo-phased to minimize incremental graph
             storage. Diploid dosage is preserved, but the selected phase is not
-            a biological inference.
+            a biological inference. The default reuse policy preserves the
+            existing graph-search behavior.
 
         **Arguments:**
 
         - `input_h5`: Existing block-structured LinearARG HDF5 file.
         - `carrier_table`: Sparse carrier table with one row per non-reference call.
         - `output_h5`: Path for the new augmented copy.
+        - `reuse_policy`: Doubleton-node reuse policy. One of
+          `existing_then_batch`, `batch_only`, or `none`.
 
         **Returns:**
 
@@ -791,7 +796,12 @@ class LinearARG(LinearOperator):
         """
         from linear_dag.rare_variants import augment_rare_variants_file
 
-        return augment_rare_variants_file(input_h5, carrier_table, output_h5)
+        return augment_rare_variants_file(
+            input_h5,
+            carrier_table,
+            output_h5,
+            reuse_policy=reuse_policy,
+        )
 
     def write(
         self,

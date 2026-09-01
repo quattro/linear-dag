@@ -19,12 +19,13 @@ import csv
 import os
 import shutil
 import tempfile
+import time
 
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import cast, Iterable, Literal, Sequence
 
 import h5py
 import numpy as np
@@ -39,6 +40,8 @@ except ImportError:
 
 REQUIRED_COLUMNS = ("CHROM", "POS", "ID", "REF", "ALT", "IID", "DOSAGE")
 META_COLUMNS = ("CHROM", "POS", "ID", "REF", "ALT")
+ReusePolicy = Literal["existing_then_batch", "batch_only", "none"]
+REUSE_POLICIES: tuple[ReusePolicy, ...] = ("existing_then_batch", "batch_only", "none")
 
 
 @dataclass(frozen=True)
@@ -96,20 +99,68 @@ class AugmentationStats:
 
     variants_added: int = 0
     direct_singletons: int = 0
+    doubletons_added: int = 0
     reused_existing_nodes: int = 0
+    distinct_existing_nodes_reused: int = 0
     reused_new_nodes: int = 0
     nodes_added: int = 0
     edges_added: int = 0
+    existing_candidate_nodes_scanned: int = 0
+    existing_signatures_available: int = 0
+    carrier_parse_seconds: float = 0.0
+    file_copy_seconds: float = 0.0
+    iid_normalization_seconds: float = 0.0
+    block_assignment_seconds: float = 0.0
+    matrix_load_seconds: float = 0.0
+    existing_scan_seconds: float = 0.0
+    candidate_selection_seconds: float = 0.0
+    graph_expansion_seconds: float = 0.0
+    record_build_seconds: float = 0.0
+    dataset_rewrite_seconds: float = 0.0
+    total_seconds: float = 0.0
 
     def add(self, other: "AugmentationStats") -> None:
         for field in self.__dataclass_fields__:
             setattr(self, field, getattr(self, field) + getattr(other, field))
 
 
+def _validate_reuse_policy(reuse_policy: str) -> ReusePolicy:
+    if reuse_policy not in REUSE_POLICIES:
+        raise ValueError(f"unknown reuse policy {reuse_policy!r}; expected one of {REUSE_POLICIES}")
+    return cast(ReusePolicy, reuse_policy)
+
+
+def _phase_method(reuse_policy: ReusePolicy) -> str:
+    if reuse_policy == "existing_then_batch":
+        return "direct_singletons_greedy_doubletons"
+    if reuse_policy == "batch_only":
+        return "direct_singletons_batch_reuse_doubletons"
+    return "direct_singletons_independent_doubletons"
+
+
 def _decode(value: object) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return str(value)
+
+
+def _diploid_iids(iids: Sequence[str], n_samples: int) -> list[str]:
+    """Normalize individual- or haplotype-aligned IDs to one IID per individual."""
+    if n_samples % 2:
+        raise ValueError(f"LinearARG has odd haplotype sample count {n_samples}; expected a diploid axis")
+    n_individuals = n_samples // 2
+    if len(iids) == n_individuals:
+        return list(iids)
+    if len(iids) == n_samples:
+        if any(iids[index] != iids[index + 1] for index in range(0, n_samples, 2)):
+            raise ValueError(
+                "haplotype-aligned LinearARG IIDs must repeat in adjacent pairs to recover diploid individuals"
+            )
+        return list(iids[0::2])
+    raise ValueError(
+        f"LinearARG has {n_samples} haplotypes but {len(iids)} IIDs; expected "
+        f"{n_individuals} individual IDs or {n_samples} adjacent-paired haplotype IDs"
+    )
 
 
 def _read_carrier_table(path: Path) -> list[RareVariant]:
@@ -163,14 +214,21 @@ def _assign_variants_to_blocks(h5: h5py.File, variants: Sequence[RareVariant]) -
     blocks = _block_names(h5)
     if not blocks:
         raise ValueError("input HDF5 has no LinearARG block groups")
+    block_intervals = []
+    for name in blocks:
+        group = h5[name]
+        block_intervals.append(
+            (
+                name,
+                group.attrs.get("chrom", name.split(":", 1)[0]),
+                int(group.attrs.get("start", 0)),
+                int(group.attrs.get("end", np.iinfo(np.int64).max)),
+            )
+        )
     assigned: dict[str, list[RareVariant]] = defaultdict(list)
     for variant in variants:
         matches = []
-        for name in blocks:
-            group = h5[name]
-            chrom = group.attrs.get("chrom", name.split(":", 1)[0])
-            start = int(group.attrs.get("start", 0))
-            end = int(group.attrs.get("end", np.iinfo(np.int64).max))
+        for name, chrom, start, end in block_intervals:
             if _chrom_equal(chrom, variant.chrom) and start <= variant.pos <= end:
                 matches.append(name)
         if len(matches) != 1:
@@ -322,6 +380,8 @@ def _augment_block(
     group: h5py.Group,
     variants: Sequence[RareVariant],
     iids: Sequence[str],
+    *,
+    reuse_policy: ReusePolicy = "existing_then_batch",
 ) -> AugmentationStats:
     """Augment one LinearARG HDF5 block in place."""
     stats = AugmentationStats(variants_added=len(variants))
@@ -357,23 +417,33 @@ def _augment_block(
     else:
         old_counts = None
         doubleton_mask = np.arange(len(old_variant_indices))
-    if has_doubletons:
+    A: csc_matrix | None = None
+    existing_nodes: dict[tuple[int, ...], int] = {}
+    if has_doubletons and reuse_policy == "existing_then_batch":
+        matrix_load_started = time.perf_counter()
         A = _read_matrix(group)
+        stats.matrix_load_seconds += time.perf_counter() - matrix_load_started
+
+        existing_scan_started = time.perf_counter()
         core_n = n_nodes - n_individual_nodes
         A_core = A[:core_n, :core_n].tocsc()
-        signatures_by_node = _capped_leaf_signatures(A_core, old_variant_indices[doubleton_mask], n_samples)
-    else:
-        signatures_by_node = {}
-    existing_nodes: dict[tuple[int, ...], int] = {}
-    for node, signature in signatures_by_node.items():
-        if len(signature) == 2:
-            existing_nodes.setdefault(signature, node)
+        candidate_nodes = set(map(int, old_variant_indices[doubleton_mask]))
+        stats.existing_candidate_nodes_scanned = len(candidate_nodes)
+        signatures_by_node = _capped_leaf_signatures(A_core, candidate_nodes, n_samples)
+        for node, signature in signatures_by_node.items():
+            if len(signature) == 2:
+                existing_nodes.setdefault(signature, node)
+        stats.existing_signatures_available = len(existing_nodes)
+        stats.existing_scan_seconds += time.perf_counter() - existing_scan_started
 
     selected_nodes: dict[tuple[int, ...], int] = {}
-    chosen: list[tuple[RareVariant, tuple[int, ...], str]] = []
+    chosen: list[tuple[RareVariant, tuple[int, ...], str, int | None]] = []
     novel_signatures: list[tuple[int, ...]] = []
+    used_existing_signatures: set[tuple[int, ...]] = set()
+    candidate_selection_started = time.perf_counter()
     for variant in sorted(variants, key=lambda value: (value.pos, value.ref, value.alt, value.variant_id)):
         candidates = _phase_candidates(variant, iid_to_index)
+        new_node_slot: int | None = None
         if variant.allele_count == 1:
             # Either haplotype preserves the unphased dosage.  Pointing the
             # variant directly at the deterministic first candidate avoids
@@ -382,41 +452,55 @@ def _augment_block(
             source = "sample"
             stats.direct_singletons += 1
         else:
-            signature, source = _choose_signature(candidates, existing_nodes, selected_nodes)
+            stats.doubletons_added += 1
+            reusable_new_nodes = selected_nodes if reuse_policy != "none" else {}
+            signature, source = _choose_signature(candidates, existing_nodes, reusable_new_nodes)
         if source == "existing":
             stats.reused_existing_nodes += 1
+            used_existing_signatures.add(signature)
         elif source == "selected":
             stats.reused_new_nodes += 1
+            new_node_slot = selected_nodes[signature]
         elif source == "new":
-            selected_nodes[signature] = -1
+            new_node_slot = len(novel_signatures)
             novel_signatures.append(signature)
+            if reuse_policy != "none":
+                selected_nodes[signature] = new_node_slot
             stats.nodes_added += 1
             stats.edges_added += len(signature)
-        chosen.append((variant, signature, source))
+        chosen.append((variant, signature, source, new_node_slot))
+    stats.distinct_existing_nodes_reused = len(used_existing_signatures)
+    stats.candidate_selection_seconds += time.perf_counter() - candidate_selection_started
 
     old_samples = _sample_indices(n_nodes, n_samples, n_individual_nodes)
     if novel_signatures:
         assert has_doubletons
+        if A is None:
+            matrix_load_started = time.perf_counter()
+            A = _read_matrix(group)
+            stats.matrix_load_seconds += time.perf_counter() - matrix_load_started
+        graph_expansion_started = time.perf_counter()
         expanded, mapping, new_nodes = _expand_graph(A, novel_signatures, n_samples, n_individual_nodes)
+        stats.graph_expansion_seconds += time.perf_counter() - graph_expansion_started
     else:
         expanded = None
         mapping = None
         new_nodes = []
-    for signature, node in zip(novel_signatures, new_nodes):
-        selected_nodes[signature] = node
     mapped_existing_nodes = {
         signature: int(node if mapping is None else mapping[node]) for signature, node in existing_nodes.items()
     }
 
+    record_build_started = time.perf_counter()
     additions = []
-    for ordinal, (variant, signature, source) in enumerate(chosen):
+    for ordinal, (variant, signature, source, new_node_slot) in enumerate(chosen):
         if source == "sample":
             sample_node = old_samples[signature[0]]
             node = int(sample_node if mapping is None else mapping[sample_node])
         elif source == "existing":
             node = mapped_existing_nodes[signature]
         else:
-            node = selected_nodes[signature]
+            assert new_node_slot is not None
+            node = new_nodes[new_node_slot]
         additions.append(
             {
                 "CHROM": variant.chrom,
@@ -450,7 +534,9 @@ def _augment_block(
     # Stable POS-only ordering preserves the established order of same-position
     # alleles; new alleles follow existing alleles at that position.
     records.sort(key=lambda record: (int(record["POS"]), bool(record["is_new"]), int(record["ordinal"])))
+    stats.record_build_seconds += time.perf_counter() - record_build_started
 
+    dataset_rewrite_started = time.perf_counter()
     if expanded is not None:
         _replace_dataset(group, "indptr", expanded.indptr)
         _replace_dataset(group, "indices", expanded.indices)
@@ -469,39 +555,80 @@ def _augment_block(
         group.attrs["n"] = expanded.shape[0]
         group.attrs["n_entries"] = expanded.nnz
     group.attrs["n_variants"] = len(records)
-    group.attrs["rare_variant_phase_method"] = "direct_singletons_greedy_doubletons"
+    group.attrs["rare_variant_phase_method"] = _phase_method(reuse_policy)
+    group.attrs["rare_variant_reuse_policy"] = reuse_policy
     group.attrs["rare_variant_phase_is_inferred"] = False
     group.attrs["rare_variant_diploid_dosage_preserved"] = True
     group.attrs["rare_variants_added"] = stats.variants_added
     group.attrs["rare_variant_singletons_direct"] = stats.direct_singletons
+    group.attrs["rare_variant_doubletons_added"] = stats.doubletons_added
+    group.attrs["rare_variant_existing_nodes_reused"] = stats.reused_existing_nodes
+    group.attrs["rare_variant_distinct_existing_nodes_reused"] = stats.distinct_existing_nodes_reused
+    group.attrs["rare_variant_new_nodes_reused"] = stats.reused_new_nodes
     group.attrs["rare_variant_nodes_added"] = stats.nodes_added
     group.attrs["rare_variant_edges_added"] = stats.edges_added
+    group.attrs["rare_variant_existing_candidate_nodes_scanned"] = stats.existing_candidate_nodes_scanned
+    group.attrs["rare_variant_existing_signatures_available"] = stats.existing_signatures_available
+    stats.dataset_rewrite_seconds += time.perf_counter() - dataset_rewrite_started
     return stats
 
 
-def _augment_file(input_h5: Path, carrier_table: Path, output_h5: Path) -> AugmentationStats:
+def _augment_file(
+    input_h5: Path,
+    carrier_table: Path,
+    output_h5: Path,
+    *,
+    reuse_policy: ReusePolicy = "existing_then_batch",
+) -> AugmentationStats:
     """Copy and augment a block-structured LinearARG HDF5 file."""
+    total_started = time.perf_counter()
+    reuse_policy = _validate_reuse_policy(reuse_policy)
     if output_h5.exists():
         raise FileExistsError(f"output already exists: {output_h5}")
+
+    carrier_parse_started = time.perf_counter()
     variants = _read_carrier_table(carrier_table)
+    carrier_parse_seconds = time.perf_counter() - carrier_parse_started
     output_h5.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(prefix=f".{output_h5.name}.", suffix=".tmp", dir=output_h5.parent)
     os.close(fd)
     temporary = Path(temporary_name)
     try:
+        file_copy_started = time.perf_counter()
         shutil.copy2(input_h5, temporary)
+        file_copy_seconds = time.perf_counter() - file_copy_started
         total = AugmentationStats()
+        total.carrier_parse_seconds = carrier_parse_seconds
+        total.file_copy_seconds = file_copy_seconds
         with h5py.File(temporary, "r+") as h5:
             if "iids" not in h5:
                 raise ValueError("input HDF5 is missing root-level iids")
-            iids = [_decode(value) for value in h5["iids"][:]]
+            iid_normalization_started = time.perf_counter()
+            raw_iids = [_decode(value) for value in h5["iids"][:]]
+            sample_counts = {int(h5[name].attrs["n_samples"]) for name in _block_names(h5)}
+            if len(sample_counts) != 1:
+                raise ValueError(f"LinearARG blocks have inconsistent haplotype sample counts: {sorted(sample_counts)}")
+            iids = _diploid_iids(raw_iids, sample_counts.pop())
+            total.iid_normalization_seconds = time.perf_counter() - iid_normalization_started
+            block_assignment_started = time.perf_counter()
             assignments = _assign_variants_to_blocks(h5, variants)
+            total.block_assignment_seconds = time.perf_counter() - block_assignment_started
             for block, block_variants in assignments.items():
-                total.add(_augment_block(h5[block], block_variants, iids))
-            h5.attrs["rare_variant_phase_method"] = "minimum_incremental_edges_greedy"
+                total.add(_augment_block(h5[block], block_variants, iids, reuse_policy=reuse_policy))
+            h5.attrs["rare_variant_phase_method"] = _phase_method(reuse_policy)
+            h5.attrs["rare_variant_reuse_policy"] = reuse_policy
             h5.attrs["rare_variant_phase_is_inferred"] = False
             h5.attrs["rare_variant_diploid_dosage_preserved"] = True
+            h5.attrs["rare_variants_added"] = total.variants_added
+            h5.attrs["rare_variant_singletons_direct"] = total.direct_singletons
+            h5.attrs["rare_variant_doubletons_added"] = total.doubletons_added
+            h5.attrs["rare_variant_existing_nodes_reused"] = total.reused_existing_nodes
+            h5.attrs["rare_variant_distinct_existing_nodes_reused"] = total.distinct_existing_nodes_reused
+            h5.attrs["rare_variant_new_nodes_reused"] = total.reused_new_nodes
+            h5.attrs["rare_variant_nodes_added"] = total.nodes_added
+            h5.attrs["rare_variant_edges_added"] = total.edges_added
         os.replace(temporary, output_h5)
+        total.total_seconds = time.perf_counter() - total_started
         return total
     except Exception:
         temporary.unlink(missing_ok=True)
@@ -529,7 +656,11 @@ def read_rare_variant_carriers(path: Path | str) -> list[RareVariant]:
 
 
 def augment_rare_variants_file(
-    input_h5: Path | str, carrier_table: Path | str, output_h5: Path | str
+    input_h5: Path | str,
+    carrier_table: Path | str,
+    output_h5: Path | str,
+    *,
+    reuse_policy: ReusePolicy = "existing_then_batch",
 ) -> AugmentationStats:
     """Copy and augment a block-structured LinearARG HDF5 file.
 
@@ -540,13 +671,17 @@ def augment_rare_variants_file(
 
         Heterozygous calls are pseudo-phased to minimize incremental graph
         storage. Diploid dosage is preserved, but the selected phase is not a
-        biological inference.
+        biological inference. `existing_then_batch` preserves the production
+        behavior; `batch_only` skips existing-graph traversal while retaining
+        within-run reuse; `none` creates an independent node per doubleton.
 
     **Arguments:**
 
     - `input_h5`: Existing block-structured LinearARG HDF5 file.
     - `carrier_table`: Sparse singleton/doubleton carrier table.
     - `output_h5`: Path for the new augmented copy.
+    - `reuse_policy`: Doubleton-node reuse policy. One of
+      `existing_then_batch`, `batch_only`, or `none`.
 
     **Returns:**
 
@@ -557,4 +692,9 @@ def augment_rare_variants_file(
     - `FileExistsError`: If `output_h5` already exists.
     - `ValueError`: If carrier data cannot be assigned or augmented safely.
     """
-    return _augment_file(Path(input_h5), Path(carrier_table), Path(output_h5))
+    return _augment_file(
+        Path(input_h5),
+        Path(carrier_table),
+        Path(output_h5),
+        reuse_policy=reuse_policy,
+    )
