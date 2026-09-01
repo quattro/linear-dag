@@ -30,7 +30,7 @@ from typing import cast, Iterable, Literal, Sequence
 import h5py
 import numpy as np
 
-from scipy.sparse import coo_matrix, csc_matrix
+from scipy.sparse import csc_matrix
 
 try:  # Register Blosc filters when the source LinearARG uses them.
     import hdf5plugin  # noqa: F401
@@ -327,35 +327,41 @@ def _expand_graph(
     """Insert mutation nodes immediately before the trailing sample nodes."""
     if not signatures:
         return A, np.arange(A.shape[0], dtype=np.int64), []
+    # The previous COO round-trip both sorted column indices and combined any
+    # duplicates. Preserve that behavior without materializing Python lists
+    # for every graph edge.
+    A.sum_duplicates()
+    A.sort_indices()
     old_n = A.shape[0]
     insert_at = old_n - n_individual_nodes - n_samples
     count = len(signatures)
-    mapping = np.arange(old_n, dtype=np.int64)
+    mapping = np.arange(old_n, dtype=np.int32)
     mapping[insert_at:] += count
-
-    coo = A.tocoo()
-    rows = list(mapping[coo.row])
-    cols = list(mapping[coo.col])
-    data = list(coo.data)
     new_nodes = list(range(insert_at, insert_at + count))
     old_samples = _sample_indices(old_n, n_samples, n_individual_nodes)
-    for node, signature in zip(new_nodes, signatures):
-        for haplotype in signature:
-            rows.append(int(mapping[old_samples[haplotype]]))
-            cols.append(node)
-            data.append(1)
-    expanded = coo_matrix(
-        (
-            np.asarray(data, dtype=np.int32),
-            (np.asarray(rows, dtype=np.int32), np.asarray(cols, dtype=np.int32)),
-        ),
-        shape=(old_n + count, old_n + count),
-    ).tocsc()
-    # The accelerated triangular solvers use C ``int`` memoryviews for all
-    # graph arrays, so SciPy's COO conversion must not promote sparse indices.
-    expanded.indices = expanded.indices.astype(np.int32, copy=False)
-    expanded.indptr = expanded.indptr.astype(np.int32, copy=False)
-    expanded.sort_indices()
+    signature_lengths = np.fromiter((len(signature) for signature in signatures), dtype=np.int32, count=count)
+    edge_count = int(signature_lengths.sum())
+    edge_insert = int(A.indptr[insert_at])
+
+    indices = np.empty(A.nnz + edge_count, dtype=np.int32)
+    data = np.empty(A.nnz + edge_count, dtype=np.int32)
+    indices[:edge_insert] = mapping[A.indices[:edge_insert]]
+    data[:edge_insert] = A.data[:edge_insert]
+    cursor = edge_insert
+    for signature in signatures:
+        mapped_samples = mapping[old_samples[np.asarray(signature, dtype=np.int64)]]
+        stop = cursor + len(signature)
+        indices[cursor:stop] = np.sort(mapped_samples)
+        data[cursor:stop] = 1
+        cursor = stop
+    indices[cursor:] = mapping[A.indices[edge_insert:]]
+    data[cursor:] = A.data[edge_insert:]
+
+    indptr = np.empty(old_n + count + 1, dtype=np.int32)
+    indptr[: insert_at + 1] = A.indptr[: insert_at + 1]
+    indptr[insert_at + 1 : insert_at + count + 1] = edge_insert + np.cumsum(signature_lengths, dtype=np.int64)
+    indptr[insert_at + count :] = A.indptr[insert_at:] + edge_count
+    expanded = csc_matrix((data, indices, indptr), shape=(old_n + count, old_n + count), copy=False)
     return expanded, mapping, new_nodes
 
 
@@ -376,6 +382,182 @@ def _metadata(group: h5py.Group) -> dict[str, list[object]]:
     return {name: list(group[name][:]) for name in META_COLUMNS}
 
 
+def _new_metadata_values(variants: Sequence[RareVariant], name: str) -> np.ndarray:
+    """Return one incoming metadata column without building per-record dicts."""
+    attributes = {
+        "CHROM": "chrom",
+        "POS": "pos",
+        "ID": "variant_id",
+        "REF": "ref",
+        "ALT": "alt",
+    }
+    attribute = attributes[name]
+    if name == "POS":
+        return np.fromiter((variant.pos for variant in variants), dtype=np.int64, count=len(variants))
+    return np.asarray([getattr(variant, attribute) for variant in variants], dtype=object)
+
+
+def _check_new_alleles_absent(
+    group: h5py.Group,
+    variants: Sequence[RareVariant],
+    *,
+    chunk_size: int = 250_000,
+) -> None:
+    """Check old/new allele overlap using memory bounded by the incoming keys."""
+    new_keys = {variant.allele_key for variant in variants}
+    duplicates = []
+    n_variants = len(group["POS"])
+    for start in range(0, n_variants, chunk_size):
+        stop = min(start + chunk_size, n_variants)
+        columns = {name: group[name][start:stop] for name in ("CHROM", "POS", "REF", "ALT")}
+        for chrom, pos, ref, alt in zip(
+            columns["CHROM"],
+            columns["POS"],
+            columns["REF"],
+            columns["ALT"],
+        ):
+            key = (_decode(chrom), int(pos), _decode(ref), _decode(alt))
+            if key in new_keys:
+                duplicates.append(key)
+                if len(duplicates) == 5:
+                    break
+        if len(duplicates) == 5:
+            break
+    if duplicates:
+        raise ValueError(f"rare-variant input already exists in block {group.name}: {duplicates}")
+
+
+def _augment_block_batch_only(
+    group: h5py.Group,
+    variants: Sequence[RareVariant],
+    iids: Sequence[str],
+) -> AugmentationStats:
+    """Augment one block with batch-only reuse and bounded metadata memory."""
+    stats = AugmentationStats(variants_added=len(variants))
+    if not variants:
+        return stats
+    n_nodes = int(group.attrs["n"])
+    n_samples = int(group.attrs["n_samples"])
+    n_individual_nodes = int(group.attrs.get("n_individuals", 0))
+    if n_samples != 2 * len(iids):
+        raise ValueError(
+            f"block {group.name} has {n_samples} haplotypes for {len(iids)} IIDs; "
+            "this utility currently requires two haplotypes per IID"
+        )
+    iid_to_index = {iid: index for index, iid in enumerate(iids)}
+    if len(iid_to_index) != len(iids):
+        raise ValueError("LinearARG contains duplicate IIDs")
+    missing = [name for name in META_COLUMNS if name not in group]
+    if missing:
+        raise ValueError(f"block {group.name} is missing metadata datasets: {missing}")
+
+    old_variant_indices = np.asarray(group["variant_indices"][:], dtype=np.int32)
+    old_flip = np.asarray(group["flip"][:], dtype=bool)
+    old_counts = np.asarray(group["allele_counts"][:], dtype=np.int64) if "allele_counts" in group else None
+    _check_new_alleles_absent(group, variants)
+
+    ordered = sorted(variants, key=lambda value: (value.pos, value.ref, value.alt, value.variant_id))
+    old_samples = _sample_indices(n_nodes, n_samples, n_individual_nodes)
+    selected_nodes: dict[tuple[int, ...], int] = {}
+    novel_signatures: list[tuple[int, ...]] = []
+    source_kind = np.empty(len(ordered), dtype=np.uint8)
+    source_value = np.empty(len(ordered), dtype=np.int32)
+    new_counts = np.empty(len(ordered), dtype=np.int64)
+    candidate_selection_started = time.perf_counter()
+    for index, variant in enumerate(ordered):
+        candidates = _phase_candidates(variant, iid_to_index)
+        new_counts[index] = variant.allele_count
+        if variant.allele_count == 1:
+            signature = min(candidates)
+            source_kind[index] = 0
+            source_value[index] = old_samples[signature[0]]
+            stats.direct_singletons += 1
+            continue
+        stats.doubletons_added += 1
+        signature, source = _choose_signature(candidates, {}, selected_nodes)
+        source_kind[index] = 1
+        if source == "selected":
+            source_value[index] = selected_nodes[signature]
+            stats.reused_new_nodes += 1
+        else:
+            slot = len(novel_signatures)
+            novel_signatures.append(signature)
+            selected_nodes[signature] = slot
+            source_value[index] = slot
+            stats.nodes_added += 1
+            stats.edges_added += len(signature)
+    stats.candidate_selection_seconds += time.perf_counter() - candidate_selection_started
+
+    matrix_load_started = time.perf_counter()
+    A = _read_matrix(group)
+    stats.matrix_load_seconds += time.perf_counter() - matrix_load_started
+    graph_expansion_started = time.perf_counter()
+    expanded, mapping, _ = _expand_graph(A, novel_signatures, n_samples, n_individual_nodes)
+    stats.graph_expansion_seconds += time.perf_counter() - graph_expansion_started
+    insert_at = n_nodes - n_individual_nodes - n_samples
+    mapped_old_indices = mapping[old_variant_indices]
+    new_variant_indices = np.empty(len(ordered), dtype=np.int32)
+    sample_mask = source_kind == 0
+    new_variant_indices[sample_mask] = mapping[source_value[sample_mask]]
+    new_variant_indices[~sample_mask] = insert_at + source_value[~sample_mask]
+
+    dataset_rewrite_started = time.perf_counter()
+    _replace_dataset(group, "indptr", expanded.indptr)
+    _replace_dataset(group, "indices", expanded.indices)
+    _replace_dataset(group, "data", expanded.data)
+    del A, expanded, mapping, novel_signatures, selected_nodes, source_kind, source_value
+
+    record_build_started = time.perf_counter()
+    old_positions = np.asarray(group["POS"][:], dtype=np.int64)
+    new_positions = _new_metadata_values(ordered, "POS")
+    combined_positions = np.concatenate((old_positions, new_positions))
+    order = np.argsort(combined_positions, kind="stable")
+    merged_positions = combined_positions[order]
+    stats.record_build_seconds += time.perf_counter() - record_build_started
+
+    _replace_dataset(
+        group,
+        "variant_indices",
+        np.concatenate((mapped_old_indices, new_variant_indices))[order],
+    )
+    _replace_dataset(group, "flip", np.concatenate((old_flip, np.zeros(len(ordered), dtype=bool)))[order])
+    for name in META_COLUMNS:
+        if name == "POS":
+            _replace_dataset(group, name, merged_positions)
+            continue
+        old_values = np.asarray(group[name][:], dtype=object)
+        new_values = _new_metadata_values(ordered, name)
+        merged_values = np.concatenate((old_values, new_values))[order]
+        _replace_dataset(group, name, merged_values, strings=True)
+        del old_values, new_values, merged_values
+    if old_counts is not None:
+        _replace_dataset(group, "allele_counts", np.concatenate((old_counts, new_counts))[order])
+    if "nonunique_indices" in group:
+        del group["nonunique_indices"]
+
+    group.attrs["n"] = expanded_n = n_nodes + stats.nodes_added
+    group.attrs["n_entries"] = int(group.attrs["n_entries"]) + stats.edges_added
+    group.attrs["n_variants"] = len(order)
+    group.attrs["rare_variant_phase_method"] = _phase_method("batch_only")
+    group.attrs["rare_variant_reuse_policy"] = "batch_only"
+    group.attrs["rare_variant_phase_is_inferred"] = False
+    group.attrs["rare_variant_diploid_dosage_preserved"] = True
+    group.attrs["rare_variants_added"] = stats.variants_added
+    group.attrs["rare_variant_singletons_direct"] = stats.direct_singletons
+    group.attrs["rare_variant_doubletons_added"] = stats.doubletons_added
+    group.attrs["rare_variant_existing_nodes_reused"] = 0
+    group.attrs["rare_variant_distinct_existing_nodes_reused"] = 0
+    group.attrs["rare_variant_new_nodes_reused"] = stats.reused_new_nodes
+    group.attrs["rare_variant_nodes_added"] = stats.nodes_added
+    group.attrs["rare_variant_edges_added"] = stats.edges_added
+    group.attrs["rare_variant_existing_candidate_nodes_scanned"] = 0
+    group.attrs["rare_variant_existing_signatures_available"] = 0
+    if expanded_n != len(group["indptr"]) - 1:
+        raise AssertionError("expanded graph dimension does not match indptr")
+    stats.dataset_rewrite_seconds += time.perf_counter() - dataset_rewrite_started
+    return stats
+
+
 def _augment_block(
     group: h5py.Group,
     variants: Sequence[RareVariant],
@@ -384,6 +566,8 @@ def _augment_block(
     reuse_policy: ReusePolicy = "existing_then_batch",
 ) -> AugmentationStats:
     """Augment one LinearARG HDF5 block in place."""
+    if reuse_policy == "batch_only":
+        return _augment_block_batch_only(group, variants, iids)
     stats = AugmentationStats(variants_added=len(variants))
     if not variants:
         return stats
