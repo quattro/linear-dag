@@ -20,6 +20,13 @@ from .genotype import write_vcf_to_hdf5
 from .memory_logger import MemoryLogger
 
 
+def _compression_ratio(numerator, denominator):
+    """Return a compression ratio without failing for an edge-free graph."""
+    if denominator == 0:
+        return np.inf if numerator else 1.0
+    return numerator / denominator
+
+
 def _coerce_logger(
     logger: Optional[Union[logging.Logger, MemoryLogger]],
     *,
@@ -801,6 +808,7 @@ def run_forward_backward(
         genotype_path,
         add_samples=True,
         out=f"{out}/forward_backward_graphs/{partition_identifier}",
+        exclude_singletons=True,
     )
     np.savetxt(f"{out}/forward_backward_graphs/{partition_identifier}_sample_indices.txt", sample_indices)
     t4 = time.time()
@@ -840,7 +848,9 @@ def reduction_union_recom(
             return None
         n, m = f["shape"][:]
         genotype_indptr = f["indptr"][:]
-        singleton_columns = np.flatnonzero(np.diff(genotype_indptr) == 1)
+        allele_counts = np.diff(genotype_indptr)
+        singleton_columns = np.flatnonzero(allele_counts == 1)
+        inference_columns = np.flatnonzero(allele_counts != 1)
         singleton_carriers = (
             f["indices"][genotype_indptr[singleton_columns]] if len(singleton_columns) > 0 else np.array([], dtype=int)
         )
@@ -856,8 +866,14 @@ def reduction_union_recom(
 
     logger.info("Combining nodes and computing reduction union")
     t3 = time.time()
-    packed_edges, variant_indices = BrickGraph.combine_graphs_packed(forward_graph, backward_graph, m)
-    variant_indices = np.asarray(variant_indices)
+    packed_edges, inference_variant_indices = BrickGraph.combine_graphs_packed(
+        forward_graph,
+        backward_graph,
+        len(inference_columns),
+    )
+    # Restore the original column order after inference on the compact matrix.
+    variant_indices = np.empty(m, dtype=np.int64)
+    variant_indices[inference_columns] = np.asarray(inference_variant_indices)
     variant_indices[singleton_columns] = np.asarray(sample_indices, dtype=int)[singleton_carriers]
     del forward_graph, backward_graph
     t4 = time.time()
@@ -892,7 +908,7 @@ def reduction_union_recom(
     del indptr, indices, data
     af = np.diff(genotype_indptr) / n
     geno_nnz = np.sum(n * np.minimum(af, 1 - af))
-    nnz_ratio = geno_nnz / brickgraph_nnz
+    nnz_ratio = _compression_ratio(geno_nnz, brickgraph_nnz)
     logger.info(
         "Stats - n: %s, m: %s, geno_nnz: %s, brickgraph_nnz: %s, nnz_ratio: %s",
         n,
@@ -948,7 +964,7 @@ def infer_brick_graph(
 
     af = np.diff(genotypes.indptr) / n
     geno_nnz = np.sum(n * np.minimum(af, 1 - af))
-    nnz_ratio = geno_nnz / adj_mat.nnz
+    nnz_ratio = _compression_ratio(geno_nnz, adj_mat.nnz)
     logger.info(f"Stats - n: {n}, m: {m}, geno_nnz: {geno_nnz}, brickgraph_nnz: {adj_mat.nnz}, nnz_ratio: {nnz_ratio}")
 
 
@@ -1133,7 +1149,7 @@ def get_linarg_stats(out, mount_point, partition_identifiers, partition_identifi
         linarg.shape[1],
         genotypes_nnz,
         linarg.nnz,
-        np.round(genotypes_nnz / linarg.nnz, 3),
+        np.round(_compression_ratio(genotypes_nnz, linarg.nnz), 3),
         np.all(allele_counts_from_genotype == allele_count_from_linarg),
     ]
     stats = [str(x) for x in stats]

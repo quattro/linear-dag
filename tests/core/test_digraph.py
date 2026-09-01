@@ -8,9 +8,10 @@ from scipy.sparse import csc_matrix
 
 from linear_dag.core.brick_graph import BrickGraph, read_graph_from_disk, reduction_union, reduction_union_packed
 from linear_dag.core.digraph import DiGraph
+from linear_dag.core.lineararg import LinearARG
 from linear_dag.core.recombination import Recombination
 from linear_dag.genotype import read_vcf, write_vcf_to_hdf5
-from linear_dag.pipeline import reduction_union_recom, run_forward_backward
+from linear_dag.pipeline import get_linarg_stats, reduction_union_recom, run_forward_backward
 
 
 def test_to_csc_arrays_sorts_parents_and_sums_duplicate_edges():
@@ -266,6 +267,39 @@ def test_batched_hdf5_forward_backward_matches_in_memory(test_data_dir, tmp_path
         np.testing.assert_array_equal(actual_graph.to_csc().toarray(), expected_graph.to_csc().toarray())
 
 
+def test_hdf5_singleton_filter_matches_filtered_in_memory_graph(test_data_dir, tmp_path):
+    vcf_path = test_data_dir / "1kg_small.vcf"
+    genotype_path = tmp_path / "genotypes.h5"
+    streamed_prefix = tmp_path / "streamed"
+    genotypes, _, _, _ = read_vcf(vcf_path)
+    write_vcf_to_hdf5(vcf_path, genotype_path, batch_nnz=19, batch_columns=7)
+    inference_columns = np.flatnonzero(np.diff(genotypes.indptr) != 1)
+    filtered = genotypes[:, inference_columns].tocsc()
+
+    expected_forward, expected_backward, expected_samples = BrickGraph.forward_backward(filtered)
+    actual_samples = BrickGraph.forward_backward_from_hdf5(
+        str(genotype_path),
+        add_samples=True,
+        out=str(streamed_prefix),
+        batch_nnz=19,
+        exclude_singletons=True,
+    )
+
+    np.testing.assert_array_equal(actual_samples, expected_samples)
+    for direction, expected_graph in [("forward", expected_forward), ("backward", expected_backward)]:
+        actual_graph = read_graph_from_disk(f"{streamed_prefix}_{direction}_graph.h5")
+        np.testing.assert_array_equal(actual_graph.to_csc().toarray(), expected_graph.to_csc().toarray())
+
+
+def test_forward_backward_preserves_standalone_singletons():
+    genotypes = csc_matrix(np.array([[1], [0], [0], [0]], dtype=np.int8))
+
+    forward, backward, sample_indices = BrickGraph.forward_backward(genotypes)
+    graph, variant_indices = BrickGraph.combine_graphs(forward, backward, genotypes.shape[1])
+
+    assert list(graph.successors(int(variant_indices[0]))) == [sample_indices[0]]
+
+
 def test_streamed_pipeline_singletons_use_carrier_sample_nodes(tmp_path):
     out = tmp_path / "run"
     partition = "0_chr1:1-10"
@@ -296,3 +330,30 @@ def test_streamed_pipeline_singletons_use_carrier_sample_nodes(tmp_path):
         sample_indices = handle["sample_indices"][:]
         np.testing.assert_array_equal(variant_indices[:2], np.repeat(sample_indices[0], 2))
         assert variant_indices[2] not in set(sample_indices)
+
+
+def test_all_singleton_pipeline_handles_zero_edges(tmp_path):
+    out = tmp_path / "run"
+    partition = "0_chr1:1-10"
+    genotype_dir = out / "genotype_matrices"
+    genotype_dir.mkdir(parents=True)
+    genotypes = csc_matrix(np.eye(4, 3, dtype=np.int8))
+    with h5py.File(genotype_dir / f"{partition}.h5", "w") as handle:
+        handle.create_dataset("shape", data=genotypes.shape)
+        handle.create_dataset("indptr", data=genotypes.indptr)
+        handle.create_dataset("indices", data=genotypes.indices)
+        handle.create_dataset("data", data=genotypes.data)
+
+    run_forward_backward(str(out), "", partition)
+    reduction_union_recom(str(out), "", partition)
+
+    with h5py.File(out / "brick_graph_partitions" / f"{partition}.h5", "r") as handle:
+        assert len(handle["data"]) == 0
+        np.testing.assert_array_equal(handle["variant_indices"][:], handle["sample_indices"][:3])
+
+    linarg = LinearARG.from_genotypes(genotypes, np.zeros(genotypes.shape[1], dtype=bool))
+    assert linarg.nnz == 0
+    (out / "linear_args").mkdir()
+    get_linarg_stats(str(out), "", [partition], partition, linarg)
+    stats = (out / "linear_args" / f"{partition}_stats.txt").read_text().splitlines()[1].split()
+    assert stats[4] == "inf"
