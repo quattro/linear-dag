@@ -197,10 +197,21 @@ cdef class BrickGraph:
 
 
     @staticmethod
-    def forward_backward_from_hdf5(str genotype_path, bint add_samples = True, str out = None, long batch_nnz = 1000000):
-        """Run sequential passes from bounded batches of CSC carrier indices."""
+    def forward_backward_from_hdf5(
+        str genotype_path,
+        bint add_samples = True,
+        str out = None,
+        long batch_nnz = 1000000,
+        bint exclude_singletons = False,
+    ):
+        """Run sequential passes from bounded batches of CSC carrier indices.
+
+        When ``exclude_singletons`` is true, singleton columns are omitted and
+        the remaining variants receive compact local indices.
+        """
         cdef long num_samples
         cdef long num_variants
+        cdef long original_num_variants
         cdef cnp.ndarray[cnp.int64_t, ndim=1] indptr_array
         cdef cnp.int64_t[:] indptr
         cdef cnp.ndarray[cnp.int32_t, ndim=1] batch_indices_array
@@ -212,6 +223,7 @@ cdef class BrickGraph:
         cdef long index_end
         cdef long target
         cdef long i
+        cdef long local_i
         cdef BrickGraph forward_pass
         cdef BrickGraph backward_pass
         cdef long[:] sample_indices
@@ -223,9 +235,13 @@ cdef class BrickGraph:
             raise ValueError("batch_nnz must be positive")
 
         with h5py.File(genotype_path, 'r') as f:
-            num_samples, num_variants = f['shape'][:]
+            num_samples, original_num_variants = f['shape'][:]
             indptr_array = np.asarray(f['indptr'][:], dtype=np.int64)
             indptr = indptr_array
+            if exclude_singletons:
+                num_variants = int(np.count_nonzero(np.diff(indptr_array) != 1))
+            else:
+                num_variants = original_num_variants
 
             forward_pass = BrickGraph(
                 num_samples,
@@ -235,21 +251,26 @@ cdef class BrickGraph:
             )
             forward_pass.direction = 1
             batch_start = 0
-            while batch_start < num_variants:
+            local_i = 0
+            while batch_start < original_num_variants:
                 target = indptr[batch_start] + batch_nnz
                 batch_end = np.searchsorted(indptr_array, target, side='right') - 1
                 if batch_end <= batch_start:
                     batch_end = batch_start + 1
-                if batch_end > num_variants:
-                    batch_end = num_variants
+                if batch_end > original_num_variants:
+                    batch_end = original_num_variants
                 index_start = indptr[batch_start]
                 index_end = indptr[batch_end]
                 batch_indices_array = np.asarray(f['indices'][index_start:index_end], dtype=np.int32)
                 batch_indices = batch_indices_array
                 for i in range(batch_start, batch_end):
+                    if exclude_singletons and indptr[i + 1] - indptr[i] == 1:
+                        continue
                     carriers = batch_indices[indptr[i] - index_start:indptr[i + 1] - index_start]
-                    forward_pass.intersect_clades(carriers, i)
+                    forward_pass.intersect_clades(carriers, local_i)
+                    local_i += 1
                 batch_start = batch_end
+            assert local_i == num_variants
 
             if add_samples:
                 sample_indices = np.arange(num_variants, num_variants + num_samples, dtype=np.int64)
@@ -274,7 +295,8 @@ cdef class BrickGraph:
                 out=f'{out}_backward_graph.h5',
             )
             backward_pass.direction = -1
-            batch_end = num_variants
+            batch_end = original_num_variants
+            local_i = num_variants - 1
             while batch_end > 0:
                 target = indptr[batch_end] - batch_nnz
                 batch_start = np.searchsorted(indptr_array, target, side='left')
@@ -285,9 +307,13 @@ cdef class BrickGraph:
                 batch_indices_array = np.asarray(f['indices'][index_start:index_end], dtype=np.int32)
                 batch_indices = batch_indices_array
                 for i in reversed(range(batch_start, batch_end)):
+                    if exclude_singletons and indptr[i + 1] - indptr[i] == 1:
+                        continue
                     carriers = batch_indices[indptr[i] - index_start:indptr[i + 1] - index_start]
-                    backward_pass.intersect_clades(carriers, i)
+                    backward_pass.intersect_clades(carriers, local_i)
+                    local_i -= 1
                 batch_end = batch_start
+            assert local_i == -1
 
             del backward_pass
 
@@ -319,9 +345,35 @@ cdef class BrickGraph:
         :param genotypes: sparse genotype matrix in csc_matrix format; rows=samples, columns=variants. Order of variants
         matters, order of samples does not.
         :param add_samples: whether to add nodes to the brick graph for the sample haplotypes.
+
+        With sample nodes enabled, singleton columns are excluded from graph
+        inference and mapped directly to their carrier sample nodes afterward.
         """
-        forward_graph, backward_graph, sample_indices = BrickGraph.forward_backward(genotypes, add_samples)
-        brick_graph, variant_indices = BrickGraph.combine_graphs(forward_graph, backward_graph, genotypes.shape[1])
+        if not add_samples:
+            forward_graph, backward_graph, sample_indices = BrickGraph.forward_backward(genotypes, False)
+            brick_graph, variant_indices = BrickGraph.combine_graphs(
+                forward_graph,
+                backward_graph,
+                genotypes.shape[1],
+            )
+            return brick_graph, sample_indices, variant_indices
+
+        allele_counts = np.diff(genotypes.indptr)
+        singleton_columns = np.flatnonzero(allele_counts == 1)
+        inference_columns = np.flatnonzero(allele_counts != 1)
+        inference_genotypes = genotypes[:, inference_columns].tocsc()
+        forward_graph, backward_graph, sample_indices = BrickGraph.forward_backward(inference_genotypes, True)
+        brick_graph, inference_variant_indices = BrickGraph.combine_graphs(
+            forward_graph,
+            backward_graph,
+            len(inference_columns),
+        )
+
+        variant_indices = np.empty(genotypes.shape[1], dtype=np.int64)
+        variant_indices[inference_columns] = np.asarray(inference_variant_indices)
+        if len(singleton_columns) > 0:
+            carrier_rows = genotypes.indices[genotypes.indptr[singleton_columns]]
+            variant_indices[singleton_columns] = np.asarray(sample_indices)[carrier_rows]
         return brick_graph, sample_indices, variant_indices
 
 

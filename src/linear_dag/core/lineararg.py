@@ -192,7 +192,8 @@ class LinearARG(LinearOperator):
 
             `genotypes` must already be phased. Diploid semantics are recovered
             later by pairing adjacent haplotypes or by adding explicit
-            individual nodes.
+            individual nodes. Singleton variants use their carrier sample node
+            directly and therefore do not add graph nodes.
 
         **Arguments:**
 
@@ -538,54 +539,6 @@ class LinearARG(LinearOperator):
             carriers = get_pairing_matrix(self.shape[0]) @ carriers
         return carriers
 
-    def remove_samples(self, iids_to_remove: npt.NDArray[np.int_]):
-        """Return a copy with selected sample IDs removed.
-
-        !!! info
-
-            This method rebuilds the graph by dropping sample nodes and, when
-            present, their corresponding individual nodes. Variant indexing is
-            preserved.
-
-        **Arguments:**
-
-        - `iids_to_remove`: iterable of sample IDs to remove.
-
-        **Returns:**
-
-        - New [`linear_dag.LinearARG`][] with updated adjacency and metadata.
-        """
-        sample_mask = np.isin(self.iids, iids_to_remove)
-        sample_indices_to_remove = np.where(sample_mask)[0]
-        iids_to_keep = np.array(self.iids)[~sample_mask]
-
-        individual_mask = np.isin(list(dict.fromkeys(self.iids)), iids_to_remove)  # deduplicate but keep order
-        individual_indices_to_remove = np.where(individual_mask)[0]
-
-        if self.n_individuals is not None:
-            nodes_to_remove = np.concatenate(
-                [self.sample_indices[sample_indices_to_remove], self.individual_indices[individual_indices_to_remove]]
-            )
-        else:
-            nodes_to_remove = self.sample_indices[sample_indices_to_remove]
-
-        A = self.A
-        nodes_to_keep = np.setdiff1d(np.arange(A.shape[0]), nodes_to_remove)
-        A = A.tocsr()
-        A = A[nodes_to_keep, :].tocsc()  # efficient row slice, then convert back to CSC
-        A = A[:, nodes_to_keep]
-
-        linarg_samples_removed = LinearARG(A, self.variant_indices, self.flip, len(iids_to_keep))
-        linarg_samples_removed.iids = pl.Series(iids_to_keep).cast(pl.Int64)
-
-        if self.n_individuals is not None:
-            linarg_samples_removed.n_individuals = self.n_individuals - len(iids_to_remove)
-        if self.variants is not None:
-            linarg_samples_removed.variants = self.variants
-        if self.sex is not None:
-            linarg_samples_removed.sex = self.sex[~individual_mask]
-        return linarg_samples_removed
-
     def __str__(self):
         return f"A: shape {self.A.shape}, nonzeros {self.A.nnz}"
 
@@ -760,6 +713,55 @@ class LinearARG(LinearOperator):
         if "allele_counts" in self.__dict__:
             copied.set_allele_counts(self.allele_counts.copy())
         return copied
+
+    @staticmethod
+    def augment_rare_variants_file(
+        input_h5: Union[str, PathLike],
+        carrier_table: Union[str, PathLike],
+        output_h5: Union[str, PathLike],
+        *,
+        reuse_policy: str = "existing_then_batch",
+    ):
+        """Add sparse singleton/doubleton calls to compressed HDF5 data.
+
+        This is the object-oriented entry point for
+        [`linear_dag.rare_variants.augment_rare_variants_file`][]. The source
+        file is copied, augmented, and atomically installed at `output_h5`.
+
+        !!! info
+
+            Heterozygous calls are pseudo-phased to minimize incremental graph
+            storage. Diploid dosage is preserved, but the selected phase is not
+            a biological inference. Input blocks must contain uniformly
+            diploid data, represented either by one IID per individual or two
+            adjacent haplotype rows per IID. The default reuse policy preserves
+            the existing graph-search behavior.
+
+        **Arguments:**
+
+        - `input_h5`: Existing block-structured LinearARG HDF5 file.
+        - `carrier_table`: Sparse carrier table with one row per non-reference call.
+        - `output_h5`: Path for the new augmented copy.
+        - `reuse_policy`: Doubleton-node reuse policy. One of
+          `existing_then_batch`, `batch_only`, or `none`.
+
+        **Returns:**
+
+        - [`linear_dag.rare_variants.AugmentationStats`][] summarizing graph reuse and additions.
+
+        **Raises:**
+
+        - `FileExistsError`: If `output_h5` already exists.
+        - `ValueError`: If carrier data cannot be assigned or augmented safely.
+        """
+        from linear_dag.rare_variants import augment_rare_variants_file
+
+        return augment_rare_variants_file(
+            input_h5,
+            carrier_table,
+            output_h5,
+            reuse_policy=reuse_policy,
+        )
 
     def write(
         self,

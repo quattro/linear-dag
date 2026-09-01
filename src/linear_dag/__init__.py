@@ -21,6 +21,15 @@ from .genotype import (
     flip_alleles as flip_alleles,
     read_vcf as read_vcf,
 )
+from .rare_variants import (
+    augment_rare_variants_file as augment_rare_variants_file,
+    AugmentationStats as AugmentationStats,
+    CarrierCall as CarrierCall,
+    RareVariant as RareVariant,
+    read_rare_variant_carriers as read_rare_variant_carriers,
+    REUSE_POLICIES as REUSE_POLICIES,
+    ReusePolicy as ReusePolicy,
+)
 from .structure import (
     pca as pca,
     svd as svd,
