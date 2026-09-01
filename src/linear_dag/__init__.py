@@ -27,6 +27,8 @@ from .rare_variants import (
     CarrierCall as CarrierCall,
     RareVariant as RareVariant,
     read_rare_variant_carriers as read_rare_variant_carriers,
+    REUSE_POLICIES as REUSE_POLICIES,
+    ReusePolicy as ReusePolicy,
 )
 from .structure import (
     pca as pca,
