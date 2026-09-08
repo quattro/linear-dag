@@ -145,16 +145,7 @@ def test_linear_arg_inference_logs_progress_when_logger_provided(monkeypatch, ca
         def from_genotypes(_genotypes):
             return "graph", np.array([0]), np.array([0])
 
-    class _FakeRecombination:
-        @staticmethod
-        def from_graph(_graph):
-            return _FakeRecombination()
-
-        def find_recombinations(self):
-            return None
-
     monkeypatch.setattr(lai, "BrickGraph", _FakeBrickGraph)
-    monkeypatch.setattr(lai, "Recombination", _FakeRecombination)
     monkeypatch.setattr(lai, "linearize_brick_graph", lambda _recom: np.eye(2))
 
     genotypes = csc_matrix(np.array([[1], [0]]))

@@ -805,6 +805,7 @@ def _compress(args, logger):
         )
     compress_vcf(
         input_vcf=args.vcf_path,
+        recombination_method=args.recombination_method,
         output_h5=args.output_h5,
         region=args.region,
         keep_path=args.keep,
@@ -844,13 +845,13 @@ def _step1(args, logger):
 
 def _step2(args, logger):
     logger.info("Starting main process")
-    msc_step2(args.job_metadata, args.small_job_id, logger=logger)
+    msc_step2(args.job_metadata, args.small_job_id, logger=logger, recombination_method=args.recombination_method)
     return
 
 
 def _step3(args, logger):
     logger.info("Starting main process")
-    msc_step3(args.job_metadata, args.large_job_id, logger=logger)
+    msc_step3(args.job_metadata, args.large_job_id, logger=logger, recombination_method=args.recombination_method)
     return
 
 
@@ -937,6 +938,12 @@ def _main(args):
         help=("Genomic region of the form chrN:start-end. Supplying this preserves block metadata for downstream CLI."),
     )
     compress_p.add_argument("--out", default="kodama", help="Location to save result files.")
+    compress_p.add_argument(
+        "--recombination-method",
+        choices=("legacy", "msbf"),
+        default="legacy",
+        help="Recombination algorithm: legacy two-parent method (default) or MSBF block factorization.",
+    )
     compress_p.set_defaults(func=_compress)
 
     #### multi-step compress pipeline ####
@@ -1010,6 +1017,12 @@ def _main(args):
     step2_p.add_argument(
         "--small-job-id", required=True, type=int, help="Job id to run (small_job_id in job-metadata file)."
     )
+    step2_p.add_argument(
+        "--recombination-method",
+        choices=("legacy", "msbf"),
+        default="legacy",
+        help="Recombination algorithm: legacy two-parent method (default) or MSBF block factorization.",
+    )
     step2_p.set_defaults(func=_step2)
 
     step3_p = msc_subp.add_parser(
@@ -1018,6 +1031,12 @@ def _main(args):
     step3_p.add_argument("--job-metadata", required=True, help="Path to job metadata file outputted from step 0.")
     step3_p.add_argument(
         "--large-job-id", required=True, type=int, help="Job id to run (large_job_id in job-metadata file)."
+    )
+    step3_p.add_argument(
+        "--recombination-method",
+        choices=("legacy", "msbf"),
+        default="legacy",
+        help="Recombination algorithm: legacy two-parent method (default) or MSBF block factorization.",
     )
     step3_p.set_defaults(func=_step3)
 

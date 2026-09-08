@@ -1,0 +1,144 @@
+{
+  "metadata": {
+    "generated_at": "2026-08-27T00:25:47.864505+00:00",
+    "baseline_sha": "c199307eeb1f04cb9204ce4bb99342f7ea32a2de",
+    "candidate_sha": "c199307eeb1f04cb9204ce4bb99342f7ea32a2de",
+    "candidate_base_sha": "c199307eeb1f04cb9204ce4bb99342f7ea32a2de",
+    "candidate_extension_sha256": "598175fb790c0c3472d41e51dc70c213fd1a72cbeb72d432b767e1955d9be1f2",
+    "baseline_wheel_sha256": "ec00bfaac17632ae868cbfd3605d2adfbcca4ca63e36f22d36c507fb971da747",
+    "candidate_wheel_sha256": "8aee98edadb2f0ce0dbc822d7a04fc68d8559c9ad6565feaacb9e14f5f611e96",
+    "baseline_label": "compact-init",
+    "candidate_label": "second-pass-final",
+    "comparison_description": "Both environments contain the first-pass optimized package and identical dependencies; the candidate replaces only the ABI-compatible recombination extension with the completed second pass.",
+    "repetitions": 7,
+    "system": {
+      "os": "macOS-26.4.1-arm64-arm-64bit",
+      "machine": "arm64",
+      "cpu": "Apple M1",
+      "physical_cpus": 8,
+      "logical_cpus": 8,
+      "ram_bytes": 17179869184,
+      "compiler": [
+        "Apple clang version 21.0.0 (clang-2100.0.123.102)",
+        "Target: arm64-apple-darwin25.4.0",
+        "Thread model: posix",
+        "InstalledDir: /Library/Developer/CommandLineTools/usr/bin"
+      ]
+    },
+    "baseline_runtime": {
+      "executable": "/private/tmp/msbf-benchmark/venv-msbf-optimized/bin/python",
+      "python": "3.11.15 (main, Jun 23 2026, 15:46:51) [Clang 22.1.3 ]",
+      "platform": "macOS-26.4.1-arm64-arm-64bit",
+      "cython": "3.3.0",
+      "numpy": "2.4.6",
+      "scipy": "1.17.1"
+    },
+    "candidate_runtime": {
+      "executable": "/private/tmp/msbf-benchmark/venv-msbf-second-pass/bin/python",
+      "python": "3.11.15 (main, Jun 23 2026, 15:46:51) [Clang 22.1.3 ]",
+      "platform": "macOS-26.4.1-arm64-arm-64bit",
+      "cython": "3.3.0",
+      "numpy": "2.4.6",
+      "scipy": "1.17.1"
+    },
+    "worker_sha256": "07cf99c5d5efa97a4306dc2396e60158e8c72ef48bd4b9968f43a1117ee4febd",
+    "has_adversarial_cases": false
+  },
+  "summaries": [
+    {
+      "case": {
+        "block": "22_10000001_15000000",
+        "family": "linarg_reconstructed_recombination",
+        "name": "linarg-22_10000001_15000000",
+        "path": "/Users/nicholas/Library/CloudStorage/Dropbox/collab/nick-luke/linearg_shared/data/1kg_chromosomes_n3202_blocks.h5"
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 65464,
+      "input_edges": 3699752,
+      "output_nodes": 238343,
+      "output_edges": 1341418,
+      "factor_nodes": 172879,
+      "init_ns": {
+        "median": 533475083,
+        "iqr": 38422583.0,
+        "minimum": 505263625
+      },
+      "find_ns": {
+        "median": 898133375,
+        "iqr": 16248541.5,
+        "minimum": 843864250
+      },
+      "total_ns": {
+        "median": 1434004958,
+        "iqr": 52846478.5,
+        "minimum": 1349274792
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 1307377664,
+        "iqr": 106496.0,
+        "minimum": 1092911104
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 1213022208,
+        "iqr": 106496.0,
+        "minimum": 1031847936
+      }
+    },
+    {
+      "case": {
+        "block": "22_10000001_15000000",
+        "family": "linarg_reconstructed_recombination",
+        "name": "linarg-22_10000001_15000000",
+        "path": "/Users/nicholas/Library/CloudStorage/Dropbox/collab/nick-luke/linearg_shared/data/1kg_chromosomes_n3202_blocks.h5"
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 65464,
+      "input_edges": 3699752,
+      "output_nodes": 238343,
+      "output_edges": 1341418,
+      "factor_nodes": 172879,
+      "init_ns": {
+        "median": 469694458,
+        "iqr": 16308208.5,
+        "minimum": 443488167
+      },
+      "find_ns": {
+        "median": 802554167,
+        "iqr": 23173604.0,
+        "minimum": 761917417
+      },
+      "total_ns": {
+        "median": 1272264000,
+        "iqr": 33069020.5,
+        "minimum": 1205420459
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 1141342208,
+        "iqr": 73728.0,
+        "minimum": 1141293056
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 1099972608,
+        "iqr": 73728.0,
+        "minimum": 1099923456
+      }
+    }
+  ],
+  "gates": {
+    "candidate_faster_at_two_largest_adversarial_sizes": null,
+    "candidate_adversarial_log_log_slope": null,
+    "candidate_near_linear_slope_at_most_1_15": null,
+    "representative_runtime_ratios": {
+      "linarg-22_10000001_15000000": 0.8872103216256801
+    },
+    "representative_runtime_regression_at_most_10_percent": true,
+    "representative_peak_rss_ratios": {
+      "linarg-22_10000001_15000000": 0.873001152939997
+    },
+    "representative_peak_rss_regression_at_most_10_percent": true
+  }
+}

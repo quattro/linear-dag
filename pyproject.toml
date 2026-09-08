@@ -105,6 +105,7 @@ force_rebuild = true
 [build.targets.wheel.hooks.cython.options.files]
 include = [
   "recombination.pyx",
+  "recombination_msbf.pyx",
   "solve.pyx",
   "data_structures.pyx",
   "digraph.pyx",

@@ -1339,6 +1339,7 @@ def test_compress_passes_injected_logger_to_pipeline(monkeypatch):
         remove_indels=False,
         remove_multiallelics=False,
         add_individual_nodes=False,
+        recombination_method="legacy",
     )
     cli._compress(args, injected)
     assert captured["logger"] is injected
@@ -1673,3 +1674,26 @@ def test_run_cli_out_of_bounds_covar_col_nums_returns_bounds_error(monkeypatch, 
     assert "Requested column index value(s) out of bounds" in stderr
     assert "Valid range: 0..5" in stderr
     assert "Total columns: 6" in stderr
+
+
+@pytest.mark.parametrize("method", [None, "legacy", "msbf"])
+@pytest.mark.parametrize(
+    "command,target",
+    [
+        (["compress", "input.vcf", "output.h5"], "compress_vcf"),
+        (["multi-step-compress", "step2", "--job-metadata", "jobs.parquet", "--small-job-id", "0"], "msc_step2"),
+        (["multi-step-compress", "step3", "--job-metadata", "jobs.parquet", "--large-job-id", "0"], "msc_step3"),
+    ],
+)
+def test_cli_dispatches_recombination_method(monkeypatch, command, target, method):
+    captured = {}
+    monkeypatch.setattr(cli, target, lambda *args, **kwargs: captured.update(kwargs))
+    args = command + (["--recombination-method", method] if method is not None else [])
+    cli._main(args)
+    assert captured["recombination_method"] == (method or "legacy")
+
+
+def test_cli_rejects_unknown_recombination_method():
+    with pytest.raises(SystemExit) as exc:
+        cli._main(["compress", "input.vcf", "output.h5", "--recombination-method", "invalid"])
+    assert exc.value.code == 2

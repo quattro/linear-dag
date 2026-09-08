@@ -23,7 +23,7 @@ cdef class Recombination(DiGraph):
         # Call parent __init__ to initialize the graph structure
         # Note: __cinit__ was already called with these same arguments
         DiGraph.__init__(self, num_nodes, num_edges)
-        
+
         self.clique = -np.ones(num_edges, dtype=np.int64)
         self.clique_rows = LinkedListArray(num_edges)
         self.clique_size_heap = None
@@ -53,7 +53,7 @@ cdef class Recombination(DiGraph):
         result.copy_from(brick_graph)
         result.compute_cliques()
         result.collect_cliques()
-        
+
         return result
 
     cpdef void compute_cliques(self):
@@ -102,29 +102,29 @@ cdef class Recombination(DiGraph):
         cdef long[:] clique_rows
         cdef node* new_node
         cdef long p
-        
+
         c = self.max_clique()
-        
+
         while c >= 0: # -1 when none remain
             clique_rows = self.clique_rows.extract(c)
-            
+
             if len(clique_rows) <= 1:
                 c = self.max_clique()
                 if c >= 0 and self.clique_rows.length[c] <= 1:
                     break
                 continue
-            
+
             new_node = self.add_node(-1)
-            
+
             for p in range(2):
                 self.update_trios(p, clique_rows, new_node.index)
-            
+
             assert self.clique_rows.length[c] == len(clique_rows)
-            
+
             self.collapse_clique(c, new_node.index, clique_rows)
-            
+
             c = self.max_clique()
-            if self.clique_rows.length[c] <= 1:
+            if c < 0 or self.clique_rows.length[c] <= 1:
                 break
 
     cpdef int max_clique(self):
@@ -148,6 +148,34 @@ cdef class Recombination(DiGraph):
         # Replace clique with a star
         self.collapse_clique(clique_index, new_node.index, clique_rows)
 
+    cdef void _ensure_clique_capacity(self, long needed):
+        # Clique IDs increase as neighboring pairs are reassigned, even while
+        # edge count decreases. Grow all ID-indexed workspace together.
+        cdef long capacity = self.clique_rows.n
+        cdef long row, value
+        cdef long[:] values
+        cdef long[:] priorities
+        cdef LinkedListArray expanded
+        cdef CountingArray tracker
+        if needed <= capacity:
+            return
+        while capacity < needed:
+            capacity *= 2
+        expanded = LinkedListArray(capacity, self.clique_rows.capacity)
+        for row in range(self.clique_rows.n):
+            values = self.clique_rows.extract(row)
+            for value in values:
+                expanded._extend(row, value)
+        priorities = np.zeros(capacity, dtype=np.int64)
+        priorities[:self.clique_size_heap.n] = self.clique_size_heap.priority
+        tracker = CountingArray(capacity)
+        self.clique_rows = expanded
+        self.clique_size_heap.priority = priorities
+        self.clique_size_heap.n = capacity
+        # Called after the current grouping is complete; the next update starts
+        # a fresh grouping. Retain the existing heap and its tie ordering.
+        self.unique_cliques_tracker = tracker
+
     cdef void update_trios(self, long p, long[:] edges, long new_node):
         cdef long num_trios = len(edges)
 
@@ -168,12 +196,12 @@ cdef class Recombination(DiGraph):
         cdef long[:] which_affected_cliques = np.empty(num_neighbors, dtype=np.int64)
         cdef long num_unique = 0
         cdef long clique_val, unique_idx
-        
+
         # Find unique cliques using CountingArray
         self.unique_cliques_tracker.clear()
         for i in range(num_neighbors):
             clique_val = self.clique[neighboring_trios[i]]
-            
+
             if not self.unique_cliques_tracker.contains(clique_val):
                 # Not seen before - add to unique list
                 affected_cliques[num_unique] = clique_val
@@ -183,10 +211,11 @@ cdef class Recombination(DiGraph):
             else:  # Already seen
                 unique_idx = self.unique_cliques_tracker.get_element(clique_val)
                 which_affected_cliques[i] = unique_idx
-        
+
         affected_cliques = affected_cliques[:num_unique]
-        
+
         num_new_cliques = len(affected_cliques)
+        self._ensure_clique_capacity(self.num_cliques + num_new_cliques)
         for i in range(num_neighbors):
             self.clique[neighboring_trios[i]] = which_affected_cliques[i] + self.num_cliques
         cdef long[:] new_cliques = np.arange(self.num_cliques, self.num_cliques + num_new_cliques, dtype=np.int64)

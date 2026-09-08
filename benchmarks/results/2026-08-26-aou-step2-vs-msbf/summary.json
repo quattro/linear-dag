@@ -1,0 +1,1175 @@
+{
+  "metadata": {
+    "generated_at": "2026-08-26T22:51:14.036549+00:00",
+    "baseline_sha": "d8ef3bd3089caa9944803fec2bd0b48d8cd01d05",
+    "candidate_sha": "554f4fac3fbd244ba0400bde9eaaaeb0beb0ddd9+msbf-pyx-0710e0edb380dfc901402b71db0847d78eb27f9fdd83a4f9de1f90e093187406",
+    "candidate_base_sha": "c199307eeb1f04cb9204ce4bb99342f7ea32a2de",
+    "candidate_extension_sha256": "b22223af4ead0c2785db9657ada64f956f17178e7868eb0ad7278db94bb9c5b6",
+    "baseline_wheel_sha256": "e15ac891eedbab4d41bdcbe8fef920b094156ec28284dd62113d9e486667cb39",
+    "candidate_wheel_sha256": "78d8c5a92bc7726c7dd08a3daa204a221f2ed78282b8f58fd1c6514eba791183",
+    "baseline_label": "aou-step2",
+    "candidate_label": "msbf",
+    "comparison_description": "The baseline environment contains the complete wheel from remote branch codex/aou-step2-sparse-workspace at the recorded SHA. The candidate environment contains the clean main package with only the ABI-compatible final MSBF recombination extension replaced. Both use identical runtime dependencies, Python, compiler, and hardware; synthetic recombination cases compare the algorithms directly, while the fixture end-to-end case also includes other branch-level pipeline differences.",
+    "repetitions": 7,
+    "system": {
+      "os": "macOS-26.4.1-arm64-arm-64bit",
+      "machine": "arm64",
+      "cpu": "Apple M1",
+      "physical_cpus": 8,
+      "logical_cpus": 8,
+      "ram_bytes": 17179869184,
+      "compiler": [
+        "Apple clang version 21.0.0 (clang-2100.0.123.102)",
+        "Target: arm64-apple-darwin25.4.0",
+        "Thread model: posix",
+        "InstalledDir: /Library/Developer/CommandLineTools/usr/bin"
+      ]
+    },
+    "baseline_runtime": {
+      "executable": "/private/tmp/msbf-benchmark/venv-aou-step2/bin/python",
+      "python": "3.11.15 (main, Jun 23 2026, 15:46:51) [Clang 22.1.3 ]",
+      "platform": "macOS-26.4.1-arm64-arm-64bit",
+      "cython": "3.3.0",
+      "numpy": "2.4.6",
+      "scipy": "1.17.1"
+    },
+    "candidate_runtime": {
+      "executable": "/private/tmp/msbf-benchmark/venv-candidate/bin/python",
+      "python": "3.11.15 (main, Jun 23 2026, 15:46:51) [Clang 22.1.3 ]",
+      "platform": "macOS-26.4.1-arm64-arm-64bit",
+      "cython": "3.3.0",
+      "numpy": "2.4.6",
+      "scipy": "1.17.1"
+    },
+    "worker_sha256": "aed52fcf61dad22e317ac29e5fed3faea91772b204b9a23ef53bb25ba1c60737"
+  },
+  "summaries": [
+    {
+      "case": {
+        "family": "adversarial",
+        "name": "adversarial-q128",
+        "q": 128
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 41153,
+      "input_edges": 98176,
+      "output_nodes": 41281,
+      "output_edges": 57536,
+      "factor_nodes": 128,
+      "init_ns": {
+        "median": 5979459,
+        "iqr": 35500.0,
+        "minimum": 5938541
+      },
+      "find_ns": {
+        "median": 10636542,
+        "iqr": 449708.5,
+        "minimum": 10453542
+      },
+      "total_ns": {
+        "median": 16609000,
+        "iqr": 388500.0,
+        "minimum": 16461708
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 120242176,
+        "iqr": 81920.0,
+        "minimum": 120127488
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 119980032,
+        "iqr": 16384.0,
+        "minimum": 119980032
+      }
+    },
+    {
+      "case": {
+        "family": "adversarial",
+        "name": "adversarial-q128",
+        "q": 128
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 41153,
+      "input_edges": 98176,
+      "output_nodes": 41281,
+      "output_edges": 57536,
+      "factor_nodes": 128,
+      "init_ns": {
+        "median": 4312708,
+        "iqr": 139750.0,
+        "minimum": 4035417
+      },
+      "find_ns": {
+        "median": 1924625,
+        "iqr": 45249.5,
+        "minimum": 1886875
+      },
+      "total_ns": {
+        "median": 6276500,
+        "iqr": 156667.5,
+        "minimum": 5934667
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 124878848,
+        "iqr": 24576.0,
+        "minimum": 124813312
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 124223488,
+        "iqr": 32768.0,
+        "minimum": 124157952
+      }
+    },
+    {
+      "case": {
+        "family": "adversarial",
+        "name": "adversarial-q16",
+        "q": 16
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 665,
+      "input_edges": 1520,
+      "output_nodes": 681,
+      "output_edges": 920,
+      "factor_nodes": 16,
+      "init_ns": {
+        "median": 155792,
+        "iqr": 10417.0,
+        "minimum": 144417
+      },
+      "find_ns": {
+        "median": 219041,
+        "iqr": 4187.5,
+        "minimum": 217041
+      },
+      "total_ns": {
+        "median": 378458,
+        "iqr": 14834.0,
+        "minimum": 367125
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 97288192,
+        "iqr": 98304.0,
+        "minimum": 97091584
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 97239040,
+        "iqr": 98304.0,
+        "minimum": 97042432
+      }
+    },
+    {
+      "case": {
+        "family": "adversarial",
+        "name": "adversarial-q16",
+        "q": 16
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 665,
+      "input_edges": 1520,
+      "output_nodes": 681,
+      "output_edges": 920,
+      "factor_nodes": 16,
+      "init_ns": {
+        "median": 68250,
+        "iqr": 3375.5,
+        "minimum": 64916
+      },
+      "find_ns": {
+        "median": 34834,
+        "iqr": 625.0,
+        "minimum": 34042
+      },
+      "total_ns": {
+        "median": 108917,
+        "iqr": 3958.0,
+        "minimum": 103958
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 97157120,
+        "iqr": 40960.0,
+        "minimum": 97091584
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 97157120,
+        "iqr": 40960.0,
+        "minimum": 97091584
+      }
+    },
+    {
+      "case": {
+        "family": "adversarial",
+        "name": "adversarial-q256",
+        "q": 256
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 164225,
+      "input_edges": 392960,
+      "output_nodes": 164481,
+      "output_edges": 229760,
+      "factor_nodes": 256,
+      "init_ns": {
+        "median": 24939625,
+        "iqr": 1235729.5,
+        "minimum": 24657667
+      },
+      "find_ns": {
+        "median": 73346625,
+        "iqr": 2842957.5,
+        "minimum": 71434916
+      },
+      "total_ns": {
+        "median": 99246333,
+        "iqr": 3705187.5,
+        "minimum": 96606250
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 178962432,
+        "iqr": 81920.0,
+        "minimum": 178946048
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 176766976,
+        "iqr": 8192.0,
+        "minimum": 176717824
+      }
+    },
+    {
+      "case": {
+        "family": "adversarial",
+        "name": "adversarial-q256",
+        "q": 256
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 164225,
+      "input_edges": 392960,
+      "output_nodes": 164481,
+      "output_edges": 229760,
+      "factor_nodes": 256,
+      "init_ns": {
+        "median": 20179500,
+        "iqr": 2115854.5,
+        "minimum": 18356875
+      },
+      "find_ns": {
+        "median": 8004291,
+        "iqr": 274396.0,
+        "minimum": 7948417
+      },
+      "total_ns": {
+        "median": 28587333,
+        "iqr": 2357104.5,
+        "minimum": 26325000
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 199737344,
+        "iqr": 40960.0,
+        "minimum": 199622656
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 197099520,
+        "iqr": 40960.0,
+        "minimum": 196984832
+      }
+    },
+    {
+      "case": {
+        "family": "adversarial",
+        "name": "adversarial-q32",
+        "q": 32
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 2609,
+      "input_edges": 6112,
+      "output_nodes": 2641,
+      "output_edges": 3632,
+      "factor_nodes": 32,
+      "init_ns": {
+        "median": 399583,
+        "iqr": 17105.0,
+        "minimum": 391250
+      },
+      "find_ns": {
+        "median": 650167,
+        "iqr": 5583.0,
+        "minimum": 636875
+      },
+      "total_ns": {
+        "median": 1055708,
+        "iqr": 23603.5,
+        "minimum": 1043000
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 97910784,
+        "iqr": 73728.0,
+        "minimum": 97861632
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 97828864,
+        "iqr": 49152.0,
+        "minimum": 97763328
+      }
+    },
+    {
+      "case": {
+        "family": "adversarial",
+        "name": "adversarial-q32",
+        "q": 32
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 2609,
+      "input_edges": 6112,
+      "output_nodes": 2641,
+      "output_edges": 3632,
+      "factor_nodes": 32,
+      "init_ns": {
+        "median": 248209,
+        "iqr": 20104.0,
+        "minimum": 243791
+      },
+      "find_ns": {
+        "median": 126625,
+        "iqr": 896.0,
+        "minimum": 125375
+      },
+      "total_ns": {
+        "median": 381125,
+        "iqr": 20937.0,
+        "minimum": 375416
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 98123776,
+        "iqr": 65536.0,
+        "minimum": 98041856
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 98091008,
+        "iqr": 65536.0,
+        "minimum": 98009088
+      }
+    },
+    {
+      "case": {
+        "family": "adversarial",
+        "name": "adversarial-q64",
+        "q": 64
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 10337,
+      "input_edges": 24512,
+      "output_nodes": 10401,
+      "output_edges": 14432,
+      "factor_nodes": 64,
+      "init_ns": {
+        "median": 1451542,
+        "iqr": 38374.5,
+        "minimum": 1436584
+      },
+      "find_ns": {
+        "median": 2390708,
+        "iqr": 103541.5,
+        "minimum": 2314917
+      },
+      "total_ns": {
+        "median": 3904708,
+        "iqr": 127166.5,
+        "minimum": 3778625
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 102973440,
+        "iqr": 114688.0,
+        "minimum": 102875136
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 102891520,
+        "iqr": 65536.0,
+        "minimum": 102842368
+      }
+    },
+    {
+      "case": {
+        "family": "adversarial",
+        "name": "adversarial-q64",
+        "q": 64
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 10337,
+      "input_edges": 24512,
+      "output_nodes": 10401,
+      "output_edges": 14432,
+      "factor_nodes": 64,
+      "init_ns": {
+        "median": 993708,
+        "iqr": 20021.0,
+        "minimum": 966625
+      },
+      "find_ns": {
+        "median": 487709,
+        "iqr": 12312.5,
+        "minimum": 481500
+      },
+      "total_ns": {
+        "median": 1507709,
+        "iqr": 39250.0,
+        "minimum": 1455375
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 104202240,
+        "iqr": 73728.0,
+        "minimum": 104120320
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 104038400,
+        "iqr": 65536.0,
+        "minimum": 103956480
+      }
+    },
+    {
+      "case": {
+        "f": 1024,
+        "family": "dense",
+        "k": 128,
+        "name": "dense-k128-f1024"
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 1152,
+      "input_edges": 131072,
+      "output_nodes": 1279,
+      "output_edges": 1279,
+      "factor_nodes": 127,
+      "init_ns": {
+        "median": 9896791,
+        "iqr": 456353.5,
+        "minimum": 8411542
+      },
+      "find_ns": {
+        "median": 17375375,
+        "iqr": 1097229.0,
+        "minimum": 15772542
+      },
+      "total_ns": {
+        "median": 27492833,
+        "iqr": 1288604.0,
+        "minimum": 25417792
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 122978304,
+        "iqr": 16384.0,
+        "minimum": 122912768
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 122929152,
+        "iqr": 16384.0,
+        "minimum": 122847232
+      }
+    },
+    {
+      "case": {
+        "f": 1024,
+        "family": "dense",
+        "k": 128,
+        "name": "dense-k128-f1024"
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 1152,
+      "input_edges": 131072,
+      "output_nodes": 1153,
+      "output_edges": 1152,
+      "factor_nodes": 1,
+      "init_ns": {
+        "median": 7304750,
+        "iqr": 701562.5,
+        "minimum": 6689292
+      },
+      "find_ns": {
+        "median": 3708458,
+        "iqr": 417042.0,
+        "minimum": 3548375
+      },
+      "total_ns": {
+        "median": 11089375,
+        "iqr": 1182334.0,
+        "minimum": 10249958
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 128745472,
+        "iqr": 40960.0,
+        "minimum": 128679936
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 128729088,
+        "iqr": 40960.0,
+        "minimum": 128663552
+      }
+    },
+    {
+      "case": {
+        "f": 1024,
+        "family": "dense",
+        "k": 16,
+        "name": "dense-k16-f1024"
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 1040,
+      "input_edges": 16384,
+      "output_nodes": 1055,
+      "output_edges": 1055,
+      "factor_nodes": 15,
+      "init_ns": {
+        "median": 1017083,
+        "iqr": 72021.5,
+        "minimum": 967417
+      },
+      "find_ns": {
+        "median": 1495875,
+        "iqr": 95187.0,
+        "minimum": 1465583
+      },
+      "total_ns": {
+        "median": 2518292,
+        "iqr": 221125.0,
+        "minimum": 2438167
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 100040704,
+        "iqr": 24576.0,
+        "minimum": 99991552
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 99483648,
+        "iqr": 24576.0,
+        "minimum": 99434496
+      }
+    },
+    {
+      "case": {
+        "f": 1024,
+        "family": "dense",
+        "k": 16,
+        "name": "dense-k16-f1024"
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 1040,
+      "input_edges": 16384,
+      "output_nodes": 1041,
+      "output_edges": 1040,
+      "factor_nodes": 1,
+      "init_ns": {
+        "median": 696792,
+        "iqr": 52750.0,
+        "minimum": 655667
+      },
+      "find_ns": {
+        "median": 432833,
+        "iqr": 39187.5,
+        "minimum": 419500
+      },
+      "total_ns": {
+        "median": 1124542,
+        "iqr": 84291.5,
+        "minimum": 1082000
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 100319232,
+        "iqr": 49152.0,
+        "minimum": 100237312
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 100302848,
+        "iqr": 49152.0,
+        "minimum": 100220928
+      }
+    },
+    {
+      "case": {
+        "f": 4096,
+        "family": "dense",
+        "k": 16,
+        "name": "dense-k16-f4096"
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 4112,
+      "input_edges": 65536,
+      "output_nodes": 4127,
+      "output_edges": 4127,
+      "factor_nodes": 15,
+      "init_ns": {
+        "median": 4233750,
+        "iqr": 386083.5,
+        "minimum": 3822125
+      },
+      "find_ns": {
+        "median": 6495750,
+        "iqr": 757062.5,
+        "minimum": 5878916
+      },
+      "total_ns": {
+        "median": 10613792,
+        "iqr": 942437.5,
+        "minimum": 9708750
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 111738880,
+        "iqr": 40960.0,
+        "minimum": 111591424
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 109428736,
+        "iqr": 40960.0,
+        "minimum": 109379584
+      }
+    },
+    {
+      "case": {
+        "f": 4096,
+        "family": "dense",
+        "k": 16,
+        "name": "dense-k16-f4096"
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 4112,
+      "input_edges": 65536,
+      "output_nodes": 4113,
+      "output_edges": 4112,
+      "factor_nodes": 1,
+      "init_ns": {
+        "median": 2790125,
+        "iqr": 231167.0,
+        "minimum": 2656750
+      },
+      "find_ns": {
+        "median": 1927958,
+        "iqr": 235292.0,
+        "minimum": 1719208
+      },
+      "total_ns": {
+        "median": 4776500,
+        "iqr": 320833.0,
+        "minimum": 4404125
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 113098752,
+        "iqr": 49152.0,
+        "minimum": 113065984
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 113033216,
+        "iqr": 49152.0,
+        "minimum": 112984064
+      }
+    },
+    {
+      "case": {
+        "f": 512,
+        "family": "dense",
+        "k": 16,
+        "name": "dense-k16-f512"
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 528,
+      "input_edges": 8192,
+      "output_nodes": 543,
+      "output_edges": 543,
+      "factor_nodes": 15,
+      "init_ns": {
+        "median": 538709,
+        "iqr": 47604.0,
+        "minimum": 509208
+      },
+      "find_ns": {
+        "median": 825916,
+        "iqr": 82041.5,
+        "minimum": 799958
+      },
+      "total_ns": {
+        "median": 1369792,
+        "iqr": 133396.5,
+        "minimum": 1322291
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 98222080,
+        "iqr": 49152.0,
+        "minimum": 98156544
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 97943552,
+        "iqr": 49152.0,
+        "minimum": 97878016
+      }
+    },
+    {
+      "case": {
+        "f": 512,
+        "family": "dense",
+        "k": 16,
+        "name": "dense-k16-f512"
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 528,
+      "input_edges": 8192,
+      "output_nodes": 529,
+      "output_edges": 528,
+      "factor_nodes": 1,
+      "init_ns": {
+        "median": 365416,
+        "iqr": 31895.5,
+        "minimum": 318375
+      },
+      "find_ns": {
+        "median": 216292,
+        "iqr": 21958.0,
+        "minimum": 206750
+      },
+      "total_ns": {
+        "median": 590416,
+        "iqr": 54145.5,
+        "minimum": 530917
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 98304000,
+        "iqr": 49152.0,
+        "minimum": 98254848
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 98304000,
+        "iqr": 57344.0,
+        "minimum": 98254848
+      }
+    },
+    {
+      "case": {
+        "f": 64,
+        "family": "dense",
+        "k": 16,
+        "name": "dense-k16-f64"
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 80,
+      "input_edges": 1024,
+      "output_nodes": 95,
+      "output_edges": 95,
+      "factor_nodes": 15,
+      "init_ns": {
+        "median": 124583,
+        "iqr": 15125.0,
+        "minimum": 113834
+      },
+      "find_ns": {
+        "median": 190625,
+        "iqr": 20146.0,
+        "minimum": 178500
+      },
+      "total_ns": {
+        "median": 323000,
+        "iqr": 35999.5,
+        "minimum": 300625
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 97124352,
+        "iqr": 57344.0,
+        "minimum": 97042432
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 97058816,
+        "iqr": 40960.0,
+        "minimum": 97009664
+      }
+    },
+    {
+      "case": {
+        "f": 64,
+        "family": "dense",
+        "k": 16,
+        "name": "dense-k16-f64"
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 80,
+      "input_edges": 1024,
+      "output_nodes": 81,
+      "output_edges": 80,
+      "factor_nodes": 1,
+      "init_ns": {
+        "median": 43708,
+        "iqr": 1917.0,
+        "minimum": 40834
+      },
+      "find_ns": {
+        "median": 24750,
+        "iqr": 896.0,
+        "minimum": 24334
+      },
+      "total_ns": {
+        "median": 72958,
+        "iqr": 3187.0,
+        "minimum": 70875
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 97058816,
+        "iqr": 57344.0,
+        "minimum": 96976896
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 97058816,
+        "iqr": 57344.0,
+        "minimum": 96976896
+      }
+    },
+    {
+      "case": {
+        "f": 1024,
+        "family": "dense",
+        "k": 2,
+        "name": "dense-k2-f1024"
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 1026,
+      "input_edges": 2048,
+      "output_nodes": 1027,
+      "output_edges": 1027,
+      "factor_nodes": 1,
+      "init_ns": {
+        "median": 182083,
+        "iqr": 23687.0,
+        "minimum": 171500
+      },
+      "find_ns": {
+        "median": 54458,
+        "iqr": 4771.0,
+        "minimum": 51666
+      },
+      "total_ns": {
+        "median": 240625,
+        "iqr": 28416.5,
+        "minimum": 230125
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 97239040,
+        "iqr": 40960.0,
+        "minimum": 97189888
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 97222656,
+        "iqr": 57344.0,
+        "minimum": 97173504
+      }
+    },
+    {
+      "case": {
+        "f": 1024,
+        "family": "dense",
+        "k": 2,
+        "name": "dense-k2-f1024"
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 1026,
+      "input_edges": 2048,
+      "output_nodes": 1027,
+      "output_edges": 1026,
+      "factor_nodes": 1,
+      "init_ns": {
+        "median": 87791,
+        "iqr": 3500.0,
+        "minimum": 84583
+      },
+      "find_ns": {
+        "median": 39167,
+        "iqr": 437.5,
+        "minimum": 38500
+      },
+      "total_ns": {
+        "median": 132208,
+        "iqr": 4750.0,
+        "minimum": 128958
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 97271808,
+        "iqr": 81920.0,
+        "minimum": 97173504
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 97255424,
+        "iqr": 81920.0,
+        "minimum": 97157120
+      }
+    },
+    {
+      "case": {
+        "family": "fixture_end_to_end",
+        "name": "fixture-1kg-small-end-to-end",
+        "path": "/Users/nicholas/Projects/linear-dag/tests/testdata/1kg_small.vcf"
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 1100,
+      "input_edges": 13571,
+      "output_nodes": 2305,
+      "output_edges": 6017,
+      "factor_nodes": 1205,
+      "init_ns": null,
+      "find_ns": null,
+      "total_ns": null,
+      "end_to_end_ns": {
+        "median": 41451500,
+        "iqr": 4616687.0,
+        "minimum": 40729584
+      },
+      "peak_rss_bytes": {
+        "median": 103710720,
+        "iqr": 98304.0,
+        "minimum": 103645184
+      },
+      "peak_rss_after_init_bytes": null
+    },
+    {
+      "case": {
+        "family": "fixture_end_to_end",
+        "name": "fixture-1kg-small-end-to-end",
+        "path": "/Users/nicholas/Projects/linear-dag/tests/testdata/1kg_small.vcf"
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 1100,
+      "input_edges": 13571,
+      "output_nodes": 2138,
+      "output_edges": 5873,
+      "factor_nodes": 1038,
+      "init_ns": null,
+      "find_ns": null,
+      "total_ns": null,
+      "end_to_end_ns": {
+        "median": 33643000,
+        "iqr": 2056813.0,
+        "minimum": 29817958
+      },
+      "peak_rss_bytes": {
+        "median": 104415232,
+        "iqr": 122880.0,
+        "minimum": 104300544
+      },
+      "peak_rss_after_init_bytes": null
+    },
+    {
+      "case": {
+        "family": "fixture_recombination",
+        "name": "fixture-1kg-small-recombination",
+        "path": "/Users/nicholas/Projects/linear-dag/tests/testdata/1kg_small.vcf"
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 1100,
+      "input_edges": 13571,
+      "output_nodes": 2305,
+      "output_edges": 6017,
+      "factor_nodes": 1205,
+      "init_ns": {
+        "median": 1085292,
+        "iqr": 106083.0,
+        "minimum": 1057667
+      },
+      "find_ns": {
+        "median": 10694125,
+        "iqr": 790708.5,
+        "minimum": 10455084
+      },
+      "total_ns": {
+        "median": 11766625,
+        "iqr": 889999.5,
+        "minimum": 11527542
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 103530496,
+        "iqr": 196608.0,
+        "minimum": 103333888
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 103481344,
+        "iqr": 172032.0,
+        "minimum": 103268352
+      }
+    },
+    {
+      "case": {
+        "family": "fixture_recombination",
+        "name": "fixture-1kg-small-recombination",
+        "path": "/Users/nicholas/Projects/linear-dag/tests/testdata/1kg_small.vcf"
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 1100,
+      "input_edges": 13571,
+      "output_nodes": 2138,
+      "output_edges": 5873,
+      "factor_nodes": 1038,
+      "init_ns": {
+        "median": 618041,
+        "iqr": 40645.5,
+        "minimum": 591459
+      },
+      "find_ns": {
+        "median": 1284750,
+        "iqr": 64271.0,
+        "minimum": 1103500
+      },
+      "total_ns": {
+        "median": 1911625,
+        "iqr": 62438.0,
+        "minimum": 1702167
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 103907328,
+        "iqr": 81920.0,
+        "minimum": 103792640
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 103907328,
+        "iqr": 81920.0,
+        "minimum": 103792640
+      }
+    },
+    {
+      "case": {
+        "family": "nested",
+        "name": "nested-overlapping-s512",
+        "scale": 512
+      },
+      "implementation": "baseline",
+      "repetitions": 7,
+      "input_nodes": 1545,
+      "input_edges": 7680,
+      "output_nodes": 1554,
+      "output_edges": 1555,
+      "factor_nodes": 9,
+      "init_ns": {
+        "median": 515417,
+        "iqr": 63333.0,
+        "minimum": 480625
+      },
+      "find_ns": {
+        "median": 439958,
+        "iqr": 65645.5,
+        "minimum": 429041
+      },
+      "total_ns": {
+        "median": 953625,
+        "iqr": 127083.0,
+        "minimum": 914625
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 97927168,
+        "iqr": 65536.0,
+        "minimum": 97861632
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 97845248,
+        "iqr": 65536.0,
+        "minimum": 97763328
+      }
+    },
+    {
+      "case": {
+        "family": "nested",
+        "name": "nested-overlapping-s512",
+        "scale": 512
+      },
+      "implementation": "candidate",
+      "repetitions": 7,
+      "input_nodes": 1545,
+      "input_edges": 7680,
+      "output_nodes": 1550,
+      "output_edges": 1550,
+      "factor_nodes": 5,
+      "init_ns": {
+        "median": 361750,
+        "iqr": 43958.0,
+        "minimum": 328166
+      },
+      "find_ns": {
+        "median": 334667,
+        "iqr": 67021.0,
+        "minimum": 329709
+      },
+      "total_ns": {
+        "median": 712667,
+        "iqr": 119020.5,
+        "minimum": 662875
+      },
+      "end_to_end_ns": null,
+      "peak_rss_bytes": {
+        "median": 98287616,
+        "iqr": 40960.0,
+        "minimum": 98189312
+      },
+      "peak_rss_after_init_bytes": {
+        "median": 98254848,
+        "iqr": 40960.0,
+        "minimum": 98156544
+      }
+    }
+  ],
+  "gates": {
+    "candidate_faster_at_two_largest_adversarial_sizes": true,
+    "candidate_adversarial_log_log_slope": 1.0039520055135418,
+    "candidate_near_linear_slope_at_most_1_15": true,
+    "representative_runtime_ratios": {
+      "dense-k16-f4096": 0.4500276621211345,
+      "dense-k128-f1024": 0.4033551216784389,
+      "nested-overlapping-s512": 0.7473241578188491,
+      "fixture-1kg-small-end-to-end": 0.8116232223200608
+    },
+    "representative_runtime_regression_at_most_10_percent": true,
+    "representative_peak_rss_ratios": {
+      "dense-k16-f4096": 1.0121700879765396,
+      "dense-k128-f1024": 1.0468958166799893,
+      "nested-overlapping-s512": 1.0036807763091853,
+      "fixture-1kg-small-end-to-end": 1.0067930489731438
+    },
+    "representative_peak_rss_regression_at_most_10_percent": true
+  }
+}

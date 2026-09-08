@@ -10,7 +10,7 @@ from scipy.sparse import csc_matrix, csr_matrix, eye
 
 from .brick_graph import BrickGraph
 from .one_summed_cy import linearize_brick_graph
-from .recombination import Recombination
+from .recombination_methods import _recombination_class
 from .solve import spinv_make_triangular
 
 
@@ -20,6 +20,7 @@ def linear_arg_from_genotypes(
     variant_info,
     find_recombinations,
     logger: logging.Logger | None = None,
+    recombination_method: str = "legacy",
 ):
     """Infer a linearized ARG adjacency matrix from sparse genotypes.
 
@@ -42,6 +43,7 @@ def linear_arg_from_genotypes(
     - `flip`: Boolean flip vector aligned to input variants.
     - `variant_info`: Optional variant metadata DataFrame.
     - `find_recombinations`: Whether to explicitly infer recombination events.
+    - `recombination_method`: "legacy" (default) or "msbf". Validated even when recombination is disabled.
     - `logger`: Optional logger for timing/progress output.
 
     **Returns:**
@@ -53,6 +55,8 @@ def linear_arg_from_genotypes(
 
     - `TypeError`: If `genotypes` is not a CSC sparse matrix.
     """
+
+    recombination_cls = _recombination_class(recombination_method)
 
     if type(genotypes) is not csc_matrix:
         raise TypeError
@@ -69,9 +73,11 @@ def linear_arg_from_genotypes(
 
     _emit_progress("Finding recombinations")
     t0 = time.time()
-    recom = Recombination.from_graph(brick_graph)
     if find_recombinations:
+        recom = recombination_cls.from_graph(brick_graph)
         recom.find_recombinations()
+    else:
+        recom = brick_graph
     t1 = time.time()
     _emit_progress(f"  Time: {t1 - t0:.3f}s")
 
