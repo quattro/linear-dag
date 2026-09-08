@@ -88,3 +88,8 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 - `src/linear_dag/association/heritability.py` - randomized HE estimator
 - `src/linear_dag/association/prs.py` - PRS scoring pipeline
 - `src/linear_dag/bed_io.py` - BED region parsing contract
+
+## Terminology
+
+- `legacy`: Existing heap-based two-parent recombination method; default for compression.
+- `msbf`: Maximal-support block factorization, selected with `recombination_method` or `--recombination-method`.

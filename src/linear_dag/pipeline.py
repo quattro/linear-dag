@@ -15,7 +15,7 @@ import scipy.sparse as sp
 from .core.brick_graph import BrickGraph, merge_brick_graphs, read_graph_from_disk
 from .core.lineararg import LinearARG, make_triangular, remove_degree_zero_nodes
 from .core.one_summed_cy import linearize_brick_graph
-from .core.recombination import Recombination
+from .core.recombination_methods import _recombination_class
 from .genotype import write_vcf_to_hdf5
 from .memory_logger import MemoryLogger
 
@@ -32,6 +32,16 @@ def _coerce_logger(
     return MemoryLogger(__name__, log_file=log_file).logger
 
 
+def _check_cached_recombination_method(path, method):
+    with h5py.File(path, "r") as handle:
+        saved_method = handle.attrs.get("recombination_method", "legacy")
+    if saved_method != method:
+        raise ValueError(
+            f"Existing output {path} uses recombination method {saved_method!r}, "
+            f"but {method!r} was requested. Use a separate output directory to change algorithms."
+        )
+
+
 def compress_vcf(
     input_vcf: Union[str, PathLike],
     output_h5: Union[str, PathLike],
@@ -43,6 +53,7 @@ def compress_vcf(
     remove_multiallelics: bool = False,
     add_individual_nodes: bool = False,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+    recombination_method: str = "legacy",
 ):
     """Compress a VCF file into a [`linear_dag.core.lineararg.LinearARG`][] HDF5 file.
 
@@ -57,6 +68,7 @@ def compress_vcf(
 
     **Arguments:**
 
+    - `recombination_method`: "legacy" (default) or "msbf".
     - `input_vcf`: Input VCF/BCF path.
     - `output_h5`: Output HDF5 destination.
     - `region`: Optional `chrom:start-end` region string.
@@ -72,6 +84,7 @@ def compress_vcf(
 
     - `None`.
     """
+    _recombination_class(recombination_method)
     logger = _coerce_logger(logger, log_file="memory_usage.log")
     logger.info("Starting compression")
 
@@ -82,6 +95,7 @@ def compress_vcf(
 
     linarg = LinearARG.from_vcf(
         path=input_vcf,
+        recombination_method=recombination_method,
         region=region,
         include_samples=include_samples,
         flip_minor_alleles=flip_minor_alleles,
@@ -311,6 +325,7 @@ def msc_step2(
     jobs_metadata: Union[str, PathLike],
     small_job_id: int,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+    recombination_method: str = "legacy",
 ):
     """Run multi-step compression step 2 for one small partition.
 
@@ -323,6 +338,7 @@ def msc_step2(
 
     **Arguments:**
 
+    - `recombination_method`: "legacy" (default) or "msbf".
     - `jobs_metadata`: Path to `job_metadata.parquet` emitted by `msc_step0`.
     - `small_job_id`: Small-partition job identifier.
 
@@ -334,6 +350,7 @@ def msc_step2(
 
     - `FileNotFoundError`: If required step-1 artifacts are missing.
     """
+    _recombination_class(recombination_method)
 
     logger = _coerce_logger(logger)
     job_meta = pl.read_parquet(jobs_metadata)
@@ -352,15 +369,25 @@ def msc_step2(
             )
         )
     if os.path.exists(f"{mount_point}{out}/brick_graph_partitions/{small_job_id}_{region}.h5"):
+        _check_cached_recombination_method(
+            f"{mount_point}{out}/brick_graph_partitions/{small_job_id}_{region}.h5", recombination_method
+        )
         logger.info(f"Brick graph for {small_job_id}_{region} already exists. Skipping.")
     else:
-        reduction_union_recom(out, mount_point, f"{small_job_id}_{region}", logger=logger)
+        reduction_union_recom(
+            out,
+            mount_point,
+            f"{small_job_id}_{region}",
+            logger=logger,
+            recombination_method=recombination_method,
+        )
 
 
 def msc_step3(
     jobs_metadata: Union[str, PathLike],
     large_job_id: int,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+    recombination_method: str = "legacy",
 ):
     """Run multi-step compression step 3 for one large partition.
 
@@ -374,6 +401,7 @@ def msc_step3(
 
     **Arguments:**
 
+    - `recombination_method`: "legacy" (default) or "msbf".
     - `jobs_metadata`: Path to `job_metadata.parquet` emitted by `msc_step0`.
     - `large_job_id`: Large-partition job identifier.
 
@@ -385,6 +413,7 @@ def msc_step3(
 
     - `FileNotFoundError`: If required step-2 brick-graph artifacts are missing.
     """
+    _recombination_class(recombination_method)
 
     logger = _coerce_logger(logger)
     job_meta = pl.read_parquet(jobs_metadata)
@@ -396,6 +425,9 @@ def msc_step3(
     out = params["out"]
 
     if os.path.exists(f"{mount_point}{out}/linear_args/{large_job_id}_{large_region}.h5"):
+        _check_cached_recombination_method(
+            f"{mount_point}{out}/linear_args/{large_job_id}_{large_region}.h5", recombination_method
+        )
         logger.info(f"Linear ARG for {large_job_id}_{large_region} already exists. Skipping.")
         return
 
@@ -422,9 +454,17 @@ def msc_step3(
     if len(partition_identifiers) == 0:
         with h5py.File(f"{out}/linear_args/{large_partition_identifier}.h5", "w") as f:
             f.attrs["is_empty"] = True
+            f.attrs["recombination_method"] = recombination_method
         return
 
-    merge(out, mount_point, partition_identifiers, large_partition_identifier, logger=logger)
+    merge(
+        out,
+        mount_point,
+        partition_identifiers,
+        large_partition_identifier,
+        logger=logger,
+        recombination_method=recombination_method,
+    )
 
 
 def msc_step4(
@@ -812,6 +852,7 @@ def reduction_union_recom(
     mount_point,
     partition_identifier,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+    recombination_method: str = "legacy",
 ):
     """Build one recombination-aware brick-graph partition from step-1 artifacts.
 
@@ -824,7 +865,10 @@ def reduction_union_recom(
 
         Empty genotype partitions short-circuit to an empty output marker under
         `brick_graph_partitions/`.
+
+    `recombination_method` selects "legacy" (default) or "msbf".
     """
+    recombination_cls = _recombination_class(recombination_method)
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/brick_graph_partitions/", exist_ok=True)
 
@@ -837,6 +881,7 @@ def reduction_union_recom(
         if is_empty:
             with h5py.File(f"{out}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
                 f.attrs["is_empty"] = True
+                f.attrs["recombination_method"] = recombination_method
             return None
         n, m = f["shape"][:]
     forward_graph = read_graph_from_disk(
@@ -859,9 +904,9 @@ def reduction_union_recom(
     for i in sample_indices:
         assert len(list(brick_graph.successors(int(i)))) == 0
 
-    logger.info("Finding recombinations")
+    logger.info("Finding recombinations (%s)", recombination_method)
     t5 = time.time()
-    recom = Recombination.from_graph(brick_graph)
+    recom = recombination_cls.from_graph(brick_graph)
     del brick_graph
     recom.find_recombinations()
     t6 = time.time()
@@ -876,6 +921,7 @@ def reduction_union_recom(
 
     logger.info("Saving brick graph")
     with h5py.File(f"{out}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
+        f.attrs["recombination_method"] = recombination_method
         f.attrs["n"] = num_nodes
         f.create_dataset("indptr", data=indptr, compression="gzip", shuffle=True)
         f.create_dataset("indices", data=indices, compression="gzip", shuffle=True)
@@ -904,13 +950,17 @@ def infer_brick_graph(
     mount_point,
     partition_identifier,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+    recombination_method: str = "legacy",
 ):
     """Infer a brick graph directly from one genotype-matrix partition.
 
     This is a single-shot alternative to the forward/backward plus
     reduction-union route. It loads the partition genotype matrix, infers a
     brick graph, inserts recombinations, and writes the resulting partition.
+
+    `recombination_method` selects "legacy" (default) or "msbf".
     """
+    recombination_cls = _recombination_class(recombination_method)
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/brick_graph_partitions/", exist_ok=True)
 
@@ -926,8 +976,8 @@ def infer_brick_graph(
     brick_graph, sample_indices, variant_indices = BrickGraph.from_genotypes(genotypes)
     t3 = time.time()
     logger.info(f"Brick graph inferred in {np.round(t3 - t2, 3)} seconds")
-    logger.info("Finding recombinations")
-    recom = Recombination.from_graph(brick_graph)
+    logger.info("Finding recombinations (%s)", recombination_method)
+    recom = recombination_cls.from_graph(brick_graph)
     recom.find_recombinations()
     t4 = time.time()
     logger.info(f"Recombinations found in {np.round(t4 - t3, 3)} seconds")
@@ -935,6 +985,7 @@ def infer_brick_graph(
 
     logger.info("Saving brick graph")
     with h5py.File(f"{out}/brick_graph_partitions/{partition_identifier}.h5", "w") as f:
+        f.attrs["recombination_method"] = recombination_method
         f.attrs["n"] = adj_mat.shape[0]
         f.create_dataset("indptr", data=adj_mat.indptr, compression="gzip", shuffle=True)
         f.create_dataset("indices", data=adj_mat.indices, compression="gzip", shuffle=True)
@@ -954,6 +1005,7 @@ def merge(
     partition_identifiers,
     partition_identifier,
     logger: Optional[Union[logging.Logger, MemoryLogger]] = None,
+    recombination_method: str = "legacy",
 ):
     """Merge brick-graph partitions into one large-partition LinearARG.
 
@@ -961,7 +1013,10 @@ def merge(
     reinfers recombinations on the merged graph, linearizes the result, loads
     variant metadata and flip vectors, and writes the final large-partition
     [`linear_dag.core.lineararg.LinearARG`][].
+
+    `recombination_method` selects "legacy" (default) or "msbf".
     """
+    recombination_cls = _recombination_class(recombination_method)
 
     os.makedirs(f"{out}/logs/", exist_ok=True)
     os.makedirs(f"{out}/linear_args/", exist_ok=True)
@@ -976,9 +1031,9 @@ def merge(
     t2 = time.time()
     logger.info(f"Brick graphs merged in {np.round(t2 - t1, 3)} seconds")
 
-    logger.info("Finding recombinations")
+    logger.info("Finding recombinations (%s)", recombination_method)
     t3 = time.time()
-    merged_graph_recom = Recombination.from_graph(merged_graph)
+    merged_graph_recom = recombination_cls.from_graph(merged_graph)
     merged_graph_recom.find_recombinations()
     t4 = time.time()
     logger.info(f"Recombinations found in {np.round(t4 - t3, 3)} seconds")
@@ -1027,6 +1082,8 @@ def merge(
     }
 
     linarg.write(f"{out}/linear_args/{partition_identifier}.h5", block_info=block)
+    with h5py.File(f"{out}/linear_args/{partition_identifier}.h5", "a") as f:
+        f.attrs["recombination_method"] = recombination_method
     logger.info("Computing linear ARG stats")
     get_linarg_stats(out, mount_point, partition_identifiers, partition_identifier, linarg)
 

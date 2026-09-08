@@ -1,5 +1,30 @@
 # MSBF benchmarks
 
+## Comparing selectable methods
+
+A build containing both algorithms can benchmark them in the same environment.
+Pass `--baseline-method legacy --candidate-method msbf` to
+`run_msbf_benchmarks.py`, with the same interpreter for `--baseline-python` and
+`--candidate-python`. The remaining provenance arguments still identify the
+build, source, extension, and wheel hashes. Each raw measurement records its
+selected method. Omitting the method options measures each installed package's
+default, which supports reproducing historical comparisons.
+
+For a single fresh-process measurement:
+
+```bash
+python benchmarks/msbf_worker.py --recombination-method msbf --case-json '{"name":"dense","family":"dense","k":128,"f":1024}'
+```
+
+Repeat with `--recombination-method legacy` to measure the existing method.
+The driver performs warm-up, alternating run order, and repeated measurements.
+
+## Historical extension-replacement benchmarks
+
+The instructions below reproduce the original reports using the recorded
+commits, where MSBF occupied `recombination.pyx`. Selectable builds keep MSBF in
+`recombination_msbf.pyx` and use the method options above.
+
 The benchmark compares a clean `origin/main` wheel with a candidate that differs
 only in `linear_dag/core/recombination*.so`. Each measurement runs in a fresh
 subprocess. The driver alternates implementation order after one warm-up and

@@ -30,8 +30,10 @@ METRICS = (
 )
 
 
-def _run_worker(python, worker, case):
+def _run_worker(python, worker, case, method=None):
     command = [python, str(worker), "--case-json", json.dumps(case, separators=(",", ":"))]
+    if method is not None:
+        command.extend(["--recombination-method", method])
     try:
         completed = subprocess.run(command, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as error:
@@ -324,7 +326,7 @@ def _write_report(path, metadata, summaries, gates, command):
         "",
         f"Candidate build-base SHA: `{metadata['candidate_base_sha']}`",
         "",
-        "Candidate `recombination.pyx` SHA-256: " f"`{metadata['candidate_source_sha256']}`",
+        "Candidate recombination source SHA-256: " f"`{metadata['candidate_source_sha256']}`",
         "",
         f"Candidate extension SHA-256: `{metadata['candidate_extension_sha256']}`",
         "",
@@ -337,6 +339,8 @@ def _write_report(path, metadata, summaries, gates, command):
         "Environment construction commands and the complete dependency snapshot are in "
         "[`benchmarks/README.md`](../../README.md) and "
         "[`environment.txt`](../../environment.txt), respectively.",
+        "",
+        f"Selected methods: baseline `{metadata['baseline_method']}`, candidate `{metadata['candidate_method']}`.",
         "",
         f"Repetitions: one warm-up and {metadata['repetitions']} measured fresh subprocesses per implementation/case.",
         "",
@@ -442,6 +446,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline-python", required=True)
     parser.add_argument("--candidate-python", required=True)
+    parser.add_argument("--baseline-method", choices=("legacy", "msbf"))
+    parser.add_argument("--candidate-method", choices=("legacy", "msbf"))
     parser.add_argument("--baseline-sha", required=True)
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--candidate-base-sha", required=True)
@@ -507,16 +513,17 @@ def main():
         "baseline": str(Path(args.baseline_python).absolute()),
         "candidate": str(Path(args.candidate_python).absolute()),
     }
+    methods = {"baseline": args.baseline_method, "candidate": args.candidate_method}
     raw_rows = []
     for case in cases:
         for implementation, python in implementations.items():
-            warmup = _run_worker(python, worker, case)
+            warmup = _run_worker(python, worker, case, methods[implementation])
             warmup.update({"implementation": implementation, "warmup": True, "repetition": -1})
             raw_rows.append(warmup)
         for repetition in range(args.repetitions):
             order = ("baseline", "candidate") if repetition % 2 == 0 else ("candidate", "baseline")
             for implementation in order:
-                row = _run_worker(implementations[implementation], worker, case)
+                row = _run_worker(implementations[implementation], worker, case, methods[implementation])
                 row.update(
                     {
                         "implementation": implementation,
@@ -534,6 +541,8 @@ def main():
     gates = _evaluate_gates(summaries)
     metadata = {
         "generated_at": generated_at,
+        "baseline_method": args.baseline_method or "installed-default",
+        "candidate_method": args.candidate_method or "installed-default",
         "baseline_sha": args.baseline_sha,
         "candidate_sha": args.candidate_sha,
         "candidate_base_sha": args.candidate_base_sha,

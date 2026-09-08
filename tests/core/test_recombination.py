@@ -10,7 +10,7 @@ from scipy.sparse import csr_matrix
 from linear_dag.core.digraph import DiGraph
 from linear_dag.core.linear_arg_inference import path_sum
 from linear_dag.core.one_summed_cy import linearize_brick_graph
-from linear_dag.core.recombination import Recombination
+from linear_dag.core.recombination_msbf import Recombination
 
 
 def _graph_from_parent_words(parent_words):

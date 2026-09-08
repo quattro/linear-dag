@@ -1,5 +1,48 @@
 # Maximal-support block factorization
 
+## Selecting the algorithm
+
+Compression uses `legacy`, the existing heap-based two-parent method, by
+default. Select `msbf` to factor maximal shared parent blocks:
+
+```python
+linarg = LinearARG.from_genotypes(genotypes, flip, recombination_method="msbf")
+linarg = LinearARG.from_vcf("input.vcf.gz", recombination_method="msbf")
+```
+
+The same `recombination_method` keyword is supported by
+`linear_arg_from_genotypes`, `compress_vcf`, `msc_step2`, and `msc_step3`.
+`find_recombinations=False` on genotype inference skips the pass and its
+workspace allocation. Invalid method names raise `ValueError` before input
+processing, including when the pass is disabled.
+
+```bash
+kodama compress input.vcf.gz output.h5 --recombination-method msbf
+kodama multi-step-compress step2 --job-metadata jobs.parquet --small-job-id 0 --recombination-method msbf
+kodama multi-step-compress step3 --job-metadata jobs.parquet --large-job-id 0 --recombination-method msbf
+```
+
+For an all-MSBF multi-step run, pass the flag to every Step 2 job and every
+Step 3 job. Each stage selects its method independently; mixed-method runs
+are supported. Step 1 does not perform recombination.
+
+Both methods preserve the genotype matrix, but their factor nodes and edge
+counts can differ. Step 2 and Step 3 outputs record the method in an optional
+HDF5 attribute. Resuming with the same method reuses the output. Requesting a
+different method raises an error; use a separate output directory to compare
+algorithms. Outputs without this attribute are treated as `legacy`; use a
+fresh output directory for any unannotated experimental MSBF files.
+
+The low-level `linear_dag.core.recombination.Recombination` class retains the
+legacy implementation. The MSBF class is available as
+`linear_dag.core.recombination_msbf.Recombination`.
+
+## Algorithm
+
+MSBF requires a directed acyclic graph with unique parents in each child list.
+Parallel edges are rejected before factorization because the support-count
+bounds assume at most one occurrence of a parent pair per child.
+
 The recombination pass represents every active adjacency in a child's ordered
 parent list with one stable boundary slot. Boundary slots, not graph-edge
 indices, are the identities stored in pair-class occurrence lists. An active

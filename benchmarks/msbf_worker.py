@@ -21,6 +21,14 @@ from linear_dag.core.recombination import Recombination
 from linear_dag.genotype import read_vcf
 
 
+def _implementation(method):
+    if method == "msbf":
+        from linear_dag.core.recombination_msbf import Recombination as MSBFRecombination
+
+        return MSBFRecombination
+    return Recombination
+
+
 def _peak_rss_bytes():
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     # macOS reports bytes; Linux and the BSDs commonly report KiB.
@@ -31,12 +39,13 @@ def _factor_count(graph, recombination):
     return recombination.number_of_nodes - graph.number_of_nodes
 
 
-def _measure_recombination(graph):
+def _measure_recombination(graph, method=None):
     input_nodes = graph.number_of_nodes
     input_edges = graph.number_of_edges
+    recombination_cls = _implementation(method)
     total_start = perf_counter_ns()
     init_start = total_start
-    recombination = Recombination.from_graph(graph)
+    recombination = recombination_cls.from_graph(graph)
     init_end = perf_counter_ns()
     rss_after_init = _peak_rss_bytes()
     find_start = perf_counter_ns()
@@ -58,27 +67,30 @@ def _measure_recombination(graph):
     }
 
 
-def _measure_fixture_recombination(case):
+def _measure_fixture_recombination(case, method=None):
     genotypes, _, _, _ = read_vcf(Path(case["path"]))
     graph, _, _ = BrickGraph.from_genotypes(genotypes)
-    return _measure_recombination(graph)
+    return _measure_recombination(graph, method)
 
 
-def _measure_fixture_end_to_end(case):
+def _measure_fixture_end_to_end(case, method=None):
     genotypes, flip, variant_info, _ = read_vcf(Path(case["path"]))
+    _implementation(method)  # Resolve the extension before measuring graph inference.
     start = perf_counter_ns()
     adjacency, *_ = linear_arg_from_genotypes(
         genotypes,
         flip,
         variant_info,
         find_recombinations=True,
+        **({"recombination_method": method} if method is not None else {}),
     )
     end = perf_counter_ns()
     measured_peak = _peak_rss_bytes()
 
     # Collect graph/factor statistics after the timed and RSS-sampled region.
     graph, _, _ = BrickGraph.from_genotypes(genotypes)
-    recombination = Recombination.from_graph(graph)
+    recombination_cls = _implementation(method)
+    recombination = recombination_cls.from_graph(graph)
     recombination.find_recombinations()
     return {
         "init_ns": None,
@@ -97,7 +109,7 @@ def _measure_fixture_end_to_end(case):
     }
 
 
-def _measure_linarg_reconstructed_recombination(case):
+def _measure_linarg_reconstructed_recombination(case, method=None):
     read_start = perf_counter_ns()
     linarg = LinearARG.read(case["path"], block=case["block"])
     read_end = perf_counter_ns()
@@ -108,7 +120,7 @@ def _measure_linarg_reconstructed_recombination(case):
     brick_start = perf_counter_ns()
     graph, _, _ = BrickGraph.from_genotypes(genotypes)
     brick_end = perf_counter_ns()
-    result = _measure_recombination(graph)
+    result = _measure_recombination(graph, method)
     result.update(
         {
             "source_read_ns": read_end - read_start,
@@ -125,20 +137,22 @@ def _measure_linarg_reconstructed_recombination(case):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case-json", required=True)
+    parser.add_argument("--recombination-method", choices=("legacy", "msbf"))
     args = parser.parse_args()
     case = json.loads(args.case_json)
     family = case["family"]
     if family in {"adversarial", "dense", "nested"}:
-        result = _measure_recombination(build_synthetic_graph(case))
+        result = _measure_recombination(build_synthetic_graph(case), args.recombination_method)
     elif family == "fixture_recombination":
-        result = _measure_fixture_recombination(case)
+        result = _measure_fixture_recombination(case, args.recombination_method)
     elif family == "fixture_end_to_end":
-        result = _measure_fixture_end_to_end(case)
+        result = _measure_fixture_end_to_end(case, args.recombination_method)
     elif family == "linarg_reconstructed_recombination":
-        result = _measure_linarg_reconstructed_recombination(case)
+        result = _measure_linarg_reconstructed_recombination(case, args.recombination_method)
     else:
         raise ValueError(f"Unknown benchmark family: {family}")
     result["case"] = case
+    result["recombination_method"] = args.recombination_method or "installed-default"
     print(json.dumps(result, sort_keys=True))
 
 

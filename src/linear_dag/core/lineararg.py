@@ -25,6 +25,7 @@ from .digraph import DiGraph
 from .linear_arg_inference import linear_arg_from_genotypes
 from .one_sparse import OneSparseMatrix
 from .one_summed_cy import linearize_brick_graph
+from .recombination_methods import _recombination_class
 from .solve import (
     add_at,
     spsolve_backward_triangular,
@@ -194,6 +195,7 @@ class LinearARG(LinearOperator):
         find_recombinations: bool = True,
         sex: Optional[npt.NDArray[np.int32]] = None,
         logger: Optional[logging.Logger] = None,
+        recombination_method: str = "legacy",
     ):
         """Infer a [`linear_dag.core.lineararg.LinearARG`][] from phased genotypes.
 
@@ -216,6 +218,7 @@ class LinearARG(LinearOperator):
         - `variant_info`: Optional Polars dataframe with variant metadata.
         - `iids`: Optional identifiers corresponding to genotype rows.
         - `find_recombinations`: Whether to infer recombination nodes before linearization.
+        - `recombination_method`: "legacy" (default) or "msbf".
         - `sex`: Optional per-individual sex array for later individual-node expansion.
         - `logger`: Optional logger for timing/progress output.
 
@@ -231,7 +234,8 @@ class LinearARG(LinearOperator):
         import time
 
         A, flip, variants_idx, samples_idx, variant_info = linear_arg_from_genotypes(
-            genotypes, flip, variant_info, find_recombinations, logger=logger
+            genotypes, flip, variant_info, find_recombinations, logger=logger,
+            recombination_method=recombination_method,
         )
 
         if logger is not None:
@@ -280,6 +284,7 @@ class LinearARG(LinearOperator):
         maf_filter: float = None,
         snps_only: bool = False,
         remove_multiallelics: bool = False,
+        recombination_method: str = "legacy",
     ) -> Union[tuple, "LinearARG"]:
         """Read a VCF/BCF, parse genotype calls, and infer a LinearARG.
 
@@ -295,6 +300,7 @@ class LinearARG(LinearOperator):
         **Arguments:**
 
         - `path`: Path to VCF/BCF input.
+        - `recombination_method`: "legacy" (default) or "msbf".
         - `phased`: Whether the input genotypes are phased.
         - `region`: Optional region string passed to VCF reader.
         - `include_samples`: Optional row indices to keep after loading.
@@ -318,6 +324,8 @@ class LinearARG(LinearOperator):
           or if a multiallelic variant is encountered and `remove_multiallelics=False`.
         """
         import time
+
+        _recombination_class(recombination_method)
 
         if logger is not None:
             logger.info("Reading VCF")
@@ -347,7 +355,9 @@ class LinearARG(LinearOperator):
             genotypes = genotypes[include_samples, :]
             iids = [iids[i] for i in include_samples]
 
-        result = LinearARG.from_genotypes(genotypes, flip, v_info, iids=iids, logger=logger)
+        result = LinearARG.from_genotypes(
+            genotypes, flip, v_info, iids=iids, logger=logger, recombination_method=recombination_method
+        )
 
         return (result, genotypes) if return_genotypes else result
 
@@ -699,7 +709,8 @@ class LinearARG(LinearOperator):
             raise ValueError("Diploid dosage products require an even number of haplotype sample rows.")
         if other.shape[0] != self.shape[0] // 2:
             raise ValueError(
-                f"Incorrect dimensions for diploid matrix multiplication. Inputs had size {other.shape} and {self.shape}."
+                "Incorrect dimensions for diploid matrix multiplication. "
+                f"Inputs had size {other.shape} and {self.shape}."
             )
 
         self.calculate_nonunique_indices()
