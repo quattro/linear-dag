@@ -1,0 +1,75 @@
+{
+  "jax": "0.12.0.1",
+  "shape": [
+    6404,
+    1067520
+  ],
+  "workers": 4,
+  "load_seconds": 1.8737999580043834,
+  "scratch_bytes": 57347712,
+  "timings": [
+    {
+      "operation": "forward",
+      "k": 1,
+      "seconds": 0.01753758400445804,
+      "compile_seconds": 0.006305833987426013,
+      "relative_l2": 7.295007549146248e-07
+    },
+    {
+      "operation": "reverse",
+      "k": 1,
+      "seconds": 0.017045665998011827,
+      "compile_seconds": 0.00703362500644289,
+      "relative_l2": 6.796961997679318e-07
+    },
+    {
+      "operation": "weighted",
+      "k": 1,
+      "seconds": 0.034340000012889504,
+      "compile_seconds": 0.005562625010497868,
+      "relative_l2": 5.923317871747713e-07
+    },
+    {
+      "operation": "forward",
+      "k": 8,
+      "seconds": 0.03015875001437962,
+      "compile_seconds": 0.005224666994763538,
+      "relative_l2": 8.716223476312734e-08
+    },
+    {
+      "operation": "reverse",
+      "k": 8,
+      "seconds": 0.037935416999971494,
+      "compile_seconds": 0.00542983299237676,
+      "relative_l2": 0.0
+    },
+    {
+      "operation": "weighted",
+      "k": 8,
+      "seconds": 0.07019862500601448,
+      "compile_seconds": 0.005388541001593694,
+      "relative_l2": 6.35516741454012e-08
+    },
+    {
+      "operation": "forward",
+      "k": 32,
+      "seconds": 0.14626054200925864,
+      "compile_seconds": 0.037280207994626835,
+      "relative_l2": 7.500371879132217e-08
+    },
+    {
+      "operation": "reverse",
+      "k": 32,
+      "seconds": 0.18941487499978393,
+      "compile_seconds": 0.029905000003054738,
+      "relative_l2": 0.0
+    },
+    {
+      "operation": "weighted",
+      "k": 32,
+      "seconds": 0.28405866702087224,
+      "compile_seconds": 0.033442582993302494,
+      "relative_l2": 6.070489888543307e-08
+    }
+  ]
+}

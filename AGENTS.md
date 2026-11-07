@@ -1,6 +1,6 @@
 # linear-dag
 
-Last verified: 2026-08-26
+Last verified: 2026-11-06
 
 ## Scope
 This context covers the public package under `src/` and the JAX native-build integration in `hatch_build.py`.
@@ -14,7 +14,7 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 
 ## Contracts
 - **Exposes**:
-  - Package API from `src/linear_dag/__init__.py`: `LinearARG`, `BrickGraph`, `ParallelOperator`, `GRMOperator`, `Backend`, `JaxLinearARG`, `JaxParallelOperator`, `linear_arg_from_genotypes`, `list_blocks`, `read_vcf`, `compute_af`, `flip_alleles`, `apply_maf_threshold`, `binarize`, `randomized_haseman_elston`, `pca`, `svd`.
+  - Package API from `src/linear_dag/__init__.py`: `as_lineax_operator`, `LinearARG`, `BrickGraph`, `ParallelOperator`, `GRMOperator`, `Backend`, `JaxLinearARG`, `JaxParallelOperator`, `linear_arg_from_genotypes`, `list_blocks`, `read_vcf`, `compute_af`, `flip_alleles`, `apply_maf_threshold`, `binarize`, `randomized_haseman_elston`, `pca`, `svd`.
   - CLI from `src/linear_dag/cli.py`: `assoc`, `rhe`, `score`, `compress`, `multi-step-compress` (`step0`-`step5`).
 - **Guarantees**:
   - `LinearARG` behaves as a `scipy.sparse.linalg.LinearOperator` over sample-by-variant genotype space.
@@ -31,7 +31,7 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 
 ## Dependencies
 - **Uses**:
-  - Numeric/data stack: `numpy`, `scipy`, `polars`, `h5py`, `jax`, `jaxlib`, `equinox`, `jaxtyping`.
+  - Numeric/data stack: `numpy`, `scipy`, `polars`, `h5py`, `jax`, `jaxlib`, `equinox`, `lineax`, `jaxtyping`.
   - Genotype/IO: `cyvcf2`, `pyarrow.parquet`.
   - Runtime/monitoring: `psutil`.
   - Core acceleration modules under `src/linear_dag/core/*.pyx` (Cython-backed graph/solver primitives).
@@ -47,7 +47,10 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 - Haplotypes are the base representation; diploid semantics are derived by pairing haplotypes when needed.
 - HDF5 block structure is used to support blockwise and process-parallel operations.
 - GWAS/PRS pipelines favor memory-aware paths (shared memory + lazy/tabular processing) over eager full-matrix materialization.
-- JAX backend selection stays explicit through `Backend`; multi-block operators may distribute contiguous block ranges across a JAX mesh without changing operator semantics.
+- JAX backend selection stays explicit through `Backend`. Native CPU products use one device and packed ragged graph buffers; `num_processes` controls native worker threads. Pure-JAX products retain mesh distribution.
+- The native HiJAX path supports JIT, batching, JVP/VJP and higher derivatives in RHS values and dynamic GRM diagonals. Graph construction remains host-side and graph arrays remain integer operands.
+- Python 3.12 and JAX/jaxlib 0.12.0.1 are required for the experimental HiJAX API. Keep pins synchronized between build and runtime dependencies.
+- Native scratch defaults to 256 MiB with RHS tiles up to 8 columns; this excludes graph, input/output and transformation intermediates. The on-disk HDF5 schema is unchanged.
 
 ## Invariants
 - `LinearARG.A` is square CSC adjacency; sample nodes are trailing nodes and `shape == (n_samples, n_variants)` derives from sample/variant indices.
@@ -100,3 +103,13 @@ It supports association testing, heritability estimation, PRS scoring, LD utilit
 - `src/linear_dag/association/heritability.py` - randomized HE estimator
 - `src/linear_dag/association/prs.py` - PRS scoring pipeline
 - `src/linear_dag/bed_io.py` - BED region parsing contract
+
+## Lineax interoperability
+
+- `as_lineax_operator` adapts the existing JAX genotype/GRM modules to Lineax,
+  preserving graph/weight arrays as PyTree leaves and using explicit transpose
+  products. It is exported at package root and under `core.jaxlinarg`.
+- GRM symmetry is known; positive semidefiniteness is not inferred because dynamic
+  diagonals may be signed. Solver tags remain caller assertions.
+- Iterative solves do not materialize matrices. Explicit matrix/diagonal extraction
+  or direct solvers may do so. Pure-JAX backend AD limitations are unchanged.

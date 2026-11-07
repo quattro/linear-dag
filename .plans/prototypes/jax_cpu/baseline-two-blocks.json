@@ -1,0 +1,133 @@
+{
+  "jax": "0.12.0.1",
+  "config": {
+    "samples": 6404,
+    "variants": 290272,
+    "max_state": 141239,
+    "max_variants": 150192,
+    "workers": 2,
+    "chunk": 8
+  },
+  "baseline": {
+    "platform": "macOS-26.4.1-arm64-arm-64bit",
+    "python": "3.11.15",
+    "commit": "c199307eeb1f04cb9204ce4bb99342f7ea32a2de",
+    "blocks": [
+      "1_1_5000000",
+      "1_5000001_10000000"
+    ],
+    "workers": 2,
+    "chunk": 8,
+    "widths": [
+      1,
+      8,
+      32
+    ],
+    "timings": [
+      {
+        "k": 1,
+        "forward": 0.009144207986537367,
+        "reverse": 0.009142499999143183,
+        "weighted": 0.01825870800530538
+      },
+      {
+        "k": 8,
+        "forward": 0.04082845902303234,
+        "reverse": 0.03863554200506769,
+        "weighted": 0.08056349999969825
+      },
+      {
+        "k": 32,
+        "forward": 0.18537212500814348,
+        "reverse": 0.15929412498371676,
+        "weighted": 0.34585937499650754
+      }
+    ],
+    "shape": [
+      6404,
+      290272
+    ]
+  },
+  "packing_seconds": 0.1040027909912169,
+  "scratch_bytes": 28673856,
+  "timings": [
+    {
+      "operation": "forward",
+      "k": 1,
+      "seconds": 0.00954895798349753,
+      "compile_seconds": 0.007561958016594872,
+      "relative_l2": 1.7446957656375162e-07,
+      "max_abs": 0.000152587890625
+    },
+    {
+      "operation": "reverse",
+      "k": 1,
+      "seconds": 0.009888375003356487,
+      "compile_seconds": 0.006972708011744544,
+      "relative_l2": 5.421334776656295e-07,
+      "max_abs": 8.392333984375e-05
+    },
+    {
+      "operation": "weighted",
+      "k": 1,
+      "seconds": 0.019107041996903718,
+      "compile_seconds": 0.006081750005250797,
+      "relative_l2": 1.2433840765879722e-06,
+      "max_abs": 0.1875
+    },
+    {
+      "operation": "forward",
+      "k": 8,
+      "seconds": 0.0164334170112852,
+      "compile_seconds": 0.006494667002698407,
+      "relative_l2": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "operation": "reverse",
+      "k": 8,
+      "seconds": 0.023076291981851682,
+      "compile_seconds": 0.0061007920012343675,
+      "relative_l2": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "operation": "weighted",
+      "k": 8,
+      "seconds": 0.03901920799398795,
+      "compile_seconds": 0.005554999981541187,
+      "relative_l2": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "operation": "forward",
+      "k": 32,
+      "seconds": 0.08062158399843611,
+      "compile_seconds": 0.04738350000116043,
+      "relative_l2": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "operation": "reverse",
+      "k": 32,
+      "seconds": 0.10971874999813735,
+      "compile_seconds": 0.04611879101139493,
+      "relative_l2": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "operation": "weighted",
+      "k": 32,
+      "seconds": 0.16532037500292063,
+      "compile_seconds": 0.03971795900724828,
+      "relative_l2": 0.0,
+      "max_abs": 0.0
+    }
+  ],
+  "process_peak_rss_native_units": 695042048,
+  "source_sha256": {
+    "packed.py": "2b076370a449baba2ac94b9e2ff6034519ca12d21f951a5f6814c5dcd65ce3d1",
+    "kernel.cc": "05a24b1e0970d1b0a65e323d3e960fdc0443ae218521a58b2747ef4f720054b4",
+    "build.py": "9f65575b942fd67c765eb6117118a22dbcc29a81786f6d8a73750d7f1f006071"
+  }
+}

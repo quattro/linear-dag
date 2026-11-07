@@ -1,6 +1,8 @@
 # pattern: Functional Core
 
-from collections.abc import Callable
+import operator
+
+from collections.abc import Callable, Iterable
 from functools import cached_property
 from typing import Any
 
@@ -15,6 +17,7 @@ from jaxtyping import Array, ArrayLike
 
 from linear_dag.core.lineararg import list_blocks
 
+from ._packed import _ExecutionConfig, _pack
 from .operator import Backend, JaxLinearARG, resolve_backend
 
 
@@ -75,43 +78,175 @@ class JaxParallelOperator(eqx.Module):
     r"""JAX-compatible multi-block LinearARG operator.
 
     !!! info
-        `mesh` must contain a `"blocks"` axis. A single-device mesh is valid
-        and uses the same public API as multi-device execution.
+        CPU FFI packs ragged blocks without padding and runs native workers
+        on one CPU device. `num_processes` controls worker threads, not OS
+        processes. Scratch space is bounded by `workspace_bytes` (256 MiB by
+        default); worker count and RHS tile width are reduced to fit.
+        The pure-JAX backend retains mesh-based execution. A supplied `mesh`
+        must contain a `"blocks"` axis.
+
+        All blocks must represent the same sample rows in the same order.
+        Construction checks row counts, but does not join or validate IID
+        identities; callers establish sample alignment before conversion.
 
     !!! Example
         ```python
-        import jax
-        import numpy as np
-
-        from jax.sharding import Mesh
         from linear_dag.core.jaxlinarg import JaxParallelOperator
 
-        mesh = Mesh(np.asarray(jax.devices()[:1]), ("blocks",))
-        operator = JaxParallelOperator.from_hdf5("lineararg.h5", mesh=mesh)
+        operator = JaxParallelOperator.from_hdf5("lineararg.h5", num_processes=4)
         ```
 
     **Arguments:**
 
     - `blocks`: Block operators composed by this wrapper.
     - `variant_offsets`: Leading-zero cumulative variant offsets.
-    - `mesh`: JAX mesh containing a `"blocks"` axis.
+    - `mesh`: Optional JAX mesh containing a `"blocks"` axis.
     - `backend`: Requested numerical backend.
-    - `block_ranges`: Contiguous block ranges assigned to mesh devices.
+    - `block_ranges`: Optional contiguous block ranges assigned to mesh devices.
+    - `num_processes`: Maximum native CPU worker threads.
+    - `max_num_traits`: Maximum RHS tile width (default 8).
+    - `workspace_bytes`: Native scratch budget (default 256 MiB), excluding
+      graph/input/output storage and transformation intermediates.
     """
 
-    blocks: tuple[JaxLinearARG, ...] = eqx.field(converter=tuple)
+    _blocks: tuple[JaxLinearARG, ...]
     variant_offsets: tuple[int, ...] = eqx.field(converter=_int_tuple, static=True)
     mesh: Mesh | AbstractMesh = eqx.field(static=True)
     block_ranges: tuple[tuple[int, int], ...] = eqx.field(converter=_range_tuple, static=True)
     backend: Backend = eqx.field(default=Backend.AUTO, converter=Backend, static=True)
+
+    _graph: tuple[Array, ...] | None
+    _config: _ExecutionConfig | None = eqx.field(static=True)
+    _specs: tuple[tuple[int, ...], ...] = eqx.field(static=True)
+    _dtype: Any = eqx.field(static=True)
+
+    def __init__(
+        self,
+        blocks: Iterable[JaxLinearARG],
+        variant_offsets: Iterable[int],
+        mesh: Mesh | AbstractMesh | None = None,
+        block_ranges: Iterable[tuple[int, int]] | None = None,
+        backend: Backend = Backend.AUTO,
+        *,
+        num_processes: int | None = None,
+        max_num_traits: int = 8,
+        workspace_bytes: int = 256 * 1024**2,
+    ) -> None:
+        # Validate execution controls even when the selected backend ignores them.
+        num_processes = None if num_processes is None else operator.index(num_processes)
+        max_num_traits = operator.index(max_num_traits)
+        workspace_bytes = operator.index(workspace_bytes)
+
+        self._blocks = tuple(blocks)
+        self.variant_offsets = _int_tuple(variant_offsets)
+        self.mesh = Mesh(np.asarray(jax.devices()[:1]), ("blocks",)) if mesh is None else mesh
+        self.block_ranges = (
+            _range_tuple(block_ranges)
+            if block_ranges is not None
+            else split_blocks_by_n_entries(_metadata_from_lineargs(self._blocks), _mesh_blocks_axis_size(self.mesh))
+        )
+        self.backend = Backend(backend)
+        self._graph = None
+        self._config = None
+        self._specs = ()
+        self._dtype = self._blocks[0].dtype if self._blocks else jnp.dtype(jnp.float32)
+        # Validate the original block sequence before replacing it with packed
+        # state. Equinox's automatic post-init check then sees the packed form.
+        self.__check_init__()
+        self.backend = resolve_backend(_backend_for_lineargs(self._blocks, backend=self.backend))
+        if num_processes is not None and num_processes < 1:
+            raise ValueError("num_processes must be positive")
+        if max_num_traits < 1 or workspace_bytes < 1:
+            raise ValueError("max_num_traits and workspace_bytes must be positive")
+        if self.backend is Backend.FFI_CPU:
+            if isinstance(self.mesh, AbstractMesh) or self.mesh.devices.size != 1:
+                raise ValueError("Packed CPU execution uses one device; use num_processes for worker parallelism")
+            if self.mesh.devices.flat[0].platform != "cpu":
+                raise ValueError("Packed CPU execution requires a CPU device")
+            keys = (
+                "indptr",
+                "indices",
+                "data",
+                "nonunique_indices",
+                "variant_indices",
+                "sample_indices",
+                "flip",
+                "allele_counts",
+                "min_index_to_keep",
+            )
+            with jax.default_device(self.mesh.devices.flat[0]):
+                self._graph, self._config = _pack(
+                    ({key: getattr(block, key) for key in keys} for block in self._blocks),
+                    workers=num_processes,
+                    chunk=max_num_traits,
+                    workspace_bytes=workspace_bytes,
+                    dtype=self._dtype,
+                )
+            self._specs = tuple(tuple(map(int, row)) for row in np.asarray(self._graph[0]))
+            # Keep one canonical graph payload. Inspection reconstructs per-block
+            # views on demand instead of retaining a duplicate set of arrays.
+            self._blocks = ()
+
+    @property
+    def blocks(self) -> tuple[JaxLinearARG, ...]:
+        """Return individual blocks for inspection.
+
+        Packed operators reconstruct block arrays on demand. These are not
+        cached and may allocate device buffers; avoid repeated access in hot paths.
+        """
+        if self._graph is None:
+            return self._blocks
+        _, ptr, indices, data, mapping, variants, samples, flip, counts = self._graph
+        result = []
+        for i, (po, no, eo, vo, nodes, nv, ns, keep) in enumerate(self._specs):
+            edge_end = self._specs[i + 1][2] if i + 1 < len(self._specs) else indices.shape[0]
+            result.append(
+                JaxLinearARG(
+                    indptr=ptr[po : po + nodes + 1],
+                    indices=indices[eo:edge_end],
+                    data=data[eo:edge_end],
+                    nonunique_indices=mapping[no : no + nodes],
+                    variant_indices=variants[vo : vo + nv],
+                    sample_indices=samples[i * self.shape[0] : (i + 1) * self.shape[0]],
+                    flip=flip[vo : vo + nv],
+                    allele_counts=counts[vo : vo + nv],
+                    n_variants=nv,
+                    n_samples=self.shape[0],
+                    n_nonunique_indices=ns,
+                    min_index_to_keep=keep,
+                    backend=self.backend,
+                    dtype=self._dtype,
+                    _arrays_validated=True,
+                )
+            )
+        return tuple(result)
+
+    @property
+    def dtype(self) -> np.dtype:
+        """Return the computation dtype."""
+        return self._dtype
+
+    @property
+    def allele_counts(self) -> Array:
+        """Return variant-aligned allele counts, or -1 for missing counts."""
+        return self._graph[-1] if self._graph is not None else jnp.concatenate([b.allele_counts for b in self._blocks])
+
+    @property
+    def num_processes(self) -> int:
+        """Return the effective native worker count (zero for the pure-JAX path)."""
+        return self._config.workers if self._config is not None else 0
 
     @classmethod
     def from_linearargs(
         cls,
         lineargs: Any,
         *,
-        mesh: Mesh | AbstractMesh,
+        mesh: Mesh | AbstractMesh | None = None,
         backend: Backend = Backend.AUTO,
+        num_processes: int | None = None,
+        max_num_traits: int = 8,
+        workspace_bytes: int = 256 * 1024**2,
+        dtype: Any = jnp.float32,
     ) -> "JaxParallelOperator":
         """Construct a multi-block JAX operator from LinearARG objects.
 
@@ -124,8 +259,14 @@ class JaxParallelOperator(eqx.Module):
         **Arguments:**
 
         - `lineargs`: Iterable of LinearARG or JAX LinearARG blocks.
-        - `mesh`: JAX mesh with a `"blocks"` axis.
+        - `mesh`: Optional JAX mesh with a `"blocks"` axis; defaults to one device.
         - `backend`: Requested numerical backend.
+        - `num_processes`: Maximum native CPU worker threads; defaults to CPU
+          count capped by the number of blocks and scratch budget.
+        - `max_num_traits`: Maximum RHS tile width (default 8).
+        - `workspace_bytes`: Native scratch budget, excluding graph, inputs,
+          outputs, and JAX transformation intermediates.
+        - `dtype`: Computation dtype for blocks loaded from host data.
 
         **Returns:**
 
@@ -135,11 +276,14 @@ class JaxParallelOperator(eqx.Module):
 
         - `ValueError`: If block settings, shapes, or mesh ranges are invalid.
         """
+        mesh = Mesh(np.asarray(jax.devices()[:1]), ("blocks",)) if mesh is None else mesh
         lineargs = tuple(lineargs)
         backend = _backend_for_lineargs(lineargs, backend=backend)
         metadata = _metadata_from_lineargs(lineargs)
         blocks = tuple(
-            linearg if isinstance(linearg, JaxLinearARG) else JaxLinearARG.from_lineararg(linearg, backend=backend)
+            linearg
+            if isinstance(linearg, JaxLinearARG)
+            else JaxLinearARG.from_lineararg(linearg, backend=backend, dtype=dtype)
             for linearg in lineargs
         )
         return cls(
@@ -148,6 +292,9 @@ class JaxParallelOperator(eqx.Module):
             mesh=mesh,
             backend=backend,
             block_ranges=split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh)),
+            num_processes=num_processes,
+            max_num_traits=max_num_traits,
+            workspace_bytes=workspace_bytes,
         )
 
     @classmethod
@@ -155,9 +302,13 @@ class JaxParallelOperator(eqx.Module):
         cls,
         path: Any,
         *,
-        mesh: Mesh | AbstractMesh,
+        mesh: Mesh | AbstractMesh | None = None,
         block_metadata: pl.DataFrame | None = None,
         backend: Backend = Backend.AUTO,
+        num_processes: int | None = None,
+        max_num_traits: int = 8,
+        workspace_bytes: int = 256 * 1024**2,
+        dtype: Any = jnp.float32,
     ) -> "JaxParallelOperator":
         """Construct a multi-block JAX operator from an HDF5 LinearARG file.
 
@@ -169,9 +320,15 @@ class JaxParallelOperator(eqx.Module):
         **Arguments:**
 
         - `path`: HDF5 file path.
-        - `mesh`: JAX mesh with a `"blocks"` axis.
+        - `mesh`: Optional JAX mesh with a `"blocks"` axis; defaults to one device.
         - `block_metadata`: Optional preloaded block metadata.
         - `backend`: Requested numerical backend.
+        - `num_processes`: Maximum native CPU worker threads; defaults to CPU
+          count capped by the number of blocks and scratch budget.
+        - `max_num_traits`: Maximum RHS tile width (default 8).
+        - `workspace_bytes`: Native scratch budget, excluding graph, inputs,
+          outputs, and JAX transformation intermediates.
+        - `dtype`: Computation dtype for blocks loaded from host data.
 
         **Returns:**
 
@@ -181,6 +338,7 @@ class JaxParallelOperator(eqx.Module):
 
         - `ValueError`: If metadata, block settings, shapes, or mesh ranges are invalid.
         """
+        mesh = Mesh(np.asarray(jax.devices()[:1]), ("blocks",)) if mesh is None else mesh
         metadata = list_blocks(path) if block_metadata is None else block_metadata
         block_names = metadata.get_column("block_name").to_list()
         blocks = tuple(
@@ -188,6 +346,7 @@ class JaxParallelOperator(eqx.Module):
                 path,
                 block_name,
                 backend=backend,
+                dtype=dtype,
             )
             for block_name in block_names
         )
@@ -197,9 +356,14 @@ class JaxParallelOperator(eqx.Module):
             mesh=mesh,
             backend=backend,
             block_ranges=split_blocks_by_n_entries(metadata, _mesh_blocks_axis_size(mesh)),
+            num_processes=num_processes,
+            max_num_traits=max_num_traits,
+            workspace_bytes=workspace_bytes,
         )
 
     def __check_init__(self) -> None:
+        if self._graph is not None:
+            return
         if not self.blocks:
             raise ValueError("blocks must contain at least one JaxLinearARG")
         n_samples = {block.n_samples for block in self.blocks}
@@ -232,7 +396,10 @@ class JaxParallelOperator(eqx.Module):
     @property
     def shape(self) -> tuple[int, int]:
         """Return the composed operator shape `(n_samples, total_variants)`."""
-        return (self.blocks[0].n_samples, self.variant_offsets[-1])
+        return (
+            self._config.samples if self._config is not None else self._blocks[0].n_samples,
+            self.variant_offsets[-1],
+        )
 
     def matmat(self, x: ArrayLike) -> Array:
         """Multiply by the concatenated multi-block genotype matrix.
@@ -250,8 +417,12 @@ class JaxParallelOperator(eqx.Module):
 
         - `ValueError`: If `x` has an incompatible rank or leading dimension.
         """
-        x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[1], dtype=self.blocks[0].dtype)
-        if len(self.blocks) == 1:
+        x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[1], dtype=self.dtype)
+        if self._graph is not None:
+            from ._packed import _product
+
+            result = _product(self._graph, x, self._config)
+        elif len(self.blocks) == 1:
             result = self.blocks[0].matmat(x)
         elif len(self.block_ranges) > 1:
             result = self._sharded_matmat(x)
@@ -282,8 +453,12 @@ class JaxParallelOperator(eqx.Module):
 
         - `ValueError`: If `x` has an incompatible rank or leading dimension.
         """
-        x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.blocks[0].dtype)
-        if len(self.blocks) == 1:
+        x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.dtype)
+        if self._graph is not None:
+            from ._packed import _product
+
+            result = _product(self._graph, x, self._config, transpose=True)
+        elif len(self.blocks) == 1:
             result = self.blocks[0].rmatmat(x)
         else:
             result = self._cached_rmatmat(x)

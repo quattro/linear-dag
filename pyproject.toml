@@ -3,10 +3,10 @@ requires = [
   "hatchling",
   "hatch-vcs",
   "hatch-cython",
-  "jax>=0.8.0,<0.11",
-  "jaxlib>=0.8.0,<0.11",
+  "jax==0.12.0.1",
+  "jaxlib==0.12.0.1",
   "numpy",
-  "scipy>=1.14.1",
+  "scipy>=1.14.1,<1.18",
   "setuptools>=80.9.0",
 ]
 build-backend = "hatchling.build"
@@ -16,7 +16,7 @@ name = "linear-dag"
 dynamic = ["version"]
 description = ''
 readme = "README.md"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
 keywords = [
   "statistics",
@@ -37,7 +37,6 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Information Analysis",
   "Topic :: Scientific/Engineering :: Mathematics",
   "Programming Language :: Python",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
@@ -45,13 +44,14 @@ classifiers = [
 dependencies = [
   "cython",
   "cyvcf2",
-  "jax>=0.8.0,<0.11",
-  "jaxlib>=0.8.0,<0.11",
-  "equinox>=0.11.10",
+  "jax==0.12.0.1",
+  "jaxlib==0.12.0.1",
+  "equinox>=0.13.8,<0.14",
+  "lineax>=0.1.1,<0.2",
   "jaxtyping>=0.2.36",
   "numpy",
-  "scipy>=1.14.1",
-  "polars>=1.25.0",
+  "scipy>=1.14.1,<1.18",
+  "polars>=1.25.0,<2",
   "psutil",
   "h5py>=3.13.0",
   "pytest>=8.4.1",
@@ -159,7 +159,7 @@ all = [
 ]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 120
 
 [tool.ruff.lint]

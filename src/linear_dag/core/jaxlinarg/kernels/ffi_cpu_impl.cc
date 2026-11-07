@@ -27,6 +27,9 @@
 
 namespace ffi = xla::ffi;
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(linear_dag_packed_f32);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(linear_dag_packed_f64);
+
 template <typename T>
 void AxpyScalar(int64_t n, T alpha, const T* x, T* y) {
   for (int64_t i = 0; i < n; ++i) {
@@ -515,7 +518,11 @@ static PyObject* Registrations(PyObject*, PyObject*) {
   if (dict == nullptr) {
     return nullptr;
   }
-  if (AddRegistration(dict, "linear_dag_jaxlinarg_solve_forward_f32",
+  if (AddRegistration(dict, "linear_dag_packed_f32",
+                      reinterpret_cast<void*>(linear_dag_packed_f32)) < 0 ||
+      AddRegistration(dict, "linear_dag_packed_f64",
+                      reinterpret_cast<void*>(linear_dag_packed_f64)) < 0 ||
+      AddRegistration(dict, "linear_dag_jaxlinarg_solve_forward_f32",
                       reinterpret_cast<void*>(linear_dag_jaxlinarg_solve_forward_f32)) < 0 ||
       AddRegistration(dict, "linear_dag_jaxlinarg_solve_backward_f32",
                       reinterpret_cast<void*>(linear_dag_jaxlinarg_solve_backward_f32)) < 0 ||

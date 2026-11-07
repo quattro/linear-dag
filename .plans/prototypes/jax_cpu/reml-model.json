@@ -1,0 +1,16 @@
+{
+  "n": 256,
+  "variants": 150192,
+  "haplotypes": 6404,
+  "blocks": [
+    "1_1_5000000"
+  ],
+  "truth": [
+    0.6,
+    0.4
+  ],
+  "prepare_seconds": 3.9100480419874657,
+  "normalization": 153108.56862164167,
+  "min_eigenvalue": 0.22788805815061436,
+  "max_eigenvalue": 7.212259746129051
+}

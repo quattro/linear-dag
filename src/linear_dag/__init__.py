@@ -9,6 +9,7 @@ from .association import (
     run_gwas as run_gwas,
 )
 from .core import (
+    as_lineax_operator as as_lineax_operator,
     Backend as Backend,
     BrickGraph as BrickGraph,
     GRMOperator as GRMOperator,

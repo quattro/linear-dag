@@ -1,0 +1,33 @@
+{
+  "backend": "operator",
+  "action": "value",
+  "load_seconds": 0.3536595000186935,
+  "compile_seconds": 0.16414791601710021,
+  "first_seconds": 0.7317538750066888,
+  "warm_seconds": 0.6622781250043772,
+  "trials": [
+    0.6578741669945884,
+    0.6594244159932714,
+    0.6622781250043772,
+    0.6630762499989942,
+    0.6628849999979138
+  ],
+  "compilation_memory": {
+    "baseline_mib": 414.453125,
+    "peak_mib": 462.75,
+    "increase_mib": 48.296875
+  },
+  "first_memory": {
+    "baseline_mib": 354.296875,
+    "peak_mib": 361.703125,
+    "increase_mib": 7.40625
+  },
+  "warm_memory": {
+    "baseline_mib": 361.671875,
+    "peak_mib": 361.703125,
+    "increase_mib": 0.03125
+  },
+  "initial_value": 362.6517400136929,
+  "initial_residual": 5.600768062445474e-11,
+  "process_peak_mib": 462.75
+}

@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from functools import cached_property
 from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, ArrayLike
 
-from .operator import JaxLinearARG
+from .operator import Backend, JaxLinearARG
 from .wrapper import (
     _as_rank2_matrix,
     _device_put_if_needed,
@@ -30,39 +32,57 @@ class JaxGRMOperator(eqx.Module):
     This operator is an algebraic view over an already-constructed JAX genotype
     operator $X$. It computes sample-space products of the form
     $(X - \mathbf{1} f^\top) D (X - \mathbf{1} f^\top)^\top y$, where $f$ is
-    the vector of allele frequencies and $D_j = (f_j(1-f_j))^\alpha$.
+    the vector of allele frequencies. By default $D_j = (f_j(1-f_j))^\alpha$,
+    with zero weight for monomorphic variants. A supplied `diagonal` replaces
+    these weights and may depend on differentiable model parameters. Signed
+    weights are accepted; positive semidefiniteness then depends on the caller.
 
     !!! info
 
-        Loading, filtering, pruning, and device placement belong to
-        [`linear_dag.core.jaxlinarg.JaxLinearARG`][] or
-        [`linear_dag.core.jaxlinarg.JaxParallelOperator`][]. This class only
-        defines the GRM algebra on top of those operators.
+        Construct and validate operators on the host before applying JAX
+        transformations. Use `matmat(..., diagonal=weights)` to vary weights
+        inside a traced model. This class does not load or filter graph data.
+        Sample rows follow the wrapped operator (usually haplotypes); diploid
+        pairing and phenotype alignment are separate operations.
+
+    !!! Example
+        ```python
+        import jax
+        from linear_dag.core.jaxlinarg import JaxGRMOperator
+
+        grm = JaxGRMOperator(genotypes, center=True)
+        product = jax.jit(lambda weights, rhs: grm.matmat(rhs, diagonal=weights))
+        ```
 
     **Arguments:**
 
     - `operator`: JAX genotype operator providing `matmat`, `rmatmat`, and
       per-variant allele counts.
-    - `alpha`: Allele-frequency weight exponent.
+    - `diagonal`: Optional dynamic variant weights, differentiable on the native
+      CPU path along with the input vectors. Graph topology stays fixed.
+    - `alpha`: Static allele-frequency weight exponent, used when no diagonal is supplied.
     - `center`: Whether to center genotypes by allele frequency before forming
       the GRM.
+    - `iids`: Optional host-side sample identifiers for phenotype alignment.
     """
 
     operator: JaxLinearARG | JaxParallelOperator
     alpha: float = eqx.field(default=-1.0, converter=float, static=True)
     center: bool = eqx.field(default=True, converter=bool, static=True)
     iids: Any = eqx.field(default=None, static=True)
+    diagonal: Array | None = None
 
     def __check_init__(self) -> None:
         if not isinstance(self.operator, (JaxLinearARG, JaxParallelOperator)):
             raise TypeError("operator must be a JaxLinearARG or JaxParallelOperator")
-        blocks = self.operator.blocks if isinstance(self.operator, JaxParallelOperator) else (self.operator,)
-        for block in blocks:
-            if block.n_samples <= 0:
-                raise ValueError("JaxGRMOperator requires a positive sample count")
-            if block.allele_counts.size and (
-                int(jnp.min(block.allele_counts)) < 0 or int(jnp.max(block.allele_counts)) > block.n_samples
-            ):
+        n_samples = self.operator.shape[0]
+        if n_samples <= 0:
+            raise ValueError("JaxGRMOperator requires a positive sample count")
+        if self.diagonal is not None and jnp.shape(self.diagonal) != (self.operator.shape[1],):
+            raise ValueError("diagonal length must match the variant count")
+        if self.center or self.diagonal is None:
+            counts = np.asarray(self.operator.allele_counts)
+            if counts.size and (counts.min() < 0 or counts.max() > n_samples):
                 raise ValueError("JaxGRMOperator requires allele_counts in [0, n_samples] for every variant")
 
     @property
@@ -73,20 +93,53 @@ class JaxGRMOperator(eqx.Module):
     @property
     def dtype(self) -> object:
         """Return the wrapped operator dtype."""
-        return self.operator.blocks[0].dtype if isinstance(self.operator, JaxParallelOperator) else self.operator.dtype
+        return self.operator.dtype
 
-    def matmat(self, x: ArrayLike) -> Array:
+    def matmat(self, x: ArrayLike, *, diagonal: ArrayLike | None = None) -> Array:
         """Multiply by the implicit genetic relatedness matrix.
 
         **Arguments:**
 
         - `x`: Rank-1 sample-space vector, or rank-2 sample-by-trait matrix.
+        - `diagonal`: Optional dynamic variant weights overriding the stored
+          diagonal or frequency-based weights. Gradients flow through these values.
 
         **Returns:**
 
         - GRM product with the same rank convention as the input.
         """
         x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.dtype)
+
+        selected_diagonal = self.diagonal if diagonal is None else diagonal
+        native = self._native_state()
+        if native is not None:
+            from ._packed import _weighted
+
+            graph, config = native
+            if selected_diagonal is None:
+                frequencies = self.operator.allele_counts.astype(x.dtype) / self.shape[0]
+                pq = frequencies * (1 - frequencies)
+                # Keep the unselected branch finite for negative exponents.
+                # Monomorphic variants contribute zero, not 0**alpha.
+                safe_pq = jnp.where(pq > 0, pq, 1)
+                selected_diagonal = jnp.where(pq > 0, safe_pq**self.alpha, 0)
+            result = _weighted(
+                graph, jnp.asarray(selected_diagonal, dtype=x.dtype), x, replace(config, center=self.center)
+            )
+            return result[:, 0] if was_vector else result
+        if selected_diagonal is not None:
+            weights = jnp.asarray(selected_diagonal, dtype=x.dtype)
+            if weights.shape != (self.operator.shape[1],):
+                raise ValueError("diagonal length must match the variant count")
+            scores = self.operator.rmatmat(x)
+            frequencies = self.operator.allele_counts.astype(x.dtype) / self.shape[0]
+            if self.center:
+                scores = scores - frequencies[:, None] * jnp.sum(x, axis=0)
+            scores = weights[:, None] * scores
+            result = self.operator.matmat(scores)
+            if self.center:
+                result = result - jnp.sum(frequencies[:, None] * scores, axis=0)
+            return result[:, 0] if was_vector else result
 
         @jax.custom_vjp
         def product(values: Array) -> Array:
@@ -126,16 +179,32 @@ class JaxGRMOperator(eqx.Module):
                 )
         return result
 
-    def matmat_blockwise(self, x: ArrayLike) -> Array:
-        """Multiply by the GRM using cached per-block JIT entrypoints.
+    def _native_state(self):
+        if isinstance(self.operator, JaxParallelOperator):
+            if self.operator._graph is not None:
+                return self.operator._graph, self.operator._config
+        elif self.operator.backend is Backend.FFI_CPU and self.operator.data.dtype == jnp.int32:
+            return self.operator._packed_state()
+        return None
 
-        This path preserves the same algebra as
-        [`linear_dag.core.jaxlinarg.JaxGRMOperator.matmat`][], but keeps the
-        Python loop over LinearARG blocks outside a single XLA program. It is
-        useful for workflows such as RHE where a full multi-block GRM product
-        inside a larger `jax.jit` can make all block temporaries live in one HLO
-        module.
+    def matmat_blockwise(self, x: ArrayLike) -> Array:
+        """Apply the GRM with backend-specific block execution.
+
+        Native CPU execution delegates to the fused packed product, whose
+        scratch is already bounded. The pure-JAX default-weight path keeps
+        a host loop over cached per-block JIT functions to limit simultaneous
+        block temporaries. Explicit diagonal weights use `matmat` directly.
+
+        **Arguments:**
+
+        - `x`: Sample-space vector or sample-by-trait matrix.
+
+        **Returns:**
+
+        - GRM product with the same rank as the input.
         """
+        if self._native_state() is not None or self.diagonal is not None:
+            return self.matmat(x)
         x, was_vector = _as_rank2_matrix(x, expected_rows=self.shape[0], dtype=self.dtype)
         result = self._matmat_blockwise_rank2(x)
         return result[:, 0] if was_vector else result

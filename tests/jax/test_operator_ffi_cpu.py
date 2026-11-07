@@ -232,8 +232,8 @@ def test_factory_auto_constructor_uses_pure_jax_for_unsupported_ffi_dtype(oracle
 @pytest.mark.parametrize(
     ("operation", "target"),
     [
-        ("matmat", "linear_dag_jaxlinarg_matmat_f32"),
-        ("rmatmat", "linear_dag_jaxlinarg_rmatmat_f32"),
+        ("matmat", "linear_dag_packed_f32"),
+        ("rmatmat", "linear_dag_packed_f32"),
     ],
 )
 def test_jax_lineararg_ffi_cpu_lowers_each_product_to_one_fused_call(oracle_case, operation, target):
@@ -267,7 +267,10 @@ def test_jax_lineararg_ffi_cpu_keeps_graph_arrays_as_operands(oracle_case):
         if isinstance(constant, (jax.Array, np.ndarray))
     )
 
-    assert constant_bytes == 0
+    # Only the eight-int single-block shape/offset descriptor is constant.
+    # Graph payload remains dynamic operands, independent of graph size.
+    assert constant_bytes == 8 * np.dtype(np.int32).itemsize
+    assert all(np.asarray(c).shape == (1, 8) for c in closed_jaxpr.consts)
 
 
 def test_jax_lineararg_auto_resolves_to_ffi_cpu_when_handler_is_available(oracle_case):

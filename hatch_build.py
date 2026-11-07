@@ -142,7 +142,10 @@ def build_ffi_cpu_extension(root):
     blas_options = _ffi_cpu_blas_options()
     extension = Extension(
         "linear_dag.core.jaxlinarg.kernels._ffi_cpu_impl",
-        sources=[str(root / "src/linear_dag/core/jaxlinarg/kernels/ffi_cpu_impl.cc")],
+        sources=[
+            str(root / "src/linear_dag/core/jaxlinarg/kernels/ffi_cpu_impl.cc"),
+            str(root / "src/linear_dag/core/jaxlinarg/kernels/packed_cpu.cc"),
+        ],
         include_dirs=[
             jax.ffi.include_dir(),
             np.get_include(),

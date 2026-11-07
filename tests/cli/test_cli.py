@@ -839,7 +839,7 @@ def test_cli_help_includes_argument_groups():
     assert "Execution and Output:" in rhe_help
     assert "Variant Filtering:" in rhe_help
     assert "RHE Estimator:" in rhe_help
-    assert "maximum number of JAX devices" in rhe_help
+    assert "native CPU workers" in rhe_help
 
     score_stdout = io.StringIO()
     with pytest.raises(SystemExit):

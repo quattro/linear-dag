@@ -1,0 +1,33 @@
+{
+  "backend": "dense",
+  "action": "value",
+  "load_seconds": 0.0047977079811971635,
+  "compile_seconds": 0.09222604197566397,
+  "first_seconds": 0.0012243749806657434,
+  "warm_seconds": 0.00024283298989757895,
+  "trials": [
+    0.0002805410185828805,
+    0.0002585829934105277,
+    0.00024283298989757895,
+    0.00023333399440161884,
+    0.00023195898393169045
+  ],
+  "compilation_memory": {
+    "baseline_mib": 193.375,
+    "peak_mib": 237.40625,
+    "increase_mib": 44.03125
+  },
+  "first_memory": {
+    "baseline_mib": 237.375,
+    "peak_mib": 238.96875,
+    "increase_mib": 1.59375
+  },
+  "warm_memory": {
+    "baseline_mib": 238.9375,
+    "peak_mib": 239.03125,
+    "increase_mib": 0.09375
+  },
+  "initial_value": 362.65174001395985,
+  "initial_residual": 8.758648240035235e-16,
+  "process_peak_mib": 239.09375
+}

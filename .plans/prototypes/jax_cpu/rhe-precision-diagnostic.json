@@ -1,0 +1,34 @@
+[
+  {
+    "dtype": "<class 'jax.numpy.float32'>",
+    "denom": 8.250003419891656e+20,
+    "denom_squared": Infinity,
+    "scaled_variances": [
+      [
+        0.0
+      ],
+      [
+        753.9200439453125
+      ]
+    ],
+    "covariance": [
+      128.03994750976562
+    ]
+  },
+  {
+    "dtype": "<class 'jax.numpy.float64'>",
+    "denom": 8.250000000000003e+20,
+    "denom_squared": 6.8062500000000045e+41,
+    "scaled_variances": [
+      [
+        332.19999999999976
+      ],
+      [
+        1086.1199999999997
+      ]
+    ],
+    "covariance": [
+      -204.15999999999983
+    ]
+  }
+]

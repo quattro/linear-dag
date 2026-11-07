@@ -576,32 +576,23 @@ def _open_jax_grm_operator(args, block_metadata: pl.DataFrame, logger: logging.L
     if not devices:
         raise ValueError("No JAX devices are available for --jax-backend")
 
-    requested_devices = _validate_num_processes(args.num_processes)
-    if requested_devices is None:
-        device_count = len(devices)
-    else:
-        if requested_devices > len(devices):
-            logger.warning(
-                "`--num-processes` requested %d JAX devices, but only %d are available; using %d.",
-                requested_devices,
-                len(devices),
-                len(devices),
-            )
-        device_count = min(requested_devices, len(devices))
-    device_count = max(1, min(device_count, block_metadata.height))
-
-    selected_devices = devices[:device_count]
-    logger.info("Creating JAX GRM operator with %d device(s)", device_count)
+    workers = _validate_num_processes(args.num_processes)
+    selected_devices = devices[:1]
     mesh = Mesh(np.asarray(selected_devices), ("blocks",))
     operator = JaxParallelOperator.from_hdf5(
         args.linarg_path,
         mesh=mesh,
         block_metadata=block_metadata,
         backend=Backend.AUTO,
+        num_processes=workers,
     )
-    resolved_backends = ",".join(sorted({block.backend.value for block in operator.blocks}))
     device_labels = ",".join(f"{device.platform}:{device.id}" for device in selected_devices)
-    logger.info("Created JAX GRM operator: backend=%s devices=%s", resolved_backends, device_labels)
+    logger.info(
+        "Created JAX GRM operator: backend=%s devices=%s native_workers=%d",
+        operator.backend.value,
+        device_labels,
+        operator.num_processes,
+    )
     grm = JaxGRMOperator(operator, alpha=-1.0, iids=list_iids(args.linarg_path))
     return nullcontext(grm)
 
@@ -1198,8 +1189,8 @@ def _add_assoc_rhe_execution_output_group(parser: argparse.ArgumentParser) -> No
         "--num-processes",
         type=int,
         help=(
-            "Number of CPU worker processes for canonical execution, or maximum number of JAX devices with "
-            "rhe --jax-backend. Defaults to all available CPU cores or JAX devices."
+            "Number of CPU worker processes for canonical execution, or number of native CPU workers with "
+            "rhe --jax-backend. Defaults to all available CPU cores (bounded by block count and workspace)."
         ),
     )
     execution_group.add_argument("--out", default="kodama", help="Location to save result files.")

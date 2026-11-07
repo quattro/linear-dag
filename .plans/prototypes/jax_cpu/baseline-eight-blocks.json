@@ -1,0 +1,139 @@
+{
+  "jax": "0.12.0.1",
+  "config": {
+    "samples": 6404,
+    "variants": 1067520,
+    "max_state": 141239,
+    "max_variants": 150192,
+    "workers": 4,
+    "chunk": 8
+  },
+  "baseline": {
+    "platform": "macOS-26.4.1-arm64-arm-64bit",
+    "python": "3.11.15",
+    "commit": "c199307eeb1f04cb9204ce4bb99342f7ea32a2de",
+    "blocks": [
+      "1_1_5000000",
+      "1_5000001_10000000",
+      "1_10000001_15000000",
+      "1_15000001_20000000",
+      "1_20000001_25000000",
+      "1_25000001_30000000",
+      "1_30000001_35000000",
+      "1_35000001_40000000"
+    ],
+    "workers": 4,
+    "chunk": 8,
+    "widths": [
+      1,
+      8,
+      32
+    ],
+    "timings": [
+      {
+        "k": 1,
+        "forward": 0.019587457994930446,
+        "reverse": 0.019823209004243836,
+        "weighted": 0.03890300000784919
+      },
+      {
+        "k": 8,
+        "forward": 0.09768499998608604,
+        "reverse": 0.10343241700320505,
+        "weighted": 0.20486070797778666
+      },
+      {
+        "k": 32,
+        "forward": 0.48697737499605864,
+        "reverse": 0.4213149170100223,
+        "weighted": 0.9629288340220228
+      }
+    ],
+    "shape": [
+      6404,
+      1067520
+    ]
+  },
+  "packing_seconds": 0.28989608300616965,
+  "scratch_bytes": 57347712,
+  "timings": [
+    {
+      "operation": "forward",
+      "k": 1,
+      "seconds": 0.01997337501961738,
+      "compile_seconds": 0.013744708005106077,
+      "relative_l2": 7.295007549146248e-07,
+      "max_abs": 0.0003509521484375
+    },
+    {
+      "operation": "reverse",
+      "k": 1,
+      "seconds": 0.02182012499542907,
+      "compile_seconds": 0.00739137499476783,
+      "relative_l2": 6.796961997679318e-07,
+      "max_abs": 0.00012063980102539062
+    },
+    {
+      "operation": "weighted",
+      "k": 1,
+      "seconds": 0.041201458021532744,
+      "compile_seconds": 0.007576666976092383,
+      "relative_l2": 5.923317871747713e-07,
+      "max_abs": 0.875
+    },
+    {
+      "operation": "forward",
+      "k": 8,
+      "seconds": 0.03817141699255444,
+      "compile_seconds": 0.005425291979918256,
+      "relative_l2": 8.716223476312734e-08,
+      "max_abs": 0.0001220703125
+    },
+    {
+      "operation": "reverse",
+      "k": 8,
+      "seconds": 0.047913832997437567,
+      "compile_seconds": 0.006621874985285103,
+      "relative_l2": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "operation": "weighted",
+      "k": 8,
+      "seconds": 0.08782720798626542,
+      "compile_seconds": 0.00589787500211969,
+      "relative_l2": 6.35516741454012e-08,
+      "max_abs": 0.375
+    },
+    {
+      "operation": "forward",
+      "k": 32,
+      "seconds": 0.17358841697569005,
+      "compile_seconds": 0.07311633302015252,
+      "relative_l2": 7.500371879132217e-08,
+      "max_abs": 0.00018310546875
+    },
+    {
+      "operation": "reverse",
+      "k": 32,
+      "seconds": 0.23064479100867175,
+      "compile_seconds": 0.03716599999461323,
+      "relative_l2": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "operation": "weighted",
+      "k": 32,
+      "seconds": 0.3663280839973595,
+      "compile_seconds": 0.037325415993109345,
+      "relative_l2": 6.070489888543307e-08,
+      "max_abs": 0.375
+    }
+  ],
+  "process_peak_rss_native_units": 2034909184,
+  "source_sha256": {
+    "packed.py": "bf7989cff0b9d8b6116b707dc78cdd701a742e39abae12943639154873aefd2e",
+    "kernel.cc": "05a24b1e0970d1b0a65e323d3e960fdc0443ae218521a58b2747ef4f720054b4",
+    "build.py": "dbe9054fcf7e97af3ed39accab018bf14b6a0bcc725637fd9a3f28fc518ff973"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "finite_difference_gradient": [
+    -1.8969683651448574,
+    1.2138552648366385
+  ],
+  "native_gradient": [
+    -1.8969683417162742,
+    1.2138552735519852
+  ],
+  "fit_variance_max_error": 8.964273767730901e-12,
+  "max_forward_solve_residual": 9.645721441626143e-11
+}

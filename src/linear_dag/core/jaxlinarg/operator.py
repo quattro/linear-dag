@@ -81,12 +81,21 @@ class JaxLinearARG(eqx.Module):
     r"""JAX-compatible LinearARG operator.
 
     !!! info
-        `Backend.PURE_JAX` is always available and supports JAX transforms.
+        `Backend.PURE_JAX` supports JIT, batching, and reverse-mode AD.
         `Backend.FFI_CPU` uses the native CPU FFI handler when it is installed;
         if the handler is unavailable, explicit FFI CPU requests warn and fall
         back to `Backend.PURE_JAX`. Accelerator platforms currently use
         `Backend.PURE_JAX`. Reverse-mode autodiff is supported through custom
-        VJP rules; forward mode is not supported for the solve primitive.
+        VJP rules. Packed CPU products additionally support forward-mode AD,
+        batching and higher-order derivative compositions.
+
+    !!! Example
+        ```python
+        from linear_dag.core.jaxlinarg import JaxLinearARG
+
+        operator = JaxLinearARG.from_lineararg(linarg)
+        result = operator.matvec(variant_weights)
+        ```
 
     **Arguments:**
 
@@ -96,7 +105,7 @@ class JaxLinearARG(eqx.Module):
     - `variant_indices`: Variant node indices.
     - `flip`: Allele flip flags aligned to `variant_indices`.
     - `sample_indices`: Sample node indices.
-    - `nonunique_indices`: Nonunique sample index mapping.
+    - `nonunique_indices`: Mapping from graph nodes to reused workspace rows.
     - `allele_counts`: Cached allele counts aligned to variants, or `-1` for
       missing entries.
     - `n_variants`: Number of variants in genotype space.
@@ -297,6 +306,12 @@ class JaxLinearARG(eqx.Module):
             dtype=dtype,
         )
 
+    def __post_init__(self) -> None:
+        # Factories supply the cache after host validation. Direct construction
+        # must derive it from flip as well, before numerical execution.
+        if not self._arrays_validated:
+            self._flipped_variant_indices = jnp.asarray(np.flatnonzero(np.asarray(self.flip)), dtype=jnp.int32)
+
     def __check_init__(self) -> None:
         resolved_backend = _resolve_backend_for_dtype(self.backend, self.dtype)
         if resolved_backend is not self.backend:
@@ -367,6 +382,13 @@ class JaxLinearARG(eqx.Module):
         """
         x, was_vector = _as_rank2_matrix(x, expected_rows=self.n_variants, dtype=self.dtype)
 
+        if self.backend is Backend.FFI_CPU and self.data.dtype == jnp.int32:
+            from ._packed import _product
+
+            graph, config = self._packed_state()
+            result = _product(graph, x, config)
+            return result[:, 0] if was_vector else result
+
         @jax.custom_vjp
         def product(values: Array) -> Array:
             return self._matmat_rank2(values)
@@ -434,6 +456,13 @@ class JaxLinearARG(eqx.Module):
         """
         x, was_vector = _as_rank2_matrix(x, expected_rows=self.n_samples, dtype=self.dtype)
 
+        if self.backend is Backend.FFI_CPU and self.data.dtype == jnp.int32:
+            from ._packed import _product
+
+            graph, config = self._packed_state()
+            result = _product(graph, x, config, transpose=True)
+            return result[:, 0] if was_vector else result
+
         @jax.custom_vjp
         def product(values: Array) -> Array:
             return self._rmatmat_rank2(values)
@@ -479,6 +508,29 @@ class JaxLinearARG(eqx.Module):
         values = solved[variant_nonunique_indices, :]
         total = jnp.sum(x, axis=0)
         return jnp.where(self.flip[:, None], total[None, :] - values, values)
+
+    def _packed_state(self):
+        from ._packed import _execution_config
+
+        nodes = self.indptr.shape[0] - 1
+        metadata = jnp.asarray(
+            [[0, 0, 0, 0, nodes, self.n_variants, self.n_nonunique_indices, self.min_index_to_keep]], dtype=jnp.int32
+        )
+        graph = (
+            metadata,
+            self.indptr,
+            self.indices,
+            self.data,
+            self.nonunique_indices,
+            self.variant_indices,
+            self.sample_indices,
+            self.flip,
+            self.allele_counts,
+        )
+        config = _execution_config(
+            self.n_samples, self.n_variants, self.n_nonunique_indices, self.n_variants, 1, workers=1, dtype=self.dtype
+        )
+        return graph, config
 
     def matvec(self, x: ArrayLike) -> Array:
         """Multiply a vector by the represented genotype matrix."""

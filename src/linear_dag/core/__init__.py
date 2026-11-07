@@ -2,6 +2,7 @@
 
 from .brick_graph import BrickGraph as BrickGraph
 from .jaxlinarg import (
+    as_lineax_operator as as_lineax_operator,
     Backend as Backend,
     JaxLinearARG as JaxLinearARG,
     JaxParallelOperator as JaxParallelOperator,

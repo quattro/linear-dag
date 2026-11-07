@@ -425,3 +425,15 @@ def test_jax_parallel_operator_autodiff_matches_concatenated_block_gradients(
 
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
     assert shard_map_calls
+
+
+@pytest.mark.parametrize("backend", [Backend.PURE_JAX, Backend.FFI_CPU])
+@pytest.mark.parametrize("setting", ["num_processes", "max_num_traits", "workspace_bytes"])
+def test_execution_controls_require_integers(backend, setting):
+    with pytest.raises(TypeError):
+        JaxParallelOperator(
+            blocks=(_tiny_block(),),
+            variant_offsets=(0, 1),
+            backend=backend,
+            **{setting: 1.5},
+        )

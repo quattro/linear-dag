@@ -14,6 +14,33 @@ from linear_dag.core.jaxlinarg import Backend, JaxLinearARG
 _USE_CASE_NONUNIQUE = object()
 
 
+@pytest.mark.parametrize("compiled", [False, True])
+def test_direct_constructor_flipped_product_matches_dense_adjoint(compiled):
+    # Unflipped genotype is [[1], [0]]; flipping gives [[0], [1]].
+    op = JaxLinearARG(
+        indptr=np.array([0, 1, 1, 1], dtype=np.int32),
+        indices=np.array([1], dtype=np.int32),
+        data=np.ones(1, dtype=np.float32),
+        variant_indices=np.array([0], dtype=np.int32),
+        flip=np.array([True]),
+        sample_indices=np.array([1, 2], dtype=np.int32),
+        nonunique_indices=np.arange(3, dtype=np.int32),
+        allele_counts=np.array([1], dtype=np.int32),
+        n_variants=1,
+        n_samples=2,
+        n_nonunique_indices=3,
+        min_index_to_keep=2,
+        backend=Backend.PURE_JAX,
+    )
+    forward = jax.jit(lambda x: op.matmat(x)) if compiled else op.matmat
+    backward = jax.jit(lambda x: op.rmatmat(x)) if compiled else op.rmatmat
+    x = jnp.array([2.0])
+    y = jnp.array([3.0, 5.0])
+    np.testing.assert_allclose(forward(x), [0.0, 2.0])
+    np.testing.assert_allclose(backward(y), [5.0])
+    np.testing.assert_allclose(jnp.vdot(forward(x), y), jnp.vdot(x, backward(y)))
+
+
 def _minimal_operator_kwargs() -> dict:
     return {
         "indptr": np.array([0, 1, 1], dtype=np.int32),

@@ -17,6 +17,8 @@ FFI_CPU_MATMAT_F64 = "linear_dag_jaxlinarg_matmat_f64"
 FFI_CPU_RMATMAT_F32 = "linear_dag_jaxlinarg_rmatmat_f32"
 FFI_CPU_RMATMAT_F64 = "linear_dag_jaxlinarg_rmatmat_f64"
 FFI_CPU_TARGET_NAMES = (
+    "linear_dag_packed_f32",
+    "linear_dag_packed_f64",
     FFI_CPU_SOLVE_FORWARD_F32,
     FFI_CPU_SOLVE_BACKWARD_F32,
     FFI_CPU_SOLVE_FORWARD_F64,

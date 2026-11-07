@@ -1,0 +1,7 @@
+h5py==3.16.0
+# Standalone prototype dependencies; package requirements are in pyproject.toml.
+jax==0.12.0.1
+jaxlib==0.12.0.1
+numpy==2.5.4
+pytest==9.2.0
+setuptools==84.2.1
