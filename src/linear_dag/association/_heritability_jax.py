@@ -403,8 +403,6 @@ def _compute_err_variance_vectorized(
     dtype = Y.dtype
 
     denom = identity_trace * grm_sq_trace - grm_trace**2
-    denom2 = denom * denom
-    identity_trace2 = identity_trace * identity_trace
 
     s2g = solutions[0].astype(dtype)
     s2e = solutions[1].astype(dtype)
@@ -427,11 +425,20 @@ def _compute_err_variance_vectorized(
     trV2 = (s2g**2) * grm_sq_trace + 2.0 * s2g * s2e * grm_trace + (s2e**2) * identity_trace
     varW_hat = 2.0 * trV2
 
-    var_s2g = (term1 + term2) / denom2
+    # Divide sequentially: denom can be finite in float32 while denom**2
+    # overflows for an unnormalized GRM, incorrectly producing zero variances.
+    # Form the related ratios first too, avoiding products such as n**2*denom**2
+    # without promoting graph products or phenotype arrays to float64. The
+    # barrier prevents JIT from combining the divisions back into a squared
+    # denominator (or an underflowing squared reciprocal).
+    term1_over_denom2 = jax.lax.optimization_barrier(term1 / denom) / denom
+    covUW_over_denom = covUW_hat / denom
+    mean_trace = grm_trace / identity_trace
+    var_s2g = jax.lax.optimization_barrier((term1 + term2) / denom) / denom
     var_s2e = (
-        (grm_trace**2 / (identity_trace2 * denom2)) * term1
-        + varW_hat / identity_trace2
-        - (2.0 * grm_trace / (identity_trace2 * denom)) * covUW_hat
+        mean_trace**2 * term1_over_denom2
+        + (varW_hat / identity_trace) / identity_trace
+        - 2.0 * mean_trace * (covUW_over_denom / identity_trace)
     )
-    cov_ge = covUW_hat / (denom * identity_trace) - (grm_trace / identity_trace) * term1 / denom2
+    cov_ge = covUW_over_denom / identity_trace - mean_trace * term1_over_denom2
     return var_s2g, var_s2e, cov_ge

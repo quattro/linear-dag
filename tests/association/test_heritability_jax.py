@@ -463,3 +463,36 @@ def test_jax_randomized_haseman_elston_allows_default_grm_matmat_opt_out(monkeyp
 
     assert grm.default_calls > 0
     assert grm.blockwise_calls == 0
+
+
+@pytest.mark.parametrize("scale", [1.0, 1e6, 1e9])
+@pytest.mark.parametrize("compiled", [False, True])
+def test_uncertainty_float32_large_grm_matches_float64(scale, compiled):
+    from scipy.sparse.linalg import aslinearoperator
+
+    from linear_dag.association._heritability_jax import _compute_err_variance_vectorized as jax_variance
+    from linear_dag.association.heritability import _compute_err_variance_vectorized as numpy_variance
+
+    n = 10
+    matrix = np.diag(np.arange(1, n + 1, dtype=np.float64) * scale)
+    y = np.column_stack([np.arange(1, n + 1) / 10, np.linspace(-1, 1, n)])
+    coefficients = np.array([[1 / scale, 0.5 / scale], [1.0, 0.7]])
+    trace, sq_trace = np.trace(matrix), np.sum(matrix**2)
+    expected = numpy_variance(aslinearoperator(matrix), y, coefficients, sq_trace, trace, 100)
+
+    def evaluate(matrix, y, coefficients, sq_trace, trace):
+        return jax_variance(
+            lambda x: matrix @ x, y, coefficients, sq_trace, trace, 100, jnp.asarray(n, dtype=jnp.float32)
+        )
+
+    if compiled:
+        evaluate = jax.jit(evaluate)
+    observed = evaluate(*(jnp.asarray(x, dtype=jnp.float32) for x in (matrix, y, coefficients, sq_trace, trace)))
+    # Compare in the reported total-variance units, rather than allowing an
+    # absolute tolerance to hide tiny/zero raw coefficient variances.
+    for actual, reference, factor in zip(observed, expected, (trace**2, n**2, trace * n)):
+        assert actual.dtype == jnp.float32
+        assert np.isfinite(actual).all()
+        np.testing.assert_allclose(
+            np.asarray(actual, dtype=np.float64) * factor, reference * factor, rtol=2e-5, atol=2e-5
+        )
