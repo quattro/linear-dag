@@ -15,7 +15,6 @@ from importlib import metadata
 from os import PathLike
 from typing import Optional, Union
 
-import numpy as np
 import polars as pl
 
 from linear_dag.pipeline import (
@@ -568,8 +567,6 @@ def _open_jax_grm_operator(args, block_metadata: pl.DataFrame, logger: logging.L
 
     import jax
 
-    from jax.sharding import Mesh
-
     from .core.jaxlinarg import Backend, JaxGRMOperator, JaxParallelOperator
 
     devices = tuple(jax.devices())
@@ -577,20 +574,17 @@ def _open_jax_grm_operator(args, block_metadata: pl.DataFrame, logger: logging.L
         raise ValueError("No JAX devices are available for --jax-backend")
 
     workers = _validate_num_processes(args.num_processes)
-    selected_devices = devices[:1]
-    mesh = Mesh(np.asarray(selected_devices), ("blocks",))
+    device = devices[0]
     operator = JaxParallelOperator.from_hdf5(
         args.linarg_path,
-        mesh=mesh,
         block_metadata=block_metadata,
         backend=Backend.AUTO,
         num_processes=workers,
     )
-    device_labels = ",".join(f"{device.platform}:{device.id}" for device in selected_devices)
     logger.info(
         "Created JAX GRM operator: backend=%s devices=%s native_workers=%d",
         operator.backend.value,
-        device_labels,
+        f"{device.platform}:{device.id}",
         operator.num_processes,
     )
     grm = JaxGRMOperator(operator, alpha=-1.0, iids=list_iids(args.linarg_path))

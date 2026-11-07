@@ -254,7 +254,8 @@ Independently mapped diagonals currently use sequential whole-operation mapping.
 The native wrapper holds one canonical packed graph, not padded copies of blocks.
 Its `.blocks` property reconstructs inspection views on demand. Native CPU execution
 uses one device: `num_processes` now means worker threads on this path, including
-`rhe --jax-backend`. Explicit multi-device meshes remain a pure-JAX feature.
+`rhe --jax-backend`. Both backends now use single-device execution; the legacy
+mesh API was removed during the interface simplification below.
 The workspace budget bounds native scratch, not graph/input/output storage or all
 JAX AD/batching intermediates. It reduces workers and tile width to fit, and rejects
 a budget that cannot hold one worker and one column.
@@ -384,5 +385,39 @@ Validation: native extension/wheel rebuilt successfully; source JAX, RHE and CLI
 suites passed **353 tests, 7 skipped** with `pytest -p no:capture`. Ruff and
 `git diff --check` passed. Five warnings concern existing Polars horizontal-concat
 deprecations outside this cleanup. No numerical algorithms or public operator
-names changed. The known RHE uncertainty overflow remains a separate unresolved
-correctness issue; this review does not certify that path at large GRM scales.
+names changed. The RHE uncertainty overflow was subsequently fixed in `f1d1982`
+using sequential division with an optimization barrier, with eager/JIT regressions
+and eight-trait real-data agreement against the Cython reference.
+
+
+## Single-device interface simplification
+
+The unreleased JAX API now supports one device per operator. Removed `mesh`,
+`block_ranges`, `split_blocks_by_n_entries`, shard-map reductions, per-device
+transpose dispatch, and device assembly helpers. Native packed CPU execution
+still uses worker threads controlled by `num_processes`; its kernels, scratch
+budget, and transformation rules are unchanged. The pure-JAX reference backend
+uses block sums and exact-size concatenation without padding. Its blockwise GRM
+path retains per-block compiled calls to bound temporary memory.
+
+Updated constructors, CLI callers, benchmarks, and tests. The removed mesh API
+has no compatibility shim because this branch is unreleased. Lineax integration
+and dynamic GRM diagonal weights remain supported.
+
+Verification: **351 passed, 4 skipped** across the source JAX, RHE, and CLI
+suites with `JAX_ENABLE_X64=1` and `pytest -p no:capture`. The skips are opt-in
+benchmarks; five warnings are existing Polars deprecations. New independent
+Cython-built dense references cover ragged forward/transpose products under
+JIT, vmap, and gradients for both backends. Existing packed JVP, higher-order AD,
+Lineax, dynamic diagonal, and workspace tests passed. Ruff formatting/lint and
+`git diff --check` passed. Local diff review found no remaining mesh callers;
+no independent agent review was used.
+
+The pre-commit hygiene pass consolidated the surviving metadata tests into the
+wrapper suite, removed redundant benchmark/device-label helpers, and clarified
+constructor typing, backend selection, and the metadata helper docstring. Native
+numerical kernels and transformation rules were not changed.
+
+Final hygiene verification: **96 passed** in the wrapper and CLI suites after
+the documentation, typing, test consolidation, and helper cleanup. Ruff lint,
+formatting, and whitespace checks passed.

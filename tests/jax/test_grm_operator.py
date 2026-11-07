@@ -8,24 +8,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jax.sharding import Mesh
-
 from linear_dag.core.jaxlinarg import Backend, JaxGRMOperator, JaxLinearARG, JaxParallelOperator
 from linear_dag.core.parallel_processing import GRMOperator
-
-
-def _mesh() -> Mesh:
-    return Mesh(np.asarray(jax.devices()[:1]), ("blocks",))
-
-
-def _two_device_cpu_mesh_or_skip() -> Mesh:
-    devices = jax.devices("cpu")
-    if len(devices) < 2:
-        pytest.skip(
-            "requires at least two CPU devices; set "
-            "XLA_FLAGS=--xla_force_host_platform_device_count=2 before JAX import"
-        )
-    return Mesh(np.asarray(devices[:2]), ("blocks",))
 
 
 def _jax_block(linearg) -> JaxLinearARG:
@@ -182,7 +166,6 @@ def test_jax_grm_reverse_mode_gradient_uses_symmetric_adjoint(oracle_case):
 def test_jax_grm_parallel_operator_matches_dense_blocks(linarg_h5_path, linarg_block_metadata):
     op = JaxParallelOperator.from_hdf5(
         linarg_h5_path,
-        mesh=_mesh(),
         block_metadata=linarg_block_metadata,
         backend=Backend.PURE_JAX,
     )
@@ -198,7 +181,6 @@ def test_jax_grm_parallel_operator_matches_dense_blocks(linarg_h5_path, linarg_b
 def test_jax_grm_blockwise_matmat_matches_default_parallel_operator(linarg_h5_path, linarg_block_metadata):
     op = JaxParallelOperator.from_hdf5(
         linarg_h5_path,
-        mesh=_mesh(),
         block_metadata=linarg_block_metadata,
         backend=Backend.PURE_JAX,
     )
@@ -214,7 +196,6 @@ def test_jax_grm_blockwise_matmat_matches_default_parallel_operator(linarg_h5_pa
 def test_jax_grm_blockwise_matvec_restores_vector_outputs(linarg_h5_path, linarg_block_metadata):
     op = JaxParallelOperator.from_hdf5(
         linarg_h5_path,
-        mesh=_mesh(),
         block_metadata=linarg_block_metadata,
         backend=Backend.PURE_JAX,
     )
@@ -231,7 +212,6 @@ def test_jax_grm_blockwise_matvec_restores_vector_outputs(linarg_h5_path, linarg
 def test_jax_grm_matches_existing_grm_operator(linarg_h5_path, linarg_block_metadata):
     op = JaxParallelOperator.from_hdf5(
         linarg_h5_path,
-        mesh=_mesh(),
         block_metadata=linarg_block_metadata,
         backend=Backend.PURE_JAX,
     )
@@ -242,24 +222,3 @@ def test_jax_grm_matches_existing_grm_operator(linarg_h5_path, linarg_block_meta
         expected = expected_grm @ np.asarray(y)
 
     np.testing.assert_allclose(np.asarray(grm @ y), expected, rtol=1e-3, atol=1e-3)
-
-
-def test_jax_grm_parallel_operator_sharded_matmat_matches_single_device(linarg_h5_path, linarg_block_metadata):
-    two_device = JaxParallelOperator.from_hdf5(
-        linarg_h5_path,
-        mesh=_two_device_cpu_mesh_or_skip(),
-        block_metadata=linarg_block_metadata,
-        backend=Backend.PURE_JAX,
-    )
-    single_device = JaxParallelOperator.from_hdf5(
-        linarg_h5_path,
-        mesh=_mesh(),
-        block_metadata=linarg_block_metadata,
-        backend=Backend.PURE_JAX,
-    )
-    y = jnp.arange(two_device.shape[0] * 2, dtype=jnp.float32).reshape(two_device.shape[0], 2)
-
-    sharded = JaxGRMOperator(two_device).matmat(y)
-    expected = JaxGRMOperator(single_device).matmat(y)
-
-    np.testing.assert_allclose(np.asarray(sharded), np.asarray(expected), rtol=1e-4, atol=1e-4)

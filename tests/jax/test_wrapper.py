@@ -2,54 +2,26 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import jax
 import jax.numpy as jnp
 import numpy as np
 import polars as pl
 import pytest
 
-from jax.sharding import AbstractMesh, Mesh
 from scipy import sparse
-
-import linear_dag.core.jaxlinarg.wrapper as wrapper_module
 
 from linear_dag.core.jaxlinarg import (
     Backend,
     JaxLinearARG,
     JaxParallelOperator,
-    split_blocks_by_n_entries,
     variant_offsets_from_metadata,
 )
 from linear_dag.core.lineararg import LinearARG
 
 
-def _mesh(axis_name: str = "blocks") -> Mesh:
-    return Mesh(np.asarray(jax.devices()[:1]), (axis_name,))
-
-
-def _abstract_mesh(axis_name: str = "blocks", axis_size: int = 2) -> AbstractMesh:
-    try:
-        return AbstractMesh((axis_size,), (axis_name,))
-    except TypeError:
-        return AbstractMesh(((axis_name, axis_size),))
-
-
-def _two_device_cpu_mesh_or_skip() -> Mesh:
-    devices = jax.devices("cpu")
-    if len(devices) < 2:
-        pytest.skip(
-            "requires at least two CPU devices; set JAX_NUM_CPU_DEVICES=2 "
-            "or XLA_FLAGS=--xla_force_host_platform_device_count=2 before JAX import"
-        )
-    return Mesh(np.asarray(devices[:2]), ("blocks",))
-
-
-def _fixture_operator(linarg_h5_path, linarg_block_metadata, *, mesh: Mesh | None = None) -> JaxParallelOperator:
+def _fixture_operator(linarg_h5_path, linarg_block_metadata) -> JaxParallelOperator:
     return JaxParallelOperator.from_hdf5(
         linarg_h5_path,
-        mesh=_mesh() if mesh is None else mesh,
         block_metadata=linarg_block_metadata,
         backend=Backend.PURE_JAX,
     )
@@ -89,7 +61,6 @@ def test_jax_parallel_operator_construction_from_hdf5_blocks(
 ):
     op = JaxParallelOperator.from_hdf5(
         linarg_h5_path,
-        mesh=_mesh(),
         block_metadata=linarg_block_metadata,
         backend=Backend.PURE_JAX,
     )
@@ -100,48 +71,6 @@ def test_jax_parallel_operator_construction_from_hdf5_blocks(
         linarg_block_metadata.get_column("n_variants").sum(),
     )
     np.testing.assert_array_equal(np.asarray(op.variant_offsets), variant_offsets_from_metadata(linarg_block_metadata))
-    assert op.block_ranges == split_blocks_by_n_entries(linarg_block_metadata, 1)
-
-
-def test_jax_parallel_operator_construction_rejects_empty_mesh():
-    block = _tiny_block()
-    empty_mesh = Mesh(np.asarray([]), ("blocks",))
-
-    with pytest.raises(ValueError, match="mesh must contain at least one device"):
-        JaxParallelOperator(
-            blocks=(block,),
-            variant_offsets=(0, 1),
-            mesh=empty_mesh,
-            backend=Backend.PURE_JAX,
-            block_ranges=((0, 1),),
-        )
-
-
-def test_jax_parallel_operator_construction_rejects_fake_mesh():
-    block = _tiny_block()
-    fake_mesh = SimpleNamespace(devices=np.asarray(jax.devices()[:1]), axis_names=("blocks",))
-
-    with pytest.raises(TypeError, match="jax.sharding.Mesh"):
-        JaxParallelOperator(
-            blocks=(block,),
-            variant_offsets=(0, 1),
-            mesh=fake_mesh,
-            backend=Backend.PURE_JAX,
-            block_ranges=((0, 1),),
-        )
-
-
-def test_jax_parallel_operator_construction_rejects_mesh_without_blocks_axis():
-    block = _tiny_block()
-
-    with pytest.raises(ValueError, match="blocks"):
-        JaxParallelOperator(
-            blocks=(block,),
-            variant_offsets=(0, 1),
-            mesh=_mesh("devices"),
-            backend=Backend.PURE_JAX,
-            block_ranges=((0, 1),),
-        )
 
 
 def test_jax_parallel_operator_construction_rejects_mismatched_sample_counts():
@@ -152,9 +81,7 @@ def test_jax_parallel_operator_construction_rejects_mismatched_sample_counts():
         JaxParallelOperator(
             blocks=(first, second),
             variant_offsets=(0, 1, 2),
-            mesh=_mesh(),
             backend=Backend.PURE_JAX,
-            block_ranges=((0, 2),),
         )
 
 
@@ -170,9 +97,7 @@ def test_jax_parallel_operator_construction_rejects_mixed_block_dtypes():
         JaxParallelOperator(
             blocks=(first, second),
             variant_offsets=(0, 1, 2),
-            mesh=_mesh(),
             backend=Backend.PURE_JAX,
-            block_ranges=((0, 2),),
         )
 
 
@@ -183,9 +108,7 @@ def test_jax_parallel_operator_construction_rejects_bad_variant_offsets():
         JaxParallelOperator(
             blocks=(block,),
             variant_offsets=(1, 0),
-            mesh=_mesh(),
             backend=Backend.PURE_JAX,
-            block_ranges=((0, 1),),
         )
 
 
@@ -197,39 +120,7 @@ def test_jax_parallel_operator_construction_rejects_offsets_that_mismatch_blocks
         JaxParallelOperator(
             blocks=(first, second),
             variant_offsets=(0, 2, 2),
-            mesh=_mesh(),
             backend=Backend.PURE_JAX,
-            block_ranges=((0, 2),),
-        )
-
-
-def test_jax_parallel_operator_construction_rejects_block_ranges_that_do_not_cover_mesh_axis():
-    first = _tiny_block(n_variants=1)
-    second = _tiny_block(n_variants=1)
-    mesh = _abstract_mesh()
-
-    with pytest.raises(ValueError, match="block_ranges"):
-        JaxParallelOperator(
-            blocks=(first, second),
-            variant_offsets=(0, 1, 2),
-            mesh=mesh,
-            backend=Backend.PURE_JAX,
-            block_ranges=((0, 1),),
-        )
-
-
-def test_jax_parallel_operator_construction_rejects_noncontiguous_block_ranges():
-    first = _tiny_block(n_variants=1)
-    second = _tiny_block(n_variants=1)
-    mesh = _abstract_mesh()
-
-    with pytest.raises(ValueError, match="contiguous"):
-        JaxParallelOperator(
-            blocks=(first, second),
-            variant_offsets=(0, 1, 2),
-            mesh=mesh,
-            backend=Backend.PURE_JAX,
-            block_ranges=((0, 1), (2, 2)),
         )
 
 
@@ -246,7 +137,6 @@ def test_jax_parallel_operator_from_hdf5_rejects_block_metadata_variant_count_mi
     with pytest.raises(ValueError, match="block n_variants"):
         JaxParallelOperator.from_hdf5(
             linarg_h5_path,
-            mesh=_mesh(),
             block_metadata=bad_metadata,
             backend=Backend.PURE_JAX,
         )
@@ -266,7 +156,6 @@ def test_jax_parallel_operator_from_linearargs_auto_accepts_consistent_prebuilt_
 
     op = JaxParallelOperator.from_linearargs(
         (block,),
-        mesh=_mesh(),
     )
 
     assert op.backend is Backend.PURE_JAX
@@ -288,7 +177,6 @@ def test_jax_parallel_operator_from_linearargs_rejects_explicit_prebuilt_backend
     with pytest.raises(ValueError, match="backend"):
         JaxParallelOperator.from_linearargs(
             (block,),
-            mesh=_mesh(),
             backend=Backend.FFI_CPU,
         )
 
@@ -327,76 +215,11 @@ def test_jax_parallel_operator_rmatmat_matches_concatenated_block_products(
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
 
 
-def test_jax_parallel_operator_rmatmat_uses_concatenated_cached_path(monkeypatch):
-    def reject_shard_map(*args, **kwargs):
-        raise AssertionError("rmatmat should not use shard_map")
-
-    monkeypatch.setattr(wrapper_module, "_shard_map", reject_shard_map)
-    op = JaxParallelOperator(
-        blocks=(_tiny_block(), _tiny_block()),
-        variant_offsets=(0, 1, 2),
-        mesh=_abstract_mesh(),
-        backend=Backend.PURE_JAX,
-        block_ranges=((0, 1), (1, 2)),
-    )
-    y = jnp.ones((op.shape[0], 1), dtype=jnp.float32)
-
-    actual = op.rmatmat(y)
-    expected = jnp.concatenate([block.rmatmat(y) for block in op.blocks], axis=0)
-
-    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
-
-
-def test_jax_parallel_operator_products_on_two_device_cpu_mesh(
-    linarg_h5_path,
-    linarg_block_metadata,
-    monkeypatch,
-):
-    shard_map_calls = []
-
-    def recording_shard_map(*args, **kwargs):
-        shard_map_calls.append(kwargs)
-        return original_shard_map(*args, **kwargs)
-
-    original_shard_map = wrapper_module._shard_map
-    monkeypatch.setattr(wrapper_module, "_shard_map", recording_shard_map)
-    op = _fixture_operator(linarg_h5_path, linarg_block_metadata, mesh=_two_device_cpu_mesh_or_skip())
-    w = jnp.ones((op.shape[1], 2), dtype=jnp.float32)
-    y = jnp.ones((op.shape[0], 2), dtype=jnp.float32)
-
-    expected_matmat = sum(
-        block.matmat(w[start:end])
-        for block, start, end in zip(
-            op.blocks,
-            op.variant_offsets[:-1],
-            op.variant_offsets[1:],
-            strict=True,
-        )
-    )
-    expected_rmatmat = jnp.concatenate([block.rmatmat(y) for block in op.blocks], axis=0)
-
-    np.testing.assert_allclose(np.asarray(op.matmat(w)), np.asarray(expected_matmat), rtol=1e-5, atol=1e-5)
-    assert len(shard_map_calls) == 1
-
-    np.testing.assert_allclose(np.asarray(op.rmatmat(y)), np.asarray(expected_rmatmat), rtol=1e-5, atol=1e-5)
-    assert len(shard_map_calls) == 1
-    assert all(call["axis_names"] == {"blocks"} for call in shard_map_calls)
-
-
 def test_jax_parallel_operator_autodiff_matches_concatenated_block_gradients(
     linarg_h5_path,
     linarg_block_metadata,
-    monkeypatch,
 ):
-    shard_map_calls = []
-
-    def recording_shard_map(*args, **kwargs):
-        shard_map_calls.append(kwargs)
-        return original_shard_map(*args, **kwargs)
-
-    original_shard_map = wrapper_module._shard_map
-    monkeypatch.setattr(wrapper_module, "_shard_map", recording_shard_map)
-    op = _fixture_operator(linarg_h5_path, linarg_block_metadata, mesh=_two_device_cpu_mesh_or_skip())
+    op = _fixture_operator(linarg_h5_path, linarg_block_metadata)
     w = jnp.arange(op.shape[1] * 2, dtype=jnp.float32).reshape(op.shape[1], 2) / 100.0
     target = jnp.linspace(-1.0, 1.0, op.shape[0] * 2, dtype=jnp.float32).reshape(op.shape[0], 2)
 
@@ -424,7 +247,6 @@ def test_jax_parallel_operator_autodiff_matches_concatenated_block_gradients(
     expected = jnp.concatenate(expected_blocks, axis=0)
 
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5)
-    assert shard_map_calls
 
 
 @pytest.mark.parametrize("backend", [Backend.PURE_JAX, Backend.FFI_CPU])
@@ -437,3 +259,39 @@ def test_execution_controls_require_integers(backend, setting):
             backend=backend,
             **{setting: 1.5},
         )
+
+
+@pytest.mark.parametrize("backend", [Backend.PURE_JAX, Backend.FFI_CPU])
+@pytest.mark.parametrize("transpose", [False, True])
+def test_ragged_products_jit_vmap_and_grad_match_dense(linarg_h5_path, linarg_block_metadata, backend, transpose):
+    # Build the reference through the independent Cython graph implementation.
+    blocks = tuple(
+        LinearARG.read(linarg_h5_path, block=name) for name in linarg_block_metadata.head(2).get_column("block_name")
+    )
+    assert len({block.shape[1] for block in blocks}) == 2
+    dense = np.concatenate([block @ np.eye(block.shape[1], dtype=np.float32) for block in blocks], axis=1)
+    op = JaxParallelOperator.from_linearargs(blocks, backend=backend, num_processes=2)
+    if transpose:
+        dense = dense.T
+    product = op.rmatvec if transpose else op.matvec
+    values = jnp.asarray(np.random.default_rng(42).normal(size=(3, dense.shape[1])), dtype=jnp.float32)
+    expected = np.asarray(values) @ dense.T
+    np.testing.assert_allclose(jax.jit(jax.vmap(product))(values), expected, rtol=2e-5, atol=2e-5)
+    # A quadratic loss exercises the transpose of the batched product as well.
+    gradient = jax.jit(jax.grad(lambda x: 0.5 * jnp.sum(jax.vmap(product)(x) ** 2)))(values)
+    np.testing.assert_allclose(gradient, expected @ dense, rtol=2e-5, atol=2e-4)
+
+
+def test_variant_offsets_from_metadata_returns_leading_zero_cumulative_offsets():
+    metadata = pl.DataFrame({"n_variants": [2, 3, 5]})
+
+    offsets = variant_offsets_from_metadata(metadata)
+
+    np.testing.assert_array_equal(offsets, np.array([0, 2, 5, 10], dtype=np.int64))
+
+
+def test_variant_offsets_from_metadata_requires_n_variants_column():
+    metadata = pl.DataFrame({"n_entries": [2, 3]})
+
+    with pytest.raises(ValueError, match='metadata must contain columns "n_variants"'):
+        variant_offsets_from_metadata(metadata)

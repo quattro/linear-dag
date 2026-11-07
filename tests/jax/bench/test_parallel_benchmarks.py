@@ -15,8 +15,6 @@ import numpy as np
 import polars as pl
 import pytest
 
-from jax.sharding import Mesh
-
 from linear_dag.core.jaxlinarg import Backend, JaxParallelOperator
 from linear_dag.core.jaxlinarg.kernels import ffi_cpu
 from linear_dag.core.parallel_processing import ParallelOperator
@@ -55,7 +53,7 @@ def test_jax_parallel_operator_benchmark(
     baselines = {(result.operation, result.k): result.median_seconds for result in process_results}
     results = list(process_results)
 
-    for config in _jax_parallel_configs(linarg_block_metadata):
+    for config in _jax_parallel_configs():
         results.extend(
             _time_jax_parallel_operator(
                 linarg_h5_path,
@@ -115,23 +113,22 @@ def _time_jax_parallel_operator(
     baselines: dict[tuple[str, int], float],
     k_values: tuple[int, ...],
 ) -> list[ParallelBenchmarkResult]:
-    with jax.default_device(config.devices[0]):
+    with jax.default_device(config.device):
         op = JaxParallelOperator.from_hdf5(
             linarg_h5_path,
-            mesh=config.mesh,
             block_metadata=linarg_block_metadata,
             backend=config.backend,
         )
     variant_inputs, sample_inputs = _benchmark_inputs(op.shape, k_values=k_values)
     results = []
     for k, matrix in variant_inputs.items():
-        with jax.default_device(config.devices[0]):
+        with jax.default_device(config.device):
             jax_matrix = jnp.asarray(matrix)
         matmat = jax.jit(lambda values: op.matmat(values)).lower(jax_matrix).compile()
         runtime = _time_call(lambda matrix=jax_matrix, matmat=matmat: matmat(matrix), block_until_ready=True)
         results.append(
             ParallelBenchmarkResult(
-                _result_operator_name(config),
+                config.name,
                 "matmat",
                 k,
                 runtime,
@@ -139,17 +136,13 @@ def _time_jax_parallel_operator(
             )
         )
     for k, matrix in sample_inputs.items():
-        with jax.default_device(config.devices[0]):
+        with jax.default_device(config.device):
             jax_matrix = jnp.asarray(matrix)
-        if config.backend is Backend.FFI_CPU:
-            reverse = jax.jit(lambda values: op.rmatmat(values)).lower(jax_matrix).compile()
-        else:
-            # Preserve the pure-JAX host loop over cached per-range launches.
-            reverse = op.rmatmat
+        reverse = jax.jit(lambda values: op.rmatmat(values)).lower(jax_matrix).compile()
         runtime = _time_call(lambda matrix=jax_matrix: reverse(matrix), block_until_ready=True)
         results.append(
             ParallelBenchmarkResult(
-                _result_operator_name(config),
+                config.name,
                 "rmatmat",
                 k,
                 runtime,
@@ -175,53 +168,17 @@ def _benchmark_inputs(
 class JaxParallelBenchmarkConfig:
     name: str
     backend: Backend
-    devices: tuple[jax.Device, ...]
-
-    @property
-    def mesh(self) -> Mesh:
-        return Mesh(np.asarray(self.devices), ("blocks",))
+    device: jax.Device
 
 
-def _jax_parallel_configs(linarg_block_metadata: pl.DataFrame) -> list[JaxParallelBenchmarkConfig]:
-    cpu_devices = tuple(_devices_for_backend("cpu"))
+def _jax_parallel_configs() -> list[JaxParallelBenchmarkConfig]:
+    cpu_devices = _devices_for_backend("cpu")
     if not cpu_devices:
-        pytest.skip("JAX parallel benchmark requires at least one JAX device")
-
-    configs = []
-    configs.extend(_configs_for_backend(Backend.PURE_JAX, "pure_jax_cpu", cpu_devices, linarg_block_metadata))
+        pytest.skip("JAX parallel benchmark requires a CPU device")
+    device = cpu_devices[0]
+    configs = [JaxParallelBenchmarkConfig("jax_parallel_pure_jax_cpu", Backend.PURE_JAX, device)]
     if ffi_cpu.is_ffi_cpu_available():
-        configs.extend(_configs_for_backend(Backend.FFI_CPU, "ffi_cpu", cpu_devices, linarg_block_metadata))
-    return configs
-
-
-def _configs_for_backend(
-    backend: Backend,
-    backend_name: str,
-    devices: tuple[jax.Device, ...],
-    linarg_block_metadata: pl.DataFrame,
-) -> list[JaxParallelBenchmarkConfig]:
-    if not devices:
-        return []
-
-    if backend is Backend.FFI_CPU:
-        return [JaxParallelBenchmarkConfig("jax_parallel_ffi_cpu_native_workers", backend, devices[:1])]
-
-    configs = [
-        JaxParallelBenchmarkConfig(
-            f"jax_parallel_{backend_name}_1_device",
-            backend,
-            devices[:1],
-        )
-    ]
-    sharded_device_count = min(len(devices), linarg_block_metadata.height)
-    if sharded_device_count > 1:
-        configs.append(
-            JaxParallelBenchmarkConfig(
-                f"jax_parallel_{backend_name}_{sharded_device_count}_device_sharded",
-                backend,
-                devices[:sharded_device_count],
-            )
-        )
+        configs.append(JaxParallelBenchmarkConfig("jax_parallel_ffi_cpu_native_workers", Backend.FFI_CPU, device))
     return configs
 
 
@@ -230,10 +187,6 @@ def _devices_for_backend(backend: str) -> list[jax.Device]:
         return list(jax.devices(backend))
     except RuntimeError:
         return []
-
-
-def _result_operator_name(config: JaxParallelBenchmarkConfig) -> str:
-    return config.name
 
 
 def _time_call(call: Callable[[], Any], *, block_until_ready: bool = False) -> float:

@@ -10,7 +10,6 @@ import numpy as np
 import polars as pl
 import pytest
 
-from jax.sharding import Mesh
 from scipy.sparse.linalg import LinearOperator
 
 from linear_dag.association._heritability_jax import randomized_haseman_elston as randomized_haseman_elston_jax
@@ -24,10 +23,8 @@ COVAR_COLS = ["sex"]
 
 
 def _jax_grm_from_hdf5(path: Path) -> JaxGRMOperator:
-    mesh = Mesh(np.asarray(jax.devices()[:1]), ("blocks",))
     operator = JaxParallelOperator.from_hdf5(
         str(path),
-        mesh=mesh,
         block_metadata=list_blocks(path),
         backend=Backend.PURE_JAX,
     )
@@ -322,7 +319,6 @@ def test_jax_randomized_haseman_elston_rejects_missing_iids(linarg_h5_path: Path
     grm = JaxGRMOperator(
         JaxParallelOperator.from_hdf5(
             str(linarg_h5_path),
-            mesh=Mesh(np.asarray(jax.devices()[:1]), ("blocks",)),
             block_metadata=list_blocks(linarg_h5_path),
             backend=Backend.PURE_JAX,
         ),

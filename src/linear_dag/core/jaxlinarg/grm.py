@@ -12,18 +12,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, ArrayLike
 
 from .operator import Backend, JaxLinearARG
-from .wrapper import (
-    _as_rank2_matrix,
-    _device_put_if_needed,
-    _mesh_assembly_device,
-    _mesh_block_devices,
-    _shard_map,
-    JaxParallelOperator,
-)
+from .wrapper import _as_rank2_matrix, JaxParallelOperator
 
 
 class JaxGRMOperator(eqx.Module):
@@ -166,8 +158,6 @@ class JaxGRMOperator(eqx.Module):
                 alpha=self.alpha,
                 center=self.center,
             )
-        elif len(self.operator.block_ranges) > 1:
-            result = self._sharded_matmat(x)
         else:
             result = jnp.zeros_like(x)
             for block in self.operator.blocks:
@@ -210,23 +200,15 @@ class JaxGRMOperator(eqx.Module):
         return result[:, 0] if was_vector else result
 
     def _matmat_blockwise_rank2(self, x: Array) -> Array:
-        assembly_device = (
-            _mesh_assembly_device(self.operator.mesh) if isinstance(self.operator, JaxParallelOperator) else None
-        )
-        result = _device_put_if_needed(jnp.zeros_like(x), assembly_device)
-        for device, product in self._blockwise_grm_products:
-            contribution = product(_device_put_if_needed(x, device))
-            result = result + _device_put_if_needed(contribution, assembly_device)
+        result = jnp.zeros_like(x)
+        for product in self._blockwise_grm_products:
+            result = result + product(x)
         return result
 
     @cached_property
-    def _blockwise_grm_products(self) -> tuple[tuple[jax.Device | None, Callable[[Array], Array]], ...]:
+    def _blockwise_grm_products(self) -> tuple[Callable[[Array], Array], ...]:
         blocks = self.operator.blocks if isinstance(self.operator, JaxParallelOperator) else (self.operator,)
-        devices = _grm_block_devices(self.operator) if isinstance(self.operator, JaxParallelOperator) else (None,)
-        return tuple(
-            (device, _blockwise_grm_product(block, alpha=self.alpha, center=self.center))
-            for device, block in zip(devices, blocks, strict=True)
-        )
+        return tuple(_blockwise_grm_product(block, alpha=self.alpha, center=self.center) for block in blocks)
 
     def matvec(self, x: ArrayLike) -> Array:
         """Multiply a vector by the implicit genetic relatedness matrix."""
@@ -251,52 +233,6 @@ class JaxGRMOperator(eqx.Module):
     def T(self) -> "JaxGRMOperator":
         """Return this symmetric operator."""
         return self
-
-    def _sharded_matmat(self, x: Array) -> Array:
-        branches = tuple(self._grm_branch(start, end) for start, end in self.operator.block_ranges)
-
-        def mapped(values: Array) -> Array:
-            axis_index = jax.lax.axis_index("blocks")
-            local = jax.lax.switch(axis_index, branches, values)
-            # Every GRM block-range contribution is sample-shaped, so unlike
-            # `JaxParallelOperator.rmatmat` there is no ragged variant output to
-            # assemble. Devices can reduce partial sample products directly.
-            return jax.lax.psum(local, "blocks")
-
-        product = _shard_map(
-            mapped,
-            mesh=self.operator.mesh,
-            in_specs=P(),
-            out_specs=P(),
-            axis_names={"blocks"},
-        )
-        return product(x)
-
-    def _grm_branch(self, start: int, end: int) -> Callable[[Array], Array]:
-        def branch(values: Array) -> Array:
-            local = jnp.zeros_like(values)
-            for block_index in range(start, end):
-                local = local + _block_grm_product(
-                    self.operator.blocks[block_index],
-                    values,
-                    alpha=self.alpha,
-                    center=self.center,
-                )
-            return local
-
-        return branch
-
-
-def _grm_block_devices(operator: JaxParallelOperator) -> tuple[jax.Device | None, ...]:
-    devices = _mesh_block_devices(operator.mesh)
-    if devices is None:
-        return tuple(None for _ in operator.blocks)
-
-    block_devices: list[jax.Device | None] = [None] * len(operator.blocks)
-    for range_index, (start, end) in enumerate(operator.block_ranges):
-        for block_index in range(start, end):
-            block_devices[block_index] = devices[range_index]
-    return tuple(block_devices)
 
 
 def _blockwise_grm_product(block: JaxLinearARG, *, alpha: float, center: bool) -> Callable[[Array], Array]:
